@@ -10,9 +10,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  semanticToolPhrase,
-  semanticToolFailPhrase,
+  semanticToolPhrase as semanticToolPhraseRaw,
+  semanticToolFailPhrase as semanticToolFailPhraseRaw,
 } from '../src/channel_phrases.js';
+
+// These progress phrases are WeChat-facing (Chinese locale). The functions now default to lang='en';
+// route this suite through lang='zh' so it verifies the Chinese phrases WeChat actually shows (the
+// no-tool-name-leak invariant for 'git' only holds in zh, where "正在执行 Git 操作…" has no lowercase "git").
+const semanticToolPhrase = (t: string, i?: Record<string, unknown>): string =>
+  semanticToolPhraseRaw(t, i, 'zh');
+const semanticToolFailPhrase = (t: string): string => semanticToolFailPhraseRaw(t, 'zh');
 
 // ── semanticToolPhrase 分组覆盖 ────────────────────────────────────────
 

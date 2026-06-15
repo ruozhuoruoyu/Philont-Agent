@@ -12,6 +12,7 @@ export {
   barrierCheckTool,
   KNOWN_BARRIERS,
   matchBarriers,
+  mentionsCircumvention,
   renderBarrierAdvisory,
   formatBarrier,
   type Barrier,

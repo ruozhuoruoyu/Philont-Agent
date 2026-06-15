@@ -9,8 +9,36 @@ import {
   barrierCheckTool,
   KNOWN_BARRIERS,
   matchBarriers,
+  mentionsCircumvention,
   renderBarrierAdvisory,
 } from '../src/runtime/barriers.js';
+
+test('WS3: Erdős–Straus Legendre/reciprocity goal+method → applies', () => {
+  const matches = matchBarriers(
+    'Prove the Erdős–Straus conjecture for the hard classes mod 840 via a Legendre symbol / quadratic reciprocity covering argument over D_R(a) and T_R(a)',
+  );
+  const es = matches.find((m) => m.barrier.id === 'erdos-straus-jacobi');
+  assert.ok(es, 'erdos-straus-jacobi should match');
+  assert.equal(es!.severity, 'applies');
+});
+
+test('WS3: mentionsCircumvention true only when a circumvention tag is named', () => {
+  const es = matchBarriers('erdos-straus hard class via legendre symbol covering')
+    .find((m) => m.barrier.id === 'erdos-straus-jacobi')!;
+  assert.ok(es);
+  // a proof that just restates the blocked method does NOT name a circumvention
+  assert.equal(mentionsCircumvention('apply quadratic reciprocity to each R', es), false);
+  // a proof that routes through the unbounded BlEl22 modular reduction DOES
+  assert.equal(mentionsCircumvention('use the BlEl22 modular reduction p ≡ −a/c mod 4acd−1, an unbounded family', es), true);
+});
+
+test('WS3: barriers without circumventionTags never auto-pass mentionsCircumvention', () => {
+  const noTagBarrier = KNOWN_BARRIERS.find((b) => !b.circumventionTags || b.circumventionTags.length === 0);
+  if (noTagBarrier) {
+    const m = { barrier: noTagBarrier, severity: 'applies' as const, matchedGoal: [], matchedMethod: [] };
+    assert.equal(mentionsCircumvention('any text whatsoever', m), false);
+  }
+});
 
 test('empty query lists the whole barrier library', async () => {
   const out = await barrierCheckTool.execute({ query: '' });

@@ -46,7 +46,7 @@ test('近期 iter_cap_hit → 注入命中,文本含 planAndExecute', () => {
   assert.equal(r.recentFailures[0].kind, 'iter_cap_hit');
   assert.match(r.text, /planAndExecute/);
   assert.match(r.text, /searchSkills/);
-  assert.match(r.text, /撞 iter cap/);
+  assert.match(r.text, /hit iter cap/);
 });
 
 // ── 3. 多种 kind → 全列出 ──────────────────────────────────────────────
@@ -73,8 +73,8 @@ test('多种 kind 同时 → 文本列出各 kind', () => {
   assert.equal(r.matched, true);
   assert.equal(r.recentFailures.length, 3);
   assert.match(r.text, /iter cap/);
-  assert.match(r.text, /turn 超过时长/);
-  assert.match(r.text, /反复超时/);
+  assert.match(r.text, /exceeded time limit/);
+  assert.match(r.text, /timed out repeatedly/);
 });
 
 // ── 4. > 30min 老 audit → 不 match ────────────────────────────────────
@@ -190,7 +190,7 @@ test('软失败 kind 也能命中:reflection_triggered', () => {
   const r = buildFailureRecoveryInjection(audit, SESSION_A, 'hi');
   assert.equal(r.matched, true);
   assert.equal(r.recentFailures[0].kind, 'reflection_triggered');
-  assert.match(r.text, /反思系统触发/);
+  assert.match(r.text, /reflection system triggered/);
 });
 
 test('软失败 kind 也能命中:tool_failure_burst', () => {
@@ -202,7 +202,7 @@ test('软失败 kind 也能命中:tool_failure_burst', () => {
   });
   const r = buildFailureRecoveryInjection(audit, SESSION_A, 'hi');
   assert.equal(r.matched, true);
-  assert.match(r.text, /工具失败/);
+  assert.match(r.text, /tool failures/);
 });
 
 test('软失败 kind 也能命中:user_dissatisfaction', () => {
@@ -214,7 +214,7 @@ test('软失败 kind 也能命中:user_dissatisfaction', () => {
   });
   const r = buildFailureRecoveryInjection(audit, SESSION_A, 'hi');
   assert.equal(r.matched, true);
-  assert.match(r.text, /不满意/);
+  assert.match(r.text, /dissatisfaction/);
 });
 
 // ── detectUserDissatisfaction 单元测试 ────────────────────────────────

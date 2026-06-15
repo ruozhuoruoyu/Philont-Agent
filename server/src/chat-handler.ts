@@ -30,6 +30,8 @@ import {
   PlanBudgetTracker,
   createCredentialTools,
   hostEnvPromptLine,
+  matchBarriers,
+  type BarrierMatch,
   type MiniLoopLLMClient,
   type MiniLoopLLMResponse,
   type MiniLoopMessage,
@@ -196,6 +198,13 @@ import {
   sanitizeAssistantMessageBlocks,
 } from './sanitize_tool_input.js';
 import { renderDeterministicMaxIterSummary } from './max_iter_summary.js';
+import {
+  computeViability,
+  buildViabilityDirective,
+  CONTINUATION_PITCH_RE,
+  VIABILITY_ACCEPT_RE,
+  VIABILITY_CONTINUE_RE,
+} from './viability_gate.js';
 import { resolveResponseLanguage, buildLanguageDirective } from './response_language.js';
 
 const llm = createLLMAdapter();
@@ -2003,6 +2012,34 @@ interface PendingAuth {
 }
 
 const pendingAuth = new Map<string, PendingAuth>();
+
+/**
+ * Phase 18 WS2: chat sessions where the ViabilityGate recommended stop_and_report last turn, awaiting the
+ * user's decision. Keyed by chat sessionId → the reasoning session id to abandon if (and only if) the user
+ * explicitly accepts stopping next turn. Counsel-only: we never auto-abandon without explicit acceptance.
+ */
+const viabilityStopRecommended = new Map<string, { reasoningSessionId: string; at: number }>();
+const VIABILITY_STOP_RECOMMEND_TTL_MS = 30 * 60_000;
+
+/**
+ * Phase 18 WS4: reflection's persisted recommend_stop signal, keyed by chat sessionId → timestamp. Written at
+ * turn close (post-reflection) when the owner reasoning session is stalled AND failing the same way repeatedly
+ * (reflection's cross-turn judgment, derived mechanically from its own trigger signals rather than a fragile LLM
+ * output-schema change). Read the next turn pre-LLM into signalBus.recommendStop, arming the ViabilityGate (+3).
+ */
+const viabilityRecommendStop = new Map<string, number>();
+const VIABILITY_RECOMMEND_STOP_TTL_MS = 30 * 60_000;
+
+/**
+ * Phase 18 WS5: workflow grant. When the user approves one local write/execute tool, also grant these sibling
+ * local workflow tools (same capability) so a coherent multi-step local workflow flows without re-prompting at
+ * each step. Destructive deleteFile is intentionally absent (keeps per-call confirmation).
+ */
+const LOCAL_WORKFLOW_SIBLINGS: Record<string, string[]> = {
+  write: ['writeFile', 'patch', 'moveFile'],
+  execute: ['shell'],
+};
+const WORKFLOW_GRANT_TTL_MS = 30 * 60_000;
 
 /**
  * pendingAuth TTL — matches the "(valid for 10 min)" shown on the auth card. After this, a pending
@@ -4269,10 +4306,12 @@ export async function handleChatSend(
       );
     }
 
-    // Reflection trigger (fire-and-forget): evaluated only when the turn reaches a natural end (response / question_pending);
-    // not evaluated for interrupted states like auth_pending / question_timeout. Failures never affect the main flow.
+    // Reflection trigger (fire-and-forget): evaluated only when the turn reaches a natural end (response / question_pending /
+    // stop_and_report); not evaluated for interrupted states like auth_pending / question_timeout. Failures never affect the main flow.
+    // Phase 18 WS2: stop_and_report is a natural, high-value end (a deliberate concede) — reflection should run so it can
+    // distil a routing_rule ("goal X is barrier-blocked via method Y, don't re-attack that way").
     const outcomeType = result.outcome.outcomeType;
-    if (outcomeType === 'response') {
+    if (outcomeType === 'response' || outcomeType === 'stop_and_report') {
       // 2026-05-06 sameRootCauseFailures integration: scans up to 30 failed tool calls within the last 24h,
       // clusters by (toolName + errorClass) signature, and takes the count of the largest same-signature group.
       // This is a cross-turn signal (memory_actions global timeline) implementing "repeated same-wall collision"
@@ -4285,6 +4324,23 @@ export async function handleChatSend(
         sameRootCauseFailures = countSameRootCauseFailures(recent);
       } catch (e) {
         console.warn('[reflection] sameRootCauseFailures computation failed, ignored', e);
+      }
+
+      // Phase 18 WS4: arm the NEXT turn's ViabilityGate with reflection's cross-turn judgment. If the owner
+      // reasoning session is still active but stalled (noProgressRounds ≥ 3) AND failing the same way repeatedly
+      // (sameRootCauseFailures ≥ 2), persist a recommend_stop marker for this chat session. The next turn reads it
+      // into signalBus.recommendStop (+3 score) — closing the loop where reflection's same_root_cause insight, which
+      // historically only wrote a future routing hint, now also actuates the stop decision.
+      try {
+        const os = memory.reasoning.getMostRecentActiveSession(sessionId);
+        if (os && os.status === 'active' && os.noProgressRounds >= 3 && sameRootCauseFailures >= 2) {
+          viabilityRecommendStop.set(sessionId, Date.now());
+          console.log(
+            `[viability] session=${sessionId} reflection recommend_stop armed (noProgressRounds=${os.noProgressRounds}, sameRootCause=${sameRootCauseFailures})`,
+          );
+        }
+      } catch {
+        /* advisory signal; ignore lookup failure */
       }
 
       // 2026-05-11 Phase 3: routing rule outcome backflow.
@@ -4577,6 +4633,28 @@ async function handleChatSendInner(
         text: `Granted ${pending.toolName} (valid for ${grantMinutes} min)`,
         meta: { toolName: pending.toolName },
       });
+      // Phase 18 (2026-06-15) WS5: workflow grant. Approving one LOCAL write/execute tool also grants its sibling
+      // local workflow tools (same capability) for a longer window, so a coherent multi-step local workflow
+      // (e.g. GP: writeFile → shell → patch) doesn't force a fresh auth card at every step — the
+      // "继续→授权→ok" treadmill. Destructive deleteFile is deliberately excluded (stays per-call). External /
+      // untrusted execution (domain≠local) is never batched. env PHILONT_WORKFLOW_GRANT=0 to disable.
+      if (
+        process.env.PHILONT_WORKFLOW_GRANT !== '0' &&
+        pending.domain === 'local' &&
+        (pending.capability === 'write' || pending.capability === 'execute')
+      ) {
+        const siblings = (LOCAL_WORKFLOW_SIBLINGS[pending.capability] ?? []).filter(
+          (s) => s !== pending.toolName,
+        );
+        for (const sib of siblings) {
+          grants.grant(sib, pending.capability as any, pending.domain as any, `workflow grant via ${pending.toolName} approval`, WORKFLOW_GRANT_TTL_MS);
+        }
+        if (siblings.length > 0) {
+          console.log(
+            `[workflow-grant] session=${sessionId} ${pending.capability}/local approval also grants [${siblings.join(',')}] for ${Math.round(WORKFLOW_GRANT_TTL_MS / 60_000)}min`,
+          );
+        }
+      }
       // Reconstruct the suspended tool as a call and place it back at the front of the queue, then re-enter runToolLoop with the remaining calls.
       // Must preserve it; otherwise the tool_use in the previous assistant message will have no matching tool_result,
       // and the next llm.send will be rejected by the API with "empty final user message" or structure mismatch.
@@ -4792,6 +4870,36 @@ async function handleChatSendInner(
     console.log(`[recall-trigger] session=${sessionId} matched "${retroHit.snippet}", injected proactive recall hint`);
   }
 
+  // Phase 18 WS2: if the ViabilityGate recommended stop_and_report last turn and the user now EXPLICITLY accepts
+  // stopping/reframing (and is not asking to continue), abandon the reasoning session. Counsel-only: any ambiguity
+  // → leave it active (the gate will counsel again). This is the only place a viability stop closes the session.
+  {
+    const stopRec = viabilityStopRecommended.get(sessionId);
+    if (stopRec) {
+      const fresh = Date.now() - stopRec.at < VIABILITY_STOP_RECOMMEND_TTL_MS;
+      const accepts = fresh && VIABILITY_ACCEPT_RE.test(userMessage) && !VIABILITY_CONTINUE_RE.test(userMessage);
+      if (accepts) {
+        try {
+          memory.reasoning.setSessionStatus(stopRec.reasoningSessionId, 'abandoned');
+          internalAudit.append('self_domain_write', {
+            source: 'viability_gate',
+            origin: 'Internal',
+            toolName: 'viability_stop_accepted',
+            sessionId,
+            reasoningSessionId: stopRec.reasoningSessionId,
+          });
+          console.log(
+            `[viability] session=${sessionId} user accepted stop → reasoning session ${stopRec.reasoningSessionId} abandoned`,
+          );
+        } catch (e) {
+          console.warn('[viability] abandon-on-accept failed (ignored):', e);
+        }
+      }
+      // Decision made (accept / continue / moved on) → clear the one-shot marker; gate re-arms next turn if still doomed.
+      viabilityStopRecommended.delete(sessionId);
+    }
+  }
+
   // Short-answer binding: if the previous assistant message has an unclosed question, hint the LLM to treat
   // this turn's user message as a reply rather than a new topic. Injected into the system section (messages[0]), not the user slot.
   // Only triggers when messages[0] already exists (not the first turn where system is absent) and there is a preceding natural-language assistant message.
@@ -4926,6 +5034,19 @@ async function handleChatSendInner(
     }
   } catch (e) {
     console.warn('[user-pattern] confirmation check failed, skipped', e);
+  }
+
+  // Phase 18 WS4: inherit reflection's persisted recommend_stop for this session (armed at last turn close). Sets
+  // signalBus.recommendStop so the ViabilityGate later this turn scores it (+3). TTL-bounded; consumed lazily.
+  {
+    const rs = viabilityRecommendStop.get(sessionId);
+    if (rs !== undefined) {
+      if (Date.now() - rs < VIABILITY_RECOMMEND_STOP_TTL_MS) {
+        signalBus.recommendStop = true;
+      } else {
+        viabilityRecommendStop.delete(sessionId);
+      }
+    }
   }
 
   // Failure recovery injection: if there is a task_failure_mode audit within the last 30 min for this session
@@ -5283,6 +5404,11 @@ interface TurnSignalBus {
    * Multiple runToolLoop calls within a single turn (auth resume / question resume) share the same array.
    */
   inTurnRecords?: InTurnToolRecord[];
+  /**
+   * Phase 18 (2026-06-15) WS4: reflection emitted a recommend_stop verdict for this owner session on a
+   * prior turn (persisted, read pre-LLM this turn). Arms the ViabilityGate score (+3). undefined = no signal.
+   */
+  recommendStop?: boolean;
 }
 
 /** True when a tool call would advance a deep_explore round (the expensive ~15-min mini-loop), vs read-only status/finalize. */
@@ -5808,6 +5934,16 @@ async function runToolLoop(
   // honesty did not count register 404 as failure → lie slipped through. This gate uses mechanism-layer signals (circuit breaker /
   // placeholder plan still in draft) to directly determine a lie, without relying on honesty's tool result count.
   let planFailureFalseClaimAttempts = 0;
+  // Phase 18 (2026-06-15): ViabilityGate budget for "active reasoning goal is doomed/stalled but the draft
+  // pitches continuation as if normal" regeneration within the same turn; cap=1. env PHILONT_VIABILITY_GATE=0
+  // to disable. Counsel-only: changes the RECOMMENDATION (and may downgrade outcome to stop_and_report), never
+  // blocks the user from replying "继续".
+  let viabilityAttempts = 0;
+  // Phase 18 WS2: carries a stop_and_report verdict from the ViabilityGate to the final emit so the outcome
+  // class is downgraded deterministically (independent of whether the regen dropped the continuation pitch).
+  let viabilityStopPending = false;
+  // The owner reasoning session a stop was recommended for, so the next turn can abandon it iff the user accepts.
+  let viabilityStopReasoningId: string | null = null;
 
   // 2026-05-07: give the LLM one warning at max-3 (approaching the iter limit) so it wraps up rather than
   // continuing to explore. Injected only once to prevent spam.
@@ -6470,6 +6606,96 @@ async function runToolLoop(
         }
       }
 
+      // Phase 18 (2026-06-15) ViabilityGate — the missing ACTUATOR. Runs last (after honesty/format have
+      // settled truthfulness and shape) so it only changes the RECOMMENDATION inside an already-clean draft.
+      // Reads the owner-scoped active reasoning session's sensors (barrier match / noProgressRounds / status /
+      // same_root_cause / reflection recommend_stop) and, when the goal is doomed/stalled, forces one regen that
+      // forbids the "要我继续吗" pitch and recommends stop/reframe. Counsel-only: never blocks the user's "继续".
+      // env PHILONT_VIABILITY_GATE=0 to disable. See viability_gate.ts.
+      if (process.env.PHILONT_VIABILITY_GATE !== '0') {
+        try {
+          const ownerSession = memory.reasoning.getMostRecentActiveSession(sessionId);
+          if (ownerSession) {
+            const vSummary = memory.reasoning.summarizeSession(ownerSession.id);
+            const applied: BarrierMatch[] = matchBarriers(
+              [ownerSession.goal, ...ownerSession.assumptions].join('\n'),
+            ).filter((m) => m.severity === 'applies');
+            let vSameRoot = 0;
+            try {
+              const vSince = Date.now() - 24 * 60 * 60_000;
+              vSameRoot = countSameRootCauseFailures(
+                memory.actions.listRecentFailures({ sinceTs: vSince, limit: 30 }),
+              );
+            } catch {
+              /* same_root_cause is one input of many; ignore lookup failure */
+            }
+            const advancedThisTurn = (signalBus.inTurnRecords ?? []).some(
+              (r) => r.toolName === 'deep_explore' && r.success,
+            );
+            const vTurnCount = messages.filter(
+              (m) => m.role === 'user' && typeof m.content === 'string',
+            ).length;
+            const v = computeViability({
+              hasActiveSession: true,
+              barrierApplies: applied.length > 0,
+              barrierTitle: applied[0]?.barrier.title,
+              barrierCircumvention: applied[0]?.barrier.circumvention,
+              noProgressRounds: ownerSession.noProgressRounds,
+              status: vSummary?.status ?? ownerSession.status,
+              provedCount: vSummary?.provedCount ?? 0,
+              openFrontierCount: vSummary?.openFrontierCount ?? 0,
+              sameRootCause: vSameRoot,
+              turnCount: vTurnCount,
+              recommendStop: signalBus.recommendStop === true,
+              madeProgressThisTurn: advancedThisTurn && ownerSession.noProgressRounds === 0,
+            });
+            if (v.verdict !== 'continue' && viabilityAttempts < 1) {
+              viabilityAttempts++;
+              if (v.verdict === 'stop_and_report') {
+                viabilityStopPending = true;
+                viabilityStopReasoningId = ownerSession.id;
+              }
+              audit.append('self_domain_write', {
+                source: 'viability_gate',
+                origin: 'Internal',
+                toolName: 'viability_gate_fired',
+                sessionId,
+                verdict: v.verdict,
+                score: v.score,
+                reasons: v.reasons.join(','),
+              });
+              console.warn(
+                `[viability] session=${sessionId} fired verdict=${v.verdict} score=${v.score} reasons=${v.reasons.join(',')}`,
+              );
+              messages.push({ role: 'assistant', content: response.content });
+              messages.push({
+                role: 'user',
+                content: buildViabilityDirective(v, { provedCount: vSummary?.provedCount ?? 0 }),
+              });
+              onTrace?.({
+                kind: 'internal-gate', tier: 4,
+                text: `Viability gate ${v.verdict} (score=${v.score}), reframing recommendation`,
+                meta: { gateName: 'Viability' },
+              });
+              continue;
+            }
+            // Budget already spent (the regen ran): a stop verdict downgrades the outcome at emit regardless of
+            // whether the rewrite dropped the pitch — the actuator does not depend on model compliance.
+            if (v.verdict === 'stop_and_report') {
+              viabilityStopPending = true;
+              viabilityStopReasoningId = ownerSession.id;
+              if (CONTINUATION_PITCH_RE.test(response.content)) {
+                console.warn(
+                  `[viability] session=${sessionId} continuation pitch persisted after regen → deterministic stop_and_report downgrade`,
+                );
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('[viability] gate failed (ignored):', e);
+        }
+      }
+
       // Anti-fabrication: block a tool-loop text response that claims deep_explore round/session
       // results when no deep_explore tool actually ran this turn (e.g. it called list_facts then
       // invented "第N轮/时间帽"). A response that did call deep_explore reports legitimately.
@@ -6482,7 +6708,17 @@ async function runToolLoop(
         role: 'assistant',
         content: safeText,
       });
-      return { outcome: { outcomeType: 'response', text: safeText }, auditEvents: audit.length };
+      // Phase 18 WS2: stop_and_report is a first-class, WINNABLE outcome (honest no-go + banked lemmas +
+      // recommended reframe), not a failure. Counsel-only: the reasoning session is NOT auto-abandoned here;
+      // it stays resumable so the next "继续" runs another round (user keeps agency). We only ARM the abandon —
+      // the next turn closes it iff the user explicitly accepts stopping (handleChatSendInner WS2 check).
+      if (viabilityStopPending && viabilityStopReasoningId) {
+        viabilityStopRecommended.set(sessionId, { reasoningSessionId: viabilityStopReasoningId, at: Date.now() });
+      }
+      return {
+        outcome: { outcomeType: viabilityStopPending ? 'stop_and_report' : 'response', text: safeText },
+        auditEvents: audit.length,
+      };
     }
 
     // Same as #1: subsequent loop iterations also need to sanitize assistantMessage tool_use blocks

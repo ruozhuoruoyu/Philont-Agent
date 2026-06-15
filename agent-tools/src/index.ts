@@ -20,7 +20,7 @@ import { createSecuredHttpTool, type SecuredHttpOptions } from './network/secure
 // ── Categorized exports ───────────────────────────────
 export { readFileTool, writeFileTool, deleteFileTool, moveFileTool, listDirTool, inspectPathTool, grepTool, globTool, patchTool } from './fs/index.js';
 export { shellTool, processTool, z3VerifyTool, pariGpTool, magnitudeTool, lemmaLookupTool, barrierCheckTool } from './runtime/index.js';
-export { KNOWN_BARRIERS, matchBarriers, renderBarrierAdvisory, formatBarrier } from './runtime/index.js';
+export { KNOWN_BARRIERS, matchBarriers, mentionsCircumvention, renderBarrierAdvisory, formatBarrier } from './runtime/index.js';
 export type { Barrier, BarrierMatch, BarrierSeverity } from './runtime/index.js';
 export { httpTool, webSearchTool, webFetchTool, downloadFileTool, createSecuredHttpTool, parseContentDisposition, filenameFromUrl, sanitizeFilename } from './network/index.js';
 export type { SecuredHttpOptions } from './network/index.js';

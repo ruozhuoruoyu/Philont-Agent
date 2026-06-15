@@ -62,6 +62,7 @@ import type { Tool, ToolDefinition, ToolResult } from '@agent/policy';
 import {
   runMiniAgentLoop,
   matchBarriers,
+  mentionsCircumvention,
   renderBarrierAdvisory,
   type MiniLoopLLMClient,
   type MiniLoopToolRunResult,
@@ -624,6 +625,12 @@ export const REASON_TOOL_DEFS: ToolDefinition[] = [
         status: { type: 'string', enum: ['proved', 'refuted', 'dead_end'] },
         result: { type: 'string', description: 'Conclusion / counterexample / why it is stuck (brief)' },
         approach: { type: 'string', description: 'For dead_end: the method you tried (backtracking memory)' },
+        circumvention: {
+          type: 'string',
+          description:
+            'REQUIRED when proving a step that a known barrier blocks: name the explicit way you route AROUND the wall ' +
+            '(a non-blocked input / a weaker target), and where that input enters. Without it, a barrier-blocked "proved" is rejected.',
+        },
         evidence: {
           type: 'array',
           items: { type: 'string' },
@@ -1814,6 +1821,7 @@ export function makeReasoningToolRunner(
       const status = input.status as string;
       let result = typeof input.result === 'string' ? input.result : null;
       const approach = typeof input.approach === 'string' ? input.approach : undefined;
+      const circumvention = typeof input.circumvention === 'string' ? input.circumvention : undefined;
       const evidence = Array.isArray(input.evidence)
         ? input.evidence.filter((e): e is string => typeof e === 'string' && e.trim().length > 0).map((e) => e.trim())
         : [];
@@ -1850,6 +1858,46 @@ export function makeReasoningToolRunner(
             ok: true,
             output: `Node [${nodeId}] not ${profile.settledVerb}: ${pre.reason ?? 'precheck failed'} Node stays open — address that and settle again.`,
           };
+        }
+        // Phase 18 (2026-06-15) WS3: barrier code-authority. A node proved via a method blocked by an
+        // APPLICABLE barrier, with no NAMED circumvention, cannot be recorded proved — turning barriers.ts's
+        // advisory directive into an enforced precondition (the "knowing→acting" actuator at the proof site).
+        // Scoped to nodes near the goal (depth ≤ 1, or the node's claim re-states the barrier's target) so
+        // trivial true sub-lemmas elsewhere prove normally. Fail-open. env PHILONT_BARRIER_AUTHORITY=0 to disable.
+        if (process.env.PHILONT_BARRIER_AUTHORITY !== '0') {
+          try {
+            const appliedB = (sessionBarriers.get(sessionId) ?? []).filter((m) => m.severity === 'applies');
+            if (appliedB.length > 0) {
+              const proofText = `${result ?? ''}\n${approach ?? ''}\n${circumvention ?? ''}`;
+              const claimLc = target.claim.toLowerCase();
+              const nearGoal =
+                target.depth <= 1 ||
+                appliedB.some((m) => m.barrier.goalTags.some((t) => claimLc.includes(t)));
+              const named =
+                (typeof circumvention === 'string' && circumvention.trim().length > 0) ||
+                appliedB.some((m) => mentionsCircumvention(proofText, m));
+              if (nearGoal && !named) {
+                const b0 = appliedB[0].barrier;
+                writeEvidence(nodeId);
+                reasoning.updateNode(sessionId, nodeId, {
+                  appendApproach: `barrier-blocked (${appliedB.map((m) => m.barrier.id).join(',')}): 'proved' rejected — name the circumvention or reason_record(dead_end).`,
+                });
+                console.warn(
+                  `[deep-explore] reason_record proved blocked by barrier ${b0.id} (no named circumvention); node ${nodeId} kept open`,
+                );
+                return {
+                  ok: true,
+                  output:
+                    `Node [${nodeId}] cannot be recorded proved: it settles a step blocked by ${b0.title} [${b0.id}] ` +
+                    `via the blocked method with no named circumvention. Known way through: ${b0.circumvention} ` +
+                    `Route through that EXPLICITLY (pass it as the \`circumvention\` argument and state where the ` +
+                    `non-blocked input enters), or reason_record(status=dead_end, approach=...) to bank the wall honestly.`,
+                };
+              }
+            }
+          } catch (e) {
+            console.warn('[deep-explore] barrier authority check failed (ignored):', e);
+          }
         }
         // Adversarial review (skeptics), when enabled.
         if (verifyProved) {

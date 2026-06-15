@@ -106,7 +106,7 @@ test('inject: provisional 规则带"未验证" caveat', () => {
 
   const r = buildRoutingInjection('我要 web scraping 一下 html', routingRules);
   assert.ok(r.matched >= 1);
-  assert.match(r.text, /未验证/);
+  assert.match(r.text, /not yet validated/);
 });
 
 test('inject: 关键词不匹配 → 不注入(minScore 阈值)', () => {

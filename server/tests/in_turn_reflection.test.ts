@@ -59,7 +59,7 @@ test('3 个同 signature 失败 → 仍触发,count=3', () => {
   assert.equal(r.triggered, true);
   assert.equal(r.count, 3);
   assert.match(r.signature ?? '', /http:http-401/);
-  assert.match(r.reminder ?? '', /反思/);
+  assert.match(r.reminder ?? '', /reflect/i);
   assert.match(r.reminder ?? '', /search_skills/);
   assert.match(r.reminder ?? '', /use_skill/);
   assert.match(r.reminder ?? '', /store_note/);
@@ -156,10 +156,10 @@ test('reminder 文案含三选一指引', () => {
   assert.match(r.reminder ?? '', /search_skills/);
   assert.match(r.reminder ?? '', /use_skill/);
   assert.match(r.reminder ?? '', /store_note/);
-  // 收尾本 turn
-  assert.match(r.reminder ?? '', /收尾/);
-  // 一次性提醒(防 LLM 期待重复)
-  assert.match(r.reminder ?? '', /只触发一次/);
+  // wrap up this turn
+  assert.match(r.reminder ?? '', /wrap up/i);
+  // one-shot reminder (prevents the LLM expecting repeats)
+  assert.match(r.reminder ?? '', /fires only once/i);
 });
 
 test('reminder 文案不含 service / skill 具体名(通用机制)', () => {

@@ -41,6 +41,12 @@ export interface Barrier {
   whyHere?: string;
   /** The only known ways through — a different (non-blocked) input, or a weaker provable target. */
   circumvention: string;
+  /**
+   * Lowercase substrings that, if present in a proof's text, count as NAMING the circumvention (Phase 18 WS3).
+   * Used by mentionsCircumvention() so reason_record can let a proof through only when it explicitly routes
+   * around the wall. Empty/undefined ⇒ the only way to satisfy the gate is the explicit `circumvention` arg.
+   */
+  circumventionTags?: string[];
   source: string;
 }
 
@@ -75,7 +81,44 @@ export const KNOWN_BARRIERS: readonly Barrier[] = [
       'bilinear / Type-II sum estimates (Vinogradov; Zhang / Polymath8; Bombieri–Friedlander–Iwaniec), the ' +
       'circle method, or automorphic input. A sieve ALONE provably will not do it; name where the non-sieve ' +
       'input enters or the plan is dead.',
+    circumventionTags: [
+      'chen', 'p₂', 'p_2', 'almost prime', 'almost-prime', 'switching', 'bilinear', 'type-ii', 'type ii',
+      'vinogradov', 'zhang', 'polymath', 'bombieri', 'friedlander', 'iwaniec', 'circle method', 'automorphic',
+    ],
     source: 'Selberg, the parity problem; Friedlander–Iwaniec, Opera de Cribro.',
+  },
+  {
+    id: 'erdos-straus-jacobi',
+    title: 'Erdős–Straus — Jacobi/quadratic-reciprocity barrier: no single parametric family covers the hard classes',
+    tags: ['erdos-straus', 'unit-fraction', 'jacobi', 'quadratic-reciprocity', 'covering', 'no-go'],
+    goalTags: [
+      'erdős–straus', 'erdos-straus', 'erdős straus', 'erdos straus', '4/n', '4/p',
+      'd_r(a)', 't_r(a)', 'hard class', 'hard classes', 'mod 840', 'residual divisor',
+    ],
+    methodTags: [
+      'legendre symbol', 'legendre', 'jacobi symbol', 'jacobi', 'quadratic reciprocity', 'quadratic residue',
+      'covering system', 'covering set', 'parametric family', 'single r', 'multi-r', 'residue class cover',
+    ],
+    blocks:
+      'For the six hard residue classes mod 840 (all squares mod 840), Legendre/Jacobi-symbol constraints prevent ' +
+      'any single parametric family — and any fixed finite covering set of R values — from solving every prime p ' +
+      'in the class. A "find R ≤ 59 that works for all p in the class" covering argument provably cannot close: ' +
+      'the symbol conditions on the prime factors of a=(p+R)/4 leave, for each fixed R, an infinite residue ' +
+      'subclass of p where D_R(a) ∩ T_R(a) = ∅.',
+    whyHere:
+      'Numerically no single R covers more than a fraction of a hard class; a multi-R union must defeat the ' +
+      'reciprocity constraints simultaneously, which the symbol algebra forbids for a FIXED finite R-set. ' +
+      'Grinding more (class, R) symbol bookkeeping pads sub-lemmas around the wall without touching it.',
+    circumvention:
+      'Do NOT attack via a fixed finite covering set + reciprocity. Inject a non-covering input: a flexible ' +
+      '(unbounded) family where the modulus grows with p (BlEl22-style modular reduction p ≡ −a/c mod 4acd−1), ' +
+      'an analytic/density argument (Vaughan, Elsholtz–Tao), or a genuinely new arithmetic structure. Or WEAKEN ' +
+      'to a density/almost-all statement rather than every p. Name where the non-covering input enters or the path is dead.',
+    circumventionTags: [
+      'blel22', 'bloom', 'elsholtz', '4acd', '4acd-1', '4acd−1', 'modular reduction', 'unbounded',
+      'density', 'almost all', 'almost-all', 'vaughan', 'analytic', 'growing modulus',
+    ],
+    source: 'ErdosProblems.com/242 (Tao, Bloom remarks); Bright–Loughran 2020; BlEl22; Zenodo "Residual Divisor Certificates".',
   },
   {
     id: 'binary-circle-method-gap',
@@ -605,6 +648,19 @@ export function matchBarriers(text: string): BarrierMatch[] {
     );
   });
   return out;
+}
+
+/**
+ * Phase 18 WS3: does a proof's text NAME a circumvention of this barrier? True iff the text (lowercased)
+ * contains one of the barrier's circumventionTags. Barriers without circumventionTags always return false,
+ * so for them the only way past the reason_record gate is the explicit `circumvention` argument.
+ */
+export function mentionsCircumvention(text: string, match: BarrierMatch): boolean {
+  const tags = match.barrier.circumventionTags;
+  if (!tags || tags.length === 0) return false;
+  const hay = (text || '').toLowerCase();
+  if (!hay.trim()) return false;
+  return tags.some((t) => hay.includes(t));
 }
 
 /** Full human/LLM-facing card for one barrier. */

@@ -44,12 +44,12 @@ test('K7 bridge inject: 仅 bridge initiative 出现在复核段', () => {
   done(store, 'gap', 'fact_gap', '查了 fact:foo');
 
   const review = buildK7BridgeReviewSection(store, { sinceTs: 0, topK: 5 });
-  assert.match(review, /## 我自己复核了上一轮的承诺/);
+  assert.match(review, /## I reviewed my previous commitments/);
   assert.match(review, /honesty:verify-size/);
   assert.doesNotMatch(review, /fact_gap/);
 
   const progress = buildAutonomousProgressInjection(store, { sinceTs: 0, topK: 5 });
-  assert.match(progress, /## 我自己刚做了什么/);
+  assert.match(progress, /## What I just did on my own/);
   assert.match(progress, /fact_gap/);
   assert.doesNotMatch(progress, /honesty:verify-size/);
 
@@ -106,7 +106,7 @@ test('K7 bridge inject: 复核段 maxChars 截断', () => {
 
   const review = buildK7BridgeReviewSection(store, { sinceTs: 0, topK: 5, maxChars: 200 });
   assert.ok(review.length <= 200 + 20, `length=${review.length}`);
-  assert.match(review, /截断/);
+  assert.match(review, /truncated/);
 
   handle.close();
 });
