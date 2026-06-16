@@ -1,11 +1,31 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  decodeShellOutput,
   detectReplacementChar,
   detectShellKind,
   prefixCommandWithUtf8,
   sanitizeReplacementChar,
 } from '../src/utils/encoding.js';
+
+describe('decodeShellOutput (UTF-8 → GBK auto-detect)', () => {
+  it('decodes GBK-encoded bytes (Windows piped cmd output)', () => {
+    // "驱动器 E" in GBK/cp936 — what `dir` emits on zh-CN Windows even with chcp 65001
+    const gbk = Buffer.from([0xc7, 0xfd, 0xb6, 0xaf, 0xc6, 0xf7, 0x20, 0x45]);
+    assert.equal(decodeShellOutput(gbk), '驱动器 E');
+  });
+  it('decodes valid UTF-8 bytes unchanged', () => {
+    assert.equal(decodeShellOutput(Buffer.from('结论：ES 撞墙', 'utf8')), '结论：ES 撞墙');
+  });
+  it('ASCII (gp.exe banner) decodes identically', () => {
+    assert.equal(decodeShellOutput(Buffer.from('=== ANALYSIS ===', 'utf8')), '=== ANALYSIS ===');
+  });
+  it('null/undefined/string pass through safely', () => {
+    assert.equal(decodeShellOutput(null), '');
+    assert.equal(decodeShellOutput(undefined), '');
+    assert.equal(decodeShellOutput('already decoded'), 'already decoded');
+  });
+});
 
 // process.platform 是只读 getter，但可以用 Object.defineProperty 临时覆盖
 // 来模拟 Windows 行为而不实际跨平台跑。

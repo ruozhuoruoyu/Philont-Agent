@@ -346,6 +346,51 @@ function isContextTooLargeMessage(s: string): boolean {
  */
 const NONSTREAMING_MAX_TOKENS = 21000;
 
+/**
+ * Transient LLM/network error retry (2026-06-16). Prod: a single "Connection error" / "fetch failed"
+ * killed autonomous tasks outright (llmTokens=0) and bubbled up on chat turns with no retry. We retry
+ * a FAILED request (no response yet → safe to re-issue) a few times with exponential backoff. Never
+ * retries user aborts (turn deadline / stop) or non-transient errors (400/401/403 → real problems).
+ * env PHILONT_LLM_MAX_RETRIES (default 2 → up to 3 attempts); 0 disables.
+ */
+const LLM_MAX_RETRIES = (() => {
+  const n = Number.parseInt(process.env.PHILONT_LLM_MAX_RETRIES ?? '', 10);
+  return Number.isFinite(n) && n >= 0 ? n : 2;
+})();
+
+export function isTransientLlmError(e: unknown): boolean {
+  const err = e as { status?: number; name?: string; message?: string; code?: string } | null;
+  if (!err) return false;
+  if (err.name === 'AbortError') return false; // user abort / turn deadline — never retry
+  const status = err.status;
+  if (typeof status === 'number' && (status === 408 || status === 409 || status === 429 || (status >= 500 && status < 600))) {
+    return true;
+  }
+  const sig = `${err.message ?? ''} ${err.code ?? ''}`.toLowerCase();
+  return /connection error|fetch failed|econnreset|econnrefused|etimedout|enotfound|eai_again|socket hang up|network error|timed out|timeout|stream (?:error|disconnected)|terminated|premature close/.test(
+    sig,
+  );
+}
+
+async function sendWithTransientRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= LLM_MAX_RETRIES; attempt++) {
+    if (signal?.aborted) throw new Error('aborted');
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (attempt >= LLM_MAX_RETRIES || !isTransientLlmError(e)) throw e;
+      const backoffMs = Math.min(8000, 500 * 2 ** attempt) + (attempt * 113) % 250; // deterministic jitter
+      console.warn(
+        `[llm-adapter] transient error (attempt ${attempt + 1}/${LLM_MAX_RETRIES + 1}), retrying in ${backoffMs}ms: ${(e as Error)?.message ?? e}`,
+      );
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+  }
+  throw lastErr;
+}
+
 class AnthropicAdapter implements LLMAdapter {
   private client: Anthropic;
   private readonly model: string;
@@ -425,16 +470,18 @@ class AnthropicAdapter implements LLMAdapter {
       // every turn. Above the threshold, stream and reassemble via finalMessage() — same
       // Anthropic.Message shape, so all downstream handling (content blocks, stop_reason,
       // usage, thinking-block echo) is unchanged. Small requests keep the non-streaming path.
-      if (maxTokens > NONSTREAMING_MAX_TOKENS) {
-        response = await this.client.messages
-          .stream(createParams as unknown as Anthropic.MessageStreamParams, { signal: opts?.signal })
-          .finalMessage();
-      } else {
-        response = await this.client.messages.create(
-          createParams as unknown as Anthropic.MessageCreateParamsNonStreaming,
-          { signal: opts?.signal },
-        );
-      }
+      response = await sendWithTransientRetry<Anthropic.Message>(
+        async () =>
+          maxTokens > NONSTREAMING_MAX_TOKENS
+            ? await this.client.messages
+                .stream(createParams as unknown as Anthropic.MessageStreamParams, { signal: opts?.signal })
+                .finalMessage()
+            : await this.client.messages.create(
+                createParams as unknown as Anthropic.MessageCreateParamsNonStreaming,
+                { signal: opts?.signal },
+              ),
+        opts?.signal,
+      );
     } catch (e: unknown) {
       // 400 + "too large" / "context length exceeded" → normalise to ContextTooLargeError
       // so the upper layer can trigger emergency eviction + retry
@@ -747,15 +794,26 @@ class OpenAICompatAdapter implements LLMAdapter {
     }
 
     const url = `${this.baseUrl}${this.cfg.path}`;
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: opts?.signal,
-    });
+    // Retry transient network failures (fetch failed / connection reset) + 5xx/429 — a failed POST
+    // produced no completion, so re-issuing is safe. 4xx (except 408/429) and aborts propagate.
+    const resp = await sendWithTransientRetry(async () => {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: opts?.signal,
+      });
+      if (!r.ok && (r.status === 408 || r.status === 429 || (r.status >= 500 && r.status < 600))) {
+        const t = await r.text().catch(() => '');
+        const err = new Error(`${this.cfg.name} API ${r.status}: ${t.slice(0, 300)}`) as Error & { status?: number };
+        err.status = r.status; // makes isTransientLlmError retry it
+        throw err;
+      }
+      return r;
+    }, opts?.signal);
 
     if (!resp.ok) {
       const errText = await resp.text();

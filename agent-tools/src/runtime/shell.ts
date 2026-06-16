@@ -16,6 +16,7 @@ import { stat } from 'node:fs/promises';
 import type { Tool } from '@agent/policy';
 import {
   detectReplacementChar,
+  decodeShellOutput,
   prefixCommandWithUtf8,
 } from '../utils/encoding.js';
 import { hostShellGuidanceLines, POSIX_PREFERRED_SHELL } from '../utils/host.js';
@@ -101,8 +102,8 @@ function formatFailure(error: any, durationMs: number, requestedTimeout: number)
   const exitCode = typeof error?.code === 'number' ? error.code : null;
   const signal = error?.signal ?? null;
   const killed = error?.killed === true;
-  const stderr = (error?.stderr ?? '').toString().trim();
-  const stdoutLeftover = (error?.stdout ?? '').toString().trim();
+  const stderr = decodeShellOutput(error?.stderr).trim();
+  const stdoutLeftover = decodeShellOutput(error?.stdout).trim();
 
   const meta: string[] = [];
   if (exitCode !== null) meta.push(`exitCode=${exitCode}`);
@@ -175,13 +176,19 @@ export const shellTool: Tool = {
     try {
       // shell: prefer /bin/bash on POSIX (avoids Linux dash misinterpreting LLM bash syntax);
       // undefined → Node default (POSIX /bin/sh or Windows cmd.exe). See host.ts.
-      const { stdout, stderr } = await execAsync(wrappedCommand, { timeout, shell: POSIX_PREFERRED_SHELL });
+      // Capture as Buffer (encoding:'buffer') and decode with UTF-8→GBK auto-detect: chcp is unreliable for
+      // PIPED output (cmd builtins like `dir` emit the OEM codepage regardless), so decode the bytes correctly.
+      const { stdout, stderr } = await execAsync(wrappedCommand, {
+        timeout,
+        shell: POSIX_PREFERRED_SHELL,
+        encoding: 'buffer',
+      });
       const durationMs = Date.now() - startedAt;
       // Success path: exit 0. Prefer stdout; append stderr as supplementary info (many tools
       // send progress on stderr). Completely empty output is also explicitly labelled,
       // rather than returning an empty string and letting the LLM guess.
-      const out = stdout?.toString() ?? '';
-      const err = stderr?.toString() ?? '';
+      const out = decodeShellOutput(stdout);
+      const err = decodeShellOutput(stderr);
       const trimmedOut = out.trim();
       const trimmedErr = err.trim();
       let body =

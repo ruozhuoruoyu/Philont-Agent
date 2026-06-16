@@ -13,8 +13,24 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { repairToolResultPairing } from '../src/llm-adapter.js';
+import { repairToolResultPairing, isTransientLlmError } from '../src/llm-adapter.js';
 import type { NativeMessage } from '../src/llm-adapter.js';
+
+test('isTransientLlmError: retries network/5xx, not aborts/4xx', () => {
+  // transient → retry
+  assert.equal(isTransientLlmError(new Error('Connection error.')), true);
+  assert.equal(isTransientLlmError(new Error('fetch failed')), true);
+  assert.equal(isTransientLlmError(new Error('Request timed out')), true);
+  assert.equal(isTransientLlmError({ code: 'ECONNRESET' }), true);
+  assert.equal(isTransientLlmError({ status: 503 }), true);
+  assert.equal(isTransientLlmError({ status: 429 }), true);
+  // non-transient → propagate immediately
+  const abort = new Error('aborted'); abort.name = 'AbortError';
+  assert.equal(isTransientLlmError(abort), false); // user abort / turn deadline
+  assert.equal(isTransientLlmError({ status: 400, message: 'bad request' }), false);
+  assert.equal(isTransientLlmError({ status: 401 }), false);
+  assert.equal(isTransientLlmError(null), false);
+});
 
 type Block = { type: string; [k: string]: unknown };
 

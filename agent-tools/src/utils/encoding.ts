@@ -62,6 +62,32 @@ export function detectReplacementChar(text: string): boolean {
   return text.includes(REPLACEMENT_CHAR);
 }
 
+/**
+ * Decode captured shell output bytes, auto-detecting UTF-8 vs the Windows OEM/ANSI codepage (GBK).
+ *
+ * Why bytes, not a pre-decoded string: `chcp 65001` only switches the CONSOLE codepage; when stdout is
+ * a pipe (captured by Node) many programs — notably cmd builtins like `dir` and Windows error text —
+ * still emit the OEM codepage (GBK on zh-CN) regardless of chcp. So forcing the codepage is unreliable;
+ * decoding the raw bytes correctly is the robust fix.
+ *
+ * Strategy: try strict UTF-8 (fatal) first — valid UTF-8 (incl. pure ASCII like gp.exe output) wins.
+ * If it throws, the bytes are not UTF-8 → fall back to GBK (gb18030 is a superset, covers cp936).
+ * On non-Windows, output is UTF-8 and the first decode succeeds, so this is a no-op there.
+ */
+export function decodeShellOutput(buf: Buffer | Uint8Array | string | null | undefined): string {
+  if (buf == null) return '';
+  if (typeof buf === 'string') return buf; // already decoded (legacy callers)
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    try {
+      return new TextDecoder('gb18030').decode(buf); // GBK/cp936 superset
+    } catch {
+      return new TextDecoder('utf-8').decode(buf); // ICU without the codec (rare) → lossy, not throwing
+    }
+  }
+}
+
 /** Replace U+FFFD with a readable placeholder (for end-user-facing rendering). */
 export function sanitizeReplacementChar(text: string, placeholder = '?'): string {
   return text.split(REPLACEMENT_CHAR).join(placeholder);

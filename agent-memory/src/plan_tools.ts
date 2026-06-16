@@ -28,6 +28,31 @@ import type {
 const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*[a-z0-9]$/;
 const DELIVERABLE_DESC_MIN_CHARS = 8;
 
+/**
+ * Normalize an id toward kebab-case so a NEAR-MISS (capital letters, spaces, underscores) is auto-fixed
+ * instead of hard-rejecting the whole plan. Prod foot-gun: deliverable id 'class-R-grid' (capital R) failed
+ * the kebab check → plan_draft failed → plan_protocol_gate/auto-revise/circuit-breaker cascade + false 已完成.
+ * Lowercases, maps runs of non-[a-z0-9] to a single '-', strips leading/trailing '-'. Applied consistently to
+ * deliverable ids, step.covers, and close-time deliverable_status keys so references always resolve.
+ * Returns '' for an id with no alphanumerics (then the original validation reports it cleanly).
+ */
+export function kebabize(id: string): string {
+  return id
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Per-plan C3 rejection counter (2026-06-16). C3 (outcome='success' with partial deliverables) used to hard-reject
+ * forever — prod showed the model re-issuing the same success close, driving sameRootCause to 8-9 → circuit-breaker
+ * → false 已完成. Now: the FIRST C3 hit still rejects (gives the model a chance to mark deliverables skipped/done or
+ * choose failure), but a REPEAT auto-converts to an honest 'failure' close — deterministically breaking the loop
+ * (never a false success). Cleared on close. env PHILONT_PLAN_C3_GRACE sets the chances before auto-convert (default 1).
+ */
+const c3RejectionCount = new Map<string, number>();
+
 /** Strict anti-walkthrough blacklist (forbidden words for deliverable.id). Disable via env PHILONT_SPEC_BLACKLIST=0. */
 const DELIVERABLE_ID_BLACKLIST: ReadonlySet<string> = new Set([
   'task-done',
@@ -558,7 +583,9 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
                 error: `steps[${i}].covers contains non-string or empty value`,
               };
             }
-            covers.push(c.trim());
+            // Normalize to kebab so a near-miss reference (e.g. 'class-R-grid') still resolves to the
+            // normalized deliverable id below, instead of failing R4 (covers ⊆ ids).
+            covers.push(kebabize(c) || c.trim());
           }
         }
         steps.push({ id, description: desc.trim(), covers });
@@ -599,7 +626,8 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
             };
           }
           const parsed: ParsedDeliverable = {
-            id: dd.id.trim(),
+            // Auto-normalize to kebab-case (capital letters / spaces / underscores) instead of hard-rejecting.
+            id: kebabize(dd.id) || dd.id.trim(),
             description: dd.description.trim(),
           };
           if (typeof dd.source === 'string' && dd.source.trim()) {
@@ -1048,7 +1076,7 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
                 error: `new_steps[${i}].covers contains non-string or empty value`,
               };
             }
-            covers.push(c.trim());
+            covers.push(kebabize(c) || c.trim());
           }
         }
         steps.push({
@@ -1112,7 +1140,8 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
             };
           }
           const parsed: ParsedDeliverable = {
-            id: dd.id.trim(),
+            // Auto-normalize to kebab-case (capital letters / spaces / underscores) instead of hard-rejecting.
+            id: kebabize(dd.id) || dd.id.trim(),
             description: dd.description.trim(),
           };
           if (typeof dd.source === 'string' && dd.source.trim()) {
@@ -1397,7 +1426,10 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
       }
 
       const expectedIds = new Set(planCurrent.deliverables.map((d) => d.id));
-      const provided = rawDelivStatus as Record<string, unknown>;
+      // Normalize provided keys to kebab so a near-miss (e.g. 'class-R-grid') maps to the stored id and C1 passes.
+      const providedRaw = rawDelivStatus as Record<string, unknown>;
+      const provided: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(providedRaw)) provided[kebabize(k) || k] = v;
       const providedKeys = new Set(Object.keys(provided));
 
       // (C1) keys must exactly equal the deliverable ids set
@@ -1443,16 +1475,32 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
           }
         }
         if (nonSuccess.length > 0) {
-          return {
-            success: false,
-            output: '',
-            error:
-              `[spec-coverage C3] outcome='success' but some deliverables have non-done/skipped status:\n` +
-              nonSuccess.map(([k, v]) => `  - ${k}: ${v}`).join('\n') +
-              `\n\nChoose one:\n` +
-              `  - Change outcome='failure' for failure wrap-up (distills failure playbook)\n` +
-              `  - Change these deliverables to 'done' (execute+evidence) or 'skipped' (write reason in summary)`,
-          };
+          const graceRaw = Number.parseInt(process.env.PHILONT_PLAN_C3_GRACE ?? '', 10);
+          const grace = Number.isFinite(graceRaw) && graceRaw >= 0 ? graceRaw : 1;
+          const prior = c3RejectionCount.get(planCurrent.id) ?? 0;
+          if (prior < grace) {
+            // First (grace) attempt(s): reject with guidance so the model can correct honestly.
+            c3RejectionCount.set(planCurrent.id, prior + 1);
+            return {
+              success: false,
+              output: '',
+              error:
+                `[spec-coverage C3] outcome='success' but some deliverables have non-done/skipped status:\n` +
+                nonSuccess.map(([k, v]) => `  - ${k}: ${v}`).join('\n') +
+                `\n\nChoose one:\n` +
+                `  - Change outcome='failure' for failure wrap-up (distills failure playbook)\n` +
+                `  - Change these deliverables to 'done' (execute+evidence) or 'skipped' (write reason in summary)\n` +
+                `\n(If you call plan_close success again without changing these, it will be recorded as a 'failure' close — a success with partial deliverables is not an honest success.)`,
+            };
+          }
+          // Repeat without correction → deterministically break the loop with an HONEST failure close
+          // (never a false success). The partial deliverables stand as-is and feed the failure playbook.
+          outcome = 'failure';
+          autoConvertedToFailure = true;
+          validationLine =
+            `⚠️ outcome auto-converted success→failure (spec-coverage C3): claimed success but ` +
+            nonSuccess.map(([k, v]) => `${k}=${v}`).join(', ') +
+            ` after ${prior} correction prompt(s). Recorded honestly as a partial/failure close.`;
         }
 
         // (C4) Phase 12 (2026-05-17): evidence contains failure signals → reject outcome=success
@@ -1468,7 +1516,7 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
             taintedSteps.push({ id: s.id, evidence: s.evidence });
           }
         }
-        if (taintedSteps.length > 0) {
+        if (taintedSteps.length > 0 && !autoConvertedToFailure) {
           return {
             success: false,
             output: '',
@@ -1565,6 +1613,7 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
       // genuine honesty issues will be written to routing_rule / playbook via reflection learning.
 
       const closed = plans.close(planId, outcome, summary.trim(), deliverableStatus);
+      c3RejectionCount.delete(planId); // plan closed (or gone) → drop its C3 retry counter
       if (!closed) {
         return {
           success: false,

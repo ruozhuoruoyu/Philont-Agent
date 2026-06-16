@@ -782,11 +782,22 @@ test('spec-coverage R1: slow + deliverables.length=1 → reject(默认 MIN=2)', 
   assert.match(r.error ?? '', /slow task requires at least/);
 });
 
-test('spec-coverage R2: deliverable.id 非 kebab → reject', async () => {
-  const { drafts } = setup();
+test('spec-coverage R2: near-miss deliverable.id 自动归一化为 kebab(不再 hard-reject)', async () => {
+  const { drafts, memory, sessionId } = setup();
   const r = await drafts.execute({
     steps: [{ description: 'a', covers: ['Bad_ID'] }],
     deliverables: [{ id: 'Bad_ID', description: 'description here' }],
+  });
+  assert.equal(r.success, true); // 'Bad_ID' → 'bad-id', covers also normalized → R4/R5 hold
+  const plan = memory.plans.listBySession(sessionId)[0];
+  assert.equal(plan.deliverables[0].id, 'bad-id');
+});
+
+test('spec-coverage R2: 无法归一化的 id(数字开头)仍 reject', async () => {
+  const { drafts } = setup();
+  const r = await drafts.execute({
+    steps: [{ description: 'a', covers: ['42'] }],
+    deliverables: [{ id: '42', description: 'description here' }],
   });
   assert.equal(r.success, false);
   assert.match(r.error ?? '', /is not kebab-case/);
@@ -899,7 +910,28 @@ test('spec-coverage C1: deliverable_status 多 key → reject', async () => {
     deliverable_status: { d1: 'done', d_extra: 'done' },
   });
   assert.equal(r.success, false);
-  assert.match(r.error ?? '', /extra: \[d_extra\]/);
+  assert.match(r.error ?? '', /extra: \[d-extra\]/); // key normalized to kebab, still rejected as extra
+});
+
+test('spec-coverage C3: 重复 success+partial → 自动转 failure(打断重试循环,不假成功)', async () => {
+  const { drafts, updateStep, close, memory, sessionId } = setup();
+  await drafts.execute(specDraftArgs({ steps: [{ description: 'a' }] }));
+  const planId = memory.plans.listBySession(sessionId)[0].id;
+  await markAllStepsDone(updateStep, planId, [{ id: 'step-1' }]);
+  const args = {
+    plan_id: planId,
+    outcome: 'success' as const,
+    summary: 'claiming done',
+    deliverable_status: { d1: 'partial' as const },
+  };
+  // First attempt: one correction chance → reject with C3 guidance
+  const r1 = await close.execute(args);
+  assert.equal(r1.success, false);
+  assert.match(r1.error ?? '', /C3/);
+  // Repeat without correcting → auto-convert to an honest failure close (loop broken, never a false success)
+  const r2 = await close.execute(args);
+  assert.equal(r2.success, true);
+  assert.match(r2.output ?? '', /failure/i);
 });
 
 test('spec-coverage C2: deliverable_status value 非法 → reject', async () => {
