@@ -34,6 +34,8 @@ const STOP_SCORE = 4;
 const PIVOT_SCORE = 2;
 /** noProgressRounds threshold that counts as stalled (mirrors deep_explore STUCK_ESCALATE_AFTER). */
 const STUCK_ROUNDS = 3;
+/** Prior consecutive non-continue verdicts after which a fresh 'pivot' escalates to 'stop' (de-facto stuck). */
+const RATCHET_PIVOTS = 3;
 
 export interface ViabilityInput {
   /** Whether an owner-scoped active reasoning session exists. Gate is inert (continue) without one. */
@@ -64,6 +66,12 @@ export interface ViabilityInput {
   recommendStop: boolean;
   /** A deep_explore advance round ran AND reset noProgressRounds this turn → real progress. Vetoes stop. */
   madeProgressThisTurn: boolean;
+  /**
+   * Consecutive PRIOR turns this session got a non-continue viability verdict (the gate kept saying "stalling").
+   * Generalizes intractable to goals NOT in the curated barrier library: if we've recommended pivot this many
+   * turns running with nothing improving, that IS de-facto intractable → escalate pivot → stop. (2026-06-16)
+   */
+  repeatedPivotCount: number;
 }
 
 export interface ViabilityResult {
@@ -175,12 +183,22 @@ export function computeViability(input: ViabilityInput): ViabilityResult {
     };
   }
 
-  const verdict: ViabilityVerdict =
+  let verdict: ViabilityVerdict =
     score >= STOP_SCORE ? 'stop_and_report' : score >= PIVOT_SCORE ? 'pivot' : 'continue';
+
+  // RATCHET: the gate has recommended pivot for several turns running and nothing improved. That repeated
+  // self-reported stalling IS de-facto intractable, even for a goal with no curated barrier — escalate to stop
+  // so the loop doesn't pivot forever on the untracked long tail.
+  if (verdict === 'pivot' && input.repeatedPivotCount >= RATCHET_PIVOTS) {
+    verdict = 'stop_and_report';
+    reasons.push('repeated_pivot_ratchet');
+  }
 
   const evidence =
     verdict === 'continue'
       ? ''
+      : reasons.includes('repeated_pivot_ratchet')
+        ? `recommended pivoting ${input.repeatedPivotCount + 1} turns running with no improvement — this approach is de-facto exhausted`
       : input.barrierApplies && input.barrierTitle
         ? `blocked by a known barrier (${input.barrierTitle}); ${input.noProgressRounds} round(s) without progress`
         : input.status === 'stuck'

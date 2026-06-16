@@ -2050,6 +2050,13 @@ const viabilityRecommendStop = new Map<string, number>();
 const VIABILITY_RECOMMEND_STOP_TTL_MS = 30 * 60_000;
 
 /**
+ * Phase 18 ratchet (2026-06-16): consecutive turns this chat session got a non-continue viability verdict.
+ * Passed into computeViability as repeatedPivotCount so a long pivot streak escalates to stop — generalizing
+ * intractable to goals with no curated barrier. Reset to 0 the moment a turn comes back 'continue'.
+ */
+const viabilityPivotStreak = new Map<string, number>();
+
+/**
  * Phase 18 WS5: workflow grant. When the user approves one local write/execute tool, also grant these sibling
  * local workflow tools (same capability) so a coherent multi-step local workflow flows without re-prompting at
  * each step. Destructive deleteFile is intentionally absent (keeps per-call confirmation).
@@ -5602,10 +5609,20 @@ async function runToolLoop(
       const sessionPlans = memory.plans.listBySession(sessionId, { limit: 1 });
       const lastPlan = sessionPlans[0];
       // M3 / Phase 11 (2026-05-15) tightened: only 'executing' allows execution-type tools.
-      // 'draft' still rejects (forces LLM to call plan_update_step status='doing' to enter executing);
-      // failed/completed/none all require a new plan_draft.
+      // 'draft' still rejects (forces LLM to call plan_update_step status='doing' to enter executing).
+      // Phase 18 (2026-06-16): a TERMINAL plan (completed/failed) is NOT an active plan — the planned task is over.
+      // Forcing a full re-plan for follow-up tool calls caused a thrash (reject → re-draft → spurious failures that
+      // then pollute the viability/same_root_cause signal). Treat terminal as "no active plan": auto-downgrade to
+      // fast and let the tool run; the auto-classifier re-promotes to slow if a genuinely new multi-step task starts.
+      const planIsTerminal = lastPlan?.status === 'completed' || lastPlan?.status === 'failed';
+      if (planIsTerminal) {
+        taskModeStore.set(sessionId, 'fast', `auto:terminal-plan:${lastPlan!.status}`);
+        console.log(
+          `[plan_protocol_gate] session=${sessionId} terminal plan ${lastPlan!.id} (${lastPlan!.status}) → auto fast, ${call.name} allowed[first-iter]`,
+        );
+      }
       const planAllowsExec = lastPlan?.status === 'executing';
-      const needsPlanReview = !planAllowsExec;
+      const needsPlanReview = !planAllowsExec && !planIsTerminal;
       const exempt = isPlanGateExempt(call.name, classification, call.input);
       if (needsPlanReview && !exempt) {
         const baseReason = !lastPlan
@@ -5962,6 +5979,8 @@ async function runToolLoop(
   let viabilityStopPending = false;
   // The owner reasoning session a stop was recommended for, so the next turn can abandon it iff the user accepts.
   let viabilityStopReasoningId: string | null = null;
+  // Ratchet: update the per-session pivot streak at most once per turn (the gate may evaluate twice across a regen).
+  let viabilityStreakUpdated = false;
 
   // 2026-05-07: give the LLM one warning at max-3 (approaching the iter limit) so it wraps up rather than
   // continuing to explore. Injected only once to prevent spam.
@@ -6659,6 +6678,7 @@ async function runToolLoop(
           const vTurnCount = messages.filter(
             (m) => m.role === 'user' && typeof m.content === 'string',
           ).length;
+          const priorPivotStreak = viabilityPivotStreak.get(sessionId) ?? 0;
           const v = computeViability({
             hasActiveSession: !!ownerSession,
             barrierApplies: applied.length > 0,
@@ -6673,7 +6693,13 @@ async function runToolLoop(
             turnCount: vTurnCount,
             recommendStop: signalBus.recommendStop === true,
             madeProgressThisTurn: advancedThisTurn && (ownerSession?.noProgressRounds ?? 1) === 0,
+            repeatedPivotCount: priorPivotStreak,
           });
+          // Ratchet bookkeeping (once per turn): a non-continue verdict extends the streak; continue resets it.
+          if (!viabilityStreakUpdated) {
+            viabilityStreakUpdated = true;
+            viabilityPivotStreak.set(sessionId, v.verdict === 'continue' ? 0 : priorPivotStreak + 1);
+          }
           if (v.verdict !== 'continue' && viabilityAttempts < 1) {
             viabilityAttempts++;
             if (isStopVerdict(v.verdict)) {
@@ -6935,8 +6961,16 @@ async function runToolLoop(
         const sessionPlans = memory.plans.listBySession(sessionId, { limit: 1 });
         const lastPlan = sessionPlans[0];
         // M3 / Phase 11 (2026-05-15) tightened: only 'executing' passes through (same as first-iter).
+        // Phase 18: terminal plan (completed/failed) is not active → auto-downgrade to fast, allow the tool.
+        const planIsTerminal = lastPlan?.status === 'completed' || lastPlan?.status === 'failed';
+        if (planIsTerminal) {
+          taskModeStore.set(sessionId, 'fast', `auto:terminal-plan:${lastPlan!.status}`);
+          console.log(
+            `[plan_protocol_gate] session=${sessionId} terminal plan ${lastPlan!.id} (${lastPlan!.status}) → auto fast, ${call.name} allowed`,
+          );
+        }
         const planAllowsExec = lastPlan?.status === 'executing';
-        const needsPlanReview = !planAllowsExec;
+        const needsPlanReview = !planAllowsExec && !planIsTerminal;
         const exempt = isPlanGateExempt(call.name, classification, call.input);
         if (needsPlanReview && !exempt) {
           const baseReason = !lastPlan

@@ -365,6 +365,26 @@ test('SessionReflector: extract skills from session', async () => {
   assert.ok(skills.getByName('deploy-rust'));
 });
 
+test('SessionReflector: doom-loop window (failure-dominated) → skill extraction suppressed', async () => {
+  const { skills, actions, raw } = openMemoryDb(':memory:');
+  const session = raw.startSession();
+  raw.appendMessage({ sessionId: session.id, role: 'user', content: '反复试这个' });
+  raw.appendMessage({ sessionId: session.id, role: 'assistant', content: '又失败了' });
+  // 5 failures, 0 success → failure-dominated window (no reusable workflow to teach)
+  for (let i = 0; i < 5; i++) {
+    actions.log({ sessionId: session.id, toolName: 'shell', params: { command: `try-${i}` }, success: false, result: 'boom' });
+  }
+  const mockLlm = new MockLlm(
+    JSON.stringify([
+      { name: 'should-not-exist', description: 'junk from a doom loop', trigger_keywords: ['x'], action_template: 'x' },
+    ]),
+  );
+  const reflector = new SessionReflector(mockLlm, skills, actions, raw);
+  const result = await reflector.reflectFromSession(session.id);
+  assert.equal(result.skillsCreated, 0); // gate suppressed extraction before the LLM call
+  assert.ok(!skills.getByName('should-not-exist'));
+});
+
 test('SessionReflector: update existing skill, preserve use_count', async () => {
   const { skills, actions, raw } = openMemoryDb(':memory:');
 

@@ -22,6 +22,7 @@
 
 import type { Tool } from '@agent/policy';
 import { callAuxLLM, AuxLLMError } from '../utils/aux-llm.js';
+import { withRetry } from '../utils/retry.js';
 import { extractTitle, htmlToMarkdown } from './html-to-markdown.js';
 import { isPreapprovedHost } from './preapproved.js';
 
@@ -537,12 +538,18 @@ export const webFetchTool: Tool = {
   domain: 'network',
   async execute(params) {
     try {
-      const payload = await runWebFetch({
-        url: params.url as string,
-        prompt: params.prompt as string | undefined,
-        extractMode: params.extractMode as 'markdown' | 'text' | undefined,
-        maxChars: params.maxChars as number | undefined,
-      });
+      // Retry transient network stalls (timeout / abort) — a read is idempotent, and a spurious webFetch
+      // failure would otherwise pollute the same_root_cause / viability stop signal. 4xx/permanent → no retry.
+      const payload = await withRetry(
+        () =>
+          runWebFetch({
+            url: params.url as string,
+            prompt: params.prompt as string | undefined,
+            extractMode: params.extractMode as 'markdown' | 'text' | undefined,
+            maxChars: params.maxChars as number | undefined,
+          }),
+        { isRetryable: (e) => e instanceof IngestError && (e.kind === 'timeout' || e.kind === 'aborted') },
+      );
       return {
         success: true,
         output: formatPayload(payload),

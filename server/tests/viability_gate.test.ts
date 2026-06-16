@@ -27,6 +27,7 @@ function base(overrides: Partial<ViabilityInput> = {}): ViabilityInput {
     turnCount: 2,
     recommendStop: false,
     madeProgressThisTurn: false,
+    repeatedPivotCount: 0,
     ...overrides,
   };
 }
@@ -95,6 +96,22 @@ test('reflection recommend_stop alone → pivot (score 3), with any stall → st
     computeViability(base({ recommendStop: true, noProgressRounds: 3 })).verdict,
     'stop_and_report',
   );
+});
+
+test('ratchet: a fresh pivot after 3 prior pivots escalates to stop (de-facto exhausted)', () => {
+  // score=2 → base verdict pivot (no curated barrier, no open-problem flag — the untracked long tail)
+  const single = computeViability(base({ sameRootCause: 3, repeatedPivotCount: 0 }));
+  assert.equal(single.verdict, 'pivot');
+  // same signals, but the gate has already pivoted 3 turns running → escalate to stop
+  const ratcheted = computeViability(base({ sameRootCause: 3, repeatedPivotCount: 3 }));
+  assert.equal(ratcheted.verdict, 'stop_and_report');
+  assert.ok(ratcheted.reasons.includes('repeated_pivot_ratchet'));
+  assert.match(ratcheted.evidence, /turns running with no improvement/);
+});
+
+test('ratchet does not fire while verdict is continue (streak is about non-continue turns)', () => {
+  const v = computeViability(base({ sameRootCause: 0, repeatedPivotCount: 9 }));
+  assert.equal(v.verdict, 'continue'); // no red signal this turn → continue regardless of prior streak
 });
 
 test('healthy long task (proved nodes, advancing) → continue', () => {

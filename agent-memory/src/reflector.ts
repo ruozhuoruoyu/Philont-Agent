@@ -24,6 +24,7 @@ import type { RawStore } from './raw.js';
 import type { ExtractorLlmClient } from './extractor.js';
 import type { Action, RawMessage, ReflectResult, Skill } from './types.js';
 import type { MemoryAuditHook } from './audit.js';
+import { countSameRootCauseFailures } from './failure_signatures.js';
 
 // ── LLM-returned skill spec ─────────────────────────────────────────────────
 
@@ -245,6 +246,22 @@ export class SessionReflector {
         llmCostTokens: 0,
         skills: [],
       };
+    }
+
+    // Phase 18 source gate (2026-06-16): a DOOM-LOOP window (failure-dominated, or repeatedly hitting the same
+    // wall) has no reusable workflow to teach — distilling it just churns the draft store (create-then-prune;
+    // prod: "pruned 11 / 2 new" every idle cycle) and burns LLM tokens on the extractor call. Suppress
+    // extraction for such windows. Same honesty principle as the ViabilityGate: don't manufacture outputs
+    // (here, "skills") when there was no genuine progress. Negative "avoid X" lessons are already captured as
+    // routing_rules by turn-close reflection, so nothing of value is lost.
+    const failed = actions.filter((a) => !a.success);
+    const failureDominated = actions.length >= 5 && failed.length / actions.length >= 0.6;
+    const sameRoot = countSameRootCauseFailures(failed);
+    if (failureDominated || sameRoot >= 4) {
+      console.log(
+        `[reflector] doom-loop window (fails=${failed.length}/${actions.length}, sameRoot=${sameRoot}) → skill extraction suppressed`,
+      );
+      return { skillsCreated: 0, skillsUpdated: 0, llmCostTokens: 0, skills: [] };
     }
 
     // Build dialogue text
