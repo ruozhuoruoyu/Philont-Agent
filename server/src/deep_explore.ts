@@ -1863,8 +1863,8 @@ export function makeReasoningToolRunner(
         // APPLICABLE barrier, with no NAMED circumvention, cannot be recorded proved — turning barriers.ts's
         // advisory directive into an enforced precondition (the "knowing→acting" actuator at the proof site).
         // Scoped to nodes near the goal (depth ≤ 1, or the node's claim re-states the barrier's target) so
-        // trivial true sub-lemmas elsewhere prove normally. Fail-open. env PHILONT_BARRIER_AUTHORITY=0 to disable.
-        if (process.env.PHILONT_BARRIER_AUTHORITY !== '0') {
+        // trivial true sub-lemmas elsewhere prove normally. Fail-open (any error → behaves as before).
+        {
           try {
             const appliedB = (sessionBarriers.get(sessionId) ?? []).filter((m) => m.severity === 'applies');
             if (appliedB.length > 0) {

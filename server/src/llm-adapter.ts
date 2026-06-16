@@ -351,12 +351,9 @@ const NONSTREAMING_MAX_TOKENS = 21000;
  * killed autonomous tasks outright (llmTokens=0) and bubbled up on chat turns with no retry. We retry
  * a FAILED request (no response yet → safe to re-issue) a few times with exponential backoff. Never
  * retries user aborts (turn deadline / stop) or non-transient errors (400/401/403 → real problems).
- * env PHILONT_LLM_MAX_RETRIES (default 2 → up to 3 attempts); 0 disables.
+ * 2 retries (3 attempts total) is a sane universal default — no env knob.
  */
-const LLM_MAX_RETRIES = (() => {
-  const n = Number.parseInt(process.env.PHILONT_LLM_MAX_RETRIES ?? '', 10);
-  return Number.isFinite(n) && n >= 0 ? n : 2;
-})();
+const LLM_MAX_RETRIES = 2;
 
 export function isTransientLlmError(e: unknown): boolean {
   const err = e as { status?: number; name?: string; message?: string; code?: string } | null;

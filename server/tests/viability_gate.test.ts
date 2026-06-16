@@ -18,6 +18,7 @@ function base(overrides: Partial<ViabilityInput> = {}): ViabilityInput {
   return {
     hasActiveSession: true,
     barrierApplies: false,
+    goalIsOpenProblem: false,
     noProgressRounds: 0,
     status: 'active',
     provedCount: 0,
@@ -109,6 +110,51 @@ test('continuation-pitch regex matches the pitch, not the bare instruction', () 
   // bare instruction "reply 继续 to keep going" must NOT match
   assert.doesNotMatch('回复"继续"我会再跑一轮', CONTINUATION_PITCH_RE);
   assert.doesNotMatch('this round saved the tree', CONTINUATION_PITCH_RE);
+});
+
+test('open problem + stuck → intractable (no path, categorical no-go)', () => {
+  const v = computeViability(
+    base({
+      goalIsOpenProblem: true,
+      barrierApplies: true,
+      barrierTitle: 'Parity problem (Selberg) — sieves cannot prove binary Goldbach',
+      barrierCircumvention: 'Chen / bilinear input',
+      turnCount: 18,
+      provedCount: 0, // long_barren ⇒ reallyStuck
+    }),
+  );
+  assert.equal(v.verdict, 'intractable');
+  assert.ok(v.reasons.includes('goal_is_open_problem'));
+  assert.equal(v.recommendedReframe, undefined); // MUST NOT hand the user a path
+  assert.match(v.evidence, /open problem/i);
+});
+
+test('open problem but NOT stuck (progressing on sub-lemmas) → not intractable', () => {
+  const v = computeViability(
+    base({ goalIsOpenProblem: true, barrierApplies: true, provedCount: 4, noProgressRounds: 0, turnCount: 18 }),
+  );
+  assert.notEqual(v.verdict, 'intractable'); // still proving sub-results → don't declare hopeless
+});
+
+test('intractable directive: states categorical truth, offers NO path, forbids 继续 invitation', () => {
+  const v = computeViability(
+    base({ goalIsOpenProblem: true, barrierApplies: true, barrierTitle: 'Erdős–Straus — Jacobi barrier', status: 'stuck' }),
+  );
+  const d = buildViabilityDirective(v, { provedCount: 2, openProblemNote: 'BlEl22 modular reduction' });
+  assert.match(d, /known open problem|categorically out of reach/i);
+  assert.match(d, /do NOT list approaches to try/i);
+  assert.match(d, /genuinely new idea/i);
+  assert.match(d, /BlEl22 modular reduction/); // named only as "itself unsolved", not as a path
+  // must NOT contain the soft "reply 继续 to keep probing" door that the pivot/stop directive has
+  assert.doesNotMatch(d, /reply 继续 only if you want me to keep probing/);
+});
+
+test('method barrier WITHOUT open-problem flag → pivot offers the reframe (real alternative)', () => {
+  const v = computeViability(
+    base({ goalIsOpenProblem: false, barrierApplies: true, noProgressRounds: 3, barrierCircumvention: 'use a different decomposition' }),
+  );
+  assert.notEqual(v.verdict, 'intractable');
+  assert.equal(v.recommendedReframe, 'use a different decomposition'); // legitimate pivot still offers a path
 });
 
 test('directive forbids the pitch and credits banked lemmas', () => {

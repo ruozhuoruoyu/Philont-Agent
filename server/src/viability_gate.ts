@@ -5,25 +5,35 @@
  * [barrier] cards / matchBarriers, deep_explore noProgressRounds (Tooth-B strict progress),
  * reflection same_root_cause — but every one of them only NARRATED to the user or injected a soft
  * hint for a FUTURE turn. None could change the action of the CURRENT turn. The recurring
- * enthusiastic "要我继续吗 / shall I continue?" next-action pitch was pure LLM text under no gate,
- * hardwired after narration regardless of what the sensors said. knowing and acting were decoupled.
+ * enthusiastic "要我继续吗 / shall I continue?" next-action pitch was pure LLM text under no gate.
  *
- * This gate reads the existing sensors for the owner-scoped active reasoning session and converts
- * red signals into a verdict (continue | pivot | stop_and_report). The chat-handler turns a
- * pivot/stop verdict into one regen that forbids the continuation-pitch and presents stop/reframe
- * as the RECOMMENDED option (counsel, not a wall — the user can always reply "继续").
+ * This gate reads those sensors and converts red signals into a verdict:
+ *   continue        — fine, keep going.
+ *   pivot           — the current METHOD is stalling but a real alternative exists → recommend it.
+ *   stop_and_report — generic stall/doom → recommend stopping/reframing (user may still continue).
+ *   intractable     — the GOAL itself is a known open problem; there is no try-able path. State the
+ *                     categorical truth, offer NO path, do NOT invite "继续". (2026-06-16)
  *
- * Design: pure + dependency-free so it unit-tests trivially. The caller (chat-handler) gathers the
- * raw materials (barrier match, session summary, same-root-cause count) and passes primitives in.
+ * The intractable verdict is the fix for the false-hope loop: previously even "stop" handed the user a
+ * circumvention to try and ended with "reply 继续 to keep probing" — so the user always tried again. For a
+ * genuinely open problem (Erdős–Straus, binary Goldbach), the "circumventions" are themselves unsolved
+ * research, NOT paths; presenting them as try-able is the lie. intractable says so plainly and stops offering.
  *
- * Tunables (env, mirroring PHILONT_*_GATE convention):
- *   PHILONT_VIABILITY_GATE=0          disable entirely
- *   PHILONT_VIABILITY_STOP_SCORE=4    score ≥ this → stop_and_report
- *   PHILONT_VIABILITY_PIVOT_SCORE=2   score ≥ this → pivot
- *   PHILONT_VIABILITY_STUCK_ROUNDS=3  noProgressRounds threshold (mirrors deep_explore STUCK_ESCALATE_AFTER)
+ * Design: pure + dependency-free so it unit-tests trivially. The caller (chat-handler) gathers the raw
+ * materials (barrier match incl. goalIsOpenProblem, session summary, same-root-cause count) and passes them in.
+ *
+ * Single env knob (rollout kill-switch, read in chat-handler): PHILONT_VIABILITY_GATE=0 disables the gate.
+ * Everything else is a constant with a sensible default — no per-threshold env vars.
  */
 
-export type ViabilityVerdict = 'continue' | 'pivot' | 'stop_and_report';
+export type ViabilityVerdict = 'continue' | 'pivot' | 'stop_and_report' | 'intractable';
+
+/** Score ≥ this → stop_and_report. Constant: one internal scoring scale, no per-deployment tuning. */
+const STOP_SCORE = 4;
+/** Score ≥ this → pivot. */
+const PIVOT_SCORE = 2;
+/** noProgressRounds threshold that counts as stalled (mirrors deep_explore STUCK_ESCALATE_AFTER). */
+const STUCK_ROUNDS = 3;
 
 export interface ViabilityInput {
   /** Whether an owner-scoped active reasoning session exists. Gate is inert (continue) without one. */
@@ -32,8 +42,12 @@ export interface ViabilityInput {
   barrierApplies: boolean;
   /** Title of the first applied barrier, for the honest no-go directive (optional). */
   barrierTitle?: string;
-  /** Curated circumvention of the first applied barrier, surfaced as the recommended reframe (optional). */
+  /** Curated circumvention of the first applied barrier (optional). For pivot/stop it's the recommended
+   *  reframe; for intractable it is named ONLY to explain it is itself unsolved, never as a path to try. */
   barrierCircumvention?: string;
+  /** The matched barrier's GOAL is a famous OPEN problem (the circumvention is research-grade, not a path).
+   *  Drives the intractable verdict. */
+  goalIsOpenProblem: boolean;
   /** Consecutive rounds with no net tree progress (Tooth-B strict). */
   noProgressRounds: number;
   /** Reasoning session status. */
@@ -58,20 +72,18 @@ export interface ViabilityResult {
   reasons: string[];
   /** Short human-readable no-go summary for the regen directive + log line. */
   evidence: string;
-  /** The recommended reframe to surface to the user (barrier circumvention when available). */
+  /** The recommended reframe to surface (barrier circumvention). Omitted for intractable — no path to offer. */
   recommendedReframe?: string;
 }
 
-function envInt(name: string, def: number): number {
-  const raw = process.env[name];
-  if (!raw) return def;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) ? n : def;
+/** True for the verdicts that should stop the pursuit (downgrade the outcome, arm abandon-on-accept). */
+export function isStopVerdict(v: ViabilityVerdict): boolean {
+  return v === 'stop_and_report' || v === 'intractable';
 }
 
 /**
  * Detects a "shall I continue?" continuation pitch in drafted text. Used after the regen to confirm
- * the model dropped the pitch; if it didn't and the verdict was stop, the caller deterministically
+ * the model dropped the pitch; if it didn't and the verdict stops, the caller deterministically
  * downgrades the outcome. Deliberately matches the QUESTION form ("要我继续吗 / shall I continue"),
  * not the bare word 继续 (which legitimately appears in "reply 继续 to keep going").
  */
@@ -79,7 +91,7 @@ export const CONTINUATION_PITCH_RE =
   /要(?:我|不要)?[^。\n？?]{0,14}(?:继续|推进|深入|开始|开攻|往下)[^。\n？?]{0,6}(?:[吗嘛]\s*[?？]?|[?？])|是否(?:要|需要|继续|推进)|要不要(?:我)?[^。\n？?]{0,10}(?:继续|推进|深入|开)|继续(?:推进|攻|探|深入)?\s*[?？]|shall I (?:continue|proceed|keep going|go on)|want me to (?:continue|keep|proceed|go on)|should I (?:continue|keep|proceed|go on)/i;
 
 /**
- * WS2: the user EXPLICITLY accepts stopping / reframing (after a stop_and_report was recommended).
+ * WS2: the user EXPLICITLY accepts stopping / reframing (after a stop was recommended).
  * Only then is the reasoning session abandoned — counsel-only, we never abandon on ambiguity.
  */
 export const VIABILITY_ACCEPT_RE =
@@ -90,13 +102,15 @@ export const VIABILITY_CONTINUE_RE = /继续|接着|再(?:试|跑|来|攻|想)|g
 
 /**
  * Pure verdict computation. Weighted multi-signal accumulation (not a single trip-wire) so a single
- * noisy sensor never stops a task: stop_and_report needs the score from ≥2 independent sensor families.
- * Any genuine progress this turn zeroes the score (absolute veto).
+ * noisy sensor never stops a task: stop needs the score from ≥2 independent sensor families. Any genuine
+ * progress this turn zeroes the score (absolute veto). A goal that IS a known open problem, once stuck,
+ * overrides to 'intractable' regardless of score — there is no honest path to offer.
  */
 export function computeViability(input: ViabilityInput): ViabilityResult {
-  const STOP = envInt('PHILONT_VIABILITY_STOP_SCORE', 4);
-  const PIVOT = envInt('PHILONT_VIABILITY_PIVOT_SCORE', 2);
-  const STUCK = envInt('PHILONT_VIABILITY_STUCK_ROUNDS', 3);
+  // Progress veto (absolute): a round that genuinely advanced the tree this turn is never a stop.
+  if (input.madeProgressThisTurn) {
+    return { verdict: 'continue', score: 0, reasons: ['progress_this_turn'], evidence: '' };
+  }
 
   let score = 0;
   const reasons: string[] = [];
@@ -114,56 +128,55 @@ export function computeViability(input: ViabilityInput): ViabilityResult {
     score += 2;
     reasons.push('same_root_cause');
   }
-  // WS4: reflection's persisted recommend_stop — strong cross-turn judgment.
   if (input.recommendStop) {
     score += 3;
     reasons.push('reflection_recommend_stop');
   }
 
   if (input.hasActiveSession) {
-    // HARD no-go: the blocked method is detected AND the frontier is stalled. A barrier ALONE is not
-    // enough (the goal could legitimately route around it); barrier + stall = doomed via this method.
-    if (input.barrierApplies && input.noProgressRounds >= STUCK) {
+    if (input.barrierApplies && input.noProgressRounds >= STUCK_ROUNDS) {
       score += 3;
       reasons.push('barrier_applies_and_stalled');
     }
-    // Empty frontier with nothing proved = genuinely stuck (judgeConvergence already says 'stuck').
     if (input.status === 'stuck' && input.provedCount === 0) {
       score += 3;
       reasons.push('frontier_empty_no_proof');
     }
-    // Persistent no-progress beyond the escalate threshold (Tooth-B strict counter).
-    if (input.noProgressRounds >= STUCK) {
+    if (input.noProgressRounds >= STUCK_ROUNDS) {
       score += 1;
       reasons.push('no_progress_rounds');
     }
-    // Long task accumulating zero proved nodes (churn without yield).
     if (input.turnCount >= 15 && input.provedCount === 0) {
       score += 1;
       reasons.push('long_barren');
     }
-  } else {
-    // Session-less path: no deep_explore session to read stall/barrier from, so the only signals are the
-    // global same_root_cause (above) and a very long, churny turn history. Keeps false positives near zero —
-    // without a real repeated-failure signal the score stays 0 → continue.
-    if (input.turnCount >= 20) {
-      score += 1;
-      reasons.push('long_barren');
-    }
+  } else if (input.turnCount >= 20) {
+    // Session-less path: only the global same_root_cause (above) + a very long, churny history count.
+    score += 1;
+    reasons.push('long_barren');
   }
 
-  // Progress veto (absolute): a round that genuinely advanced the tree this turn cannot be a stop.
-  if (input.madeProgressThisTurn) {
+  // INTRACTABLE override: the goal itself is a known open problem AND we're genuinely stuck on it. There is
+  // no try-able path (the "circumventions" are themselves unsolved research), so this is a categorical no-go,
+  // not a pivot. Requires real stuckness so a session making sub-lemma progress on a hard target isn't killed.
+  const reallyStuck =
+    input.status === 'stuck' ||
+    input.noProgressRounds >= STUCK_ROUNDS ||
+    (input.turnCount >= 15 && input.provedCount === 0);
+  if (input.goalIsOpenProblem && reallyStuck) {
+    reasons.push('goal_is_open_problem');
+    const name = input.barrierTitle ? input.barrierTitle.replace(/\s*[—–-].*$/, '').trim() : 'this goal';
     return {
-      verdict: 'continue',
-      score: 0,
-      reasons: ['progress_this_turn'],
-      evidence: '',
+      verdict: 'intractable',
+      score: Math.max(score, STOP_SCORE),
+      reasons,
+      evidence: `${name} is a known OPEN problem; the remaining directions are themselves unsolved research, not paths we can try here`,
+      // No recommendedReframe — intractable must not hand the user a "try this" path.
     };
   }
 
   const verdict: ViabilityVerdict =
-    score >= STOP ? 'stop_and_report' : score >= PIVOT ? 'pivot' : 'continue';
+    score >= STOP_SCORE ? 'stop_and_report' : score >= PIVOT_SCORE ? 'pivot' : 'continue';
 
   const evidence =
     verdict === 'continue'
@@ -186,11 +199,35 @@ export function computeViability(input: ViabilityInput): ViabilityResult {
 }
 
 /**
- * Builds the intra-turn regen directive injected when the verdict is pivot/stop. It forbids the
- * continuation pitch and forces the draft to present stop/reframe as the recommendation while
- * crediting what was already established — counsel, never a hard block on the user.
+ * Builds the intra-turn regen directive. Two shapes:
+ *  - intractable: state the categorical truth, offer NO try-able path, and do NOT invite "继续" — the only
+ *    legitimate continuation is a genuinely NEW idea from the user, not a menu of research-grade dead ends.
+ *  - pivot/stop: forbid the continuation pitch, present stop/reframe as the recommendation. Counsel, not a wall.
  */
-export function buildViabilityDirective(result: ViabilityResult, ctx: { provedCount: number }): string {
+export function buildViabilityDirective(
+  result: ViabilityResult,
+  ctx: { provedCount: number; openProblemNote?: string },
+): string {
+  if (result.verdict === 'intractable') {
+    const lines = [
+      `[drive Viability/${result.reasons.join(',')}] STOP offering paths. ${result.evidence}.`,
+      '',
+      '**This goal is categorically out of reach in this setting — do NOT treat it like a solvable problem with a blocked sub-step.**',
+      ctx.openProblemNote
+        ? `The only known directions (${ctx.openProblemNote}) are THEMSELVES unsolved research problems — name them only to explain why there is no path, NEVER as something to "try".`
+        : 'Any remaining "directions" are themselves unsolved research — not things we can try out in this session.',
+      '',
+      '**Rewrite the final reply (keep `## For User` / `## Work Log`) so it:**',
+      '  1. States the categorical truth plainly: this is a known open problem; we will not solve it here. No hedging, no "but we could try…".',
+      `  2. Credits what we BANKED — ${ctx.provedCount} proved lemma(s) + any real artifacts (surveys, partial results) persist and are reusable. Be honest: "compiled" ≠ "correct/novel".`,
+      '  3. RECOMMENDS stopping this goal entirely.',
+      '  4. **Forbidden**: do NOT list approaches to try; do NOT pitch "要我继续吗"; do NOT end with "reply 继续 to keep probing". The ONLY opening you may leave is: "if you have a genuinely new idea, tell me — otherwise there is nothing productive to continue here."',
+      '',
+      'This is an intra-turn internal correction. Do not surface this reminder to the user.',
+    ];
+    return lines.join('\n');
+  }
+
   const stopping = result.verdict === 'stop_and_report';
   const lines = [
     `[drive Viability/${result.reasons.join(',')}] The active reasoning goal is not advancing: ${result.evidence}.`,
@@ -202,13 +239,13 @@ export function buildViabilityDirective(result: ViabilityResult, ctx: { provedCo
     `  1. States the no-go HONESTLY and concretely: ${result.evidence}.`,
     `  2. Credits what we BANKED — ${ctx.provedCount} proved lemma(s) persist in the tree and are reusable by a future attack; summarize them.`,
     result.recommendedReframe
-      ? `  3. RECOMMENDS the concrete reframe: ${result.recommendedReframe}.`
+      ? `  3. RECOMMENDS the concrete reframe (a genuinely DIFFERENT method, not the same wall): ${result.recommendedReframe}.`
       : `  3. RECOMMENDS changing the framework / goal rather than grinding the same wall.`,
     stopping
       ? `  4. Makes stopping/reframing the RECOMMENDATION, not a question. End with: "I recommend we stop here / reframe — reply 继续 only if you want me to keep probing despite the wall."`
       : `  4. Offers the pivot as the recommended next step; the user may still steer.`,
     '',
-    '**You are a trusted advisor, not a warden** — never refuse the user. If they reply 继续, you will run another round. This rewrite changes your RECOMMENDATION, not their option.',
+    '**You are a trusted advisor, not a warden** — never refuse the user. This rewrite changes your RECOMMENDATION, not their option.',
     '',
     'This is an intra-turn internal correction. Do not surface this reminder to the user.',
   ];

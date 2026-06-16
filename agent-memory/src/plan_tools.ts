@@ -49,8 +49,9 @@ export function kebabize(id: string): string {
  * forever — prod showed the model re-issuing the same success close, driving sameRootCause to 8-9 → circuit-breaker
  * → false 已完成. Now: the FIRST C3 hit still rejects (gives the model a chance to mark deliverables skipped/done or
  * choose failure), but a REPEAT auto-converts to an honest 'failure' close — deterministically breaking the loop
- * (never a false success). Cleared on close. env PHILONT_PLAN_C3_GRACE sets the chances before auto-convert (default 1).
+ * (never a false success). Cleared on close. One correction prompt before auto-convert — a constant, no env knob.
  */
+const C3_CORRECTION_GRACE = 1;
 const c3RejectionCount = new Map<string, number>();
 
 /** Strict anti-walkthrough blacklist (forbidden words for deliverable.id). Disable via env PHILONT_SPEC_BLACKLIST=0. */
@@ -1475,8 +1476,7 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
           }
         }
         if (nonSuccess.length > 0) {
-          const graceRaw = Number.parseInt(process.env.PHILONT_PLAN_C3_GRACE ?? '', 10);
-          const grace = Number.isFinite(graceRaw) && graceRaw >= 0 ? graceRaw : 1;
+          const grace = C3_CORRECTION_GRACE;
           const prior = c3RejectionCount.get(planCurrent.id) ?? 0;
           if (prior < grace) {
             // First (grace) attempt(s): reject with guidance so the model can correct honestly.

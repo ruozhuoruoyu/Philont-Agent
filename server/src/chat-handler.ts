@@ -202,6 +202,7 @@ import { renderDeterministicMaxIterSummary } from './max_iter_summary.js';
 import {
   computeViability,
   buildViabilityDirective,
+  isStopVerdict,
   CONTINUATION_PITCH_RE,
   VIABILITY_ACCEPT_RE,
   VIABILITY_CONTINUE_RE,
@@ -1701,23 +1702,23 @@ function effectiveMaxIter(sessionId: string): number {
     : MAX_TOOL_LOOP_ITERATIONS;
 }
 
+// same_root_cause count at which the system is treated as "stuck" (the ViabilityGate's "high" tier).
+const CURIOSITY_STUCK_SUPPRESS_THRESHOLD = 6;
+
 // Autonomous driver registry — single source of truth; dashboard / tests / loop all reference it.
 // PursuitDriver injects an isGranted callback: used to query GrantStore when replaying proactive research "request permission".
 const AUTONOMOUS_DRIVERS = [
   new GapDriver(),
   // Phase 18 (2026-06-16): suppress token-curiosity while the system is in a doom-loop (high global
   // same_root_cause). Otherwise the curiosity driver keeps autonomously spawning lookups on dead/adjacent
-  // topics while the main thread is walled (prod: "素数 R…/RDC…/DSML" tokens). env PHILONT_CURIOSITY_STUCK_SUPPRESS
-  // sets the same_root_cause threshold (default 6 — the "high" tier); 0 disables suppression.
+  // topics while the main thread is walled (prod: "素数 R…/RDC…/DSML" tokens).
   new CuriosityDriver({
     ...DEFAULT_CURIOSITY_CONFIG,
     isSystemStuck: () => {
-      const parsed = Number.parseInt(process.env.PHILONT_CURIOSITY_STUCK_SUPPRESS ?? '', 10);
-      const thresh = Number.isFinite(parsed) ? parsed : 6;
-      if (thresh <= 0) return false;
+      // Same "high" tier as the ViabilityGate's same_root_cause weighting — a constant, no env knob.
       try {
         const recent = memory.actions.listRecentFailures({ sinceTs: Date.now() - 24 * 60 * 60_000, limit: 30 });
-        return countSameRootCauseFailures(recent) >= thresh;
+        return countSameRootCauseFailures(recent) >= CURIOSITY_STUCK_SUPPRESS_THRESHOLD;
       } catch {
         return false;
       }
@@ -4655,9 +4656,8 @@ async function handleChatSendInner(
       // local workflow tools (same capability) for a longer window, so a coherent multi-step local workflow
       // (e.g. GP: writeFile → shell → patch) doesn't force a fresh auth card at every step — the
       // "继续→授权→ok" treadmill. Destructive deleteFile is deliberately excluded (stays per-call). External /
-      // untrusted execution (domain≠local) is never batched. env PHILONT_WORKFLOW_GRANT=0 to disable.
+      // untrusted execution (domain≠local) is never batched.
       if (
-        process.env.PHILONT_WORKFLOW_GRANT !== '0' &&
         pending.domain === 'local' &&
         (pending.capability === 'write' || pending.capability === 'execute')
       ) {
@@ -6637,11 +6637,13 @@ async function runToolLoop(
           // gate runs session-less on the global same_root_cause signal (which counts that grinding's failures).
           const ownerSession = memory.reasoning.getMostRecentActiveSession(sessionId);
           const vSummary = ownerSession ? memory.reasoning.summarizeSession(ownerSession.id) : null;
-          const applied: BarrierMatch[] = ownerSession
-            ? matchBarriers([ownerSession.goal, ...ownerSession.assumptions].join('\n')).filter(
-                (m) => m.severity === 'applies',
-              )
+          const allMatches: BarrierMatch[] = ownerSession
+            ? matchBarriers([ownerSession.goal, ...ownerSession.assumptions].join('\n'))
             : [];
+          const applied = allMatches.filter((m) => m.severity === 'applies');
+          // A matched barrier whose GOAL is a famous open problem → the goal is categorically intractable here,
+          // not a method to pivot. Prefer naming that barrier so the directive states the right problem.
+          const openMatch = allMatches.find((m) => m.barrier.goalIsOpenProblem === true);
           let vSameRoot = 0;
           try {
             const vSince = Date.now() - 24 * 60 * 60_000;
@@ -6660,8 +6662,9 @@ async function runToolLoop(
           const v = computeViability({
             hasActiveSession: !!ownerSession,
             barrierApplies: applied.length > 0,
-            barrierTitle: applied[0]?.barrier.title,
+            barrierTitle: openMatch?.barrier.title ?? applied[0]?.barrier.title,
             barrierCircumvention: applied[0]?.barrier.circumvention,
+            goalIsOpenProblem: !!openMatch,
             noProgressRounds: ownerSession?.noProgressRounds ?? 0,
             status: vSummary?.status ?? ownerSession?.status ?? null,
             provedCount: vSummary?.provedCount ?? 0,
@@ -6673,7 +6676,7 @@ async function runToolLoop(
           });
           if (v.verdict !== 'continue' && viabilityAttempts < 1) {
             viabilityAttempts++;
-            if (v.verdict === 'stop_and_report') {
+            if (isStopVerdict(v.verdict)) {
               viabilityStopPending = true;
               viabilityStopReasoningId = ownerSession?.id ?? null;
             }
@@ -6692,7 +6695,10 @@ async function runToolLoop(
             messages.push({ role: 'assistant', content: response.content });
             messages.push({
               role: 'user',
-              content: buildViabilityDirective(v, { provedCount: vSummary?.provedCount ?? 0 }),
+              content: buildViabilityDirective(v, {
+                provedCount: vSummary?.provedCount ?? 0,
+                openProblemNote: openMatch?.barrier.circumvention,
+              }),
             });
             onTrace?.({
               kind: 'internal-gate', tier: 4,
@@ -6701,9 +6707,9 @@ async function runToolLoop(
             });
             continue;
           }
-          // Budget already spent (the regen ran): a stop verdict downgrades the outcome at emit regardless of
-          // whether the rewrite dropped the pitch — the actuator does not depend on model compliance.
-          if (v.verdict === 'stop_and_report') {
+          // Budget already spent (the regen ran): a stop/intractable verdict downgrades the outcome at emit
+          // regardless of whether the rewrite dropped the pitch — the actuator does not depend on compliance.
+          if (isStopVerdict(v.verdict)) {
             viabilityStopPending = true;
             viabilityStopReasoningId = ownerSession?.id ?? null;
             if (CONTINUATION_PITCH_RE.test(response.content)) {

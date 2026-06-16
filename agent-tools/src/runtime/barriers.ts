@@ -47,6 +47,13 @@ export interface Barrier {
    * around the wall. Empty/undefined ⇒ the only way to satisfy the gate is the explicit `circumvention` arg.
    */
   circumventionTags?: string[];
+  /**
+   * The GOAL this barrier guards is a famous OPEN problem (e.g. binary Goldbach, Erdős–Straus). The
+   * `circumvention` here is research-grade — itself an unsolved direction, NOT a path a chat session can try.
+   * The ViabilityGate uses this to issue a categorical 'intractable' verdict (no try-able path, no "继续"
+   * invitation) instead of a false-hope pivot, once the session is stuck on such a goal. (2026-06-16)
+   */
+  goalIsOpenProblem?: boolean;
   source: string;
 }
 
@@ -85,6 +92,7 @@ export const KNOWN_BARRIERS: readonly Barrier[] = [
       'chen', 'p₂', 'p_2', 'almost prime', 'almost-prime', 'switching', 'bilinear', 'type-ii', 'type ii',
       'vinogradov', 'zhang', 'polymath', 'bombieri', 'friedlander', 'iwaniec', 'circle method', 'automorphic',
     ],
+    goalIsOpenProblem: true,
     source: 'Selberg, the parity problem; Friedlander–Iwaniec, Opera de Cribro.',
   },
   {
@@ -118,6 +126,7 @@ export const KNOWN_BARRIERS: readonly Barrier[] = [
       'blel22', 'bloom', 'elsholtz', '4acd', '4acd-1', '4acd−1', 'modular reduction', 'unbounded',
       'density', 'almost all', 'almost-all', 'vaughan', 'analytic', 'growing modulus',
     ],
+    goalIsOpenProblem: true,
     source: 'ErdosProblems.com/242 (Tao, Bloom remarks); Bright–Loughran 2020; BlEl22; Zenodo "Residual Divisor Certificates".',
   },
   {
@@ -143,6 +152,7 @@ export const KNOWN_BARRIERS: readonly Barrier[] = [
       'Needs extra square / cancellation structure on the minor arcs (Pintz-style), or a different decomposition ' +
       '— not a sharper choice of major/minor cutoff. Treat the minor-arc bound as the open structural node, not ' +
       'a step to assert. (See the lemmaLookup card "arc-integral-holder" for the precise magnitudes.)',
+    goalIsOpenProblem: true,
     source: 'Hardy–Littlewood; Vinogradov; Pintz on the binary problem.',
   },
   {
