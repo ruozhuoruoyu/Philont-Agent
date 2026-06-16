@@ -283,6 +283,33 @@ test('CuriosityDriver: token 未被任何 fact 引用 → 命中', () => {
   assert.equal(ps[0].targetRef, 'token:CVE-2026-0001');
 });
 
+test('CuriosityDriver: isSystemStuck=true → token-curiosity 被抑制(doom-loop 不喂死话题)', () => {
+  const d = new CuriosityDriver({
+    minTokenMentions: 1,
+    pursuitAgingDays: 14,
+    pursuitMinStakeWeight: 7,
+    maxProposals: 3,
+    isSystemStuck: () => true,
+  });
+  const ps = d.propose(snap({
+    recentTimelineTokens: ['素数 R 是否对所有 p 有效', 'CVE-2026-0001'],
+    facts: [],
+  }));
+  assert.equal(ps.filter((p) => p.kind === 'curiosity_token').length, 0);
+});
+
+test('CuriosityDriver: isSystemStuck=false → 正常提议(回归)', () => {
+  const d = new CuriosityDriver({
+    minTokenMentions: 1,
+    pursuitAgingDays: 14,
+    pursuitMinStakeWeight: 7,
+    maxProposals: 3,
+    isSystemStuck: () => false,
+  });
+  const ps = d.propose(snap({ recentTimelineTokens: ['CVE-2026-0001'], facts: [] }));
+  assert.equal(ps.filter((p) => p.kind === 'curiosity_token').length, 1);
+});
+
 test('CuriosityDriver: token 在某 fact.sourceRefs 字符串里 → 跳过', () => {
   const d = new CuriosityDriver();
   const ps = d.propose(snap({

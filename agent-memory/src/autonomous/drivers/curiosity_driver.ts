@@ -125,6 +125,13 @@ export interface CuriosityDriverConfig {
   pursuitMinStakeWeight: number;
   /** Maximum candidates to produce per tick; default 3 */
   maxProposals: number;
+  /**
+   * Optional stuck-suppression hook (Phase 18, 2026-06-16). When it returns true the system is in a doom-loop
+   * (e.g. high global same_root_cause) and token-curiosity is SUPPRESSED — autonomously looking up timeline
+   * tokens just feeds adjacent dead topics while the main thread is walled. Injected by the server (which can
+   * read the action ledger / barriers). Undefined = never suppress (back-compat).
+   */
+  isSystemStuck?: () => boolean;
 }
 
 export const DEFAULT_CURIOSITY_CONFIG: CuriosityDriverConfig = {
@@ -143,6 +150,14 @@ export class CuriosityDriver implements Driver {
 
   propose(snap: MemorySnapshot): InitiativeProposal[] {
     const proposals: InitiativeProposal[] = [];
+
+    // Phase 18: while the system is stuck in a doom-loop (high global same_root_cause), suppress token-curiosity.
+    // Autonomously looking up timeline tokens during a wall just spawns grinding on adjacent dead topics
+    // (prod: curiosity kept spawning "素数 R…/RDC…/DSML" while the main thread ground a barrier-blocked goal).
+    const stuck = this.cfg.isSystemStuck?.() === true;
+    if (stuck) {
+      console.log('[curiosity] system stuck (same_root_cause high) → token-curiosity suppressed this tick');
+    }
 
     // (A) Token-gap: timeline tokens minus those already referenced by fact sourceRefs or done initiatives
     const facts = snap.facts;
@@ -163,7 +178,7 @@ export class CuriosityDriver implements Driver {
       knownTokens.add(f.key);
     }
 
-    for (const tok of snap.recentTimelineTokens) {
+    for (const tok of stuck ? [] : snap.recentTimelineTokens) {
       const targetRef = `token:${tok}`;
       if (snap.recentDoneTargetRefs.has(targetRef)) continue;
       // Already referenced by any fact → not considered "unchecked"

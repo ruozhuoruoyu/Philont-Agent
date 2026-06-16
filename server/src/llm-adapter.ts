@@ -174,6 +174,11 @@ export function parseTextEmbeddedToolCalls(text: string): EmbeddedToolCall[] | n
   if (typeof text !== 'string' || text.length === 0) return null;
   const calls: EmbeddedToolCall[] = [];
 
+  // 0. DeepSeek DSML template leak (provider-specific, checked first because it is distinctive):
+  //    <｜｜DSML｜｜invoke name="X"> <｜｜DSML｜｜parameter name="Y">value</…> … </…invoke>
+  const dsml = parseDsmlToolCalls(text);
+  if (dsml && dsml.length > 0) return dsml;
+
   // 1. <tool_call>...</tool_call> (supports multiple)
   const toolCallRe = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
   let m: RegExpExecArray | null;
@@ -242,6 +247,64 @@ function parseToolCallJson(raw: string): EmbeddedToolCall | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Coerce a DSML parameter's raw inner text to a value: JSON for numbers/booleans/null/objects/arrays,
+ * otherwise the trimmed string (most params — command, path, summary — are strings).
+ */
+function coerceDsmlValue(raw: string): unknown {
+  const v = raw.trim();
+  if (v === '') return '';
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (v === 'null') return null;
+  if (/^-?\d+(?:\.\d+)?$/.test(v)) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  if ((v.startsWith('{') && v.endsWith('}')) || (v.startsWith('[') && v.endsWith(']'))) {
+    try {
+      return JSON.parse(v);
+    } catch {
+      /* malformed JSON → keep as string */
+    }
+  }
+  return v;
+}
+
+/**
+ * Parse DeepSeek "DSML" tool-call template that leaked into text instead of being emitted as native
+ * tool_calls — e.g.
+ *   <｜｜DSML｜｜tool_calls> <｜｜DSML｜｜invoke name="shell">
+ *     <｜｜DSML｜｜parameter name="command">dir</｜｜DSML｜｜parameter>
+ *   </｜｜DSML｜｜invoke> </｜｜DSML｜｜tool_calls>
+ * Structurally identical to Anthropic's invoke/parameter XML with a ｜｜DSML｜｜ namespace. Recovering it
+ * (a) stops the raw markup leaking into user-facing text and (b) restores tool_use/tool_result pairing
+ * (which was breaking every turn → the "pairing repair" storm). The pipe glyphs vary across builds
+ * (U+FF5C etc.), so we anchor on the DSML / invoke / parameter keywords and stay permissive about the
+ * surrounding delimiter characters, and tolerate a missing closing tag (truncated streams).
+ */
+function parseDsmlToolCalls(text: string): EmbeddedToolCall[] | null {
+  if (!/DSML[^a-zA-Z]{0,4}(?:invoke|tool_calls)/i.test(text)) return null;
+  const calls: EmbeddedToolCall[] = [];
+  const invokeRe =
+    /<[^>]*?DSML[^>]*?invoke\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)(?:<\/[^>]*?DSML[^>]*?invoke[^>]*>|$)/gi;
+  let im: RegExpExecArray | null;
+  while ((im = invokeRe.exec(text)) !== null) {
+    const name = im[1].trim();
+    if (!name) continue;
+    const body = im[2] ?? '';
+    const input: Record<string, unknown> = {};
+    const paramRe =
+      /<[^>]*?DSML[^>]*?parameter\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)(?:<\/[^>]*?DSML[^>]*?parameter[^>]*>|(?=<[^>]*?DSML[^>]*?parameter)|(?=<\/[^>]*?DSML[^>]*?invoke)|$)/gi;
+    let pm: RegExpExecArray | null;
+    while ((pm = paramRe.exec(body)) !== null) {
+      input[pm[1].trim()] = coerceDsmlValue(pm[2] ?? '');
+    }
+    calls.push({ id: `dsml-tool-${Math.random().toString(36).slice(2, 10)}`, name, input });
+  }
+  return calls.length > 0 ? calls : null;
 }
 
 /**

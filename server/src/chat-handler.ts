@@ -66,6 +66,7 @@ import {
   DEFAULT_TOOL_WHITELIST,
   GapDriver,
   CuriosityDriver,
+  DEFAULT_CURIOSITY_CONFIG,
   PursuitDriver,
   DEFAULT_PURSUIT_CONFIG,
   collectK7BridgeInitiatives,
@@ -1704,7 +1705,24 @@ function effectiveMaxIter(sessionId: string): number {
 // PursuitDriver injects an isGranted callback: used to query GrantStore when replaying proactive research "request permission".
 const AUTONOMOUS_DRIVERS = [
   new GapDriver(),
-  new CuriosityDriver(),
+  // Phase 18 (2026-06-16): suppress token-curiosity while the system is in a doom-loop (high global
+  // same_root_cause). Otherwise the curiosity driver keeps autonomously spawning lookups on dead/adjacent
+  // topics while the main thread is walled (prod: "素数 R…/RDC…/DSML" tokens). env PHILONT_CURIOSITY_STUCK_SUPPRESS
+  // sets the same_root_cause threshold (default 6 — the "high" tier); 0 disables suppression.
+  new CuriosityDriver({
+    ...DEFAULT_CURIOSITY_CONFIG,
+    isSystemStuck: () => {
+      const parsed = Number.parseInt(process.env.PHILONT_CURIOSITY_STUCK_SUPPRESS ?? '', 10);
+      const thresh = Number.isFinite(parsed) ? parsed : 6;
+      if (thresh <= 0) return false;
+      try {
+        const recent = memory.actions.listRecentFailures({ sinceTs: Date.now() - 24 * 60 * 60_000, limit: 30 });
+        return countSameRootCauseFailures(recent) >= thresh;
+      } catch {
+        return false;
+      }
+    },
+  }),
   new PursuitDriver(DEFAULT_PURSUIT_CONFIG, (tool) => globalGrants.isGranted(tool)),
 ] as const;
 export const autonomousDriverNames: readonly string[] = AUTONOMOUS_DRIVERS.map((d) => d.name);
@@ -6614,81 +6632,84 @@ async function runToolLoop(
       // env PHILONT_VIABILITY_GATE=0 to disable. See viability_gate.ts.
       if (process.env.PHILONT_VIABILITY_GATE !== '0') {
         try {
+          // The doomed goal may live in a deep_explore reasoning session (read its barrier/stall sensors) OR
+          // the loop may have moved into raw shell/patch/writeFile grinding with NO session — in which case the
+          // gate runs session-less on the global same_root_cause signal (which counts that grinding's failures).
           const ownerSession = memory.reasoning.getMostRecentActiveSession(sessionId);
-          if (ownerSession) {
-            const vSummary = memory.reasoning.summarizeSession(ownerSession.id);
-            const applied: BarrierMatch[] = matchBarriers(
-              [ownerSession.goal, ...ownerSession.assumptions].join('\n'),
-            ).filter((m) => m.severity === 'applies');
-            let vSameRoot = 0;
-            try {
-              const vSince = Date.now() - 24 * 60 * 60_000;
-              vSameRoot = countSameRootCauseFailures(
-                memory.actions.listRecentFailures({ sinceTs: vSince, limit: 30 }),
-              );
-            } catch {
-              /* same_root_cause is one input of many; ignore lookup failure */
-            }
-            const advancedThisTurn = (signalBus.inTurnRecords ?? []).some(
-              (r) => r.toolName === 'deep_explore' && r.success,
+          const vSummary = ownerSession ? memory.reasoning.summarizeSession(ownerSession.id) : null;
+          const applied: BarrierMatch[] = ownerSession
+            ? matchBarriers([ownerSession.goal, ...ownerSession.assumptions].join('\n')).filter(
+                (m) => m.severity === 'applies',
+              )
+            : [];
+          let vSameRoot = 0;
+          try {
+            const vSince = Date.now() - 24 * 60 * 60_000;
+            vSameRoot = countSameRootCauseFailures(
+              memory.actions.listRecentFailures({ sinceTs: vSince, limit: 30 }),
             );
-            const vTurnCount = messages.filter(
-              (m) => m.role === 'user' && typeof m.content === 'string',
-            ).length;
-            const v = computeViability({
-              hasActiveSession: true,
-              barrierApplies: applied.length > 0,
-              barrierTitle: applied[0]?.barrier.title,
-              barrierCircumvention: applied[0]?.barrier.circumvention,
-              noProgressRounds: ownerSession.noProgressRounds,
-              status: vSummary?.status ?? ownerSession.status,
-              provedCount: vSummary?.provedCount ?? 0,
-              openFrontierCount: vSummary?.openFrontierCount ?? 0,
-              sameRootCause: vSameRoot,
-              turnCount: vTurnCount,
-              recommendStop: signalBus.recommendStop === true,
-              madeProgressThisTurn: advancedThisTurn && ownerSession.noProgressRounds === 0,
-            });
-            if (v.verdict !== 'continue' && viabilityAttempts < 1) {
-              viabilityAttempts++;
-              if (v.verdict === 'stop_and_report') {
-                viabilityStopPending = true;
-                viabilityStopReasoningId = ownerSession.id;
-              }
-              audit.append('self_domain_write', {
-                source: 'viability_gate',
-                origin: 'Internal',
-                toolName: 'viability_gate_fired',
-                sessionId,
-                verdict: v.verdict,
-                score: v.score,
-                reasons: v.reasons.join(','),
-              });
-              console.warn(
-                `[viability] session=${sessionId} fired verdict=${v.verdict} score=${v.score} reasons=${v.reasons.join(',')}`,
-              );
-              messages.push({ role: 'assistant', content: response.content });
-              messages.push({
-                role: 'user',
-                content: buildViabilityDirective(v, { provedCount: vSummary?.provedCount ?? 0 }),
-              });
-              onTrace?.({
-                kind: 'internal-gate', tier: 4,
-                text: `Viability gate ${v.verdict} (score=${v.score}), reframing recommendation`,
-                meta: { gateName: 'Viability' },
-              });
-              continue;
-            }
-            // Budget already spent (the regen ran): a stop verdict downgrades the outcome at emit regardless of
-            // whether the rewrite dropped the pitch — the actuator does not depend on model compliance.
+          } catch {
+            /* same_root_cause is one input of many; ignore lookup failure */
+          }
+          const advancedThisTurn = (signalBus.inTurnRecords ?? []).some(
+            (r) => r.toolName === 'deep_explore' && r.success,
+          );
+          const vTurnCount = messages.filter(
+            (m) => m.role === 'user' && typeof m.content === 'string',
+          ).length;
+          const v = computeViability({
+            hasActiveSession: !!ownerSession,
+            barrierApplies: applied.length > 0,
+            barrierTitle: applied[0]?.barrier.title,
+            barrierCircumvention: applied[0]?.barrier.circumvention,
+            noProgressRounds: ownerSession?.noProgressRounds ?? 0,
+            status: vSummary?.status ?? ownerSession?.status ?? null,
+            provedCount: vSummary?.provedCount ?? 0,
+            openFrontierCount: vSummary?.openFrontierCount ?? 0,
+            sameRootCause: vSameRoot,
+            turnCount: vTurnCount,
+            recommendStop: signalBus.recommendStop === true,
+            madeProgressThisTurn: advancedThisTurn && (ownerSession?.noProgressRounds ?? 1) === 0,
+          });
+          if (v.verdict !== 'continue' && viabilityAttempts < 1) {
+            viabilityAttempts++;
             if (v.verdict === 'stop_and_report') {
               viabilityStopPending = true;
-              viabilityStopReasoningId = ownerSession.id;
-              if (CONTINUATION_PITCH_RE.test(response.content)) {
-                console.warn(
-                  `[viability] session=${sessionId} continuation pitch persisted after regen → deterministic stop_and_report downgrade`,
-                );
-              }
+              viabilityStopReasoningId = ownerSession?.id ?? null;
+            }
+            audit.append('self_domain_write', {
+              source: 'viability_gate',
+              origin: 'Internal',
+              toolName: 'viability_gate_fired',
+              sessionId,
+              verdict: v.verdict,
+              score: v.score,
+              reasons: v.reasons.join(','),
+            });
+            console.warn(
+              `[viability] session=${sessionId} fired verdict=${v.verdict} score=${v.score} reasons=${v.reasons.join(',')} hasSession=${!!ownerSession}`,
+            );
+            messages.push({ role: 'assistant', content: response.content });
+            messages.push({
+              role: 'user',
+              content: buildViabilityDirective(v, { provedCount: vSummary?.provedCount ?? 0 }),
+            });
+            onTrace?.({
+              kind: 'internal-gate', tier: 4,
+              text: `Viability gate ${v.verdict} (score=${v.score}), reframing recommendation`,
+              meta: { gateName: 'Viability' },
+            });
+            continue;
+          }
+          // Budget already spent (the regen ran): a stop verdict downgrades the outcome at emit regardless of
+          // whether the rewrite dropped the pitch — the actuator does not depend on model compliance.
+          if (v.verdict === 'stop_and_report') {
+            viabilityStopPending = true;
+            viabilityStopReasoningId = ownerSession?.id ?? null;
+            if (CONTINUATION_PITCH_RE.test(response.content)) {
+              console.warn(
+                `[viability] session=${sessionId} continuation pitch persisted after regen → deterministic stop_and_report downgrade`,
+              );
             }
           }
         } catch (e) {

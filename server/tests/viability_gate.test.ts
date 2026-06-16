@@ -30,10 +30,26 @@ function base(overrides: Partial<ViabilityInput> = {}): ViabilityInput {
   };
 }
 
-test('no active reasoning session → inert (continue)', () => {
+test('session-less with no repeated failures → continue (near-zero false positives)', () => {
+  // No reasoning session, no same_root_cause signal: barrier/stall fields are ignored without a session.
   const v = computeViability(base({ hasActiveSession: false, barrierApplies: true, noProgressRounds: 9 }));
   assert.equal(v.verdict, 'continue');
-  assert.deepEqual(v.reasons, ['no_active_session']);
+});
+
+test('session-less doom-loop: same_root_cause scales by magnitude', () => {
+  // The prod gap: doom-loop moved into raw shell/patch grinding (no deep_explore session). same_root_cause
+  // is global, so it still fires — and a runaway count must escalate pivot→stop.
+  assert.equal(computeViability(base({ hasActiveSession: false, sameRootCause: 3 })).verdict, 'pivot');
+  assert.equal(computeViability(base({ hasActiveSession: false, sameRootCause: 6 })).verdict, 'pivot');
+  const severe = computeViability(base({ hasActiveSession: false, sameRootCause: 9 }));
+  assert.equal(severe.verdict, 'stop_and_report'); // score 4 — would have stopped the 4-hour prod loop
+  assert.ok(severe.reasons.includes('same_root_cause_severe'));
+  assert.match(severe.evidence, /9×/);
+});
+
+test('same_root_cause=6 + long churny session-less turn → stop (3+1)', () => {
+  const v = computeViability(base({ hasActiveSession: false, sameRootCause: 6, turnCount: 25 }));
+  assert.equal(v.verdict, 'stop_and_report');
 });
 
 test('barrier applies but NOT stalled → does not stop (barrier alone is not enough)', () => {

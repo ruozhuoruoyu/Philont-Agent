@@ -115,3 +115,56 @@ test('缺 name 字段 → 跳过', () => {
   const r = parseTextEmbeddedToolCalls(text);
   assert.equal(r, null);
 });
+
+// ── DeepSeek DSML 模板泄漏(2026-06-16 prod log)──────────────────────────
+// 模型把 function-calling 模板当文本发出: <｜｜DSML｜｜invoke name="X"> <｜｜DSML｜｜parameter ...>
+
+test('DSML — 单个 invoke + 字符串参数', () => {
+  const text =
+    '<｜｜DSML｜｜tool_calls> <｜｜DSML｜｜invoke name="shell">' +
+    '<｜｜DSML｜｜parameter name="command">dir E:\\dev</｜｜DSML｜｜parameter>' +
+    '<｜｜DSML｜｜parameter name="timeout">120000</｜｜DSML｜｜parameter>' +
+    '</｜｜DSML｜｜invoke> </｜｜DSML｜｜tool_calls>';
+  const r = parseTextEmbeddedToolCalls(text);
+  assert.ok(r);
+  assert.equal(r!.length, 1);
+  assert.equal(r![0].name, 'shell');
+  assert.equal((r![0].input as { command: string }).command, 'dir E:\\dev');
+  assert.equal((r![0].input as { timeout: number }).timeout, 120000); // coerced to number
+  assert.match(r![0].id, /^dsml-tool-/);
+});
+
+test('DSML — 多个 invoke', () => {
+  const text =
+    '<｜｜DSML｜｜invoke name="plan_update_step"><｜｜DSML｜｜parameter name="status">done</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>' +
+    '<｜｜DSML｜｜invoke name="plan_close"><｜｜DSML｜｜parameter name="outcome">success</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>';
+  const r = parseTextEmbeddedToolCalls(text);
+  assert.ok(r);
+  assert.equal(r!.length, 2);
+  assert.equal(r![0].name, 'plan_update_step');
+  assert.equal(r![1].name, 'plan_close');
+  assert.equal((r![1].input as { outcome: string }).outcome, 'success');
+});
+
+test('DSML — 闭合标签缺失(截断流)仍能救回', () => {
+  const text =
+    '<｜｜DSML｜｜invoke name="writeFile"><｜｜DSML｜｜parameter name="path">E:\\out.gp</｜｜DSML｜｜parameter>' +
+    '<｜｜DSML｜｜parameter name="content">Rs = [3,7,11]';
+  const r = parseTextEmbeddedToolCalls(text);
+  assert.ok(r);
+  assert.equal(r![0].name, 'writeFile');
+  assert.equal((r![0].input as { path: string }).path, 'E:\\out.gp');
+  assert.equal((r![0].input as { content: string }).content, 'Rs = [3,7,11]');
+});
+
+test('DSML — JSON 对象参数被解析', () => {
+  const text =
+    '<｜｜DSML｜｜invoke name="f"><｜｜DSML｜｜parameter name="cfg">{"a":1,"b":true}</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>';
+  const r = parseTextEmbeddedToolCalls(text);
+  assert.deepEqual((r![0].input as { cfg: unknown }).cfg, { a: 1, b: true });
+});
+
+test('DSML — 普通文本不误触', () => {
+  assert.equal(parseTextEmbeddedToolCalls('谈到 DSML 数据建模语言时'), null);
+  assert.equal(parseTextEmbeddedToolCalls('## 给用户\n结论是 ES 撞墙了。'), null);
+});

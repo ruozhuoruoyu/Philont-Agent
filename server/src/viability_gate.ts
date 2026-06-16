@@ -98,43 +98,58 @@ export function computeViability(input: ViabilityInput): ViabilityResult {
   const PIVOT = envInt('PHILONT_VIABILITY_PIVOT_SCORE', 2);
   const STUCK = envInt('PHILONT_VIABILITY_STUCK_ROUNDS', 3);
 
-  if (!input.hasActiveSession) {
-    return { verdict: 'continue', score: 0, reasons: ['no_active_session'], evidence: '' };
-  }
-
   let score = 0;
   const reasons: string[] = [];
 
-  // HARD no-go: the blocked method is detected AND the frontier is stalled. A barrier ALONE is not
-  // enough (the goal could legitimately route around it); barrier + stall = doomed via this method.
-  if (input.barrierApplies && input.noProgressRounds >= STUCK) {
+  // same_root_cause is a GLOBAL action-ledger signal (independent of any deep_explore session), so it works
+  // even when the doom-loop has moved into raw shell/patch/writeFile grinding outside deep_explore. Weight it
+  // by MAGNITUDE: a runaway count (the prod log hit 8–9) is a strong standalone stop signal, not a flat +2.
+  if (input.sameRootCause >= 9) {
+    score += 4;
+    reasons.push('same_root_cause_severe');
+  } else if (input.sameRootCause >= 6) {
     score += 3;
-    reasons.push('barrier_applies_and_stalled');
-  }
-  // Empty frontier with nothing proved = genuinely stuck (judgeConvergence already says 'stuck').
-  if (input.status === 'stuck' && input.provedCount === 0) {
-    score += 3;
-    reasons.push('frontier_empty_no_proof');
-  }
-  // Persistent no-progress beyond the escalate threshold (Tooth-B strict counter).
-  if (input.noProgressRounds >= STUCK) {
-    score += 1;
-    reasons.push('no_progress_rounds');
-  }
-  // Cross-turn same-wall collisions (reflection's own same_root_cause signal).
-  if (input.sameRootCause >= 3) {
+    reasons.push('same_root_cause_high');
+  } else if (input.sameRootCause >= 3) {
     score += 2;
     reasons.push('same_root_cause');
   }
-  // Long task accumulating zero proved nodes (churn without yield).
-  if (input.turnCount >= 15 && input.provedCount === 0) {
-    score += 1;
-    reasons.push('long_barren');
-  }
-  // WS4: reflection's persisted recommend_stop — strongest single input.
+  // WS4: reflection's persisted recommend_stop — strong cross-turn judgment.
   if (input.recommendStop) {
     score += 3;
     reasons.push('reflection_recommend_stop');
+  }
+
+  if (input.hasActiveSession) {
+    // HARD no-go: the blocked method is detected AND the frontier is stalled. A barrier ALONE is not
+    // enough (the goal could legitimately route around it); barrier + stall = doomed via this method.
+    if (input.barrierApplies && input.noProgressRounds >= STUCK) {
+      score += 3;
+      reasons.push('barrier_applies_and_stalled');
+    }
+    // Empty frontier with nothing proved = genuinely stuck (judgeConvergence already says 'stuck').
+    if (input.status === 'stuck' && input.provedCount === 0) {
+      score += 3;
+      reasons.push('frontier_empty_no_proof');
+    }
+    // Persistent no-progress beyond the escalate threshold (Tooth-B strict counter).
+    if (input.noProgressRounds >= STUCK) {
+      score += 1;
+      reasons.push('no_progress_rounds');
+    }
+    // Long task accumulating zero proved nodes (churn without yield).
+    if (input.turnCount >= 15 && input.provedCount === 0) {
+      score += 1;
+      reasons.push('long_barren');
+    }
+  } else {
+    // Session-less path: no deep_explore session to read stall/barrier from, so the only signals are the
+    // global same_root_cause (above) and a very long, churny turn history. Keeps false positives near zero —
+    // without a real repeated-failure signal the score stays 0 → continue.
+    if (input.turnCount >= 20) {
+      score += 1;
+      reasons.push('long_barren');
+    }
   }
 
   // Progress veto (absolute): a round that genuinely advanced the tree this turn cannot be a stop.
@@ -157,7 +172,9 @@ export function computeViability(input: ViabilityInput): ViabilityResult {
         ? `blocked by a known barrier (${input.barrierTitle}); ${input.noProgressRounds} round(s) without progress`
         : input.status === 'stuck'
           ? `frontier exhausted (0 proved, ${input.openFrontierCount} open) after ${input.noProgressRounds} stalled round(s)`
-          : `${input.noProgressRounds} stalled round(s); same-root-cause cluster=${input.sameRootCause}`;
+          : input.sameRootCause >= 3
+            ? `the same failure has recurred ${input.sameRootCause}× — repeatedly hitting the same wall`
+            : `${input.noProgressRounds} stalled round(s)`;
 
   return {
     verdict,
