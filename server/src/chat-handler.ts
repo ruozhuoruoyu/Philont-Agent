@@ -2060,6 +2060,14 @@ const VIABILITY_RECOMMEND_STOP_TTL_MS = 30 * 60_000;
 const viabilityPivotStreak = new Map<string, number>();
 
 /**
+ * 2026-06-17 episode anchor: epoch ms of the start of the CURRENT research episode for a chat session. Set
+ * when the user overrides a stop / redirects to a new direction. Floors the same_root_cause failure window so
+ * a fresh direction does not inherit the previous direction's accumulated "撞墙" count — the fix for the prod
+ * loop where the gate declared a brand-new direction dead on 0 attempts. See the doom-reset block.
+ */
+const episodeAnchorTs = new Map<string, number>();
+
+/**
  * Phase 18 WS5: workflow grant. When the user approves one local write/execute tool, also grant these sibling
  * local workflow tools (same capability) so a coherent multi-step local workflow flows without re-prompting at
  * each step. Destructive deleteFile is intentionally absent (keeps per-call confirmation).
@@ -5062,6 +5070,30 @@ async function handleChatSendInner(
     console.warn('[user-pattern] confirmation check failed, skipped', e);
   }
 
+  // Doom-reset on user override (2026-06-17): if the gate had built up doom (a pivot streak, or reflection's
+  // recommend_stop armed) and the user pushes FORWARD instead of accepting the stop, clear the accumulated
+  // doom and anchor a fresh episode. Without this, same_root_cause / recommend_stop / the pivot ratchet
+  // carried across the redirect, and the agent re-declared the same wall on a direction it had not run — prod
+  // showed 8 "继续"s producing 0 executions, each met with another "撞了 6 次". Acceptance (算了/换框架) is
+  // exempt: that confirms the stop. Placed before recommend_stop is consumed so the clear actually takes hold.
+  try {
+    const hadDoom = (viabilityPivotStreak.get(sessionId) ?? 0) >= 1 || viabilityRecommendStop.has(sessionId);
+    const pushesForward =
+      VIABILITY_CONTINUE_RE.test(userMessage) || /^\s*(启动|开吧|开始|做吧|干吧|搞起|go|start)\b/i.test(userMessage);
+    const accepts = VIABILITY_ACCEPT_RE.test(userMessage);
+    if (hadDoom && pushesForward && !accepts) {
+      viabilityPivotStreak.delete(sessionId);
+      viabilityRecommendStop.delete(sessionId);
+      signalBus.recommendStop = false;
+      episodeAnchorTs.set(sessionId, Date.now());
+      console.log(
+        `[viability] session=${sessionId} doom-reset on user override ("${userMessage.slice(0, 20)}") — fresh episode, accumulated stop signals cleared`,
+      );
+    }
+  } catch (e) {
+    console.warn('[viability] doom-reset check failed (ignored):', e);
+  }
+
   // Phase 18 WS4: inherit reflection's persisted recommend_stop for this session (armed at last turn close). Sets
   // signalBus.recommendStop so the ViabilityGate later this turn scores it (+3). TTL-bounded; consumed lazily.
   {
@@ -6685,13 +6717,25 @@ async function runToolLoop(
           const openMatch = allMatches.find((m) => m.barrier.goalIsOpenProblem === true);
           let vSameRoot = 0;
           try {
-            const vSince = Date.now() - 24 * 60 * 60_000;
+            // Episode-scope the failure window (2026-06-17): floor sinceTs at the current reasoning
+            // session's createdAt so same_root_cause counts only failures of THIS direction. Without this,
+            // the global 24h ledger carried a saturated count across a user redirect → a brand-new direction
+            // inherited "撞了 6 次" and was stopped before it ran once.
+            const vSince = Math.max(
+              Date.now() - 24 * 60 * 60_000,
+              ownerSession?.createdAt ?? 0,
+              episodeAnchorTs.get(sessionId) ?? 0,
+            );
             vSameRoot = countSameRootCauseFailures(
               memory.actions.listRecentFailures({ sinceTs: vSince, limit: 30 }),
             );
           } catch {
             /* same_root_cause is one input of many; ignore lookup failure */
           }
+          // Real attempts this episode = settled nodes (proved + dead_end) in the current session. Gates the
+          // generic stop verdict: a direction with < MIN attempts can't be declared a wall (see viability_gate).
+          const vAttemptsThisEpisode =
+            (vSummary?.provedCount ?? 0) + (vSummary?.deadCount ?? 0);
           const advancedThisTurn = (signalBus.inTurnRecords ?? []).some(
             (r) => r.toolName === 'deep_explore' && r.success,
           );
@@ -6714,6 +6758,7 @@ async function runToolLoop(
             recommendStop: signalBus.recommendStop === true,
             madeProgressThisTurn: advancedThisTurn && (ownerSession?.noProgressRounds ?? 1) === 0,
             repeatedPivotCount: priorPivotStreak,
+            attemptsThisEpisode: vAttemptsThisEpisode,
           });
           // Ratchet bookkeeping (once per turn): a non-continue verdict extends the streak; continue resets it.
           if (!viabilityStreakUpdated) {

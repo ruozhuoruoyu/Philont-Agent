@@ -36,6 +36,16 @@ const PIVOT_SCORE = 2;
 const STUCK_ROUNDS = 3;
 /** Prior consecutive non-continue verdicts after which a fresh 'pivot' escalates to 'stop' (de-facto stuck). */
 const RATCHET_PIVOTS = 3;
+/**
+ * Minimum settled nodes (proved + dead_end) the CURRENT reasoning session must have before a generic
+ * stop_and_report is allowed. 2026-06-17: prod showed the gate declaring "撞了 6 次" on a brand-new
+ * direction the user had just redirected to — because same_root_cause (a global 24h ledger) and a stale
+ * recommend_stop carried over from the PREVIOUS direction. You cannot honestly declare a wall you have not
+ * walked into THIS episode. Below this floor a would-be stop is downgraded to `continue` so the direction
+ * actually gets run first. Does NOT affect `intractable` (a known-open-problem goal is out of reach
+ * regardless of attempts) — only the generic stall verdict.
+ */
+const MIN_EPISODE_ATTEMPTS = 2;
 
 export interface ViabilityInput {
   /** Whether an owner-scoped active reasoning session exists. Gate is inert (continue) without one. */
@@ -66,6 +76,12 @@ export interface ViabilityInput {
   recommendStop: boolean;
   /** A deep_explore advance round ran AND reset noProgressRounds this turn → real progress. Vetoes stop. */
   madeProgressThisTurn: boolean;
+  /**
+   * Settled nodes (proved + dead_end) in the CURRENT reasoning session = how many real attempts this
+   * EPISODE has had. A generic stop_and_report requires this to reach MIN_EPISODE_ATTEMPTS; a freshly
+   * redirected direction (≈0) can't be declared a wall before it's actually been tried. 0 when no session.
+   */
+  attemptsThisEpisode: number;
   /**
    * Consecutive PRIOR turns this session got a non-continue viability verdict (the gate kept saying "stalling").
    * Generalizes intractable to goals NOT in the curated barrier library: if we've recommended pivot this many
@@ -192,6 +208,25 @@ export function computeViability(input: ViabilityInput): ViabilityResult {
   if (verdict === 'pivot' && input.repeatedPivotCount >= RATCHET_PIVOTS) {
     verdict = 'stop_and_report';
     reasons.push('repeated_pivot_ratchet');
+  }
+
+  // EPISODE-ATTEMPT FLOOR (2026-06-17): a generic stop_and_report on an active session that has not
+  // actually attempted this direction yet (settled < MIN_EPISODE_ATTEMPTS) is a phantom wall — it's the
+  // global same_root_cause / stale recommend_stop bleeding over from a PREVIOUS, now-redirected direction.
+  // Downgrade to `continue` so the agent RUNS the new direction instead of declaring it dead unseen. The
+  // intractable verdict already returned above (open-problem goals are out of reach regardless of attempts).
+  if (
+    verdict === 'stop_and_report' &&
+    input.hasActiveSession &&
+    input.attemptsThisEpisode < MIN_EPISODE_ATTEMPTS
+  ) {
+    reasons.push('insufficient_episode_attempts');
+    return {
+      verdict: 'continue',
+      score,
+      reasons,
+      evidence: '',
+    };
   }
 
   const evidence =

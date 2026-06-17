@@ -28,6 +28,9 @@ function base(overrides: Partial<ViabilityInput> = {}): ViabilityInput {
     recommendStop: false,
     madeProgressThisTurn: false,
     repeatedPivotCount: 0,
+    // Default: the episode HAS been worked (≥ MIN_EPISODE_ATTEMPTS settled nodes), so the attempt-floor
+    // does not interfere with the pre-existing scoring tests. The floor is exercised explicitly below.
+    attemptsThisEpisode: 3,
     ...overrides,
   };
 }
@@ -80,6 +83,37 @@ test('empty frontier with 0 proved → stop (frontier_empty_no_proof, score 3) n
 test('stuck + same_root_cause cluster → stop (3+2=5)', () => {
   const v = computeViability(base({ status: 'stuck', provedCount: 0, sameRootCause: 4 }));
   assert.equal(v.verdict, 'stop_and_report');
+});
+
+test('episode-attempt floor: a would-be stop on an under-attempted session → continue (the prod redirect bug)', () => {
+  // The smoking gun: user redirects to a fresh direction; the global same_root_cause (6) + a stale
+  // recommend_stop carry over and score a stop — but the new direction has 0 settled nodes. It must NOT be
+  // declared a wall before it's been tried.
+  const v = computeViability(base({ sameRootCause: 6, recommendStop: true, attemptsThisEpisode: 0 }));
+  assert.equal(v.verdict, 'continue');
+  assert.ok(v.reasons.includes('insufficient_episode_attempts'));
+});
+
+test('episode-attempt floor: stuck+cluster but only 1 attempt → continue; ≥2 attempts → stop', () => {
+  assert.equal(
+    computeViability(base({ status: 'stuck', provedCount: 0, sameRootCause: 4, attemptsThisEpisode: 1 })).verdict,
+    'continue',
+  );
+  assert.equal(
+    computeViability(base({ status: 'stuck', provedCount: 0, sameRootCause: 4, attemptsThisEpisode: 2 })).verdict,
+    'stop_and_report',
+  );
+});
+
+test('episode-attempt floor does NOT apply session-less (global doom-loop still stops)', () => {
+  const v = computeViability(base({ hasActiveSession: false, sameRootCause: 9, attemptsThisEpisode: 0 }));
+  assert.equal(v.verdict, 'stop_and_report');
+});
+
+test('episode-attempt floor does NOT rescue an intractable open-problem goal', () => {
+  // A known open problem is out of reach regardless of attempts — intractable returns before the floor.
+  const v = computeViability(base({ goalIsOpenProblem: true, status: 'stuck', attemptsThisEpisode: 0 }));
+  assert.equal(v.verdict, 'intractable');
 });
 
 test('progress this turn vetoes everything → continue', () => {
