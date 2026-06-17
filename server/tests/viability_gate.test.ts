@@ -11,6 +11,7 @@ import {
   computeViability,
   CONTINUATION_PITCH_RE,
   buildViabilityDirective,
+  decideTurnAnchors,
   type ViabilityInput,
 } from '../src/viability_gate.js';
 
@@ -216,4 +217,59 @@ test('directive forbids the pitch and credits banked lemmas', () => {
   assert.match(d, /要我继续吗/);
   assert.match(d, /3 proved lemma/);
   assert.match(d, /inject non-sieve input/);
+});
+
+// ── decideTurnAnchors (commit-on-affirm + stay-on-target) ───────────────────────────────────────
+
+test('commit: prior offer-pitch + user pushes forward → commit + anchor', () => {
+  const d = decideTurnAnchors({
+    lastAssistantText: '我建议并行扫描 Eq1、Eq3、Eq5。要我开这个搜索吗？',
+    userMessage: '继续',
+    hadDoom: false,
+  });
+  assert.equal(d.commit, true);
+  assert.equal(d.anchor, true);
+});
+
+test('commit recognizes the real prod pitches, not just "要继续吗"', () => {
+  for (const pitch of ['要不要我列几个适合反例搜索的猜想？', '选哪个？或者我并行开两个？', '要继续这个方向吗？']) {
+    const d = decideTurnAnchors({ lastAssistantText: pitch, userMessage: '启动', hadDoom: false });
+    assert.equal(d.commit, true, `should commit for pitch: ${pitch}`);
+  }
+});
+
+test('no commit when there was no pitch (a plain wall-report)', () => {
+  const d = decideTurnAnchors({
+    lastAssistantText: '这条路死了，建议整合论文。回复继续只在你坚持时。',
+    userMessage: '继续',
+    hadDoom: true,
+  });
+  assert.equal(d.commit, false); // no offer-question → nothing concrete to execute
+});
+
+test('redirect: substantive new instruction after doom → doomReset + anchor (no commit)', () => {
+  const d = decideTurnAnchors({
+    lastAssistantText: '这条路死了，建议停在这里。',
+    userMessage: '专注 Erdős 问题集中的长尾题',
+    hadDoom: true,
+  });
+  assert.equal(d.doomReset, true);
+  assert.equal(d.anchor, true);
+  assert.equal(d.commit, false);
+});
+
+test('bare "ok" after doom is too ambiguous → no reset, no anchor', () => {
+  const d = decideTurnAnchors({ lastAssistantText: '建议停在这里。', userMessage: 'ok', hadDoom: true });
+  assert.equal(d.doomReset, false);
+  assert.equal(d.anchor, false);
+});
+
+test('acceptance ("算了，换个框架") → no doomReset (confirms the stop)', () => {
+  const d = decideTurnAnchors({ lastAssistantText: '建议停。', userMessage: '算了，换个框架吧', hadDoom: true });
+  assert.equal(d.doomReset, false);
+});
+
+test('no accumulated doom → no reset even on a redirect (nothing to clear)', () => {
+  const d = decideTurnAnchors({ lastAssistantText: '好的。', userMessage: '做个新方向', hadDoom: false });
+  assert.equal(d.doomReset, false);
 });

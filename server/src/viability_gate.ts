@@ -124,6 +124,50 @@ export const VIABILITY_ACCEPT_RE =
 /** WS2: the user wants to keep going despite the wall — overrides acceptance, keeps the session active. */
 export const VIABILITY_CONTINUE_RE = /继续|接着|再(?:试|跑|来|攻|想)|go on|keep going|continue|顶(?:着|上)|硬(?:上|刚)/i;
 
+/** Imperative "start doing it" words (complements VIABILITY_CONTINUE_RE) — approving a proposed next step. */
+const PUSH_FORWARD_RE = /启动|开吧|开始|做吧|干吧|搞起|\bgo\b|\bstart\b/i;
+/**
+ * The prior turn OFFERED to do something and asked the user to choose/approve ("要我开这个搜索吗？", "要不要我
+ * 列几个？", "选哪个？", "shall I…?"). Broader than CONTINUATION_PITCH_RE (which only catches the "要继续吗"
+ * form) so commit-on-affirm recognizes the real proposal pitches seen in prod, not just literal "continue".
+ */
+const OFFER_QUESTION_RE =
+  /(?:要(?:不要)?(?:我)?|我来|我帮你|选哪个|并行开|shall i|want me to|should i)[^。\n？?]{0,30}[?？]/i;
+/** A bare acknowledgement, too ambiguous on its own to count as a stop-override. */
+const BARE_AFFIRM_RE = /^\s*(?:ok|okay|yes|y|嗯+|好的?|收到|continue)\s*$/i;
+
+export interface TurnAnchorDecision {
+  /** User overrode an accumulated stop (explicit push-forward OR a substantive redirect) → caller resets the
+   *  doom accounting and anchors a fresh episode. */
+  doomReset: boolean;
+  /** Prior turn pitched a concrete next step AND the user approved → force EXECUTION this turn (no re-propose). */
+  commit: boolean;
+  /** Inject the stay-on-target / anti-substitution directive (redirect or commit). */
+  anchor: boolean;
+}
+
+/**
+ * Pure decision for the two "do, don't re-propose / don't substitute" anchors (2026-06-17). Caller supplies
+ * the last assistant message text, the new user message, and whether doom had accumulated (pivot streak /
+ * recommend_stop). Keeps the linguistic rules in this tested module; the caller only applies side effects.
+ */
+export function decideTurnAnchors(input: {
+  lastAssistantText: string;
+  userMessage: string;
+  hadDoom: boolean;
+}): TurnAnchorDecision {
+  const msg = input.userMessage ?? '';
+  const pushesForward = VIABILITY_CONTINUE_RE.test(msg) || PUSH_FORWARD_RE.test(msg);
+  const accepts = VIABILITY_ACCEPT_RE.test(msg);
+  const bareAffirm = BARE_AFFIRM_RE.test(msg);
+  const doomReset =
+    input.hadDoom && !accepts && (pushesForward || (!bareAffirm && msg.trim().length >= 4));
+  const prior = input.lastAssistantText ?? '';
+  const priorPitch = prior.length > 0 && (CONTINUATION_PITCH_RE.test(prior) || OFFER_QUESTION_RE.test(prior));
+  const commit = priorPitch && pushesForward;
+  return { doomReset, commit, anchor: commit || doomReset };
+}
+
 /**
  * Pure verdict computation. Weighted multi-signal accumulation (not a single trip-wire) so a single
  * noisy sensor never stops a task: stop needs the score from ≥2 independent sensor families. Any genuine

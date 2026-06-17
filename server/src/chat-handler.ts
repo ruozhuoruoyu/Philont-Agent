@@ -207,6 +207,7 @@ import {
   CONTINUATION_PITCH_RE,
   VIABILITY_ACCEPT_RE,
   VIABILITY_CONTINUE_RE,
+  decideTurnAnchors,
 } from './viability_gate.js';
 import { detectUngroundedArxivCitation, buildCitationGroundingDirective } from './citation_gate.js';
 import { detectHandRolledParser, buildSkillReflexNudge } from './skill_reflex.js';
@@ -2066,6 +2067,49 @@ const viabilityPivotStreak = new Map<string, number>();
  * loop where the gate declared a brand-new direction dead on 0 attempts. See the doom-reset block.
  */
 const episodeAnchorTs = new Map<string, number>();
+
+/**
+ * 2026-06-17: injected when the user approves a concrete next step the agent proposed last turn ("要我开始吗"
+ * → "继续/启动"). Forces this turn to EXECUTE rather than re-analyze/re-propose — the prod failure where the
+ * agent answered 8 "继续"s with 8 wall-reports and 0 executions.
+ */
+const COMMIT_TO_EXECUTION_DIRECTIVE =
+  '\n\n[commit-to-execution] Last turn you proposed a concrete next step and asked the user to proceed — they ' +
+  'just approved. EXECUTE that step now: actually call the tools to do the work (run the search, write+run the ' +
+  'code, start the deep_explore round). This turn is for execution, not analysis. Do NOT re-assess whether the ' +
+  'direction is viable, do NOT declare a wall before running it, do NOT switch to a different direction, and do ' +
+  'NOT ask "要我开始吗 / shall I continue?" again. Make at least one real execution attempt before reporting.';
+
+/**
+ * 2026-06-17: injected when the user redirects / overrides a stop. Anchors the turn on the user's literal
+ * instruction and forbids substituting a previously-closed direction (prod: asked for "Erdős long-tail
+ * problems", the agent resumed Erdős–Straus — a famous problem it had already closed twice).
+ */
+function buildAntiSubstitutionDirective(userMessage: string): string {
+  const ask = userMessage.replace(/\s+/g, ' ').trim().slice(0, 120);
+  return (
+    `\n\n[stay-on-target] The user's current instruction is the authoritative goal for this turn: "${ask}". ` +
+    'Pursue exactly that. Do NOT resume, restate, or fall back to a direction you previously declared dead or ' +
+    'closed (a different problem you already gave up on) unless the user explicitly named it. If their ' +
+    'instruction is a CATEGORY (e.g. "the long-tail problems in set X"), work inside that category — do not ' +
+    'substitute a famous hard problem you happen to remember.'
+  );
+}
+
+/** Most recent assistant message text in the window (string content or joined text blocks); '' if none. */
+function lastAssistantText(msgs: NativeMessage[]): string {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role !== 'assistant') continue;
+    if (typeof m.content === 'string') return m.content;
+    if (Array.isArray(m.content)) {
+      return m.content
+        .map((b) => (b && typeof b === 'object' && (b as { type?: string }).type === 'text' ? (b as { text?: string }).text ?? '' : ''))
+        .join(' ');
+    }
+  }
+  return '';
+}
 
 /**
  * Phase 18 WS5: workflow grant. When the user approves one local write/execute tool, also grant these sibling
@@ -5076,12 +5120,13 @@ async function handleChatSendInner(
   // carried across the redirect, and the agent re-declared the same wall on a direction it had not run — prod
   // showed 8 "继续"s producing 0 executions, each met with another "撞了 6 次". Acceptance (算了/换框架) is
   // exempt: that confirms the stop. Placed before recommend_stop is consumed so the clear actually takes hold.
+  let turnAnchors = { doomReset: false, commit: false, anchor: false };
   try {
     const hadDoom = (viabilityPivotStreak.get(sessionId) ?? 0) >= 1 || viabilityRecommendStop.has(sessionId);
-    const pushesForward =
-      VIABILITY_CONTINUE_RE.test(userMessage) || /^\s*(启动|开吧|开始|做吧|干吧|搞起|go|start)\b/i.test(userMessage);
-    const accepts = VIABILITY_ACCEPT_RE.test(userMessage);
-    if (hadDoom && pushesForward && !accepts) {
+    turnAnchors = decideTurnAnchors({ lastAssistantText: lastAssistantText(messages), userMessage, hadDoom });
+    if (turnAnchors.doomReset) {
+      // User overrode an accumulated stop (push-forward or a substantive redirect): clear the carried-over
+      // doom and anchor a fresh episode so the next direction is judged on its own attempts, not the prior one.
       viabilityPivotStreak.delete(sessionId);
       viabilityRecommendStop.delete(sessionId);
       signalBus.recommendStop = false;
@@ -5127,6 +5172,20 @@ async function handleChatSendInner(
         `[failure-recovery] session=${sessionId} injected ${recovery.recentFailures.length} failure hints (kinds=${recovery.recentFailures.map((f) => f.kind).join(',')})`,
       );
     }
+  }
+
+  // Commit-to-execution + stay-on-target (2026-06-17). Two prompt anchors for the prod failures where the
+  // agent (a) answered "继续" with another wall-report instead of running the proposed step, and (b) on a
+  // redirect, substituted a previously-closed direction. Appended to the system prompt (messages[0]) like the
+  // failure-recovery injection. env PHILONT_COMMIT_EXEC=0 disables.
+  if (messages[0] && process.env.PHILONT_COMMIT_EXEC !== '0' && (turnAnchors.commit || turnAnchors.anchor)) {
+    let addition = '';
+    if (turnAnchors.commit) addition += COMMIT_TO_EXECUTION_DIRECTIVE;
+    if (turnAnchors.anchor) addition += buildAntiSubstitutionDirective(userMessage);
+    messages[0] = { ...messages[0], content: messages[0].content + addition };
+    console.log(
+      `[commit-exec] session=${sessionId} injected${turnAnchors.commit ? ' commit-to-execution' : ''}${turnAnchors.anchor ? ' stay-on-target' : ''}`,
+    );
   }
 
   messages.push({ role: 'user', content: userMessage });
