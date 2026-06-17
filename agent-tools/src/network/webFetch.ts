@@ -615,9 +615,20 @@ async function fetchNative(input: WebFetchInput): Promise<FetchResultPayload> {
 /** One URL: try the provider's server-side fetch first (avoids our-IP 403), then the direct HTTP path. */
 async function fetchOne(input: WebFetchInput): Promise<FetchResultPayload> {
   try {
-    return await fetchNative(input);
-  } catch {
-    // fall back to direct HTTP (with the existing transient retry)
+    const r = await fetchNative(input);
+    // Observability (2026-06-17): mirror webSearch's `backend=native` line so it's visible whether the fetch
+    // actually went through the LLM server-side web_fetch tool or silently fell back to our-IP direct HTTP.
+    console.log(`[webFetch] backend=native url=${input.url}`);
+    return r;
+  } catch (e) {
+    // Why native was unavailable — a 4xx (endpoint doesn't support web_fetch) latches nativeFetchSupported
+    // off for the rest of the process; anything else is a one-off. Surfaced so "is webFetch using the LLM API?"
+    // is answerable from the logs instead of guessed.
+    const reason =
+      nativeFetchSupported === false
+        ? 'endpoint does not support the web_fetch tool (latched off)'
+        : (e as Error)?.message ?? String(e);
+    console.log(`[webFetch] backend=direct (native unavailable: ${reason}) url=${input.url}`);
   }
   return withRetry(() => runWebFetch(input), {
     isRetryable: (e) => e instanceof IngestError && (e.kind === 'timeout' || e.kind === 'aborted'),
