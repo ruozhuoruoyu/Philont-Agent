@@ -56,6 +56,51 @@ export function reconstructDmSessionId(channel: string, peer: string): string | 
   return null;
 }
 
+/** A single (tool, capability, domain) grant to apply. */
+export interface WorkflowGrant {
+  tool: string;
+  capability: 'write' | 'execute';
+  domain: 'local';
+}
+
+/**
+ * The full set of LOCAL research-workflow tools. A math-research push is a write→run→write→run loop:
+ * writeFile a .gp/.py script → shell/pariGp run it → patch/writeFile fix it → run again. Under the old
+ * per-capability sibling grant, approving a `write` tool granted only the other `write` tools, so the
+ * first `shell`/`pariGp` still bounced a fresh auth card — and vice versa. Every research loop needs BOTH
+ * write and execute, so the user paid (at least) one "ok" per capability AND per tool not in the list
+ * (pariGp/z3Verify were missing entirely). This unified set lets ONE approval of any member cover the
+ * whole local loop for WORKFLOW_GRANT_TTL_MS.
+ *
+ * Deliberately excluded (stay per-call): downloadFile (capability=write but domain=network — fetching
+ * from arbitrary hosts is the untrusted boundary), deleteFile (destructive), and any external/untrusted
+ * execution (domain≠local).
+ */
+export const LOCAL_RESEARCH_WORKFLOW: WorkflowGrant[] = [
+  { tool: 'writeFile', capability: 'write', domain: 'local' },
+  { tool: 'patch', capability: 'write', domain: 'local' },
+  { tool: 'moveFile', capability: 'write', domain: 'local' },
+  { tool: 'shell', capability: 'execute', domain: 'local' },
+  { tool: 'pariGp', capability: 'execute', domain: 'local' },
+  { tool: 'z3Verify', capability: 'execute', domain: 'local' },
+];
+
+/**
+ * Given the tool the user just approved, return the sibling local-workflow grants to apply alongside it
+ * (the whole local set minus the approved tool itself, which the caller grants separately with its own
+ * TTL). Returns [] when the approval is NOT a local write/execute action — network downloads, destructive
+ * deletes, and external/untrusted execution are never batched and keep their per-call confirmation.
+ */
+export function localWorkflowGrants(
+  approvedCapability: string,
+  approvedDomain: string,
+  approvedTool: string,
+): WorkflowGrant[] {
+  if (approvedDomain !== 'local') return [];
+  if (approvedCapability !== 'write' && approvedCapability !== 'execute') return [];
+  return LOCAL_RESEARCH_WORKFLOW.filter((g) => g.tool !== approvedTool);
+}
+
 export type ResearchGrantAction = 'grant' | 'deny' | 'expired' | 'passthrough';
 
 /**

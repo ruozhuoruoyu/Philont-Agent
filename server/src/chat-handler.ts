@@ -186,6 +186,7 @@ import {
   renderResearchGrantPrompt,
   reconstructDmSessionId,
   decideResearchGrantAction,
+  localWorkflowGrants,
   type PendingResearchGrant,
 } from './research_grant.js';
 import { PushDispatcher } from './push/dispatcher.js';
@@ -2062,10 +2063,8 @@ const viabilityPivotStreak = new Map<string, number>();
  * local workflow tools (same capability) so a coherent multi-step local workflow flows without re-prompting at
  * each step. Destructive deleteFile is intentionally absent (keeps per-call confirmation).
  */
-const LOCAL_WORKFLOW_SIBLINGS: Record<string, string[]> = {
-  write: ['writeFile', 'patch', 'moveFile'],
-  execute: ['shell'],
-};
+// Research-workflow grant set + applier live in research_grant.ts (LOCAL_RESEARCH_WORKFLOW /
+// localWorkflowGrants), keyed by (tool, capability, domain) so one approval covers the whole local loop.
 const WORKFLOW_GRANT_TTL_MS = 30 * 60_000;
 
 /**
@@ -4660,26 +4659,22 @@ async function handleChatSendInner(
         text: `Granted ${pending.toolName} (valid for ${grantMinutes} min)`,
         meta: { toolName: pending.toolName },
       });
-      // Phase 18 (2026-06-15) WS5: workflow grant. Approving one LOCAL write/execute tool also grants its sibling
-      // local workflow tools (same capability) for a longer window, so a coherent multi-step local workflow
-      // (e.g. GP: writeFile → shell → patch) doesn't force a fresh auth card at every step — the
-      // "继续→授权→ok" treadmill. Destructive deleteFile is deliberately excluded (stays per-call). External /
-      // untrusted execution (domain≠local) is never batched.
-      if (
-        pending.domain === 'local' &&
-        (pending.capability === 'write' || pending.capability === 'execute')
-      ) {
-        const siblings = (LOCAL_WORKFLOW_SIBLINGS[pending.capability] ?? []).filter(
-          (s) => s !== pending.toolName,
+      // Phase 18 (2026-06-15) WS5 + 2026-06-17 fix: research-workflow grant. Approving ANY local write/execute
+      // tool grants the WHOLE local research set — both write/local (writeFile, patch, moveFile) AND
+      // execute/local (shell, pariGp, z3Verify) — for a longer window. A math-research push is a
+      // write→run→write→run loop that needs both capabilities; the old per-capability grant still bounced a
+      // fresh auth card on the first cross-capability tool (and pariGp/z3Verify were missing entirely), so the
+      // user paid one "ok" per tool/capability — the "继续→授权→ok" treadmill (prod 2026-06-17: ~6 "ok"s for one
+      // push). One approval now covers the loop. Network downloads (downloadFile, domain=network), destructive
+      // deleteFile, and external/untrusted execution stay per-call.
+      const wfGrants = localWorkflowGrants(pending.capability, pending.domain, pending.toolName);
+      for (const g of wfGrants) {
+        grants.grant(g.tool, g.capability as any, g.domain as any, `research workflow grant via ${pending.toolName} approval`, WORKFLOW_GRANT_TTL_MS);
+      }
+      if (wfGrants.length > 0) {
+        console.log(
+          `[workflow-grant] session=${sessionId} ${pending.capability}/${pending.domain} approval also grants [${wfGrants.map((g) => g.tool).join(',')}] for ${Math.round(WORKFLOW_GRANT_TTL_MS / 60_000)}min`,
         );
-        for (const sib of siblings) {
-          grants.grant(sib, pending.capability as any, pending.domain as any, `workflow grant via ${pending.toolName} approval`, WORKFLOW_GRANT_TTL_MS);
-        }
-        if (siblings.length > 0) {
-          console.log(
-            `[workflow-grant] session=${sessionId} ${pending.capability}/local approval also grants [${siblings.join(',')}] for ${Math.round(WORKFLOW_GRANT_TTL_MS / 60_000)}min`,
-          );
-        }
       }
       // Reconstruct the suspended tool as a call and place it back at the front of the queue, then re-enter runToolLoop with the remaining calls.
       // Must preserve it; otherwise the tool_use in the previous assistant message will have no matching tool_result,
