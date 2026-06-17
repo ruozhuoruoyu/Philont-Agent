@@ -279,8 +279,8 @@ interface FetchResultPayload {
   text: string;
   /** Whether the content was truncated */
   truncated: boolean;
-  /** Extraction method: raw/markdown/distilled/preapproved */
-  extractor: 'raw' | 'markdown' | 'distilled' | 'preapproved' | 'redirect';
+  /** Extraction method: raw/markdown/distilled/preapproved/redirect/native */
+  extractor: 'raw' | 'markdown' | 'distilled' | 'preapproved' | 'redirect' | 'native';
   /** Raw markdown length (before truncation/distillation) */
   rawLength: number;
   fetchedAt: string;
@@ -503,6 +503,127 @@ function formatPayload(p: FetchResultPayload): string {
   return `${meta}\n\n---\n\n${p.text}`;
 }
 
+// ── arxiv → HTML routing (2026-06-17) ────────────────────────────────────────
+// arxiv blocks aggressive PDF scraping (export.arxiv.org/pdf/… returns HTTP 403). It DOES serve a
+// fetch-friendly HTML rendering: arxiv.org/html/<id> (native, 2024+) and ar5iv (older papers). When the
+// model asks for an arxiv pdf/abs URL, try the HTML versions first; fall back to the original last.
+const ARXIV_HOST_RE = /(^|\.)(arxiv\.org|export\.arxiv\.org)$/i;
+export function arxivCandidates(rawUrl: string): string[] | null {
+  let u: URL;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (!ARXIV_HOST_RE.test(u.hostname)) return null;
+  // /pdf/<id>(.pdf)?  or  /abs/<id>  or  /html/<id> — id: new (2401.01234v2) or old (math/0309136)
+  const m = u.pathname.match(/\/(?:pdf|abs|html)\/(.+?)(?:\.pdf)?\/?$/i);
+  if (!m) return null;
+  const id = m[1];
+  if (!/^([a-z-]+(\.[A-Za-z]{2})?\/\d{7}|\d{4}\.\d{4,5})(v\d+)?$/i.test(id)) return null;
+  return [
+    `https://arxiv.org/html/${id}`,
+    `https://ar5iv.labs.arxiv.org/html/${id}`,
+    rawUrl, // original (likely 403 for pdf) as last resort
+  ];
+}
+
+// ── Native server-side web_fetch tier (2026-06-17) ───────────────────────────
+// Route the fetch through the provider's SERVER-SIDE web_fetch tool (same Anthropic-compatible endpoint as
+// native web_search → DeepSeek in this deployment). The fetch then runs on the provider's infrastructure, not
+// our process — so sites that 403 our direct GET (arxiv export, baidu, erdosproblems) succeed. Fully
+// fallback-safe: any failure (no key, endpoint doesn't support the tool, parse miss) falls back to direct HTTP.
+let nativeFetchSupported: boolean | null = null; // null=unknown, true=works, false=endpoint rejected the tool
+
+/** Recursively collect text from a (web_fetch_tool_result) block subtree, tolerant of exact nesting. */
+export function collectText(node: unknown, out: string[], budget: { n: number }): void {
+  if (budget.n <= 0 || node == null) return;
+  if (typeof node === 'string') return; // bare strings are usually ids/urls; only take labelled text below
+  if (Array.isArray(node)) {
+    for (const x of node) collectText(x, out, budget);
+    return;
+  }
+  if (typeof node === 'object') {
+    const o = node as Record<string, unknown>;
+    if (typeof o.text === 'string') {
+      out.push(o.text);
+      budget.n -= o.text.length;
+    }
+    if (typeof o.data === 'string' && typeof o.media_type === 'string' && o.media_type.includes('text')) {
+      out.push(o.data);
+      budget.n -= o.data.length;
+    }
+    for (const k of ['content', 'source', 'document', 'result']) if (k in o) collectText(o[k], out, budget);
+  }
+}
+
+async function fetchNative(input: WebFetchInput): Promise<FetchResultPayload> {
+  if (nativeFetchSupported === false) throw new Error('native web_fetch unsupported on this endpoint');
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
+  const baseURL = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/+$/, '');
+  const model = process.env.ANTHROPIC_MODEL || 'deepseek-v4-flash';
+  const toolType = process.env.PHILONT_WEB_FETCH_NATIVE_TOOL || 'web_fetch_20260209';
+  const maxChars = input.maxChars ?? DEFAULT_MAX_CHARS;
+  const start = Date.now();
+
+  const resp = await fetch(`${baseURL}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model,
+      max_tokens: 4096,
+      messages: [{ role: 'user', content: `Use web_fetch to retrieve this URL and return its content. URL: ${input.url}` }],
+      tools: [{ type: toolType, name: 'web_fetch', max_uses: 1 }],
+    }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    // 4xx = the endpoint rejected the web_fetch tool (unsupported / bad param) → stop trying native this process.
+    if (resp.status >= 400 && resp.status < 500) nativeFetchSupported = false;
+    throw new Error(`native web_fetch HTTP ${resp.status}`);
+  }
+  nativeFetchSupported = true;
+  const data = (await resp.json()) as { content?: Array<{ type?: string; content?: unknown }> };
+  const out: string[] = [];
+  const budget = { n: maxChars };
+  for (const block of data.content ?? []) {
+    if (typeof block?.type !== 'string' || !block.type.includes('web_fetch')) continue;
+    const inner = block.content as { type?: string; error_code?: string } | unknown;
+    if (inner && !Array.isArray(inner) && (inner as { type?: string }).type?.includes('error')) {
+      throw new Error(`native web_fetch tool error: ${(inner as { error_code?: string }).error_code ?? 'unknown'}`);
+    }
+    collectText(block.content, out, budget);
+  }
+  const joined = out.join('\n').trim();
+  if (!joined) throw new Error('native web_fetch returned no content');
+  const { text, truncated } = truncate(joined, maxChars);
+  return {
+    url: input.url,
+    finalUrl: input.url,
+    status: 200,
+    contentType: 'text/markdown',
+    text,
+    truncated,
+    extractor: 'native',
+    rawLength: joined.length,
+    fetchedAt: new Date().toISOString(),
+    tookMs: Date.now() - start,
+  };
+}
+
+/** One URL: try the provider's server-side fetch first (avoids our-IP 403), then the direct HTTP path. */
+async function fetchOne(input: WebFetchInput): Promise<FetchResultPayload> {
+  try {
+    return await fetchNative(input);
+  } catch {
+    // fall back to direct HTTP (with the existing transient retry)
+  }
+  return withRetry(() => runWebFetch(input), {
+    isRetryable: (e) => e instanceof IngestError && (e.kind === 'timeout' || e.kind === 'aborted'),
+  });
+}
+
 export const webFetchTool: Tool = {
   name: 'webFetch',
   description: [
@@ -537,24 +658,26 @@ export const webFetchTool: Tool = {
   capability: 'read',
   domain: 'network',
   async execute(params) {
-    try {
-      // Retry transient network stalls (timeout / abort) — a read is idempotent, and a spurious webFetch
-      // failure would otherwise pollute the same_root_cause / viability stop signal. 4xx/permanent → no retry.
-      const payload = await withRetry(
-        () =>
-          runWebFetch({
-            url: params.url as string,
-            prompt: params.prompt as string | undefined,
-            extractMode: params.extractMode as 'markdown' | 'text' | undefined,
-            maxChars: params.maxChars as number | undefined,
-          }),
-        { isRetryable: (e) => e instanceof IngestError && (e.kind === 'timeout' || e.kind === 'aborted') },
-      );
-      return {
-        success: true,
-        output: formatPayload(payload),
-      };
-    } catch (e) {
+    const reqUrl = params.url as string;
+    // arxiv pdf/abs → try HTML renderings first (PDF 403s); other URLs → just the one. Each candidate goes
+    // through fetchOne (native server-side fetch → direct HTTP fallback).
+    const candidates = arxivCandidates(reqUrl) ?? [reqUrl];
+    let lastErr: unknown;
+    for (const url of candidates) {
+      try {
+        const payload = await fetchOne({
+          url,
+          prompt: params.prompt as string | undefined,
+          extractMode: params.extractMode as 'markdown' | 'text' | undefined,
+          maxChars: params.maxChars as number | undefined,
+        });
+        return { success: true, output: formatPayload(payload) };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    {
+      const e = lastErr;
       if (e instanceof IngestError) {
         return {
           success: false,
