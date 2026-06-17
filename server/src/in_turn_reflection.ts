@@ -174,3 +174,34 @@ function buildReflectionReminder(signature: string, count: number): string {
     '',
   ].join('\n');
 }
+
+/**
+ * A MECHANICAL failure (2026-06-17): a script/syntax/runtime bug in code the agent just wrote, not a
+ * strategic dead-end. The right recovery is "read the exact error, fix the script, re-run" — NOT "research
+ * first" or "make a plan". Prod showed a PARI/GP `***` syntax error funnelled into research-before-retry +
+ * auto-revise-plan + in-turn-tool-block, which together blocked the very writeFile/shell needed to fix it →
+ * deadlock. Detected by signature so the caller can keep the reflection reminder but skip the strategic gates.
+ */
+export function isMechanicalFailure(signature: string | undefined): boolean {
+  if (!signature) return false;
+  return /script error|syntax error|\btraceback\b|SyntaxError|NameError|ImportError|ModuleNotFoundError|IndentationError|TypeError|AttributeError|not a function|too few arguments|unexpected (?:token|character|symbol)|cmd-not-found|command not found|no such file/i.test(
+    signature,
+  );
+}
+
+/** Reminder for a mechanical failure: fix the code and re-run — do not research or make a plan. */
+export function buildMechanicalFixReminder(signature: string, count: number): string {
+  return [
+    '',
+    `[drive reflection-trigger] You have hit the same MECHANICAL error ${count} times this turn (signature=${signature}).`,
+    '',
+    '**This is a bug in the script you just wrote — a syntax / runtime / missing-symbol error, NOT a dead-end in the approach.** ',
+    'Do NOT research, do NOT make a plan, do NOT switch direction. The fix is mechanical:',
+    '  1. Read the EXACT error line (the `***` / traceback text) — it names the broken construct.',
+    '  2. Fix the script with `writeFile` / `patch` (correct the syntax, the missing arg, the bad function name).',
+    '  3. Re-run it. Iterate until it runs — this is normal scripting, not a wall.',
+    '',
+    'If after a few honest fix attempts the SAME error persists, then reconsider the tool/approach — but first, just fix the bug.',
+    '',
+  ].join('\n');
+}

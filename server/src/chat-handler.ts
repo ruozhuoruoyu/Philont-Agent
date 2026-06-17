@@ -172,6 +172,8 @@ import {
 } from './failure_recovery_inject.js';
 import {
   detectInTurnFailurePattern,
+  isMechanicalFailure,
+  buildMechanicalFixReminder,
   type InTurnToolRecord,
 } from './in_turn_reflection.js';
 import { maybeRunReflection } from './reflection_runner.js';
@@ -6192,15 +6194,26 @@ async function runToolLoop(
       const reflection = detectInTurnFailurePattern(inTurnRecords, 2);
       if (reflection.triggered) {
         reflectionReminderInjected = true;
-        messages.push({ role: 'user', content: reflection.reminder! });
+        // A MECHANICAL failure (gp/python syntax error, traceback, not-a-function) is a bug in the script the
+        // agent just wrote — the recovery is "fix it and re-run", which needs writeFile+shell. The strategic
+        // gates below (in-turn-tool-block / research-before-retry / auto-revise-plan) would block exactly those
+        // tools → deadlock (prod 2026-06-17). For mechanical errors: give the fix-it reminder, skip the gates.
+        const mechanicalFailure = isMechanicalFailure(reflection.signature);
+        messages.push({
+          role: 'user',
+          content: mechanicalFailure
+            ? buildMechanicalFixReminder(reflection.signature!, reflection.count!)
+            : reflection.reminder!,
+        });
         onTrace?.({
           kind: 'loop-control', tier: 4,
-          text: `同根因失败 ${reflection.count}x,触发反思提醒`,
+          text: `同根因失败 ${reflection.count}x,触发反思提醒${mechanicalFailure ? '(机械错:仅提示修复,不锁工具)' : ''}`,
         });
         // 2026-05-11: extract toolName from the signature head as the block list for the rest of this turn.
         // Signature looks like `http:http-401` / `webFetch:other:...` / `shell:cmd-not-found:rg`;
         // toolName is before the first colon. Graceful degradation on failure: if parsing fails, do not block; only inject reminder.
-        if (reflection.signature) {
+        // Mechanical errors skip the tool-block + research-before-retry entirely (the fix needs those tools).
+        if (reflection.signature && !mechanicalFailure) {
           const colonIdx = reflection.signature.indexOf(':');
           if (colonIdx > 0) {
             blockedToolAfterReflection = reflection.signature.slice(0, colonIdx);
@@ -6266,6 +6279,9 @@ async function runToolLoop(
         const isMechanismReject = /:other:\[(plan_protocol_gate|in_turn_tool_block|autonomous_blacklist|research[_-]?before[_-]?retry)\b/i.test(
           reflection.signature ?? '',
         );
+        // Mechanical errors (script/syntax bug) are not a strategic wall — escalating to slow+placeholder-plan
+        // and blocking writeFile via plan_protocol_gate is exactly what deadlocked the fix in prod. Skip it.
+        const mechFail = isMechanicalFailure(reflection.signature);
         const isBenignMiss =
           /^(get_fact|list_facts|search_notes|search_skills|search_kb|recall_sessions):/i.test(
             reflection.signature ?? '',
@@ -6273,9 +6289,14 @@ async function runToolLoop(
           /(?::|^)(未找到|not_found|not found|empty|no results?)\b/i.test(
             reflection.signature ?? '',
           ) ||
-          isMechanismReject;
+          isMechanismReject ||
+          mechFail;
         if (isBenignMiss) {
-          const skipReason = isMechanismReject ? 'mechanism-layer active reject' : 'benign miss';
+          const skipReason = isMechanismReject
+            ? 'mechanism-layer active reject'
+            : mechFail
+              ? 'mechanical error (fix-and-retry, not a strategic wall)'
+              : 'benign miss';
           console.log(
             `[auto-revise-on-fail] session=${sessionId} skipped (${skipReason}, no escalation): ${reflection.signature}`,
           );

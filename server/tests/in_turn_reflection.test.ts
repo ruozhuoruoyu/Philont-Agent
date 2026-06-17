@@ -8,8 +8,28 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   detectInTurnFailurePattern,
+  isMechanicalFailure,
   type InTurnToolRecord,
 } from '../src/in_turn_reflection.js';
+
+test('isMechanicalFailure: gp/python script bugs are mechanical (fix-and-retry, not strategic)', () => {
+  for (const sig of [
+    'shell:other:pari/gp script error (gp exited 0 but stderr...)',
+    'shell:other:Traceback (most recent call last)',
+    'shell:other:SyntaxError: invalid syntax',
+    'shell:other:*** not a function in function call',
+    'shell:cmd-not-found:rg',
+    'shell:other:ModuleNotFoundError: No module named pdfplumber',
+  ]) {
+    assert.equal(isMechanicalFailure(sig), true, `should be mechanical: ${sig}`);
+  }
+});
+
+test('isMechanicalFailure: strategic/approach failures are NOT mechanical', () => {
+  for (const sig of ['webFetch:http-403', 'http:http-401', 'deep_explore:other:no progress this round', undefined, '']) {
+    assert.equal(isMechanicalFailure(sig), false, `should NOT be mechanical: ${sig}`);
+  }
+});
 
 function http401(): InTurnToolRecord {
   return {
