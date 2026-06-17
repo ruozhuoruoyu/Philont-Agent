@@ -207,6 +207,7 @@ import {
   VIABILITY_ACCEPT_RE,
   VIABILITY_CONTINUE_RE,
 } from './viability_gate.js';
+import { detectUngroundedArxivCitation, buildCitationGroundingDirective } from './citation_gate.js';
 import { resolveResponseLanguage, buildLanguageDirective } from './response_language.js';
 
 const llm = createLLMAdapter();
@@ -5974,6 +5975,10 @@ async function runToolLoop(
   // to disable. Counsel-only: changes the RECOMMENDATION (and may downgrade outcome to stop_and_report), never
   // blocks the user from replying "继续".
   let viabilityAttempts = 0;
+  // Citation-grounding gate (2026-06-17): the model fabricates a specific arXiv id (and its attributed
+  // equation/result) from memory when no source was actually retrieved this conversation. One regen forces
+  // honest framing. Capped at one attempt like the other gates.
+  let citationGroundingAttempts = 0;
   // Phase 18 WS2: carries a stop_and_report verdict from the ViabilityGate to the final emit so the outcome
   // class is downgraded deterministically (independent of whether the regen dropped the continuation pitch).
   let viabilityStopPending = false;
@@ -6746,6 +6751,35 @@ async function runToolLoop(
           }
         } catch (e) {
           console.warn('[viability] gate failed (ignored):', e);
+        }
+      }
+
+      // Citation-grounding gate (2026-06-17): block a reply that asserts a specific arXiv id (and the
+      // equations/results it attributes to that paper) when no source backing it was ever retrieved or
+      // supplied by the user — a memory-recalled id is how fabricated citations enter. Regen once to force
+      // honest framing (待核实) or an actual fetch. env PHILONT_CITATION_GATE=0 to disable.
+      if (citationGroundingAttempts < 1 && process.env.PHILONT_CITATION_GATE !== '0') {
+        const ungroundedId = detectUngroundedArxivCitation(response.content, messages);
+        if (ungroundedId) {
+          citationGroundingAttempts++;
+          audit.append('self_domain_write', {
+            source: 'citation_grounding_gate',
+            origin: 'Internal',
+            toolName: 'citation_grounding_gate_fired',
+            sessionId,
+            arxivId: ungroundedId,
+          });
+          console.warn(
+            `[citation-grounding] session=${sessionId} fired: cited arXiv:${ungroundedId} with no retrieved/user-supplied source`,
+          );
+          messages.push({ role: 'assistant', content: response.content });
+          messages.push({ role: 'user', content: buildCitationGroundingDirective(ungroundedId) });
+          onTrace?.({
+            kind: 'internal-gate', tier: 4,
+            text: `Citation-grounding gate fired (arXiv:${ungroundedId} unsourced), forcing honest framing`,
+            meta: { gateName: 'CitationGrounding' },
+          });
+          continue;
         }
       }
 

@@ -97,6 +97,20 @@ async function checkDownloadOutputs(command: string): Promise<string> {
  */
 const DEFAULT_TIMEOUT_MS = 300_000;
 
+/**
+ * gp.exe (PARI/GP) and similar CAS exit 0 even on SCRIPT syntax/runtime errors, printing a `***  <error>`
+ * marker to stderr. Without this a broken gp script returns success with garbage/placeholder output — e.g. a
+ * search that never ran printing "No solutions found", or literal "x=x". When the command invokes gp and the
+ * captured output carries the PARI/GP `***` marker, return the error line so the caller can fail the call (the
+ * dedicated pariGp tool already does this; this covers raw `shell gp.exe`). Returns null if not a gp error.
+ */
+export function detectGpScriptError(command: string, stdout: string, stderr: string): string | null {
+  const looksLikeGp = /\bgp(\.exe)?\b/i.test(command) || /\bpari\b/i.test(command);
+  if (!looksLikeGp) return null;
+  const m = `${stderr}\n${stdout}`.match(/^\s*\*\*\*\s{2,}\S.*$/m);
+  return m ? m[0].trim() : null;
+}
+
 /** Format a child_process.exec failure exception as structured text so the LLM immediately knows it failed. */
 function formatFailure(error: any, durationMs: number, requestedTimeout: number): string {
   const exitCode = typeof error?.code === 'number' ? error.code : null;
@@ -211,6 +225,18 @@ export const shellTool: Tool = {
       // but the -o argument is unchanged; using original reduces false-match probability.
       const downloadWarnings = await checkDownloadOutputs(command);
       if (downloadWarnings) body += downloadWarnings;
+      // PARI/GP (and similar CAS) exit 0 even on SCRIPT syntax/runtime errors — surface as FAILURE (see below).
+      const gpErrorLine = detectGpScriptError(command, out, err);
+      if (gpErrorLine) {
+        return {
+          success: false,
+          output: out,
+          error:
+            `PARI/GP script error (gp exited 0 but stderr reports an error — the printed output is NOT a reliable result):\n` +
+            `${gpErrorLine}\n` +
+            `Fix the .gp script syntax and re-run; do NOT treat the printed output (e.g. "no solutions found") as a real finding.`,
+        };
+      }
       return {
         success: true,
         output: body,
