@@ -176,7 +176,7 @@ function renderInjection(failures: FailureRecord[], sinceMin: number): string {
     `1. **复杂多步任务** → 优先 \`planAndExecute({task: "...", aggregateMode: "llm-summary"})\` 一次完成。父 turn 视角 1 iter,内部子 loop 跑工具不会撞主 cap。`,
   );
   lines.push(
-    `2. 或先 \`searchSkills\` + \`use_skill\` 找现成方案,避免从零摸索。`,
+    `2. 或先 \`search_skills\` + \`use_skill\` 找现成方案,避免从零摸索。`,
   );
   lines.push(
     `3. **不要**重复"writeFile 脚本 → shell 跑 → parse → ..."的逐步摸索路径,既往同样路径已撞墙。`,

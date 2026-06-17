@@ -158,8 +158,8 @@ export class PursuitDriver implements Driver {
     // that accept a natural-language goal can be used directly; formal tools will receive the
     // query text and the executor evaluates output/errors afterward.
     const plan: InitiativePlanStep[] = [
-      { tool: 'searchNotes', params: { query: q.text } },
-      { tool: 'searchSkills', params: { query: q.text } },
+      { tool: 'search_notes', params: { query: q.text } },
+      { tool: 'search_skills', params: { query: q.text } },
       { tool: 'webSearch', params: { query: q.text } },
     ];
     if (grantedTool) {
@@ -207,8 +207,8 @@ export class PursuitDriver implements Driver {
       utility,
       budgetEstimate: 1500,
       plan: [
-        { tool: 'searchNotes', params: { query: p.title } },
-        { tool: 'listFacts', params: { namespace: 'project' } },
+        { tool: 'search_notes', params: { query: p.title } },
+        { tool: 'list_facts', params: { namespace: 'project' } },
       ],
     };
   }

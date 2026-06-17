@@ -233,7 +233,7 @@ export class CuriosityDriver implements Driver {
         budgetEstimate: 1800,
         plan: [
           {
-            tool: 'searchNotes',
+            tool: 'search_notes',
             params: { query: p.title },
           },
         ],

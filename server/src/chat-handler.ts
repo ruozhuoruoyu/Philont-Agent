@@ -209,6 +209,7 @@ import {
   VIABILITY_CONTINUE_RE,
 } from './viability_gate.js';
 import { detectUngroundedArxivCitation, buildCitationGroundingDirective } from './citation_gate.js';
+import { detectHandRolledParser, buildSkillReflexNudge } from './skill_reflex.js';
 import { resolveResponseLanguage, buildLanguageDirective } from './response_language.js';
 
 const llm = createLLMAdapter();
@@ -2066,6 +2067,10 @@ const viabilityPivotStreak = new Map<string, number>();
 // Research-workflow grant set + applier live in research_grant.ts (LOCAL_RESEARCH_WORKFLOW /
 // localWorkflowGrants), keyed by (tool, capability, domain) so one approval covers the whole local loop.
 const WORKFLOW_GRANT_TTL_MS = 30 * 60_000;
+
+// skill-reflex (2026-06-17): sessionIds already nudged once to search_skills before hand-rolling a
+// document parser. One nudge per session, then parser shells run as-is (no loop).
+const skillReflexNudged = new Set<string>();
 
 /**
  * pendingAuth TTL — matches the "(valid for 10 min)" shown on the auth card. After this, a pending
@@ -5872,7 +5877,22 @@ async function runToolLoop(
             (sanitized.truncatedTailLen ? ` truncated=${sanitized.truncatedTailLen}` : ''),
         );
       }
-      if (isDeepExploreAdvance(call) && deepExploreAdvancesThisTurn >= 1) {
+      const parserLabel =
+        process.env.PHILONT_SKILL_REFLEX !== '0' && !skillReflexNudged.has(sessionId)
+          ? detectHandRolledParser(call.name, sanitized.input)
+          : null;
+      const alreadySearchedSkills = (signalBus.inTurnRecords ?? []).some(
+        (r) => r.toolName === 'search_skills' || r.toolName === 'use_skill',
+      );
+      if (parserLabel && !alreadySearchedSkills) {
+        // Intercept once per session: don't run the raw parser yet — nudge the agent to check skills first.
+        // Re-issuing the same command runs it as-is (the session is now marked nudged), so this never loops.
+        skillReflexNudged.add(sessionId);
+        console.warn(
+          `[skill-reflex] session=${sessionId} intercepted hand-rolled "${parserLabel}" → nudging search_skills first`,
+        );
+        result = { success: false, output: '', error: buildSkillReflexNudge(parserLabel), duration: 0 };
+      } else if (isDeepExploreAdvance(call) && deepExploreAdvancesThisTurn >= 1) {
         console.warn(`[deep-explore] blocked 2nd advance this turn (one round/turn cap)`);
         result = { success: true, output: DEEP_EXPLORE_ONE_ROUND_MSG, duration: 0 };
       } else {

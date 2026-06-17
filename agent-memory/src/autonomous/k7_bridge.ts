@@ -134,8 +134,8 @@ export function bridgeTaskCommitment(
     `${verb} ${snap.lastAssistantHead?.slice(0, 60) ?? ''}`.trim();
 
   const plan: InitiativePlanStep[] = [
-    { tool: 'searchSkills', params: { query } },
-    { tool: 'searchNotes', params: { query } },
+    { tool: 'search_skills', params: { query } },
+    { tool: 'search_notes', params: { query } },
     { tool: 'webSearch', params: { query } },
   ];
 
@@ -217,8 +217,8 @@ function buildFailuresWithClaimProposal(
       ? `${failedTools.join(' ')} failure alternative approaches`
       : 'alternative approaches for tool failures this turn';
   const plan: InitiativePlanStep[] = [
-    { tool: 'searchSkills', params: { query } },
-    { tool: 'searchNotes', params: { query } },
+    { tool: 'search_skills', params: { query } },
+    { tool: 'search_notes', params: { query } },
     { tool: 'webSearch', params: { query } },
   ];
   return {

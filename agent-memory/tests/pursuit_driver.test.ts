@@ -86,7 +86,7 @@ test('PursuitDriver: 有 open question + evidence + 7+ 天 stalled → advance-q
   assert.equal(ps[0].kind, 'pursuit:advance-question');
   assert.equal(ps[0].targetRef, 'pursuit:p1:q:q1');
   assert.equal(ps[0].plan?.length, 3);
-  assert.equal(ps[0].plan?.[0].tool, 'searchNotes');
+  assert.equal(ps[0].plan?.[0].tool, 'search_notes');
   assert.equal(ps[0].plan?.[2].tool, 'webSearch');
 });
 

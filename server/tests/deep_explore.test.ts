@@ -158,11 +158,12 @@ test('judgeConvergence:根 proved→solved;frontier 空→stuck;否则 active', 
 
 test('工具白名单:本地回忆 + z3Verify(验证),剔除 web 浏览/目录翻找', () => {
   // 保留本地记忆/文件回忆 + 验证牙齿(z3Verify SMT / pariGp 数论 CAS)
-  for (const t of ['searchNotes', 'getFact', 'readFile', 'listFacts', 'searchKB', 'searchSkills', 'z3Verify', 'pariGp']) {
+  // agent-memory tools are snake_case (search_notes/get_fact/list_facts/search_skills) — must match the registry
+  for (const t of ['search_notes', 'get_fact', 'readFile', 'list_facts', 'search_skills', 'z3Verify', 'pariGp']) {
     assert.ok(DEEP_EXPLORE_RESEARCH_ALLOW.has(t), `应保留 ${t}`);
   }
   // 剔除 browsing —— 防子 LLM 用浏览回避推理
-  for (const t of ['webSearch', 'webFetch', 'fetchUrl', 'listDir', 'inspectPath']) {
+  for (const t of ['webSearch', 'webFetch', 'listDir', 'inspectPath']) {
     assert.ok(!DEEP_EXPLORE_RESEARCH_ALLOW.has(t), `应剔除 ${t}`);
   }
 });
@@ -841,7 +842,7 @@ test('PROFILES: formal vs deliberate are wired with the right ids/verbs', () => 
 });
 
 test('toolAllow: deliberate allows web + user data, formal excludes web', () => {
-  for (const t of ['webSearch', 'webFetch', 'readFile', 'getFact']) {
+  for (const t of ['webSearch', 'webFetch', 'readFile', 'get_fact']) {
     assert.ok(DELIBERATE_PROFILE.toolAllow.has(t), `deliberate should allow ${t}`);
     assert.ok(DELIBERATE_RESEARCH_ALLOW.has(t));
   }

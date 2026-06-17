@@ -65,8 +65,8 @@ test('bridgeTaskCommitment: 正常 fired → 产 commitment:research-handoff', (
   assert.match(p!.targetRef, /^commit:[a-f0-9]{12}$/);
   assert.equal(p!.utility, 0.8);
   assert.ok(p!.plan && p!.plan.length === 3);
-  assert.equal(p!.plan![0].tool, 'searchSkills');
-  assert.equal(p!.plan![1].tool, 'searchNotes');
+  assert.equal(p!.plan![0].tool, 'search_skills');
+  assert.equal(p!.plan![1].tool, 'search_notes');
   assert.equal(p!.plan![2].tool, 'webSearch');
 });
 

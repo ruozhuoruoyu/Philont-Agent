@@ -45,7 +45,7 @@ test('近期 iter_cap_hit → 注入命中,文本含 planAndExecute', () => {
   assert.equal(r.recentFailures.length, 1);
   assert.equal(r.recentFailures[0].kind, 'iter_cap_hit');
   assert.match(r.text, /planAndExecute/);
-  assert.match(r.text, /searchSkills/);
+  assert.match(r.text, /search_skills/);
   assert.match(r.text, /hit iter cap/);
 });
 

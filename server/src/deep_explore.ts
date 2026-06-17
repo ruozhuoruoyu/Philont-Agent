@@ -324,7 +324,7 @@ function renderSessionBarriers(sessionId: string): string[] {
  */
 const LIT_GROUNDING_ENABLED = process.env.PHILONT_DEEP_EXPLORE_LIT_GROUNDING !== '0';
 /** Web tools allowed ONLY in the one-shot grounding pass (never in the per-round reasoning whitelist). */
-const WEB_TOOL_NAMES: ReadonlySet<string> = new Set(['webSearch', 'webFetch', 'fetchUrl']);
+const WEB_TOOL_NAMES: ReadonlySet<string> = new Set(['webSearch', 'webFetch']);
 /** Iteration cap for the grounding mini-loop. env PHILONT_DEEP_EXPLORE_LIT_GROUNDING_ITERS, default 6, range 1-20. */
 const LIT_GROUNDING_MAX_ITERS = (() => {
   const n = Number(process.env.PHILONT_DEEP_EXPLORE_LIT_GROUNDING_ITERS);
@@ -666,11 +666,13 @@ const REASON_TOOL_NAMES: ReadonlySet<string> = new Set(REASON_TOOL_DEFS.map((d) 
  * background autonomous cannot reach them).
  */
 export const DEEP_EXPLORE_RESEARCH_ALLOW: ReadonlySet<string> = new Set([
-  'searchNotes',
-  'searchSkills',
-  'searchKB',
-  'getFact',
-  'listFacts',
+  // agent-memory tools are snake_case (search_notes / search_skills / get_fact / list_facts); the registry
+  // filters by exact tool name, so the old camelCase entries silently dropped these from research mode —
+  // the agent could not discover skills (e.g. a PDF skill) mid-research. searchKB was a phantom (no tool).
+  'search_notes',
+  'search_skills',
+  'get_fact',
+  'list_facts',
   'readFile',
   'z3Verify',
   'pariGp',
@@ -1175,11 +1177,12 @@ function renderFinalReport(session: ReasoningSession, nodes: ReasoningNode[]): s
 export const DELIBERATE_RESEARCH_ALLOW: ReadonlySet<string> = new Set([
   'webSearch',
   'webFetch',
-  'fetchUrl',
-  'searchNotes',
-  'searchKB',
-  'getFact',
-  'listFacts',
+  // snake_case agent-memory tools (the old camelCase entries never matched the registry); search_skills
+  // added so deliberate research can also discover/install skills. fetchUrl/searchKB were phantom names.
+  'search_notes',
+  'search_skills',
+  'get_fact',
+  'list_facts',
   'readFile',
 ]);
 

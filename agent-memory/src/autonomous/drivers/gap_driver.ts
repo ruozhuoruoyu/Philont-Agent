@@ -109,7 +109,7 @@ export class GapDriver implements Driver {
         budgetEstimate: 1800,
         plan: [
           {
-            tool: 'searchNotes',
+            tool: 'search_notes',
             params: { query: r.taskSignature },
           },
         ],
@@ -134,7 +134,7 @@ export class GapDriver implements Driver {
         budgetEstimate: 1500,
         plan: [
           {
-            tool: 'searchSkills',
+            tool: 'search_skills',
             params: { query: s.name },
           },
         ],

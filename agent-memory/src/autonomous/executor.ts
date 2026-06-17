@@ -31,12 +31,13 @@ import type {
 export const DEFAULT_TOOL_WHITELIST: ReadonlySet<string> = new Set([
   'webSearch',
   'webFetch',
-  'fetchUrl',
-  'searchNotes',
-  'searchSkills',
-  'searchKB',
-  'getFact',
-  'listFacts',
+  // agent-memory tools are snake_case; the old camelCase names never matched the registry, so autonomous
+  // research silently lost skill/note/fact lookup (drivers dispatched 'searchSkills' → no-op). fetchUrl /
+  // searchKB were phantom tool names.
+  'search_notes',
+  'search_skills',
+  'get_fact',
+  'list_facts',
   'readFile',
   // 2026-05-06 K7→K8 bridge: HonestyGate fabricated_size_claim review needs this
   'inspectPath',

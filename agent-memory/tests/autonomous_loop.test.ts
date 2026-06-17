@@ -397,8 +397,8 @@ test('loop: PursuitDriver 命中 stalled active pursuit + open question → 跑�
     notes: handle.notes,
     llm: llmReturning(llmOut, 250),
     tools: tools({
-      searchNotes: { ok: true, output: '(no local notes found)' },
-      searchSkills: { ok: true, output: '(no matching skills)' },
+      search_notes: { ok: true, output: '(no local notes found)' },
+      search_skills: { ok: true, output: '(no matching skills)' },
       webSearch: { ok: true, output: 'PgBouncer is a connection pooler for PostgreSQL...' },
     }),
   });
@@ -520,8 +520,8 @@ test('loop + pursuitProgressWriter: PursuitDriver done → pursuit lastTouchedAt
     notes: handle.notes,
     llm: llmReturning(llmOut, 200),
     tools: tools({
-      searchNotes: { ok: true, output: '(empty)' },
-      searchSkills: { ok: true, output: '(empty)' },
+      search_notes: { ok: true, output: '(empty)' },
+      search_skills: { ok: true, output: '(empty)' },
       webSearch: { ok: true, output: 'token bucket details' },
     }),
   });
