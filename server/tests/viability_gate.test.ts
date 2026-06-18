@@ -273,3 +273,18 @@ test('no accumulated doom → no reset even on a redirect (nothing to clear)', (
   const d = decideTurnAnchors({ lastAssistantText: '好的。', userMessage: '做个新方向', hadDoom: false });
   assert.equal(d.doomReset, false);
 });
+
+test('commit: "整理论文吧"-style verb+吧 imperatives now trigger after a pitch', () => {
+  for (const msg of ['整理论文吧', '做这个吧', '去做', '开搞', '动手', '去整理']) {
+    const d = decideTurnAnchors({ lastAssistantText: '要继续整理论文吗？', userMessage: msg, hadDoom: false });
+    assert.equal(d.commit, true, `should commit for: ${msg}`);
+  }
+});
+
+test('"算了吧"/"放弃吧" are acceptance, never commit even after a pitch', () => {
+  for (const msg of ['算了吧', '放弃吧', '不做了']) {
+    const d = decideTurnAnchors({ lastAssistantText: '要继续整理吗？', userMessage: msg, hadDoom: true });
+    assert.equal(d.commit, false, `should NOT commit for acceptance: ${msg}`);
+    assert.equal(d.doomReset, false, `acceptance must not reset doom: ${msg}`);
+  }
+});

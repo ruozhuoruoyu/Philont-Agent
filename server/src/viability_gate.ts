@@ -124,8 +124,15 @@ export const VIABILITY_ACCEPT_RE =
 /** WS2: the user wants to keep going despite the wall — overrides acceptance, keeps the session active. */
 export const VIABILITY_CONTINUE_RE = /继续|接着|再(?:试|跑|来|攻|想)|go on|keep going|continue|顶(?:着|上)|硬(?:上|刚)/i;
 
-/** Imperative "start doing it" words (complements VIABILITY_CONTINUE_RE) — approving a proposed next step. */
-const PUSH_FORWARD_RE = /启动|开吧|开始|做吧|干吧|搞起|\bgo\b|\bstart\b/i;
+/**
+ * Imperative "start doing it" words (complements VIABILITY_CONTINUE_RE) — approving a proposed next step.
+ * Covers: explicit start words (启动/开始/开搞/开干/动手/执行/实施/落地), the "去<verb>" form (去做/去搞/去
+ * 整理…), and the very common "<verb>…吧" imperative (整理论文吧 / 做这个吧 / 写代码吧) — a short verb-led
+ * directive ending in 吧. Acceptance phrases (算了吧/放弃) are NOT verbs in the list and are also screened by
+ * VIABILITY_ACCEPT_RE in the caller, so "算了吧" never reads as push-forward.
+ */
+const PUSH_FORWARD_RE =
+  /启动|开吧|开始|开搞|开干|开整|做吧|干吧|搞起|动手|执行|实施|落地|去(?:做|搞|弄|写|跑|试|整理|执行|办|查)|(?:做|搞|弄|写|跑|试|整理|办|干|上|来)\S{0,5}吧|\bgo\b|\bstart\b|\bdo it\b|\bproceed\b/i;
 /**
  * The prior turn OFFERED to do something and asked the user to choose/approve ("要我开这个搜索吗？", "要不要我
  * 列几个？", "选哪个？", "shall I…?"). Broader than CONTINUATION_PITCH_RE (which only catches the "要继续吗"
@@ -164,7 +171,8 @@ export function decideTurnAnchors(input: {
     input.hadDoom && !accepts && (pushesForward || (!bareAffirm && msg.trim().length >= 4));
   const prior = input.lastAssistantText ?? '';
   const priorPitch = prior.length > 0 && (CONTINUATION_PITCH_RE.test(prior) || OFFER_QUESTION_RE.test(prior));
-  const commit = priorPitch && pushesForward;
+  // !accepts guard: a trailing-吧 acceptance ("算了吧 / 放弃吧") must never read as "execute the proposal".
+  const commit = priorPitch && pushesForward && !accepts;
   return { doomReset, commit, anchor: commit || doomReset };
 }
 
