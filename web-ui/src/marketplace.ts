@@ -172,7 +172,7 @@ export class SkillsMarketplace extends LitElement {
     }
   }
 
-  private async update(name: string) {
+  private async applyUpdate(name: string) {
     this.busy = { ...this.busy, [name]: 'update' };
     this.error = null;
     this.notice = null;
@@ -259,7 +259,7 @@ export class SkillsMarketplace extends LitElement {
                 ${p ? html`<div class="srctag">${p.sourceTag}</div>` : null}
                 <div class="card-actions">
                   ${upd?.changed
-                    ? html`<button @click=${() => this.update(s.name)} ?disabled=${!!busy}>${t('更新', 'Update')}${upd.latestVersion ? ` v${upd.latestVersion}` : ''}</button>`
+                    ? html`<button @click=${() => this.applyUpdate(s.name)} ?disabled=${!!busy}>${t('更新', 'Update')}${upd.latestVersion ? ` v${upd.latestVersion}` : ''}</button>`
                     : html`<span class="installed">✓ ${t('最新', 'Up to date')}</span>`}
                   <button class="danger" @click=${() => this.uninstall(s.name)} ?disabled=${!!busy}>${t('卸载', 'Uninstall')}</button>
                 </div>
@@ -286,7 +286,7 @@ export class SkillsMarketplace extends LitElement {
         <div class="card-actions" @click=${(e: Event) => e.stopPropagation()}>
           ${installed
             ? (upd?.changed
-              ? html`<button @click=${() => this.update(m.name)} ?disabled=${!!busy}>${t('更新', 'Update')}${upd.latestVersion ? ` v${upd.latestVersion}` : ''}</button>`
+              ? html`<button @click=${() => this.applyUpdate(m.name)} ?disabled=${!!busy}>${t('更新', 'Update')}${upd.latestVersion ? ` v${upd.latestVersion}` : ''}</button>`
               : html`<span class="installed">✓ ${t('已安装', 'Installed')}</span>`)
             : html`<button class="primary" @click=${() => this.install(m)} ?disabled=${!!busy}>${busy === 'install' ? t('安装中…', 'Installing…') : t('安装', 'Install')}</button>`}
           ${installed ? html`<button class="danger" @click=${() => this.uninstall(m.name)} ?disabled=${!!busy}>${t('卸载', 'Uninstall')}</button>` : null}
