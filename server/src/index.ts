@@ -53,6 +53,7 @@ import {
   finalizeSession,
   registerWebuiClient,
   memory,
+  reloadSkillsFromDisk,
   reminderEmitter,
   closeSkillWatchers,
   closeScheduler,
@@ -66,6 +67,16 @@ import {
   type ReminderPayload,
 } from './chat-handler.js';
 import { utcDateString, groupFailures } from '@agent/memory';
+import {
+  searchAll,
+  inspectBundle,
+  installFromSource,
+  checkForUpdates,
+  updateSkill,
+  readLock,
+  removeLock,
+  uninstallSkillTool,
+} from '@agent/tools';
 import { listRegisteredPushChannels } from './push/channel.js';
 
 // Port: default 20266 (large enough to avoid common dev server ports 3000/8080; below the
@@ -305,6 +316,100 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const name = decodeURIComponent(path.slice('/api/memory/skills/'.length));
     const ok = memory.skills.deleteSkill(name);
     sendJson(res, ok ? 200 : 404, { deleted: ok, name });
+    return true;
+  }
+
+  // ══ Skill marketplace (aggregator client over git/URL + clawhub) ══════════
+  // GET /api/skills/registry/search?q=&limit=
+  if (req.method === 'GET' && path === '/api/skills/registry/search') {
+    const q = (url.searchParams.get('q') || '').trim();
+    const limit = Number(url.searchParams.get('limit')) || 10;
+    if (!q) { sendJson(res, 400, { error: 'q is required' }); return true; }
+    const { results, warnings } = await searchAll(q, limit);
+    sendJson(res, 200, { query: q, results, warnings });
+    return true;
+  }
+
+  // GET /api/skills/registry/inspect?sourceId=&id=  (fetch + scan, no install)
+  if (req.method === 'GET' && path === '/api/skills/registry/inspect') {
+    const sourceId = url.searchParams.get('sourceId') || '';
+    const id = url.searchParams.get('id') || '';
+    if (!sourceId || !id) { sendJson(res, 400, { error: 'sourceId and id are required' }); return true; }
+    try {
+      const { bundle, scan, decision } = await inspectBundle(sourceId, id);
+      sendJson(res, 200, { meta: bundle.meta, content: bundle.content, scan, decision });
+    } catch (e) {
+      sendJson(res, 502, { error: (e as Error).message });
+    }
+    return true;
+  }
+
+  // POST /api/skills/registry/install  {sourceId, identifier, name?, confirm?}
+  if (req.method === 'POST' && path === '/api/skills/registry/install') {
+    const body = await readJsonBody(req);
+    const sourceId = String(body.sourceId || '');
+    const identifier = String(body.identifier || '');
+    if (!sourceId || !identifier) { sendJson(res, 400, { error: 'sourceId and identifier are required' }); return true; }
+    const outcome = await installFromSource({
+      sourceId,
+      identifier,
+      name: body.name ? String(body.name) : undefined,
+      confirm: body.confirm === true,
+      actor: 'user',
+      now: new Date().toISOString(),
+    });
+    if (outcome.status === 'installed') await reloadSkillsFromDisk();
+    const code = outcome.status === 'installed' ? 200
+      : outcome.status === 'ask' ? 202
+      : outcome.status === 'blocked' ? 409 : 500;
+    sendJson(res, code, outcome);
+    return true;
+  }
+
+  // GET /api/skills/registry/updates  (which installed skills have a newer source)
+  if (req.method === 'GET' && path === '/api/skills/registry/updates') {
+    const updates = await checkForUpdates();
+    sendJson(res, 200, { updates });
+    return true;
+  }
+
+  // POST /api/skills/registry/update  {name} | {all:true}
+  if (req.method === 'POST' && path === '/api/skills/registry/update') {
+    const body = await readJsonBody(req);
+    const now = new Date().toISOString();
+    if (body.all === true) {
+      const statuses = await checkForUpdates();
+      const updated = [];
+      for (const s of statuses) {
+        if (s.changed) updated.push(await updateSkill(s.name, { confirm: true, actor: 'user', now }));
+      }
+      if (updated.some((u) => u.status === 'installed')) await reloadSkillsFromDisk();
+      sendJson(res, 200, { updated });
+      return true;
+    }
+    const name = String(body.name || '');
+    if (!name) { sendJson(res, 400, { error: 'name or all:true is required' }); return true; }
+    const outcome = await updateSkill(name, { confirm: true, actor: 'user', now });
+    if (outcome.status === 'installed') await reloadSkillsFromDisk();
+    sendJson(res, outcome.status === 'installed' ? 200 : 500, { updated: [outcome] });
+    return true;
+  }
+
+  // GET /api/skills/installed  (loaded skills + marketplace provenance)
+  if (req.method === 'GET' && path === '/api/skills/installed') {
+    const lock = readLock();
+    const skills = memory.skills.listAll(500).map((s) => ({ ...s, provenance: lock[s.name] ?? null }));
+    sendJson(res, 200, { skills });
+    return true;
+  }
+
+  // DELETE /api/skills/installed/:name  (delete the file + lock entry, then reload)
+  if (req.method === 'DELETE' && path.startsWith('/api/skills/installed/')) {
+    const name = decodeURIComponent(path.slice('/api/skills/installed/'.length));
+    const result = await uninstallSkillTool.execute({ name });
+    try { removeLock(name); } catch { /* advisory */ }
+    await reloadSkillsFromDisk();
+    sendJson(res, result.success ? 200 : 500, { deleted: result.success, name, output: result.output, error: result.error });
     return true;
   }
 

@@ -26,6 +26,8 @@ import {
   watchSkillDir,
   installSkillTool,
   uninstallSkillTool,
+  installSkillFromRegistryTool,
+  removeLock,
   createPlanAndExecuteTool,
   PlanBudgetTracker,
   createCredentialTools,
@@ -1276,7 +1278,23 @@ const channelTools: Tool[] = [replyWithMediaTool];
 // installSkill / uninstallSkill wrappers: **synchronously await reloadSkillsFromDisk** after execute,
 // eliminating the "installed but not usable" inconsistency window. See skill_install_wrapper.ts.
 const installSkillSync = wrapSkillToolWithReload(installSkillTool, reloadSkillsFromDisk);
-const uninstallSkillSync = wrapSkillToolWithReload(uninstallSkillTool, reloadSkillsFromDisk);
+// uninstall also clears the marketplace provenance/lock entry (best-effort) before reloading.
+const uninstallSkillSync = wrapSkillToolWithReload(
+  {
+    ...uninstallSkillTool,
+    async execute(params: Record<string, unknown>) {
+      const result = await uninstallSkillTool.execute(params);
+      if (result.success && typeof params.name === 'string') {
+        try { removeLock(params.name); } catch { /* lock cleanup is advisory */ }
+      }
+      return result;
+    },
+  },
+  reloadSkillsFromDisk,
+);
+// installSkillFromRegistry: typed aggregator install (fetch→scan→gate→write). Wrap with reload so the
+// installed skill is usable the same turn (same rationale as installSkill).
+const installFromRegistrySync = wrapSkillToolWithReload(installSkillFromRegistryTool, reloadSkillsFromDisk);
 
 const tools = createToolset({
   profile: 'server',
@@ -1285,9 +1303,10 @@ const tools = createToolset({
       extends: 'coding',
       // Remove volatile memory (Map): its semantics look nearly identical to the persistent store_fact/get_fact/search_notes
       // to the LLM; keeping it would tempt it to store important facts in the Map, which are lost on next startup.
-      // Remove original installSkill/uninstallSkill: fs-only, install→use not visible within the same turn.
-      // extraInternalTools below replaces them with wrapped versions that synchronously reload after execution.
-      exclude: ['memory', 'installSkill', 'uninstallSkill'],
+      // Remove original installSkill/uninstallSkill/installSkillFromRegistry: fs-only or registry write,
+      // install→use not visible within the same turn. extraInternalTools below replaces them with wrapped
+      // versions that synchronously reload after execution. (searchSkills is read-only — kept as-is.)
+      exclude: ['memory', 'installSkill', 'uninstallSkill', 'installSkillFromRegistry'],
     },
   },
   extraInternalTools: [
@@ -1300,6 +1319,7 @@ const tools = createToolset({
     ...channelTools,
     installSkillSync,
     uninstallSkillSync,
+    installFromRegistrySync,
   ],
   // 2026-05-07: hook up SecretStore so the http tool uses the secured variant, supporting {SECRET_NAME}
   // placeholders. Credentials written by saveCredential can be referenced directly in http headers / body.
@@ -1321,6 +1341,7 @@ const PLAN_EXEC_BLACKLIST: ReadonlySet<string> = new Set([
   'askUserQuestion',
   'installSkill',
   'uninstallSkill',
+  'installSkillFromRegistry',
   // Credential recording is only allowed in user-driven turns; sub-loop inside planAndExecute / autonomous turns
   // cannot modify secrets.
   'saveCredential',
@@ -1350,6 +1371,7 @@ const AUTONOMOUS_TURN_BLACKLIST_HARDCODED: ReadonlySet<string> = new Set([
   'removeCredential',
   'installSkill',
   'uninstallSkill',
+  'installSkillFromRegistry',
   'forgetFact',
   'shell',
   'writeFile',
@@ -2184,7 +2206,7 @@ const globalSkillsDir = join(homedir(), '.philont', 'skills');
 // Path is relative to server/src/chat-handler.ts → ../../agent-tools/bundled-skills
 const bundledSkillsDir = join(MODULE_DIR, '..', '..', 'agent-tools', 'bundled-skills');
 
-async function reloadSkillsFromDisk(): Promise<void> {
+export async function reloadSkillsFromDisk(): Promise<void> {
   try {
     const parsed = await loadSkills(process.cwd(), [bundledSkillsDir]);
     // Note: even if parsed.length === 0, run the prune below — when all external skill files are deleted at once,

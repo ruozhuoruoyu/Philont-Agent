@@ -1,0 +1,40 @@
+---
+name: skill-marketplace
+description: Find and install new skills from the marketplace (git/URL + clawhub) using searchSkills and installSkillFromRegistry.
+when_to_use: When you lack a capability for the current task and want to find and install a ready-made skill, or when the user asks to add/install a skill.
+metadata:
+  category: meta
+---
+
+# Skill Marketplace
+
+The marketplace is an aggregator client over external sources (git/raw-URL and clawhub). Every install
+is safety-scanned and passed through a trust × verdict gate. There is no hosted platform — you are pulling
+SKILL.md files from sources you (or the user) point at.
+
+## When to Use
+- You hit a task you can't do well and a ready-made skill likely exists.
+- The user asks to install / add a skill, or gives you a GitHub repo or SKILL.md URL.
+
+## Instructions
+
+1. **Search** with `searchSkills({ query })`:
+   - clawhub keywords, e.g. `searchSkills({ query: "kubernetes yaml lint" })`.
+   - a GitHub identifier `owner/repo[:path][@ref]`, a `github.com/.../blob/...` URL, or a raw `SKILL.md` URL —
+     these resolve to a single candidate.
+   Each result shows `sourceId`, an identifier, a trust level, and a description.
+
+2. **Install** with `installSkillFromRegistry({ sourceId, identifier })` using the values from a search result.
+   - `installed` → the skill is usable immediately (it appears in your skill index next turn).
+   - `ask` → it is a community skill with a caution-level scan. **Show the user the scan findings and get their
+     explicit confirmation**, then call again with `confirm: true`.
+   - `blocked` → the scan found dangerous patterns (exfiltration / RCE / persistence). It cannot be installed.
+     Do not try to work around the gate.
+
+3. **Use** the new skill via `use_skill(name)` as usual.
+
+## Notes
+- Trust: marketplace skills from git/URL and clawhub are all `community` — review them. Never paste secrets
+  into a skill you fetched.
+- To remove a skill, use `uninstallSkill({ name })`.
+- The clawhub source needs the `clawhub` CLI installed; if it is missing, clawhub results are simply omitted.

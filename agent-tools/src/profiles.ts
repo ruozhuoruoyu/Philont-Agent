@@ -49,6 +49,7 @@ const BUILTIN_TOOLS: Record<Exclude<BuiltinProfile, 'full'>, string[]> = {
     'git',
     'askUserQuestion',
     'installSkill', 'uninstallSkill',
+    'searchSkills', 'installSkillFromRegistry',
   ],
 };
 

@@ -10,12 +10,13 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import './chat.js';
 import './memory.js';
+import './marketplace.js';
 import './autonomous.js';
 import './settings.js';
 import { LAUNCHER_BASE, resolveAgentPort, agentHttpBase } from './config.js';
 import { LangController, t, getLang, toggleLang } from './i18n.js';
 
-type View = 'chat' | 'memory' | 'autonomous' | 'settings';
+type View = 'chat' | 'memory' | 'marketplace' | 'autonomous' | 'settings';
 
 @customElement('agent-app')
 export class AgentApp extends LitElement {
@@ -143,6 +144,7 @@ export class AgentApp extends LitElement {
           <div class="nav-buttons">
             <button class=${this.view === 'chat' ? 'active' : ''} @click=${() => (this.view = 'chat')}>💬 ${t('聊天', 'Chat')}</button>
             <button class=${this.view === 'memory' ? 'active' : ''} @click=${() => (this.view = 'memory')}>🧠 ${t('记忆', 'Memory')}</button>
+            <button class=${this.view === 'marketplace' ? 'active' : ''} @click=${() => (this.view = 'marketplace')}>🧩 ${t('技能广场', 'Skills')}</button>
             <button class=${this.view === 'autonomous' ? 'active' : ''} @click=${() => (this.view = 'autonomous')}>⚙️ ${t('自主', 'Autonomy')}</button>
             <button class=${this.view === 'settings' ? 'active' : ''} @click=${() => (this.view = 'settings')}>⚙ ${t('设置', 'Settings')}</button>
           </div>
@@ -165,6 +167,7 @@ export class AgentApp extends LitElement {
         <main>
           ${this.view === 'chat' ? html`<agent-chat></agent-chat>`
             : this.view === 'memory' ? html`<memory-dashboard></memory-dashboard>`
+            : this.view === 'marketplace' ? html`<skills-marketplace></skills-marketplace>`
             : this.view === 'autonomous' ? html`<autonomous-dashboard></autonomous-dashboard>`
             : html`<settings-view @configured=${this.onConfigured}></settings-view>`}
         </main>

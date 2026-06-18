@@ -27,7 +27,7 @@ export type { SecuredHttpOptions } from './network/index.js';
 export { echoTool, timeTool, jsonTool, memoryTool, jsonPatchTool, envTool, hashTool, askUserQuestionTool, renderQuestion, parseQuestionAnswer, createCredentialTools } from './utility/index.js';
 export type { ParsedAnswer } from './utility/index.js';
 export { gitTool } from './git/index.js';
-export { installSkillTool, uninstallSkillTool } from './skills/index.js';
+export { installSkillTool, uninstallSkillTool, searchSkillsTool, installSkillFromRegistryTool } from './skills/index.js';
 export { visionTool } from './vision/index.js';
 
 // ── Profiles ──────────────────────────────────────────
@@ -42,6 +42,19 @@ export type { ToolProfile, BuiltinProfile, ProfileDef, ProfileSet } from './prof
 // ── Skills ────────────────────────────────────────────
 export { parseSkillFile, loadSkills, watchSkillDir, MAX_ACTION_TEMPLATE_SIZE } from './skills/index.js';
 export type { ParsedSkill } from './skills/index.js';
+
+// ── Skill marketplace registry (aggregator client + safety gate) ──────────
+export {
+  searchAll, inspectFrom, fetchFrom, resolveSource, SOURCES,
+  inspectBundle, installFromSource, checkForUpdates, updateSkill,
+  scanSkillContent, gateDecision,
+  readLock, getProvenance, upsertLock, removeLock, appendAudit,
+} from './skills/index.js';
+export type {
+  SkillMeta, SkillBundle, SkillSource, ScanHit, ScanReport,
+  ProvenanceRecord, InstallOutcome, UpdateStatus, SearchResult,
+  TrustLevel, Verdict, GateDecision, InstallRequest,
+} from './skills/index.js';
 
 // ── Utils ─────────────────────────────────────────────
 export {
@@ -88,7 +101,7 @@ import { shellTool, processTool, z3VerifyTool, pariGpTool, magnitudeTool, lemmaL
 import { httpTool, webSearchTool, webFetchTool, downloadFileTool } from './network/index.js';
 import { echoTool, timeTool, jsonTool, memoryTool, jsonPatchTool, envTool, hashTool, askUserQuestionTool } from './utility/index.js';
 import { gitTool } from './git/index.js';
-import { installSkillTool, uninstallSkillTool } from './skills/index.js';
+import { installSkillTool, uninstallSkillTool, searchSkillsTool, installSkillFromRegistryTool } from './skills/index.js';
 import { visionTool } from './vision/index.js';
 
 /** Full list of built-in tools */
@@ -108,6 +121,8 @@ export const builtinTools: Tool[] = [
   gitTool,
   // skill self-management (domain='self', same level as memoryTool)
   installSkillTool, uninstallSkillTool,
+  // skill marketplace: search (read/network) + install-from-registry (write/self, server wraps with reload)
+  searchSkillsTool, installSkillFromRegistryTool,
 ];
 
 // ── Factory function ──────────────────────────────────
