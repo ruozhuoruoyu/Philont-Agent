@@ -406,7 +406,11 @@ class AnthropicAdapter implements LLMAdapter {
   private readonly profile: ProviderProfile;
 
   constructor(apiKey: string) {
-    const baseURL = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
+    // Philont defaults to DeepSeek (high value-for-money open model) on both schemes,
+    // so the empty-field fallback is DeepSeek's Anthropic-protocol endpoint — keeping it
+    // consistent with defaultModel deepseek-v4-flash below. Set ANTHROPIC_BASE_URL to
+    // https://api.anthropic.com (+ ANTHROPIC_MODEL=claude-…) to use real Claude.
+    const baseURL = process.env.ANTHROPIC_BASE_URL || 'https://api.deepseek.com/anthropic';
     // 2026-05-30: explicitly set authToken=null to lock in apiKey-only (X-Api-Key) auth.
     // Otherwise the SDK reads ANTHROPIC_AUTH_TOKEN from the environment on construction and
     // sends it **additionally** as `Authorization: Bearer <token>` (SDK authHeaders sends
@@ -693,12 +697,16 @@ interface ProviderConfig {
 
 const PROVIDERS: Record<string, ProviderConfig> = {
   openai: {
-    name: 'OpenAI',
-    baseUrl: 'https://api.openai.com',
+    // OpenAI-compatible scheme. Philont defaults to DeepSeek (high value-for-money
+    // open model), so the empty-field fallback must match the web-ui placeholder
+    // (https://api.deepseek.com / deepseek-v4-flash). Point at any other compatible
+    // endpoint (OpenAI, self-hosted vLLM, …) via OPENAI_BASE_URL + OPENAI_MODEL.
+    name: 'OpenAI-compatible',
+    baseUrl: 'https://api.deepseek.com',
     path: '/v1/chat/completions',
     apiKeyEnv: 'OPENAI_API_KEY',
     modelEnv: 'OPENAI_MODEL',
-    defaultModel: 'gpt-4o',
+    defaultModel: 'deepseek-v4-flash',
     baseUrlEnv: 'OPENAI_BASE_URL',
   },
   minimax: {

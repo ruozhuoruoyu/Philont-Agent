@@ -116,12 +116,13 @@ const FIELDS: Field[] = [
   // ══ 启动配置:选供应商 + 填它的 Key/模型/端点,配完即可启动 ══
   { key: 'LLM_PROVIDER', label: { zh: '模型供应商', en: 'Model Provider' }, type: 'select', group: '启动配置', core: true,
     options: [
-      { value: 'anthropic', label: { zh: 'Anthropic(Claude / DeepSeek anthropic 端点)', en: 'Anthropic (Claude / DeepSeek anthropic endpoint)' } },
-      { value: 'openai', label: { zh: 'OpenAI 兼容(DeepSeek / 自建 / 任意兼容端点)', en: 'OpenAI-compatible (DeepSeek / self-hosted / any)' } },
-      { value: 'glm', label: { zh: '智谱 GLM', en: 'Zhipu GLM' } },
-      { value: 'kimi', label: { zh: 'Kimi(Moonshot)', en: 'Kimi (Moonshot)' } },
-      { value: 'minimax', label: { zh: 'MiniMax', en: 'MiniMax' } },
-      { value: 'gemini', label: { zh: 'Gemini(Google)', en: 'Gemini (Google)' } },
+      { value: 'anthropic', label: { zh: 'Anthropic 兼容', en: 'Anthropic-compatible' } },
+      { value: 'openai', label: { zh: 'OpenAI 兼容', en: 'OpenAI-compatible' } },
+      // GLM / Kimi / MiniMax / Gemini stay supported in the backend PROVIDERS map
+      // (set LLM_PROVIDER=glm etc. in .env). They are omitted from the UI on purpose:
+      // standard /v1/chat/completions endpoints (Kimi, Qwen, vLLM…) already work via
+      // "OpenAI-compatible"; GLM/MiniMax/Gemini use non-standard paths and would need
+      // their dedicated provider entry, which advanced users can select via .env.
     ],
     help: { zh: '先选主模型供应商,下面只显示它需要填的项。留空 = Anthropic。', en: 'Pick the main model provider; only its fields show below. Empty = Anthropic.' } },
 
@@ -129,8 +130,8 @@ const FIELDS: Field[] = [
   { key: 'ANTHROPIC_API_KEY', label: { zh: 'API Key', en: 'API Key' }, type: 'secret', group: '启动配置', core: true,
     showIf: (v) => prov(v) === 'anthropic', help: { zh: '主模型 API Key(Anthropic 协议:Claude 或 DeepSeek anthropic 端点)。', en: 'Main model API key (Anthropic protocol: Claude or DeepSeek anthropic endpoint).' } },
   { key: 'ANTHROPIC_BASE_URL', label: { zh: 'Base URL', en: 'Base URL' }, type: 'text', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'anthropic', placeholder: 'https://api.anthropic.com',
-    help: { zh: '默认官方端点。用第三方/自建网关(openrouter、neolink…)时填。', en: 'Defaults to official endpoint. Set for third-party / self-hosted gateways.' } },
+    showIf: (v) => prov(v) === 'anthropic', placeholder: 'https://api.deepseek.com/anthropic',
+    help: { zh: '默认 DeepSeek 的 anthropic 端点。用真 Claude 填 https://api.anthropic.com,或第三方/自建网关(openrouter、neolink…)。', en: "Defaults to DeepSeek's Anthropic endpoint. Use https://api.anthropic.com for real Claude, or a third-party / self-hosted gateway." } },
   { key: 'ANTHROPIC_MODEL', label: { zh: '模型', en: 'Model' }, type: 'text', group: '启动配置', core: true,
     showIf: (v) => prov(v) === 'anthropic', placeholder: 'deepseek-v4-flash', help: { zh: '默认 deepseek-v4-flash。', en: 'Defaults to deepseek-v4-flash.' } },
 
@@ -141,31 +142,11 @@ const FIELDS: Field[] = [
   { key: 'OPENAI_API_KEY', label: { zh: 'API Key', en: 'API Key' }, type: 'secret', group: '启动配置', core: true,
     showIf: (v) => prov(v) === 'openai' },
   { key: 'OPENAI_MODEL', label: { zh: '模型', en: 'Model' }, type: 'text', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'openai', placeholder: 'deepseek-chat' },
+    showIf: (v) => prov(v) === 'openai', placeholder: 'deepseek-v4-flash' },
 
-  // — 智谱 GLM(端点内置)—
-  { key: 'GLM_API_KEY', label: { zh: 'GLM API Key', en: 'GLM API Key' }, type: 'secret', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'glm', help: { zh: '智谱开放平台 open.bigmodel.cn,端点内置无需填。', en: 'Zhipu open.bigmodel.cn; endpoint built-in.' } },
-  { key: 'GLM_MODEL', label: { zh: '模型', en: 'Model' }, type: 'text', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'glm', placeholder: 'glm-4-plus' },
-
-  // — Kimi / Moonshot(端点内置)—
-  { key: 'KIMI_API_KEY', label: { zh: 'Kimi API Key', en: 'Kimi API Key' }, type: 'secret', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'kimi', help: { zh: 'Moonshot platform.moonshot.cn,端点内置无需填。', en: 'Moonshot platform.moonshot.cn; endpoint built-in.' } },
-  { key: 'KIMI_MODEL', label: { zh: '模型', en: 'Model' }, type: 'text', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'kimi', placeholder: 'kimi-k2-0905-preview' },
-
-  // — MiniMax(端点内置)—
-  { key: 'MINIMAX_API_KEY', label: { zh: 'MiniMax API Key', en: 'MiniMax API Key' }, type: 'secret', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'minimax' },
-  { key: 'MINIMAX_MODEL', label: { zh: '模型', en: 'Model' }, type: 'text', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'minimax', placeholder: 'MiniMax-Text-01' },
-
-  // — Gemini(Google OpenAI 兼容端点内置)—
-  { key: 'GEMINI_API_KEY', label: { zh: 'Gemini API Key', en: 'Gemini API Key' }, type: 'secret', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'gemini', help: { zh: 'Google AI Studio,走 OpenAI 兼容端点。', en: 'Google AI Studio, via OpenAI-compatible endpoint.' } },
-  { key: 'GEMINI_MODEL', label: { zh: '模型', en: 'Model' }, type: 'text', group: '启动配置', core: true,
-    showIf: (v) => prov(v) === 'gemini', placeholder: 'gemini-2.0-flash' },
+  // GLM / Kimi / MiniMax / Gemini fields removed from the UI — only the two
+  // compatible schemes (Anthropic / OpenAI) are exposed. Those providers remain
+  // usable via .env (LLM_PROVIDER=glm + GLM_API_KEY/GLM_MODEL, etc.).
 
   // ══ 网络与时区 ══
   // 全局代理由组件特判渲染(开关 + 地址输入),这里只为进分组/收集。
