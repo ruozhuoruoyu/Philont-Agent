@@ -30,6 +30,9 @@ interface Provenance {
 interface InstalledItem {
   name: string;
   description: string;
+  source: string | null;     // null = bundled/default; 'github:'/'clawhub:'/'url:' = installed; 'self*'/'reflect*' = self-learned
+  maturity?: string;
+  useCount?: number;
   provenance: Provenance | null;
 }
 
@@ -55,7 +58,7 @@ export class SkillsMarketplace extends LitElement {
   @state() warnings: string[] = [];
   @state() searching = false;
   @state() searched = false;
-  @state() installed: InstalledItem[] = [];
+  @state() allSkills: InstalledItem[] = [];
   @state() installedNames = new Set<string>();
   @state() updates: Record<string, UpdateStatus> = {};
   @state() busy: Record<string, string> = {};
@@ -73,14 +76,16 @@ export class SkillsMarketplace extends LitElement {
     try {
       const r = await fetch(`${API()}/installed`);
       const data = await r.json();
-      const all: InstalledItem[] = (data.skills || []).map((s: InstalledItem & { provenance?: Provenance }) => ({
+      const all: InstalledItem[] = (data.skills || []).map((s: Partial<InstalledItem> & { name: string; description?: string }) => ({
         name: s.name,
-        description: s.description,
+        description: s.description ?? '',
+        source: s.source ?? null,
+        maturity: s.maturity,
+        useCount: s.useCount,
         provenance: s.provenance ?? null,
       }));
       this.installedNames = new Set(all.map((s) => s.name));
-      // The marketplace section lists only skills installed THROUGH the marketplace (have provenance).
-      this.installed = all.filter((s) => s.provenance);
+      this.allSkills = all;
     } catch { /* ignore */ }
     try {
       const r = await fetch(`${API()}/registry/updates`);
@@ -237,26 +242,27 @@ export class SkillsMarketplace extends LitElement {
       </div>`;
   }
 
-  private installedSection() {
-    if (!this.installed.length) return null;
+  private marketplaceSection() {
+    const items = this.allSkills.filter((s) => s.provenance);
+    if (!items.length) return null;
     return html`
       <div class="section">
         <h3>${t('已安装(来自广场)', 'Installed (from marketplace)')}</h3>
         <div class="grid">
-          ${this.installed.map((s) => {
+          ${items.map((s) => {
             const upd = this.updates[s.name];
             const busy = this.busy[s.name];
-            const p = s.provenance;
+            const p = s.provenance!;
             return html`
               <div class="card">
                 <div class="card-head">
                   <span class="name">${s.name}</span>
-                  ${p?.version ? html`<span class="ver">v${p.version}</span>` : null}
-                  ${p ? this.trustBadge(p.trust) : null}
-                  ${p ? html`<span class="src">${p.sourceId}</span>` : null}
+                  ${p.version ? html`<span class="ver">v${p.version}</span>` : null}
+                  ${this.trustBadge(p.trust)}
+                  <span class="src">${p.sourceId}</span>
                 </div>
                 <div class="desc">${s.description}</div>
-                ${p ? html`<div class="srctag">${p.sourceTag}</div>` : null}
+                <div class="srctag">${p.sourceTag}</div>
                 <div class="card-actions">
                   ${upd?.changed
                     ? html`<button @click=${() => this.applyUpdate(s.name)} ?disabled=${!!busy}>${t('更新', 'Update')}${upd.latestVersion ? ` v${upd.latestVersion}` : ''}</button>`
@@ -266,7 +272,28 @@ export class SkillsMarketplace extends LitElement {
               </div>`;
           })}
         </div>
-        <div class="muted">${t('其余内置/自习得技能见「记忆 → 技能」页。', 'Bundled / self-learned skills are listed under Memory → Skills.')}</div>
+      </div>`;
+  }
+
+  private bundledSection() {
+    // Default/built-in skills shipped with philont: source == null. Read-only here.
+    const items = this.allSkills.filter((s) => s.source == null).sort((a, b) => a.name.localeCompare(b.name));
+    if (!items.length) return null;
+    return html`
+      <div class="section">
+        <h3>${t('内置技能(默认)', 'Built-in skills (default)')}</h3>
+        <div class="grid">
+          ${items.map((s) => html`
+            <div class="card">
+              <div class="card-head">
+                <span class="name">${s.name}</span>
+                <span class="badge official">${t('内置', 'Built-in')}</span>
+                ${typeof s.useCount === 'number' ? html`<span class="src">${t('用', 'used')} ${s.useCount}</span>` : null}
+              </div>
+              <div class="desc">${s.description}</div>
+            </div>`)}
+        </div>
+        <div class="muted">${t('内置技能随 philont 发布,不可在此卸载。自习得技能见「记忆 → 技能」页。', 'Built-in skills ship with philont and cannot be uninstalled here. Self-learned skills are under Memory → Skills.')}</div>
       </div>`;
   }
 
@@ -360,7 +387,8 @@ export class SkillsMarketplace extends LitElement {
         ${this.warnings.length ? html`<div class="warns">⚠ ${this.warnings.join('; ')}</div>` : null}
         ${this.inspecting ? html`<div class="loading">${t('加载中…', 'Loading…')}</div>` : null}
 
-        ${this.installedSection()}
+        ${this.marketplaceSection()}
+        ${this.bundledSection()}
 
         ${this.searched
           ? html`<div class="section">
