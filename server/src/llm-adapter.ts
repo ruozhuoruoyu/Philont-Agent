@@ -56,8 +56,13 @@ function maskKey(key: string | undefined): string {
  * multiple tool_use per response triggers it.
  *
  * Fix: scan before each request; any tool_use missing a tool_result → insert a placeholder
- * tool_result. Catches gaps regardless of origin (auth / gate / truncation). Returns a new
- * array; does not mutate the input.
+ * tool_result. Catches gaps regardless of origin (auth / gate / truncation).
+ *
+ * 2026-06-17: persists the normalized result back into the input array (mutates in place, then returns
+ * it). Previously it returned a fresh array used only for that one send, so the SAME dangling pair was
+ * re-repaired — and re-warned — on every subsequent send within the turn (the pairing-repair log "storm").
+ * The repaired shape is API-valid and idempotent, so writing it back means a misplacement is fixed once;
+ * a genuinely new dangling pair (next interrupted multi-tool_use) still logs exactly once.
  */
 const TOOL_RESULT_PLACEHOLDER =
   '(tool call not executed — interrupted by authorization/gate or superseded; treat as no-op)';
@@ -142,6 +147,11 @@ export function repairToolResultPairing(messages: NativeMessage[]): NativeMessag
     console.warn(
       `[llm-adapter] tool_result pairing repair: missing=${missing} relocated=${relocated} orphans-dropped=${orphans} (prevents 400)`,
     );
+    // Persist the fix into the caller's array so the same dangling pair isn't re-repaired (and re-warned)
+    // on every later send this turn. Only write back when something actually changed (clean turns untouched).
+    messages.length = 0;
+    for (const m of out) messages.push(m);
+    return messages;
   }
   return out;
 }

@@ -170,3 +170,20 @@ test('普通文本 user 消息原样保留', () => {
   assert.equal(out[0].content, '你好');
   assert.equal(out[2].content, '再问一个');
 });
+
+test('persist-in-place: a misplaced pair is repaired ONCE — a second pass is a no-op (kills the log storm)', () => {
+  // assistant tool_use, an interjected assistant message, then the result later (the multi-tool_use + gate shape)
+  const msgs: NativeMessage[] = [
+    { role: 'assistant', content: [toolUse('call_X')] as never },
+    { role: 'assistant', content: '插话' as never },
+    { role: 'user', content: [toolResult('call_X')] as never },
+  ];
+  const first = repairToolResultPairing(msgs);
+  assertPaired(first);
+  // The fix was written BACK into msgs (same normalized content), so the caller's array is now API-valid…
+  assertPaired(msgs);
+  assert.deepEqual(msgs, first);
+  // …and a second repair on the now-normalized array finds nothing to relocate → idempotent (no re-warn storm).
+  const second = repairToolResultPairing(msgs);
+  assert.deepEqual(second, msgs);
+});
