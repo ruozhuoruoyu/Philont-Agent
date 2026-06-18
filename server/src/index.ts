@@ -350,19 +350,22 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const sourceId = String(body.sourceId || '');
     const identifier = String(body.identifier || '');
     if (!sourceId || !identifier) { sendJson(res, 400, { error: 'sourceId and identifier are required' }); return true; }
-    const outcome = await installFromSource({
-      sourceId,
-      identifier,
-      name: body.name ? String(body.name) : undefined,
-      confirm: body.confirm === true,
-      actor: 'user',
-      now: new Date().toISOString(),
-    });
-    if (outcome.status === 'installed') await reloadSkillsFromDisk();
-    const code = outcome.status === 'installed' ? 200
-      : outcome.status === 'ask' ? 202
-      : outcome.status === 'blocked' ? 409 : 500;
-    sendJson(res, code, outcome);
+    try {
+      const outcome = await installFromSource({
+        sourceId,
+        identifier,
+        name: body.name ? String(body.name) : undefined,
+        confirm: body.confirm === true,
+        actor: 'user',
+        now: new Date().toISOString(),
+      });
+      if (outcome.status === 'installed') await reloadSkillsFromDisk();
+      // Always 200: install outcome (installed/ask/blocked/error) is data the UI interprets,
+      // not an HTTP-level error. Only a thrown exception is a real 500.
+      sendJson(res, 200, outcome);
+    } catch (e) {
+      sendJson(res, 500, { status: 'error', error: (e as Error).message });
+    }
     return true;
   }
 
@@ -377,21 +380,24 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (req.method === 'POST' && path === '/api/skills/registry/update') {
     const body = await readJsonBody(req);
     const now = new Date().toISOString();
-    if (body.all === true) {
-      const statuses = await checkForUpdates();
-      const updated = [];
-      for (const s of statuses) {
-        if (s.changed) updated.push(await updateSkill(s.name, { confirm: true, actor: 'user', now }));
+    try {
+      let updated: Awaited<ReturnType<typeof updateSkill>>[] = [];
+      if (body.all === true) {
+        const statuses = await checkForUpdates();
+        for (const s of statuses) {
+          if (s.changed) updated.push(await updateSkill(s.name, { confirm: true, actor: 'user', now }));
+        }
+      } else {
+        const name = String(body.name || '');
+        if (!name) { sendJson(res, 400, { error: 'name or all:true is required' }); return true; }
+        updated = [await updateSkill(name, { confirm: true, actor: 'user', now })];
       }
       if (updated.some((u) => u.status === 'installed')) await reloadSkillsFromDisk();
+      // Always 200: per-skill outcomes (installed/blocked/error) are data, not HTTP errors.
       sendJson(res, 200, { updated });
-      return true;
+    } catch (e) {
+      sendJson(res, 500, { error: (e as Error).message });
     }
-    const name = String(body.name || '');
-    if (!name) { sendJson(res, 400, { error: 'name or all:true is required' }); return true; }
-    const outcome = await updateSkill(name, { confirm: true, actor: 'user', now });
-    if (outcome.status === 'installed') await reloadSkillsFromDisk();
-    sendJson(res, outcome.status === 'installed' ? 200 : 500, { updated: [outcome] });
     return true;
   }
 

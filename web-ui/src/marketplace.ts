@@ -174,13 +174,25 @@ export class SkillsMarketplace extends LitElement {
 
   private async update(name: string) {
     this.busy = { ...this.busy, [name]: 'update' };
+    this.error = null;
+    this.notice = null;
     try {
-      await fetch(`${API()}/registry/update`, {
+      const r = await fetch(`${API()}/registry/update`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       });
-      await this.refreshInstalled();
-      this.notice = t(`已更新 ${name}`, `Updated ${name}`);
+      const data = await r.json();
+      const outcome = (data.updated && data.updated[0]) || null;
+      if (outcome?.status === 'installed') {
+        this.notice = t(`已更新 ${name}`, `Updated ${name}`);
+        await this.refreshInstalled();
+      } else if (outcome?.status === 'blocked') {
+        this.error = t(`更新被拦截:新版本未通过安全扫描(${outcome.verdict})`, `Update blocked: the new version failed the safety scan (${outcome.verdict})`);
+      } else if (outcome?.status === 'ask') {
+        this.error = t(`新版本需确认(${outcome.verdict}),请在卡片详情里确认`, `New version needs confirmation (${outcome.verdict})`);
+      } else {
+        this.error = outcome?.error || data.error || t('更新失败', 'Update failed');
+      }
     } catch (e) {
       this.error = `${(e as Error).message}`;
     } finally {
