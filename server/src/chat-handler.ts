@@ -2204,7 +2204,7 @@ const globalSkillsDir = join(homedir(), '.philont', 'skills');
 // Built-in skills: published under agent-tools/bundled-skills/ as philont's out-of-the-box knowledge base.
 // Priority < workspace < global; any user-level directory's same-name skill can override it.
 // Path is relative to server/src/chat-handler.ts → ../../agent-tools/bundled-skills
-const bundledSkillsDir = join(MODULE_DIR, '..', '..', 'agent-tools', 'bundled-skills');
+export const bundledSkillsDir = join(MODULE_DIR, '..', '..', 'agent-tools', 'bundled-skills');
 
 export async function reloadSkillsFromDisk(): Promise<void> {
   try {

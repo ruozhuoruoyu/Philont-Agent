@@ -7,7 +7,7 @@
 
 import type { SkillSource, SkillMeta, SkillBundle } from './types.js';
 import { gitSource } from './sources/git.js';
-import { clawhubSource } from './sources/clawhub.js';
+import { clawhubSource, clawhubAvailable } from './sources/clawhub.js';
 
 export const SOURCES: SkillSource[] = [gitSource, clawhubSource];
 
@@ -61,6 +61,13 @@ export async function searchAll(query: string, perSourceLimit = 10): Promise<Sea
   const results = Array.from(byName.values()).sort(
     (a, b) => (TRUST_RANK[a.trust] ?? 9) - (TRUST_RANK[b.trust] ?? 9),
   );
+
+  // Help the user understand an empty keyword search: clawhub keyword search needs the CLI,
+  // and the git source only resolves explicit identifiers (owner/repo, blob/raw URL), not keywords.
+  if (!results.length && !(await clawhubAvailable())) {
+    warnings.push('clawhub CLI not installed — keyword search is unavailable. Paste a GitHub owner/repo or a SKILL.md URL to install via git.');
+  }
+
   return { results, warnings };
 }
 

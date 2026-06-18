@@ -54,6 +54,7 @@ import {
   registerWebuiClient,
   memory,
   reloadSkillsFromDisk,
+  bundledSkillsDir,
   reminderEmitter,
   closeSkillWatchers,
   closeScheduler,
@@ -66,6 +67,7 @@ import {
   internalAudit,
   type ReminderPayload,
 } from './chat-handler.js';
+import { readdirSync } from 'node:fs';
 import { utcDateString, groupFailures } from '@agent/memory';
 import {
   searchAll,
@@ -401,10 +403,24 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
-  // GET /api/skills/installed  (loaded skills + marketplace provenance)
+  // GET /api/skills/installed  (loaded skills + marketplace provenance + bundled flag)
   if (req.method === 'GET' && path === '/api/skills/installed') {
     const lock = readLock();
-    const skills = memory.skills.listAll(500).map((s) => ({ ...s, provenance: lock[s.name] ?? null }));
+    // True bundled set = subdirectory names under bundled-skills/. This is the only reliable
+    // signal: source==null also covers some self-learned (reflection) skills.
+    let bundledNames = new Set<string>();
+    try {
+      bundledNames = new Set(
+        readdirSync(bundledSkillsDir, { withFileTypes: true })
+          .filter((d) => d.isDirectory())
+          .map((d) => d.name),
+      );
+    } catch { /* dir missing → empty set */ }
+    const skills = memory.skills.listAll(500).map((s) => ({
+      ...s,
+      provenance: lock[s.name] ?? null,
+      bundled: bundledNames.has(s.name),
+    }));
     sendJson(res, 200, { skills });
     return true;
   }

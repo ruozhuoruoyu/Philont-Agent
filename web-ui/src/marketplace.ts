@@ -30,10 +30,17 @@ interface Provenance {
 interface InstalledItem {
   name: string;
   description: string;
-  source: string | null;     // null = bundled/default; 'github:'/'clawhub:'/'url:' = installed; 'self*'/'reflect*' = self-learned
+  source: string | null;     // 'github:'/'clawhub:'/'url:' = downloaded; 'self*'/'reflect*'/null = self-learned or bundled
+  bundled?: boolean;         // true = shipped with philont (authoritative; from bundled-skills/ dir)
   maturity?: string;
   useCount?: number;
   provenance: Provenance | null;
+}
+
+/** A downloaded skill: installed via the marketplace (provenance) or any external source tag. */
+function isDownloaded(s: InstalledItem): boolean {
+  if (s.provenance) return true;
+  return !!s.source && /^(github:|clawhub:|url:)/.test(s.source);
 }
 
 interface ScanHit { category: string; pattern: string; line: number; excerpt: string }
@@ -80,6 +87,7 @@ export class SkillsMarketplace extends LitElement {
         name: s.name,
         description: s.description ?? '',
         source: s.source ?? null,
+        bundled: s.bundled === true,
         maturity: s.maturity,
         useCount: s.useCount,
         provenance: s.provenance ?? null,
@@ -103,7 +111,10 @@ export class SkillsMarketplace extends LitElement {
 
   private async runSearch() {
     const q = this.query.trim();
-    if (!q) return;
+    if (!q) {
+      this.error = t('请输入关键词,或粘贴 GitHub owner/repo / SKILL.md 链接', 'Enter keywords, or paste a GitHub owner/repo / SKILL.md URL');
+      return;
+    }
     this.searching = true;
     this.error = null;
     this.notice = null;
@@ -242,27 +253,30 @@ export class SkillsMarketplace extends LitElement {
       </div>`;
   }
 
-  private marketplaceSection() {
-    const items = this.allSkills.filter((s) => s.provenance);
+  private downloadedSection() {
+    // Skills installed from the marketplace (provenance) or any external source (git/clawhub).
+    const items = this.allSkills.filter(isDownloaded).sort((a, b) => a.name.localeCompare(b.name));
     if (!items.length) return null;
     return html`
       <div class="section">
-        <h3>${t('已安装(来自广场)', 'Installed (from marketplace)')}</h3>
+        <h3>${t('已下载 / 已安装', 'Downloaded / installed')}</h3>
         <div class="grid">
           ${items.map((s) => {
             const upd = this.updates[s.name];
             const busy = this.busy[s.name];
-            const p = s.provenance!;
+            const p = s.provenance;
+            const srcLabel = p?.sourceId ?? (s.source ? s.source.split(':')[0] : '');
+            const srcTag = p?.sourceTag ?? s.source ?? '';
             return html`
               <div class="card">
                 <div class="card-head">
                   <span class="name">${s.name}</span>
-                  ${p.version ? html`<span class="ver">v${p.version}</span>` : null}
-                  ${this.trustBadge(p.trust)}
-                  <span class="src">${p.sourceId}</span>
+                  ${p?.version ? html`<span class="ver">v${p.version}</span>` : null}
+                  ${this.trustBadge(p?.trust ?? 'community')}
+                  <span class="src">${srcLabel}</span>
                 </div>
                 <div class="desc">${s.description}</div>
-                <div class="srctag">${p.sourceTag}</div>
+                ${srcTag ? html`<div class="srctag">${srcTag}</div>` : null}
                 <div class="card-actions">
                   ${upd?.changed
                     ? html`<button @click=${() => this.applyUpdate(s.name)} ?disabled=${!!busy}>${t('更新', 'Update')}${upd.latestVersion ? ` v${upd.latestVersion}` : ''}</button>`
@@ -276,9 +290,10 @@ export class SkillsMarketplace extends LitElement {
   }
 
   private bundledSection() {
-    // Default/built-in skills shipped with philont: source == null. Read-only here.
-    const items = this.allSkills.filter((s) => s.source == null).sort((a, b) => a.name.localeCompare(b.name));
-    if (!items.length) return null;
+    // Built-in/default skills shipped with philont. Authoritative flag from the server (bundled-skills/ dir).
+    const items = this.allSkills.filter((s) => s.bundled).sort((a, b) => a.name.localeCompare(b.name));
+    const selfLearned = this.allSkills.filter((s) => !s.bundled && !isDownloaded(s)).length;
+    if (!items.length && !selfLearned) return null;
     return html`
       <div class="section">
         <h3>${t('内置技能(默认)', 'Built-in skills (default)')}</h3>
@@ -293,7 +308,10 @@ export class SkillsMarketplace extends LitElement {
               <div class="desc">${s.description}</div>
             </div>`)}
         </div>
-        <div class="muted">${t('内置技能随 philont 发布,不可在此卸载。自习得技能见「记忆 → 技能」页。', 'Built-in skills ship with philont and cannot be uninstalled here. Self-learned skills are under Memory → Skills.')}</div>
+        <div class="muted">
+          ${t('内置技能随 philont 发布,不可在此卸载。', 'Built-in skills ship with philont and cannot be uninstalled here.')}
+          ${selfLearned ? t(`另有 ${selfLearned} 个 philont 自习得技能,见「记忆 → 技能」页。`, ` ${selfLearned} self-learned skills are under Memory → Skills.`) : ''}
+        </div>
       </div>`;
   }
 
@@ -381,14 +399,15 @@ export class SkillsMarketplace extends LitElement {
             ${this.searching ? t('搜索中…', 'Searching…') : t('搜索', 'Search')}
           </button>
         </div>
+        <div class="searchhint">${t(
+          '关键词搜索走 clawhub(需本机装 clawhub CLI);git 来源请粘贴 GitHub owner/repo、blob 链接或 raw SKILL.md 链接。',
+          'Keyword search uses clawhub (needs the clawhub CLI installed); for git, paste a GitHub owner/repo, blob URL, or raw SKILL.md URL.',
+        )}</div>
 
         ${this.notice ? html`<div class="notice">${this.notice}</div>` : null}
         ${this.error ? html`<div class="err">${this.error}</div>` : null}
         ${this.warnings.length ? html`<div class="warns">⚠ ${this.warnings.join('; ')}</div>` : null}
         ${this.inspecting ? html`<div class="loading">${t('加载中…', 'Loading…')}</div>` : null}
-
-        ${this.marketplaceSection()}
-        ${this.bundledSection()}
 
         ${this.searched
           ? html`<div class="section">
@@ -397,7 +416,10 @@ export class SkillsMarketplace extends LitElement {
                 ? html`<div class="grid">${list.map((m) => this.card(m))}</div>`
                 : html`<div class="empty">${t('没有结果。试试粘贴一个 GitHub owner/repo 或 SKILL.md 链接。', 'No results. Try pasting a GitHub owner/repo or SKILL.md URL.')}</div>`}
             </div>`
-          : html`<div class="hint">${t('输入关键词(clawhub)或粘贴 git 链接开始搜索。', 'Enter keywords (clawhub) or paste a git URL to start searching.')}</div>`}
+          : null}
+
+        ${this.downloadedSection()}
+        ${this.bundledSection()}
 
         ${this.modal()}
       </div>`;
@@ -417,6 +439,7 @@ export class SkillsMarketplace extends LitElement {
     .section h3 { font-size: 15px; margin: 0 0 8px; }
     .muted { color: #999; font-size: 12px; margin-top: 8px; }
     .toolbar { display: flex; gap: 8px; margin-top: 16px; }
+    .searchhint { color: #999; font-size: 12px; margin-top: 6px; }
     .toolbar input { flex: 1; padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
     .toolbar select { padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
     button { padding: 6px 12px; border: 1px solid #ccc; border-radius: 6px; background: white; cursor: pointer; font-size: 13px; }
