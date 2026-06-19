@@ -632,18 +632,21 @@ async function fetchNative(input: WebFetchInput): Promise<FetchResultPayload> {
 // Pattern adapted from hermes-agent (tools/web_tools.py `web_extract_tool`): dispatch the fetch to a
 // third-party scraper backend that retrieves the page from THE PROVIDER's IP, not our process — so sites
 // that 403 our direct GET (arxiv, huggingface, baidu, …) succeed without per-domain hacks. The backend is
-// auto-selected from env keys; the default is Jina Reader, which needs no API key. Fully fallback-safe:
-// any failure (no backend, HTTP error, empty body) falls through to the direct-HTTP path.
+// auto-selected from env keys (Firecrawl/Tavily); keyless Jina Reader is opt-in via
+// PHILONT_WEB_FETCH_BACKEND=jina. When nothing is configured the tier is skipped, leaving the baseline
+// native→direct behavior unchanged. Fully fallback-safe: any failure falls through to the direct-HTTP path.
 type ScraperBackend = 'jina' | 'tavily' | 'firecrawl';
 
 function pickScraperBackend(): ScraperBackend | null {
   const explicit = process.env.PHILONT_WEB_FETCH_BACKEND?.trim().toLowerCase();
   if (explicit === 'off' || explicit === 'none' || explicit === '0') return null;
   if (explicit === 'jina' || explicit === 'tavily' || explicit === 'firecrawl') return explicit;
-  // Auto-detect by available key, then fall back to the keyless Jina reader.
+  // Auto-detect by available key. Keyless Jina is NOT enabled implicitly — routing every
+  // URL through a third-party reader by default is a privacy/dependency surprise and changes
+  // baseline fetch behavior; opt in explicitly with PHILONT_WEB_FETCH_BACKEND=jina.
   if (process.env.FIRECRAWL_API_KEY) return 'firecrawl';
   if (process.env.TAVILY_API_KEY) return 'tavily';
-  return 'jina';
+  return null;
 }
 
 /** Jina Reader (r.jina.ai) — keyless by default; reads from Jina's IP and returns markdown. */
