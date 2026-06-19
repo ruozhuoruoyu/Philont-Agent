@@ -289,11 +289,40 @@ export class SkillsMarketplace extends LitElement {
       </div>`;
   }
 
+  private selfLearnedSection() {
+    // Skills philont generated itself (skill-creator / reflection): not bundled, no marketplace provenance.
+    const items = this.allSkills
+      .filter((s) => !s.bundled && !isDownloaded(s))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    if (!items.length) return null;
+    return html`
+      <div class="section">
+        <h3>${t('自己生成的技能', 'Self-generated skills')}</h3>
+        <div class="grid">
+          ${items.map((s) => {
+            const busy = this.busy[s.name];
+            return html`
+              <div class="card">
+                <div class="card-head">
+                  <span class="name">${s.name}</span>
+                  <span class="badge self">${t('自习得', 'Self-learned')}</span>
+                  ${typeof s.useCount === 'number' ? html`<span class="src">${t('用', 'used')} ${s.useCount}</span>` : null}
+                </div>
+                <div class="desc">${s.description}</div>
+                <div class="card-actions">
+                  <button class="danger" @click=${() => this.uninstall(s.name)} ?disabled=${!!busy}>${t('删除', 'Delete')}</button>
+                </div>
+              </div>`;
+          })}
+        </div>
+        <div class="muted">${t('这些技能由 philont 在工作中自行总结生成,可在此删除。', 'philont generated these from its own work; you can delete them here.')}</div>
+      </div>`;
+  }
+
   private bundledSection() {
     // Built-in/default skills shipped with philont. Authoritative flag from the server (bundled-skills/ dir).
     const items = this.allSkills.filter((s) => s.bundled).sort((a, b) => a.name.localeCompare(b.name));
-    const selfLearned = this.allSkills.filter((s) => !s.bundled && !isDownloaded(s)).length;
-    if (!items.length && !selfLearned) return null;
+    if (!items.length) return null;
     return html`
       <div class="section">
         <h3>${t('内置技能(默认)', 'Built-in skills (default)')}</h3>
@@ -310,7 +339,6 @@ export class SkillsMarketplace extends LitElement {
         </div>
         <div class="muted">
           ${t('内置技能随 philont 发布,不可在此卸载。', 'Built-in skills ship with philont and cannot be uninstalled here.')}
-          ${selfLearned ? t(`另有 ${selfLearned} 个 philont 自习得技能,见「记忆 → 技能」页。`, ` ${selfLearned} self-learned skills are under Memory → Skills.`) : ''}
         </div>
       </div>`;
   }
@@ -419,6 +447,7 @@ export class SkillsMarketplace extends LitElement {
           : null}
 
         ${this.downloadedSection()}
+        ${this.selfLearnedSection()}
         ${this.bundledSection()}
 
         ${this.modal()}
@@ -461,6 +490,7 @@ export class SkillsMarketplace extends LitElement {
     .installed { color: #2e7d32; font-size: 13px; align-self: center; }
     .badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; }
     .badge.official { background: #e8f5e9; color: #2e7d32; }
+    .badge.self { background: #ede7f6; color: #5e35b1; }
     .badge.community { background: #fff8e1; color: #f57f17; }
     .badge.verdict-safe { background: #e8f5e9; color: #2e7d32; }
     .badge.verdict-caution { background: #fff8e1; color: #f57f17; }
