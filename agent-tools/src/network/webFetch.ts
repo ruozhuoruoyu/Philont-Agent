@@ -279,8 +279,16 @@ interface FetchResultPayload {
   text: string;
   /** Whether the content was truncated */
   truncated: boolean;
-  /** Extraction method: raw/markdown/distilled/preapproved/redirect/native */
-  extractor: 'raw' | 'markdown' | 'distilled' | 'preapproved' | 'redirect' | 'native';
+  /** Extraction method: raw/markdown/distilled/preapproved/redirect/native/scraper/arxiv-atom */
+  extractor:
+    | 'raw'
+    | 'markdown'
+    | 'distilled'
+    | 'preapproved'
+    | 'redirect'
+    | 'native'
+    | 'scraper'
+    | 'arxiv-atom';
   /** Raw markdown length (before truncation/distillation) */
   rawLength: number;
   fetchedAt: string;
@@ -508,7 +516,9 @@ function formatPayload(p: FetchResultPayload): string {
 // fetch-friendly HTML rendering: arxiv.org/html/<id> (native, 2024+) and ar5iv (older papers). When the
 // model asks for an arxiv pdf/abs URL, try the HTML versions first; fall back to the original last.
 const ARXIV_HOST_RE = /(^|\.)(arxiv\.org|export\.arxiv\.org)$/i;
-export function arxivCandidates(rawUrl: string): string[] | null {
+
+/** Extract the bare arxiv id from a pdf/abs/html URL, or null if not a recognizable arxiv paper URL. */
+export function arxivId(rawUrl: string): string | null {
   let u: URL;
   try {
     u = new URL(rawUrl);
@@ -521,6 +531,12 @@ export function arxivCandidates(rawUrl: string): string[] | null {
   if (!m) return null;
   const id = m[1];
   if (!/^([a-z-]+(\.[A-Za-z]{2})?\/\d{7}|\d{4}\.\d{4,5})(v\d+)?$/i.test(id)) return null;
+  return id;
+}
+
+export function arxivCandidates(rawUrl: string): string[] | null {
+  const id = arxivId(rawUrl);
+  if (!id) return null;
   return [
     `https://arxiv.org/html/${id}`,
     `https://ar5iv.labs.arxiv.org/html/${id}`,
@@ -612,24 +628,186 @@ async function fetchNative(input: WebFetchInput): Promise<FetchResultPayload> {
   };
 }
 
-/** One URL: try the provider's server-side fetch first (avoids our-IP 403), then the direct HTTP path. */
+// ── Scraper backend tier (2026-06-19) ────────────────────────────────────────
+// Pattern adapted from hermes-agent (tools/web_tools.py `web_extract_tool`): dispatch the fetch to a
+// third-party scraper backend that retrieves the page from THE PROVIDER's IP, not our process — so sites
+// that 403 our direct GET (arxiv, huggingface, baidu, …) succeed without per-domain hacks. The backend is
+// auto-selected from env keys; the default is Jina Reader, which needs no API key. Fully fallback-safe:
+// any failure (no backend, HTTP error, empty body) falls through to the direct-HTTP path.
+type ScraperBackend = 'jina' | 'tavily' | 'firecrawl';
+
+function pickScraperBackend(): ScraperBackend | null {
+  const explicit = process.env.PHILONT_WEB_FETCH_BACKEND?.trim().toLowerCase();
+  if (explicit === 'off' || explicit === 'none' || explicit === '0') return null;
+  if (explicit === 'jina' || explicit === 'tavily' || explicit === 'firecrawl') return explicit;
+  // Auto-detect by available key, then fall back to the keyless Jina reader.
+  if (process.env.FIRECRAWL_API_KEY) return 'firecrawl';
+  if (process.env.TAVILY_API_KEY) return 'tavily';
+  return 'jina';
+}
+
+/** Jina Reader (r.jina.ai) — keyless by default; reads from Jina's IP and returns markdown. */
+async function scrapeJina(url: string): Promise<string> {
+  const key = process.env.JINA_API_KEY?.trim();
+  const resp = await fetch(`https://r.jina.ai/${url}`, {
+    headers: {
+      'X-Return-Format': 'markdown',
+      ...(key ? { Authorization: `Bearer ${key}` } : {}),
+    },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`jina reader HTTP ${resp.status}`);
+  return await resp.text();
+}
+
+/** Tavily extract — reuses the TAVILY_API_KEY already wired for native web search. */
+async function scrapeTavily(url: string): Promise<string> {
+  const key = process.env.TAVILY_API_KEY;
+  if (!key) throw new Error('TAVILY_API_KEY not set');
+  const resp = await fetch('https://api.tavily.com/extract', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${key}` },
+    body: JSON.stringify({ urls: [url], extract_depth: 'advanced', format: 'markdown' }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`tavily extract HTTP ${resp.status}`);
+  const data = (await resp.json()) as { results?: Array<{ raw_content?: string; content?: string }> };
+  const r = data.results?.[0];
+  return (r?.raw_content || r?.content || '').toString();
+}
+
+/** Firecrawl cloud (or self-hosted via FIRECRAWL_API_URL) scrape → markdown. */
+async function scrapeFirecrawl(url: string): Promise<string> {
+  const key = process.env.FIRECRAWL_API_KEY;
+  if (!key) throw new Error('FIRECRAWL_API_KEY not set');
+  const baseURL = (process.env.FIRECRAWL_API_URL || 'https://api.firecrawl.dev').replace(/\/+$/, '');
+  const resp = await fetch(`${baseURL}/v2/scrape`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${key}` },
+    body: JSON.stringify({ url, formats: ['markdown'] }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`firecrawl scrape HTTP ${resp.status}`);
+  const data = (await resp.json()) as { data?: { markdown?: string } };
+  const md = data.data?.markdown;
+  if (!md) throw new Error('firecrawl returned no markdown');
+  return md;
+}
+
+async function fetchScraper(input: WebFetchInput, backend: ScraperBackend): Promise<FetchResultPayload> {
+  const maxChars = input.maxChars ?? DEFAULT_MAX_CHARS;
+  const start = Date.now();
+  const md =
+    backend === 'jina'
+      ? await scrapeJina(input.url)
+      : backend === 'tavily'
+        ? await scrapeTavily(input.url)
+        : await scrapeFirecrawl(input.url);
+  const joined = md.trim();
+  if (!joined) throw new Error(`scraper(${backend}) returned no content`);
+  const { text, truncated } = truncate(joined, maxChars);
+  return {
+    url: input.url,
+    finalUrl: input.url,
+    status: 200,
+    contentType: 'text/markdown',
+    text,
+    truncated,
+    extractor: 'scraper',
+    rawLength: joined.length,
+    fetchedAt: new Date().toISOString(),
+    tookMs: Date.now() - start,
+  };
+}
+
+// ── arxiv Atom export API (2026-06-19) ───────────────────────────────────────
+// Pattern adapted from hermes-agent (skills/research/arxiv/scripts/search_arxiv.py): arxiv's Atom export
+// endpoint (export.arxiv.org/api/query) is fetch-friendly and does NOT 403 our IP, unlike the PDF host. It
+// returns title + authors + abstract — a guaranteed metadata fallback when full-text HTML can't be fetched.
+function xmlField(xml: string, tag: string): string {
+  const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i'));
+  return m ? m[1].replace(/\s+/g, ' ').trim() : '';
+}
+
+async function fetchArxivAtom(id: string, input: WebFetchInput): Promise<FetchResultPayload> {
+  const start = Date.now();
+  const maxChars = input.maxChars ?? DEFAULT_MAX_CHARS;
+  const resp = await fetch(`https://export.arxiv.org/api/query?id_list=${encodeURIComponent(id)}`, {
+    headers: { 'User-Agent': DEFAULT_USER_AGENT },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`arxiv atom HTTP ${resp.status}`);
+  const xml = await resp.text();
+  const entry = xml.match(/<entry>([\s\S]*?)<\/entry>/i)?.[1];
+  if (!entry) throw new Error('arxiv atom: no <entry> for id');
+  const title = xmlField(entry, 'title');
+  const summary = xmlField(entry, 'summary');
+  const published = xmlField(entry, 'published');
+  const authors = [...entry.matchAll(/<name>([\s\S]*?)<\/name>/gi)]
+    .map((m) => m[1].trim())
+    .filter(Boolean)
+    .join(', ');
+  const body = [
+    `# ${title}`,
+    authors ? `**Authors:** ${authors}` : null,
+    published ? `**Published:** ${published}` : null,
+    `**arXiv:** ${id} — https://arxiv.org/abs/${id}`,
+    '',
+    '## Abstract',
+    summary,
+    '',
+    '[NOTE] Full text could not be fetched; this is the arXiv abstract + metadata via the Atom export API.',
+  ]
+    .filter((x) => x !== null)
+    .join('\n');
+  const { text, truncated } = truncate(body, maxChars);
+  return {
+    url: input.url,
+    finalUrl: `https://arxiv.org/abs/${id}`,
+    status: 200,
+    contentType: 'text/markdown',
+    title: title || undefined,
+    text,
+    truncated,
+    extractor: 'arxiv-atom',
+    rawLength: body.length,
+    fetchedAt: new Date().toISOString(),
+    tookMs: Date.now() - start,
+  };
+}
+
+/**
+ * One URL, tried through three tiers in order, each running off a different IP so an our-IP 403 never ends
+ * the chain: (1) provider server-side web_fetch, (2) third-party scraper backend, (3) direct HTTP.
+ */
 async function fetchOne(input: WebFetchInput): Promise<FetchResultPayload> {
+  // Tier 1: provider server-side web_fetch (fetches from the LLM provider's infra).
   try {
     const r = await fetchNative(input);
-    // Observability (2026-06-17): mirror webSearch's `backend=native` line so it's visible whether the fetch
-    // actually went through the LLM server-side web_fetch tool or silently fell back to our-IP direct HTTP.
     console.log(`[webFetch] backend=native url=${input.url}`);
     return r;
   } catch (e) {
-    // Why native was unavailable — a 4xx (endpoint doesn't support web_fetch) latches nativeFetchSupported
-    // off for the rest of the process; anything else is a one-off. Surfaced so "is webFetch using the LLM API?"
-    // is answerable from the logs instead of guessed.
     const reason =
       nativeFetchSupported === false
         ? 'endpoint does not support the web_fetch tool (latched off)'
         : (e as Error)?.message ?? String(e);
-    console.log(`[webFetch] backend=direct (native unavailable: ${reason}) url=${input.url}`);
+    console.log(`[webFetch] backend=native unavailable (${reason}) url=${input.url}`);
   }
+  // Tier 2: third-party scraper backend (fetches from the scraper provider's IP).
+  const backend = pickScraperBackend();
+  if (backend) {
+    try {
+      const r = await fetchScraper(input, backend);
+      console.log(`[webFetch] backend=scraper:${backend} url=${input.url}`);
+      return r;
+    } catch (e) {
+      console.log(
+        `[webFetch] backend=scraper:${backend} unavailable (${(e as Error)?.message ?? String(e)}) url=${input.url}`,
+      );
+    }
+  }
+  // Tier 3: direct HTTP from our process (last resort; subject to our-IP 403).
+  console.log(`[webFetch] backend=direct url=${input.url}`);
   return withRetry(() => runWebFetch(input), {
     isRetryable: (e) => e instanceof IngestError && (e.kind === 'timeout' || e.kind === 'aborted'),
   });
@@ -670,18 +848,30 @@ export const webFetchTool: Tool = {
   domain: 'network',
   async execute(params) {
     const reqUrl = params.url as string;
+    const opts = {
+      prompt: params.prompt as string | undefined,
+      extractMode: params.extractMode as 'markdown' | 'text' | undefined,
+      maxChars: params.maxChars as number | undefined,
+    };
     // arxiv pdf/abs → try HTML renderings first (PDF 403s); other URLs → just the one. Each candidate goes
-    // through fetchOne (native server-side fetch → direct HTTP fallback).
+    // through fetchOne (native → scraper → direct HTTP).
     const candidates = arxivCandidates(reqUrl) ?? [reqUrl];
     let lastErr: unknown;
     for (const url of candidates) {
       try {
-        const payload = await fetchOne({
-          url,
-          prompt: params.prompt as string | undefined,
-          extractMode: params.extractMode as 'markdown' | 'text' | undefined,
-          maxChars: params.maxChars as number | undefined,
-        });
+        const payload = await fetchOne({ url, ...opts });
+        return { success: true, output: formatPayload(payload) };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    // arxiv guaranteed fallback: if every full-text candidate failed, return the abstract + metadata via the
+    // Atom export API, which is served off export.arxiv.org and does not 403 our IP.
+    const axId = arxivId(reqUrl);
+    if (axId) {
+      try {
+        const payload = await fetchArxivAtom(axId, { url: reqUrl, ...opts });
+        console.log(`[webFetch] backend=arxiv-atom id=${axId}`);
         return { success: true, output: formatPayload(payload) };
       } catch (e) {
         lastErr = e;
