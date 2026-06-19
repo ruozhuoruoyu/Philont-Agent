@@ -15,5 +15,21 @@ if (-not (Test-Path 'launcher/dist/index.js') -or -not (Test-Path 'web-ui/dist')
     exit 1
 }
 
+# Make the managed Python interpreter available to philont (document / z3 tools).
+# setx only reaches new shells; loading from the manifest guarantees this launch
+# has it regardless of when the env var propagates.
+if (-not $env:PHILONT_PYTHON) {
+    $manifest = Join-Path $env:USERPROFILE '.philont\python-env.json'
+    if (Test-Path $manifest) {
+        try {
+            $pp = (Get-Content $manifest -Raw | ConvertFrom-Json).pythonPath
+            if ($pp -and (Test-Path $pp)) {
+                $env:PHILONT_PYTHON = $pp
+                Write-Host "Using managed Python: $pp" -ForegroundColor DarkGray
+            }
+        } catch { }
+    }
+}
+
 Write-Host "Starting launcher (serves web UI + supervises agent + opens browser; Ctrl+C to exit)..." -ForegroundColor Green
 node launcher/dist/index.js

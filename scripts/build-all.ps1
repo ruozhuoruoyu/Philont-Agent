@@ -54,4 +54,15 @@ Build-Pkg 'web-ui'    # vite -> web-ui/dist
 Build-Pkg 'launcher'  # tsc  -> launcher/dist
 
 Write-Host ""
+Write-Host "==> setup Python env (managed venv for document/office tools + z3)" -ForegroundColor Cyan
+# Non-fatal: a missing Python or blocked PyPI must not break the TS build.
+# Run in a child powershell so the setup script's own 'exit' cannot abort this build.
+# (setx + the python-env.json manifest persist regardless of this process.)
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'setup-python-env.ps1')
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WARN: Python env setup did not complete. Document/office tools need it." -ForegroundColor Yellow
+    Write-Host "      Install Python 3.9+ then run: .\scripts\setup-python-env.ps1" -ForegroundColor Yellow
+}
+
+Write-Host ""
 Write-Host "Build complete. Start with: .\scripts\start.ps1" -ForegroundColor Green
