@@ -1,0 +1,29 @@
+# philont managed Python dependencies.
+#
+# These are installed ONCE into philont's managed virtualenv by
+# scripts/setup-python-env.(ps1|sh). PHILONT_PYTHON then points the shell / z3 /
+# document tools at that interpreter, so nothing is pip-installed at runtime.
+# Runtime installs flood the logs, evict earlier context, and on Windows can land
+# in a different interpreter than the one the tools invoke (see agent-tools/src/runtime/z3.ts).
+#
+# Single source of truth: the Dockerfile (headless tests) should also install from this file.
+#
+# All libraries below are permissive open-source (BSD / MIT / HPND) — safe to bundle
+# in an open-source distribution. The one copyleft option (PyMuPDF, AGPL) is opt-in only.
+
+# ── Office documents: read + author ───────────────────────────────────────────
+pypdf            # PDF read / merge / split / form fields — BSD-3-Clause
+pdfplumber       # PDF text + table extraction (good for multi-column layouts) — MIT
+python-docx      # Word .docx read / write — MIT
+openpyxl         # Excel .xlsx read / write (formulas, named ranges, styles) — MIT
+python-pptx      # PowerPoint .pptx read / write (layouts, charts) — MIT
+pillow           # image handling / page rendering — HPND (permissive)
+
+# ── Solver used by the z3 tool (reads PHILONT_PYTHON) ─────────────────────────
+z3-solver        # SMT solver — MIT
+
+# ── Optional: higher-quality PDF extraction (academic papers, dense layouts) ──
+# PyMuPDF (fitz) is materially better than pypdf/pdfplumber for research PDFs, but
+# it is licensed AGPL-3.0 (or commercial). Review the license implications before
+# enabling it in an open-source distribution, then uncomment:
+# pymupdf
