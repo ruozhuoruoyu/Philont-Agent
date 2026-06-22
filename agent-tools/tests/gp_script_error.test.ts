@@ -49,3 +49,29 @@ test('gp warning + a real *** error → flagged (error wins)', () => {
   assert.ok(e);
   assert.match(e!, /syntax error/);
 });
+
+// 2026-06-22: surface the WHOLE PARI error block, not just the first line — the cause is on the last
+// *** line. Returning only "at top-level" forced the agent to add 2>&1 and dig (transcript: random(0)).
+test('multi-line PARI block → surfaced error includes the CAUSE line, not just "at top-level"', () => {
+  const stderr = [
+    '  ***   at top-level: ...random((hi-lo)\\2)...',
+    '  ***                                 ^------',
+    '  ***   random: domain error in random: argument <= 0',
+  ].join('\n');
+  const e = detectGpScriptError(GP_CMD, 'partial output', stderr);
+  assert.ok(e);
+  assert.match(e!, /at top-level/);            // where
+  assert.match(e!, /random: domain error/);    // why — this was the hidden cause
+});
+
+test('multi-line block excludes interleaved benign warning but keeps the error lines', () => {
+  const stderr = [
+    '  ***   Warning: increasing stack size to 4000000.',
+    '  ***   at top-level: foo(bar)',
+    '  ***   not a function in function call',
+  ].join('\n');
+  const e = detectGpScriptError(GP_CMD, '', stderr);
+  assert.ok(e);
+  assert.match(e!, /not a function/);
+  assert.doesNotMatch(e!, /increasing stack size/); // warning dropped from the surfaced error
+});

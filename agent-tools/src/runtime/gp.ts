@@ -150,17 +150,23 @@ export function checkGpParenBalance(script: string): string | null {
  * so a CORRECT script "failed", the agent got no result, and fell back to fabricating numbers — the single
  * biggest "command execution keeps failing" cause in the 2026-06-22 post-mortem.
  *
- * Returns the first FATAL `***` line (trimmed), or null when the text has no fatal marker (a
- * warnings-only stderr counts as clean). Pure + exported for reuse by shell.ts and unit tests.
+ * Returns the FULL fatal error block — every non-warning `***` line joined — or null when the text
+ * has no fatal marker (a warnings-only stderr counts as clean). PARI prints the error across multiple
+ * `***` lines: "at top-level: <expr>" (where), a "^---" caret line, then "<func>: <message>" (why).
+ * Returning only the first line showed WHERE but not WHY, forcing the agent to add `2>&1` and dig
+ * (2026-06-22 transcript: a `random: domain error` cause was hidden behind an `at top-level` line).
+ * Pure + exported for reuse by shell.ts and unit tests.
  */
-export function gpFatalErrorLine(text: string): string | null {
+export function gpFatalError(text: string): string | null {
+  const fatal: string[] = [];
   for (const line of (text || '').split('\n')) {
     if (!/\*\*\*/.test(line)) continue;
     if (/\*\*\*\s*warning/i.test(line)) continue; // benign warning, not an error
     if (/increasing stack size|new stack size/i.test(line)) continue; // benign stack auto-grow
-    if (line.replace(/[*\s]/g, '') !== '') return line.trim(); // a *** line with real content
+    if (line.replace(/[*\s]/g, '') !== '') fatal.push(line.trim()); // a *** line with real content
   }
-  return null;
+  if (fatal.length === 0) return null;
+  return fatal.join('\n').slice(0, 600);
 }
 
 /** True if stderr has non-empty content that is NOT a benign PARI/GP warning (used for non-zero exits). */
@@ -247,9 +253,9 @@ export const pariGpTool: Tool = {
       const err = run.stderr.trim();
       // gp writes errors to stderr as "*** ... error", but ALSO benign warnings as "*** Warning: ...".
       // Only a non-warning *** line is fatal; a non-zero exit with non-warning stderr also fails.
-      const fatal = gpFatalErrorLine(err);
+      const fatal = gpFatalError(err);
       if (fatal) {
-        return { success: false, output: out, error: `PARI/GP error: ${fatal.slice(0, 600)}` };
+        return { success: false, output: out, error: `PARI/GP error:\n${fatal}` };
       }
       if (!run.ok && stderrHasNonWarningContent(err)) {
         return { success: false, output: out, error: `PARI/GP error: ${err.slice(0, 600)}` };
