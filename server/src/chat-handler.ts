@@ -214,6 +214,7 @@ import {
   decideTurnAnchors,
 } from './viability_gate.js';
 import { detectUngroundedArxivCitation, buildCitationGroundingDirective } from './citation_gate.js';
+import { detectUngroundedComputation, buildNumericGroundingDirective } from './numeric_grounding_gate.js';
 import { detectHandRolledParser, buildSkillReflexNudge } from './skill_reflex.js';
 import { resolveResponseLanguage, buildLanguageDirective } from './response_language.js';
 
@@ -4418,7 +4419,10 @@ export async function handleChatSend(
     // Phase 18 WS2: stop_and_report is a natural, high-value end (a deliberate concede) — reflection should run so it can
     // distil a routing_rule ("goal X is barrier-blocked via method Y, don't re-attack that way").
     const outcomeType = result.outcome.outcomeType;
-    if (outcomeType === 'response' || outcomeType === 'stop_and_report') {
+    // Stage A (2026-06-22): could_not_verify is a natural HONEST end (the agent admitted it lacked
+    // tool backing instead of fabricating) — reflection should run on it like response/stop_and_report
+    // so the system can distil "this needs a working compute path" rather than treating it as failure.
+    if (outcomeType === 'response' || outcomeType === 'stop_and_report' || outcomeType === 'could_not_verify') {
       // 2026-05-06 sameRootCauseFailures integration: scans up to 30 failed tool calls within the last 24h,
       // clusters by (toolName + errorClass) signature, and takes the count of the largest same-signature group.
       // This is a cross-turn signal (memory_actions global timeline) implementing "repeated same-wall collision"
@@ -5501,6 +5505,36 @@ function summarizeTurnTools(records: InTurnToolRecord[]): string {
   return parts.join(' ');
 }
 
+/**
+ * Render this turn's tool ledger as a compact, authoritative list — ✓ = real, citable result;
+ * ⚠ = failed, produced NOTHING. Used inside the numeric-grounding directive (Stage B) so the regen
+ * sees exactly what executed instead of narrating from memory (fabrication post-mortem 2026-06-22).
+ *
+ * NOTE: this is deliberately fed into an existing gate REMINDER rather than injected as a standalone
+ * user message in the tool loop — a standalone string-content user message would be misread as the
+ * turn boundary by extractRecentToolResults() and blind the honesty/numeric gates. Returns '' when
+ * no tools have run.
+ */
+function renderTurnLedger(records: InTurnToolRecord[]): string {
+  if (!records.length) return '';
+  const lines: string[] = [];
+  let idx = 0;
+  for (const r of records) {
+    idx++;
+    const mark = r.success ? '✓' : '⚠';
+    const excerpt = (r.resultText ?? '').slice(0, 140).replace(/\s+/g, ' ').trim();
+    const tail = r.success
+      ? excerpt ? ` → ${excerpt}` : ' → (ok, no output)'
+      : ` → FAILED: ${excerpt || '(no error text)'}`;
+    lines.push(`  ${mark} #${idx} ${r.toolName}${tail}`);
+    if (idx >= 24) {
+      lines.push(`  … (${records.length - idx} more)`);
+      break;
+    }
+  }
+  return lines.join('\n');
+}
+
 interface TurnSignalBus {
   honesty?: {
     evaluation: HonestyEvaluation;
@@ -5520,6 +5554,14 @@ interface TurnSignalBus {
   activeRuleIds?: number[];
   /** 2026-05-11: EmptyConclusionGate fire that occurred this turn (feeds back strong failure signal) */
   emptyConclusionFired?: boolean;
+  /**
+   * Stage A (2026-06-22 anti-fabrication): the numeric-grounding gate forced the reply away from
+   * reporting unbacked computed values toward an honest "could not verify" framing. Used at final
+   * emit to label the turn `could_not_verify` — a first-class HONEST outcome (like stop_and_report),
+   * NOT a failure — so admitting "I couldn't verify" is a sanctioned way to end a turn rather than a
+   * penalized one. Removing that penalty is what removes the pressure to fabricate.
+   */
+  couldNotVerify?: boolean;
   /**
    * Phase 9.2 M1 (2026-05-13): whether the LLM has explicitly called plan_close this turn.
    * Written back by markPlanCloseCalled at the plan_close.execute entry point.
@@ -6109,6 +6151,7 @@ async function runToolLoop(
   // equation/result) from memory when no source was actually retrieved this conversation. One regen forces
   // honest framing. Capped at one attempt like the other gates.
   let citationGroundingAttempts = 0;
+  let numericGroundingAttempts = 0;
   // Phase 18 WS2: carries a stop_and_report verdict from the ViabilityGate to the final emit so the outcome
   // class is downgraded deterministically (independent of whether the regen dropped the continuation pitch).
   let viabilityStopPending = false;
@@ -6945,6 +6988,48 @@ async function runToolLoop(
         }
       }
 
+      // Stage B (2026-06-22 anti-fabrication): block a reply that reports an accomplished
+      // computation/verification with numeric results when NO compute/exec tool succeeded this turn.
+      // Fills the honesty gate's blind spot (it has no "I ran the math, here are the numbers"
+      // category). Regen once to force an honest "could not verify" framing. env
+      // PHILONT_NUMERIC_GATE=0 to disable.
+      if (numericGroundingAttempts < 1 && process.env.PHILONT_NUMERIC_GATE !== '0') {
+        const ungroundedCompute = detectUngroundedComputation(
+          response.content,
+          extractRecentToolResults(messages),
+        );
+        if (ungroundedCompute) {
+          numericGroundingAttempts++;
+          // Stage A: arm the honest-end label. If the regen drops the unbacked numbers and ends with
+          // an honest "could not verify", the turn closes as `could_not_verify` (a sanctioned outcome),
+          // not as a fake `response`.
+          signalBus.couldNotVerify = true;
+          audit.append('self_domain_write', {
+            source: 'numeric_grounding_gate',
+            origin: 'Internal',
+            toolName: 'numeric_grounding_gate_fired',
+            sessionId,
+            claim: ungroundedCompute.claim,
+            okCompute: ungroundedCompute.okCompute,
+          });
+          console.warn(
+            `[numeric-grounding] session=${sessionId} fired: computation claim "${ungroundedCompute.claim}" with 0 successful compute/exec tools`,
+          );
+          messages.push({ role: 'assistant', content: response.content });
+          const ledgerText = renderTurnLedger(signalBus.inTurnRecords ?? []);
+          messages.push({
+            role: 'user',
+            content: buildNumericGroundingDirective(ungroundedCompute.claim, ledgerText),
+          });
+          onTrace?.({
+            kind: 'internal-gate', tier: 4,
+            text: `Numeric-grounding gate fired (unbacked computed values), forcing honest framing`,
+            meta: { gateName: 'NumericGrounding' },
+          });
+          continue;
+        }
+      }
+
       // Anti-fabrication: block a tool-loop text response that claims deep_explore round/session
       // results when no deep_explore tool actually ran this turn (e.g. it called list_facts then
       // invented "第N轮/时间帽"). A response that did call deep_explore reports legitimately.
@@ -6964,8 +7049,20 @@ async function runToolLoop(
       if (viabilityStopPending && viabilityStopReasoningId) {
         viabilityStopRecommended.set(sessionId, { reasoningSessionId: viabilityStopReasoningId, at: Date.now() });
       }
+      // Stage A (2026-06-22): when the numeric-grounding gate steered this turn to an honest
+      // no-verification reply (and no compute/exec tool actually succeeded), label it
+      // `could_not_verify` — a first-class honest outcome, not a failure. Viability stop takes
+      // precedence (it is its own deliberate concede).
+      const okComputeThisTurn = (signalBus.inTurnRecords ?? []).some(
+        (r) => r.success && ['pariGp', 'z3Verify', 'leanCheck', 'magnitude', 'shell', 'process'].includes(r.toolName),
+      );
+      const outcomeType = viabilityStopPending
+        ? 'stop_and_report'
+        : signalBus.couldNotVerify && !okComputeThisTurn
+          ? 'could_not_verify'
+          : 'response';
       return {
-        outcome: { outcomeType: viabilityStopPending ? 'stop_and_report' : 'response', text: safeText },
+        outcome: { outcomeType, text: safeText },
         auditEvents: audit.length,
       };
     }

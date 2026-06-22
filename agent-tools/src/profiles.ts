@@ -44,7 +44,7 @@ const BUILTIN_TOOLS: Record<Exclude<BuiltinProfile, 'full'>, string[]> = {
     'echo', 'time', 'memory', 'json', 'jsonPatch', 'hash', 'env',
     'readFile', 'writeFile', 'deleteFile', 'moveFile', 'listDir', 'inspectPath',
     'grep', 'glob', 'patch',
-    'shell', 'process', 'z3Verify', 'pariGp',
+    'shell', 'process', 'z3Verify', 'pariGp', 'leanCheck',
     'http', 'webSearch', 'webFetch', 'downloadFile', 'vision',
     'git',
     'askUserQuestion',

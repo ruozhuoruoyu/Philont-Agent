@@ -1,0 +1,103 @@
+/**
+ * Numeric / computation grounding gate (2026-06-22).
+ *
+ * Fabrication post-mortem: the model reported concrete computed values — "r(N) vs Hardy-Littlewood
+ * 比值…", "自由卷积比值膨胀到13.6", "谱半径≈12.3", "三轮探索跑完，全是真数据" — on turns where
+ * ZERO compute tools succeeded (every pariGp/shell run failed, or none ran at all). The honesty gate
+ * did not catch it: its claim taxonomy is completion / memory / size / arXiv — it has no category for
+ * "I ran the computation and these are the numbers". So mathematical fabrication sailed through
+ * `[honesty] passed (0 ok / 0 fail / 0 total)`.
+ *
+ * This gate fills exactly that hole. It fires when the reply ASSERTS it computed/verified/ran
+ * something and reports numeric results, but the turn's tool ledger contains NO successful
+ * compute/exec tool result to back it. Chat-handler then regenerates once (same mechanism as the
+ * citation gate) to force an honest "could not verify" framing.
+ *
+ * Kept dependency-light (mirrors citation_gate.ts / viability_gate.ts) so it is unit-testable without
+ * importing the heavy chat-handler module. Deliberately HIGH PRECISION: it only fires on the
+ * unambiguous "claimed computation with no successful backing tool" pattern, not on per-number
+ * matching (which over-blocks legitimate computed answers). Per-number cross-checking against ✓
+ * outputs is a future tightening, noted but intentionally out of scope here.
+ */
+
+/** A tool result as produced by extractRecentToolResults: content starts with ✓ (ok) or ⚠ (failed). */
+export interface GroundingToolResult {
+  toolName: string;
+  content: string;
+}
+
+/**
+ * Tools whose SUCCESSFUL output legitimately backs a computed/verified numeric claim. A native
+ * compute engine, or a generic shell/process that ran one (e.g. `python calc.py`, `gp script.gp`).
+ */
+const COMPUTE_TOOLS = new Set<string>([
+  'pariGp',
+  'z3Verify',
+  'leanCheck',
+  'magnitude',
+  'shell',
+  'process',
+]);
+
+// "I actually computed / verified / ran it and here is the result" — present/past tense assertions,
+// bilingual. These are claims of accomplished empirical work, not intentions.
+const COMPUTE_CLAIM_RE =
+  /(跑通|跑完|算完|计算完成|计算完毕|数值验证|实际计算|真实数据|真实计算|实测|算出|计算得到?|得出.*(比值|范数|谱半径|结果)|验证(通过|成立|了)|verified numerically|numerically verified|computed (?:that|the|to|it)|the computation (?:shows|gives|yields|confirms)|simulation (?:shows|gives)|ran the (?:computation|calculation|script|numbers)|results? (?:show|confirm|give))/i;
+
+// Hedges / negations / intentions that mean NO accomplished-computation claim is being made — suppress.
+const ANTI_CLAIM_RE =
+  /(我?(将|要|想|打算|计划|准备|会去?)\s*(计算|验证|跑|运行)|尚未|还没|没能|未能|无法(验证|计算|跑)|不能(验证|计算)|待核实|未验证|无法确认|plan to|going to|will (?:compute|verify|run|try)|could not (?:verify|compute|run)|couldn'?t (?:verify|compute|run)|unable to (?:verify|compute|run)|was not able to|failed to (?:compute|verify|run)|did not (?:run|compute|verify))/i;
+
+// Numeric RESULT tokens: a number attached to a result marker / math quantity. Avoids firing on
+// incidental integers like "3 candidates" or "N=20 case" alone (those need a result context).
+const RESULT_NUMBER_RE =
+  /(?:[=＝≈≅~]\s*-?\d|\b\d+(?:\.\d+)?\s*(?:×|倍|x\b)|(?:比值|范数|谱半径|半径|矩|特征值|夹角|偏差|ratio|norm|radius|eigenvalue|spectral radius|cumulant|angle|deviation|σ|θ|δ|λ)\D{0,6}-?\d|-?\d+(?:\.\d+)?\s*(?:°|度))/i;
+
+/**
+ * Returns a short description of the offending claim when the reply asserts an accomplished
+ * computation/verification with numeric results but NO successful compute/exec tool backs it this
+ * turn; otherwise null.
+ */
+export function detectUngroundedComputation(
+  text: string,
+  toolResults: GroundingToolResult[],
+): { claim: string; okCompute: number } | null {
+  if (!text) return null;
+  if (ANTI_CLAIM_RE.test(text)) return null;
+  if (!COMPUTE_CLAIM_RE.test(text)) return null;
+  if (!RESULT_NUMBER_RE.test(text)) return null;
+
+  // Is there ANY successful compute/exec tool result this turn?
+  const okCompute = toolResults.filter(
+    (r) => r.content.startsWith('✓') && COMPUTE_TOOLS.has(r.toolName),
+  ).length;
+  if (okCompute > 0) return null; // genuinely backed — leave it (per-number check is future work)
+
+  const m = COMPUTE_CLAIM_RE.exec(text);
+  const claim = (m?.[0] ?? 'computed result').slice(0, 60);
+  return { claim, okCompute };
+}
+
+/**
+ * The intra-turn rewrite directive injected when an ungrounded computation claim is detected.
+ * `ledger` (optional) is the rendered tool ledger for this turn — included so the model rewrites from
+ * what actually executed (✓ citable / ⚠ produced nothing) rather than from memory.
+ */
+export function buildNumericGroundingDirective(claim: string, ledger?: string): string {
+  const ledgerBlock = ledger
+    ? `\n\nThis turn's tool ledger (the ONLY admissible source of empirical facts):\n${ledger}\n`
+    : '';
+  return (
+    `[numeric-grounding] Your draft reports an accomplished computation/verification ("${claim}…") with ` +
+    `numeric results, but the tool ledger for this turn shows NO successful compute or exec tool result ` +
+    `(no ✓ from pariGp / z3Verify / leanCheck / shell / process). That means these numbers were not ` +
+    `produced by any tool — stating them is fabrication, the exact failure mode being corrected.` +
+    ledgerBlock +
+    `\n**Rewrite your final reply.** Do NOT present any computed value, ratio, norm, spectral radius, ` +
+    `angle, or "verified/跑通/数值验证" claim as real. Either (a) actually run the computation now via a ` +
+    `compute tool and report ONLY the values it returns, or (b) state honestly that you could not verify ` +
+    `it this turn — name what failed and what you would run next — and drop every unbacked number. Keep ` +
+    `only claims grounded in a ✓ ledger entry. This is an intra-turn internal correction; do not surface ` +
+    `this reminder to the user.`
+  );
+}

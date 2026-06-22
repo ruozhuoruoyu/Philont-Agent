@@ -63,6 +63,38 @@ export function extractFailureSignature(
   if (tool === 'z3Verify') {
     return `${tool}:z3-error`;
   }
+  if (tool === 'leanCheck') {
+    if (/\bsorry\b|\badmit\b/.test(lower)) return `${tool}:lean-sorry`;
+    if (/unsolved goals/.test(lower)) return `${tool}:lean-unsolved`;
+    if (/unknown identifier|unknown constant/.test(lower)) return `${tool}:lean-unknown`;
+    if (/computation timed out|process killed|timeout/.test(lower)) return `${tool}:lean-timeout`;
+    return `${tool}:lean-error`;
+  }
+
+  // 0b. Compute engines launched through the GENERIC shell/process tool (e.g. `gp script.gp`,
+  //     `lean foo.lean`) otherwise fall through to the generic fallback and produce
+  //     `shell:other:pari/gp script error…`. That signature (a) escapes the native compute
+  //     families' exclusion from same_root_cause clustering and (b) gets mis-labelled MECHANICAL
+  //     by isMechanicalFailure() because the raw text contains "script error" — so a shell-run gp
+  //     dodged the escalation that a native pariGp run triggers (2026-06-22 fabrication post-mortem).
+  //     Normalize to the native family so a compute run is handled identically either way.
+  if (tool === 'shell' || tool === 'process') {
+    if (/\bpari\/?gp\b|\bgp exited\b/.test(lower) || /\bgp\b[^]*script error/.test(lower)) {
+      if (/syntax error/.test(lower)) return `pariGp:gp-syntax`;
+      if (/incorrect type/.test(lower)) return `pariGp:gp-type`;
+      if (/variable name expected/.test(lower)) return `pariGp:gp-varname`;
+      if (/computation timed out|process killed/.test(lower)) return `pariGp:gp-timeout`;
+      return `pariGp:gp-other`;
+    }
+    if (/\blean\b[^]*(error|sorry|unsolved goals|unknown identifier)/.test(lower)) {
+      if (/\bsorry\b|\badmit\b/.test(lower)) return `leanCheck:lean-sorry`;
+      if (/unsolved goals/.test(lower)) return `leanCheck:lean-unsolved`;
+      return `leanCheck:lean-error`;
+    }
+    if (/\bz3\b[^]*(error|unsupported)|smt2? parse error/.test(lower)) {
+      return `z3Verify:z3-error`;
+    }
+  }
 
   // 1. shell command not found (common enough to warrant dedicated extraction)
   const cmdNotFound =
@@ -132,7 +164,7 @@ export function extractFailureSignature(
  *
  * Both are filtered out of groupFailures (and therefore countSameRootCauseFailures) below.
  */
-const EXCLUDED_FROM_ROOT_CAUSE = new Set<string>(['pariGp', 'z3Verify']);
+const EXCLUDED_FROM_ROOT_CAUSE = new Set<string>(['pariGp', 'z3Verify', 'leanCheck']);
 // Mechanism / deliberate-rejection failures are recorded with result='rejected_by_<mechanism>'
 // (plan_protocol_gate / autonomous_blacklist / research_before_retry / in_turn_reflection / ask_guard / …),
 // which extractFailureSignature turns into `<tool>:other:rejected_by_<mechanism>`. These are on-purpose
@@ -188,6 +220,11 @@ export function groupFailures(
     if (EXCLUDED_FROM_ROOT_CAUSE.has(f.toolName)) continue;
     const sig = extractFailureSignature(f.toolName, f.result);
     if (MECHANISM_REJECTION_RE.test(sig)) continue;
+    // A compute run launched via the generic shell/process tool normalizes to a
+    // pariGp:/leanCheck:/z3Verify: signature (extractFailureSignature §0b). Exclude it from
+    // same_root_cause clustering exactly like a native compute-tool call (whose toolName is
+    // already excluded above) — exploratory compute probes are not task-recurring walls.
+    if (/^(pariGp|z3Verify|leanCheck):/.test(sig)) continue;
     const existing = map.get(sig);
     if (existing) {
       existing.count += 1;

@@ -230,6 +230,8 @@ const FIELDS: Field[] = [
     help: { zh: '单轮回复 token 上限。', en: 'Token cap for one reply.' } },
   { key: 'PHILONT_GP', label: { zh: 'PARI/GP 路径', en: 'PARI/GP path' }, type: 'text', group: '高级', placeholder: 'gp',
     help: { zh: 'gp 可执行文件路径,默认直接用 gp(需在 PATH 里)。Windows 示例:C:\\Program Files\\PARI64\\gp.exe', en: 'Path to the gp executable (default: gp, must be in PATH). Windows example: C:\\Program Files\\PARI64\\gp.exe' } },
+  { key: 'PHILONT_LEAN', label: { zh: 'Lean 路径', en: 'Lean path' }, type: 'text', group: '高级', placeholder: 'lean',
+    help: { zh: 'lean 可执行文件路径,默认直接用 lean(需在 PATH 里;Mathlib 证明需在项目环境内启动的 lean)。Windows 示例:C:\\Users\\xxx\\.elan\\bin\\lean.exe', en: 'Path to the lean executable (default: lean, must be in PATH; Mathlib proofs need a project-aware lean). Windows example: C:\\Users\\xxx\\.elan\\bin\\lean.exe' } },
   { key: 'PHILONT_PLAYWRIGHT', label: { zh: 'Playwright CLI 路径', en: 'Playwright CLI path' }, type: 'text', group: '高级', placeholder: 'playwright',
     help: { zh: 'playwright CLI 路径,默认先尝试 playwright 命令再 npx。Windows 示例:C:\\Users\\xxx\\AppData\\Roaming\\npm\\playwright.cmd', en: 'Path to playwright CLI (default: tries playwright command then npx). Windows example: C:\\Users\\xxx\\AppData\\Roaming\\npm\\playwright.cmd' } },
   { key: 'PHILONT_DEEP_EXPLORE_MAX_ITERS', label: { zh: '深推单轮迭代上限', en: 'Deep-reason iters/round' }, type: 'number', group: '高级', placeholder: '40',
@@ -649,6 +651,7 @@ export class SettingsView extends LitElement {
                 ${capRow('Python', 'python')}
                 ${capRow(t('Z3 求解器(deep_explore 严格验证)', 'Z3 solver (deep_explore strict verify)'), 'z3')}
                 ${capRow(t('PARI/GP(deep_explore 数论计算/找反例)', 'PARI/GP (deep_explore number theory / counterexamples)'), 'pari')}
+                ${capRow(t('Lean 4(deep_explore 形式化证明验证)', 'Lean 4 (deep_explore formal proof verification)'), 'lean')}
                 ${capRow(t('Playwright(浏览器自动化)', 'Playwright (browser automation)'), 'playwright')}
               ` : html`<span class="muted">${t('检测中…', 'detecting…')}</span>`}
             </div>

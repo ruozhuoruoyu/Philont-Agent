@@ -132,6 +132,74 @@ test('sig: cmd 名特殊字符过滤', () => {
   assert.ok(!s.includes("'"), `不应含引号: ${s}`);
 });
 
+// ── shell-launched compute normalized to native families (2026-06-22) ──
+
+test('sig: shell-run gp script error → pariGp family (not shell:other, not mechanical-via-text)', () => {
+  // Regression: a `gp script.gp` run via the generic shell tool used to yield
+  // `shell:other:pari/gp script error…`, which (a) escaped pariGp's same_root_cause exclusion
+  // and (b) was mis-classified MECHANICAL because the raw text contains "script error".
+  assert.equal(
+    extractFailureSignature(
+      'shell',
+      '⚠ TOOL FAILED: PARI/GP script error (gp exited 0 but stderr reports an error): *** syntax error',
+    ),
+    'pariGp:gp-syntax',
+  );
+  assert.equal(
+    extractFailureSignature('shell', 'PARI/GP error: *** incorrect type in gadd'),
+    'pariGp:gp-type',
+  );
+  assert.equal(
+    extractFailureSignature('process', 'PARI/GP error: computation timed out'),
+    'pariGp:gp-timeout',
+  );
+  assert.equal(
+    extractFailureSignature('shell', 'gp exited with weird output blah'),
+    'pariGp:gp-other',
+  );
+});
+
+test('sig: shell-run lean with sorry/error → leanCheck family', () => {
+  assert.equal(
+    extractFailureSignature('shell', "lean: declaration uses 'sorry'"),
+    'leanCheck:lean-sorry',
+  );
+  assert.equal(
+    extractFailureSignature('shell', 'lean foo.lean: unsolved goals'),
+    'leanCheck:lean-unsolved',
+  );
+  assert.equal(
+    extractFailureSignature('shell', 'lean error: unknown identifier x'),
+    'leanCheck:lean-error',
+  );
+});
+
+test('sig: native leanCheck tool families', () => {
+  assert.equal(extractFailureSignature('leanCheck', "uses 'sorry'"), 'leanCheck:lean-sorry');
+  assert.equal(extractFailureSignature('leanCheck', 'unsolved goals'), 'leanCheck:lean-unsolved');
+  assert.equal(extractFailureSignature('leanCheck', 'unknown identifier'), 'leanCheck:lean-unknown');
+  assert.equal(extractFailureSignature('leanCheck', 'whatever else'), 'leanCheck:lean-error');
+});
+
+test('sig: shell "command not found: gp" is still cmd-not-found, not gp-other', () => {
+  // gp not installed must stay a cmd-not-found signal, not a compute-engine error.
+  assert.equal(
+    extractFailureSignature('shell', 'bash: command not found: gp'),
+    'shell:cmd-not-found:gp',
+  );
+});
+
+test('group: shell-run compute excluded from same_root_cause like native pariGp', () => {
+  const groups = groupFailures([
+    fail('shell', 'PARI/GP script error: *** syntax error'),
+    fail('shell', 'PARI/GP script error: *** syntax error'),
+    fail('shell', 'PARI/GP script error: *** syntax error'),
+    fail('shell', 'command not found: rg'), // a real wall must still count
+  ]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].signature, 'shell:cmd-not-found:rg');
+});
+
 // ── countSameRootCauseFailures ─────────────────────────────────────────
 
 function fail(toolName: string, result: string, ts = 0): Action {

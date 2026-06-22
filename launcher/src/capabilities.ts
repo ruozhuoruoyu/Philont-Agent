@@ -96,6 +96,7 @@ export interface Capabilities {
   python: { found: boolean; path?: string; version?: string };
   z3: { found: boolean; hint: string };
   pari: { found: boolean; hint: string };
+  lean: { found: boolean; hint: string };
   playwright: { found: boolean; hint: string };
 }
 
@@ -105,6 +106,7 @@ export async function detectCapabilities(): Promise<Capabilities> {
     python: { found: false },
     z3: { found: false, hint: 'pip install z3-solver (for deep_explore / z3Verify formal verification)' },
     pari: { found: false, hint: 'apt install pari-gp / brew install pari (for deep_explore / pariGp number-theory computation and counterexamples); or set PHILONT_GP=<path-to-gp>' },
+    lean: { found: false, hint: 'install Lean 4 via elan (https://leanprover.github.io) (for deep_explore / leanCheck formal proof verification); or set PHILONT_LEAN=<path-to-lean>' },
     playwright: { found: false, hint: 'npx playwright install chromium (for PHILONT_MCP_BROWSER browser automation); or set PHILONT_PLAYWRIGHT=<path-to-playwright-cli>' },
   };
 
@@ -138,6 +140,14 @@ export async function detectCapabilities(): Promise<Capabilities> {
     const r = await probe(gpBin, ['--version']);
     // gp --version may return a non-zero exit code, but the output contains "GP/PARI"; checking output is more reliable
     if (/GP\/PARI|pari/i.test(r.stdout + r.stderr)) caps.pari.found = true;
+  }
+
+  // lean: probe `lean --version` (PHILONT_LEAN overrides the binary path). Output looks like
+  // "Lean (version 4.x.x, ...)"; check the output text since the exit code is the reliable-enough signal.
+  {
+    const leanBin = envOverride('PHILONT_LEAN', fileCfg) || 'lean';
+    const r = await probe(leanBin, ['--version']);
+    if (r.code === 0 || /lean \(version|^lean/i.test(r.stdout + r.stderr)) caps.lean.found = true;
   }
 
   // playwright: the installed Chromium binary is the real signal (the MCP runs via npx and
