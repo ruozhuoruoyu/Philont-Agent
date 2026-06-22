@@ -168,6 +168,7 @@ import {
   renderAskGuardRejection,
 } from './short_answer_binding.js';
 import { buildRoutingInjection } from './routing_inject.js';
+import { renderLearningStats } from './learning_stats.js';
 import {
   buildFailureRecoveryInjection,
   detectUserDissatisfaction,
@@ -500,7 +501,7 @@ const reflector = new SessionReflector(
   memory.skills,
   memory.actions,
   memory.raw,
-  { auditHook: internalAudit },
+  { auditHook: internalAudit, metrics: memory.metrics },
 );
 
 // v7: pursuit proposer (shadow state) — at session end, identify unclosed inquiry topics from the conversation
@@ -776,6 +777,18 @@ const idleConsolidator = startIdleConsolidator({
       }
     } catch (e) {
       console.error('[routing-decay] failed', e);
+    }
+    // 2026-06-22 instrumentation: log the self-learning report once per UTC day (data to decide
+    // keep-vs-simplify). Day-gated via a metric stamp so idle ticks don't spam it. Read-only.
+    try {
+      const d = new Date();
+      const ymd = d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+      if (memory.metrics.get('stats.last_logged_ymd') !== ymd) {
+        memory.metrics.set('stats.last_logged_ymd', ymd);
+        console.log('[learning-stats]\n' + renderLearningStats(memory));
+      }
+    } catch (e) {
+      console.error('[learning-stats] failed', e);
     }
     // 2026-05-29 predictive proactive: deadline pursuit → schedule soft wake-up.
     // For active pursuits with a deadline and high enough stake, schedule a one-shot autonomous_turn
@@ -3100,6 +3113,7 @@ function buildMemoryPrefix(signalBus?: TurnSignalBus): string {
     .filter((p) => !failureNames.has(p.name))
     .slice(0, PLAYBOOK_TOP_N);
   if (playbooks.length > 0) {
+    memory.metrics.increment('playbook.inject.turns'); // instrumentation: lesson actually reached the prompt
     lines.push('');
     lines.push('## Lessons I have learned');
     lines.push('(These are lessons distilled from past reflections, not callable skills. When you see a matching "when" situation, remember to follow the "next time" action.)');
@@ -3123,6 +3137,7 @@ function buildMemoryPrefix(signalBus?: TurnSignalBus): string {
 
   const negatives = memory.skills.listNegative(20);
   if (negatives.length > 0) {
+    memory.metrics.increment('antipattern.inject.turns'); // instrumentation
     lines.push('⚠️ The user has previously corrected these behaviors — avoid repeating them in the following situations:');
     for (const s of negatives) {
       lines.push(`  - ${s.name}: ${s.description}`);
@@ -4478,6 +4493,10 @@ export async function handleChatSend(
           (signalBus.interruptDrainedCount ?? 0) > 0 ||
           signalBus.emptyConclusionFired === true;
         const outcome = !strongFailure;
+        memory.metrics.increment(
+          outcome ? 'routing.outcome.success' : 'routing.outcome.failure',
+          signalBus.activeRuleIds.length,
+        ); // instrumentation: does the confidence machine actually get fed?
         for (const ruleId of signalBus.activeRuleIds) {
           try {
             memory.routingRules.recordRuleOutcome(ruleId, outcome);
@@ -4519,6 +4538,7 @@ export async function handleChatSend(
         routingRules: memory.routingRules,
         plans: memory.plans,
         planFiles: memory.planFiles,
+        metrics: memory.metrics,
         appendAudit: (eventType, payload) => internalAudit.append(eventType, payload),
         // D.2 (2026-05-06): all 4/4 trigger inputs connected
         // Phase 14 (2026-05-18): scheduledSuccess connects to the plan_knowledge distillation path
@@ -5040,8 +5060,11 @@ async function handleChatSendInner(
   // Routing rule injection: extract keywords from the user message → match top-K active rules → inject into system section.
   // No injection if 0 rules match (0 token impact). Zero matches are expected during early rule accumulation.
   if (messages[0]) {
+    memory.metrics.increment('turn.total'); // instrumentation denominator: user turns where routing was evaluated
     const inj = buildRoutingInjection(userMessage, memory.routingRules);
     if (inj.matched > 0) {
+      memory.metrics.increment('routing.inject.turns');
+      memory.metrics.increment('routing.inject.rules', inj.matched);
       messages[0] = {
         ...messages[0],
         content: messages[0].content + inj.text,
@@ -6259,11 +6282,13 @@ async function runToolLoop(
       const reflection = detectInTurnFailurePattern(inTurnRecords, 2);
       if (reflection.triggered) {
         reflectionReminderInjected = true;
+        memory.metrics.increment('inturn.fire'); // instrumentation: the cheap same-turn feedback path
         // A MECHANICAL failure (gp/python syntax error, traceback, not-a-function) is a bug in the script the
         // agent just wrote — the recovery is "fix it and re-run", which needs writeFile+shell. The strategic
         // gates below (in-turn-tool-block / research-before-retry / auto-revise-plan) would block exactly those
         // tools → deadlock (prod 2026-06-17). For mechanical errors: give the fix-it reminder, skip the gates.
         const mechanicalFailure = isMechanicalFailure(reflection.signature);
+        if (mechanicalFailure) memory.metrics.increment('inturn.mechanical');
         messages.push({
           role: 'user',
           content: mechanicalFailure

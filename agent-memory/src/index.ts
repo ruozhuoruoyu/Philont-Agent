@@ -39,6 +39,7 @@ import { PushSubscriptionStore } from './push_subscriptions.js';
 import { ReasoningStore } from './reasoning.js';
 import { ScheduleOutcomeStore } from './schedule_outcomes.js';
 import { PlanFileStore } from './plan_files.js';
+import { MetricsStore } from './metrics.js';
 import { BackupRunner, type BackupConfig } from './backup.js';
 
 export { MemoryStore } from './store.js';
@@ -142,6 +143,8 @@ export type { ScorableMemory } from './decay.js';
 export { CalendarStore } from './calendar.js';
 export type { OccurrenceEvent } from './calendar.js';
 export { ScheduleStore, computeNextRun } from './schedules.js';
+export { MetricsStore } from './metrics.js';
+export type { MetricRow } from './metrics.js';
 export { PlanStore } from './plans.js';
 // M5(2026-05-15) removed: INNER_LOOP_MAX / OUTER_LOOP_MAX constants have no callers
 export {
@@ -576,6 +579,8 @@ export interface MemoryHandle {
   planFiles: PlanFileStore;
   /** v25 (2026-05-31): reasoning tree for the deep reasoning subsystem (session + sub-question nodes) */
   reasoning: ReasoningStore;
+  /** 2026-06-22: self-learning instrumentation counters (data-driven keep/simplify decision) */
+  metrics: MetricsStore;
   /** Whether this open triggered corruption recovery; `none` means database is healthy */
   recovery: MemoryDbRecovery;
   /** Stop backup timer and close DB connection; idempotent */
@@ -822,6 +827,7 @@ export function openMemoryDb(
     scheduleOutcomes: new ScheduleOutcomeStore(db),
     planFiles: new PlanFileStore(),
     reasoning: new ReasoningStore(db),
+    metrics: new MetricsStore(db),
     close,
   };
 }

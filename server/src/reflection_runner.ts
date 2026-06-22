@@ -28,6 +28,7 @@ import {
   type SkillStore,
   type RoutingRuleStore,
   type PlanStore,
+  type MetricsStore,
 } from '@agent/memory';
 import type { AuditEventType } from '@agent/policy';
 import { callAuxLLM } from '@agent/tools';
@@ -176,6 +177,8 @@ export interface ReflectionRunOptions {
   ) => void;
   /** Maximum number of messages the context LLM sees; default 12 */
   contextWindow?: number;
+  /** 2026-06-22: optional instrumentation counters (turn-close reflection fire/skip/production). */
+  metrics?: MetricsStore;
   /**
    * Turn-local signals (honesty fire / interrupt drain / task start timestamp).
    * chat-handler fills these at turn close; defaults are backward-compatible (all false/0).
@@ -234,6 +237,7 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
         `[reflection] session=${opts.sessionId} skipped (same reasons "${reasonsKey}" fired ` +
           `${Math.round((Date.now() - prevFire.ts) / 60_000)}min ago, within ${REFLECTION_COOLDOWN_MS / 60_000}min cooldown)`,
       );
+      opts.metrics?.increment('reflect.skip_cooldown'); // instrumentation: how often reflection is suppressed
       return;
     }
     lastReflectionFire.set(opts.sessionId, { ts: Date.now(), reasonsKey });
@@ -386,6 +390,13 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
         });
       }
     }
+
+    // instrumentation: turn-close reflection fired + what it actually produced
+    opts.metrics?.increment('reflect.fire');
+    opts.metrics?.increment('reflect.routing_rule', result.stats.routingRulesCreated);
+    opts.metrics?.increment('reflect.playbook', result.stats.playbooksCreated);
+    opts.metrics?.increment('reflect.new_skill', result.stats.newSkillsCreated);
+    opts.metrics?.increment('reflect.skill_refine', result.stats.skillsRefined);
 
     console.log(
       `[reflection] session=${opts.sessionId} reflectionId=${reflectionId} ` +

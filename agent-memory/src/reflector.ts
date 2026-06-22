@@ -24,6 +24,7 @@ import type { RawStore } from './raw.js';
 import type { ExtractorLlmClient } from './extractor.js';
 import type { Action, RawMessage, ReflectResult, Skill } from './types.js';
 import type { MemoryAuditHook } from './audit.js';
+import type { MetricsStore } from './metrics.js';
 import { countSameRootCauseFailures } from './failure_signatures.js';
 
 // ── LLM-returned skill spec ─────────────────────────────────────────────────
@@ -191,10 +192,13 @@ function isValidSkillSpec(x: unknown): x is ReflectedSkill {
 export interface SessionReflectorOptions {
   /** Optional: self-domain write audit hook (records one Internal origin event per createSkill/updateSkill call) */
   auditHook?: MemoryAuditHook;
+  /** 2026-06-22: optional instrumentation counters (idle skill extraction ran vs doom-loop suppressed). */
+  metrics?: MetricsStore;
 }
 
 export class SessionReflector {
   private readonly auditHook: MemoryAuditHook | undefined;
+  private readonly metrics: MetricsStore | undefined;
 
   constructor(
     private readonly llm: ExtractorLlmClient,
@@ -204,6 +208,7 @@ export class SessionReflector {
     options: SessionReflectorOptions = {},
   ) {
     this.auditHook = options.auditHook;
+    this.metrics = options.metrics;
   }
 
   /**
@@ -261,8 +266,10 @@ export class SessionReflector {
       console.log(
         `[reflector] doom-loop window (fails=${failed.length}/${actions.length}, sameRoot=${sameRoot}) → skill extraction suppressed`,
       );
+      this.metrics?.increment('idle_reflect.suppressed'); // instrumentation
       return { skillsCreated: 0, skillsUpdated: 0, llmCostTokens: 0, skills: [] };
     }
+    this.metrics?.increment('idle_reflect.ran'); // instrumentation: extraction actually proceeded
 
     // Build dialogue text
     const dialogue = messages

@@ -362,6 +362,18 @@ CREATE INDEX IF NOT EXISTS idx_drive_outcomes_root ON memory_drive_outcomes(root
 CREATE INDEX IF NOT EXISTS idx_drive_outcomes_pursuit ON memory_drive_outcomes(served_pursuit_id)
   WHERE served_pursuit_id IS NOT NULL;
 
+-- ── Learning instrumentation counters (2026-06-22) ───────────────────────
+-- Lightweight, append-only telemetry to measure whether the self-learning machinery
+-- (routing-rule injection/outcome, reflection production, in-turn reminders, lesson injection)
+-- actually reaches the agent and matures — so simplify/keep decisions are data-driven, not by feel.
+-- Plain key→count; values are derived/reported by server/src/learning_stats.ts. In DDL_BASE (not a
+-- migration) because it is a brand-new standalone table and DDL_BASE runs idempotently on every open.
+CREATE TABLE IF NOT EXISTS learning_metrics (
+  key        TEXT PRIMARY KEY,
+  count      INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+
 -- ── Meta table (schema version management) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS memory_meta (
   key   TEXT PRIMARY KEY,
