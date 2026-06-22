@@ -20,6 +20,7 @@ import {
   prefixCommandWithUtf8,
 } from '../utils/encoding.js';
 import { hostShellGuidanceLines, POSIX_PREFERRED_SHELL } from '../utils/host.js';
+import { gpFatalErrorLine } from './gp.js';
 
 const execAsync = promisify(exec);
 
@@ -107,8 +108,9 @@ const DEFAULT_TIMEOUT_MS = 300_000;
 export function detectGpScriptError(command: string, stdout: string, stderr: string): string | null {
   const looksLikeGp = /\bgp(\.exe)?\b/i.test(command) || /\bpari\b/i.test(command);
   if (!looksLikeGp) return null;
-  const m = `${stderr}\n${stdout}`.match(/^\s*\*\*\*\s{2,}\S.*$/m);
-  return m ? m[0].trim() : null;
+  // Use the shared classifier so a benign "*** Warning: increasing stack size" is NOT judged a
+  // failure (2026-06-22: that false-positive made correct gp scripts "fail" → fabrication fallback).
+  return gpFatalErrorLine(`${stderr}\n${stdout}`);
 }
 
 /** Format a child_process.exec failure exception as structured text so the LLM immediately knows it failed. */

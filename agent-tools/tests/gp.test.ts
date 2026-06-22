@@ -91,6 +91,15 @@ describe('pariGp 语法预检(括号配平,无需 gp)', () => {
   it('字符串内的括号不计数(防误报)', () => {
     assert.equal(checkGpParenBalance('print("result (a+b) = )")'), null);
   });
+  it('未闭合 { → 标记(多行体缺右花括号,2026-06-22 反复犯的错)', () => {
+    assert.match(checkGpParenBalance('f(x) = { a = x^2;\n print(a)')!, /unclosed "\{"/);
+  });
+  it('多余 } → 标记', () => {
+    assert.match(checkGpParenBalance('print(1)}')!, /no matching "\{"/);
+  });
+  it('配平的 {…} 多行体 → null', () => {
+    assert.equal(checkGpParenBalance('f(x) = { a = x^2; b = a+1; print(b) }\nprint(f(3))'), null);
+  });
   it('execute 在不启动 gp 的情况下拒绝畸形脚本', async () => {
     const r = await pariGpTool.execute({ script: 'for(i=1,nA, s=A[i]' });
     assert.equal(r.success, false);

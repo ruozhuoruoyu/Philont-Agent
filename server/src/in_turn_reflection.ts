@@ -189,6 +189,36 @@ export function isMechanicalFailure(signature: string | undefined): boolean {
   );
 }
 
+/**
+ * Tool-specific authoring cheatsheets for the recurring mechanical errors (2026-06-22). The agent
+ * kept re-making the SAME PARI/GP mistakes (unbalanced parens, multi-line body without braces,
+ * mistaking a benign stack-size warning for a failure) for hours. The in-turn reminder now carries
+ * the concrete fix for THAT signature, not just "fix the bug" — so the correction lands instead of
+ * the agent guessing again.
+ */
+function authoringCheatsheet(signature: string): string[] {
+  if (/^pariGp:/i.test(signature)) {
+    return [
+      '',
+      'PARI/GP authoring rules (this is the recurring one — apply them, do not guess again):',
+      '  • Balance every "(": for( / forstep( / forprime( / sum( / if( must each be closed. An unclosed "(" → "unexpected end of file, expecting )".',
+      '  • Multi-statement body → wrap in braces and balance them: `{ a = ...; b = ...; print(b) }`. Statements separated by ";".',
+      '  • Helper: `f(x) = { ...; value }` on its own, call it on the next line.',
+      '  • A "*** Warning: increasing stack size" line is NOT an error — the script ran. Read the printed result; do not treat it as failure.',
+    ];
+  }
+  if (/^leanCheck:/i.test(signature)) {
+    return [
+      '',
+      'Lean authoring rules:',
+      '  • `sorry`/`admit` are NOT proofs — they are reported as unverified. Replace them with real terms.',
+      '  • "unknown identifier/constant" usually means a missing import or a typo, not a logic error.',
+      '  • "unsolved goals" means the proof is incomplete — finish the remaining goal(s).',
+    ];
+  }
+  return [];
+}
+
 /** Reminder for a mechanical failure: fix the code and re-run — do not research or make a plan. */
 export function buildMechanicalFixReminder(signature: string, count: number): string {
   return [
@@ -200,6 +230,7 @@ export function buildMechanicalFixReminder(signature: string, count: number): st
     '  1. Read the EXACT error line (the `***` / traceback text) — it names the broken construct.',
     '  2. Fix the script with `writeFile` / `patch` (correct the syntax, the missing arg, the bad function name).',
     '  3. Re-run it. Iterate until it runs — this is normal scripting, not a wall.',
+    ...authoringCheatsheet(signature),
     '',
     'If after a few honest fix attempts the SAME error persists, then reconsider the tool/approach — but first, just fix the bug.',
     '',

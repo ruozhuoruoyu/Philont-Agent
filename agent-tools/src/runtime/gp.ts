@@ -117,6 +117,7 @@ export function checkGpParenBalance(script: string): string | null {
     .replace(/"(?:[^"\\]|\\.)*"/g, '""'); // string literals
   let round = 0;
   let square = 0;
+  let curly = 0;
   for (let i = 0; i < stripped.length; i++) {
     const c = stripped[i];
     if (c === '(') round++;
@@ -127,11 +128,50 @@ export function checkGpParenBalance(script: string): string | null {
     else if (c === ']') {
       square--;
       if (square < 0) return 'a `]` has no matching `[`';
+    } else if (c === '{') curly++;
+    else if (c === '}') {
+      curly--;
+      // A `}` with no matching `{` is the classic multi-line-body mistake: a `{ ... }` block was
+      // closed but never opened (or the body was wrapped wrong). 2026-06-22: this recurred for hours.
+      if (curly < 0) return 'a "}" has no matching "{" — wrap a multi-statement body as { stmt1; stmt2; ... } and balance the braces';
     }
   }
-  if (round > 0) return `${round} unclosed "(" — every for / if / sum must be closed; count your parentheses`;
+  if (round > 0) return `${round} unclosed "(" — every for / forstep / if / sum must be closed; count your parentheses`;
   if (square > 0) return `${square} unclosed "["`;
+  if (curly > 0) return `${curly} unclosed "{" - a multi-line brace body must be closed with a matching "}"`;
   return null;
+}
+
+/**
+ * PARI/GP prints BOTH fatal errors and benign warnings with the same `***` marker, e.g.
+ *   "***   Warning: increasing stack size to 1000000."   (benign — stack auto-grew, script ran fine)
+ *   "***   syntax error, unexpected ..."                 (fatal)
+ * The old check (any triple-star marker in stderr) treated the benign stack-size warning as a failure,
+ * so a CORRECT script "failed", the agent got no result, and fell back to fabricating numbers — the single
+ * biggest "command execution keeps failing" cause in the 2026-06-22 post-mortem.
+ *
+ * Returns the first FATAL `***` line (trimmed), or null when the text has no fatal marker (a
+ * warnings-only stderr counts as clean). Pure + exported for reuse by shell.ts and unit tests.
+ */
+export function gpFatalErrorLine(text: string): string | null {
+  for (const line of (text || '').split('\n')) {
+    if (!/\*\*\*/.test(line)) continue;
+    if (/\*\*\*\s*warning/i.test(line)) continue; // benign warning, not an error
+    if (/increasing stack size|new stack size/i.test(line)) continue; // benign stack auto-grow
+    if (line.replace(/[*\s]/g, '') !== '') return line.trim(); // a *** line with real content
+  }
+  return null;
+}
+
+/** True if stderr has non-empty content that is NOT a benign PARI/GP warning (used for non-zero exits). */
+function stderrHasNonWarningContent(err: string): boolean {
+  return err.split('\n').some((l) => {
+    const t = l.trim();
+    if (!t) return false;
+    if (/\*\*\*\s*warning/i.test(t)) return false;
+    if (/increasing stack size|new stack size/i.test(t)) return false;
+    return true;
+  });
 }
 
 export const pariGpTool: Tool = {
@@ -150,7 +190,12 @@ export const pariGpTool: Tool = {
         type: 'string',
         description:
           'GP script (PARI/GP language). E.g.: print(factor(2^67-1)) — outputs the factorization of that Mersenne number (proving it composite); ' +
-          'print(isprime(2^61-1)) — a primality test. Use print() to explicitly output your conclusion.',
+          'print(isprime(2^61-1)) — a primality test. Use print() to explicitly output your conclusion.\n' +
+          'Authoring rules (these recur - get them right the first time):\n' +
+          '  - Count your parentheses: every for( / forstep( / forprime( / sum( / if( must be closed. An unclosed open-paren gives "unexpected end of file, expecting )".\n' +
+          '  - Multi-statement body: wrap it in braces { a = ...; b = ...; print(b) } and balance them. Statements are separated by ";".\n' +
+          '  - Define a helper as f(x) = { ...; value } on its own line, then call it on the next line.\n' +
+          '  - A "*** Warning: increasing stack size" line is NOT an error - your script ran; read the printed result.',
       },
       timeoutMs: {
         type: 'number',
@@ -200,8 +245,13 @@ export const pariGpTool: Tool = {
       }
       const out = run.stdout.trim();
       const err = run.stderr.trim();
-      // gp writes errors to stderr, typically like "*** at top-level: ... *** ... error".
-      if (/\*\*\*/.test(err) || (!run.ok && err)) {
+      // gp writes errors to stderr as "*** ... error", but ALSO benign warnings as "*** Warning: ...".
+      // Only a non-warning *** line is fatal; a non-zero exit with non-warning stderr also fails.
+      const fatal = gpFatalErrorLine(err);
+      if (fatal) {
+        return { success: false, output: out, error: `PARI/GP error: ${fatal.slice(0, 600)}` };
+      }
+      if (!run.ok && stderrHasNonWarningContent(err)) {
         return { success: false, output: out, error: `PARI/GP error: ${err.slice(0, 600)}` };
       }
       return { success: true, output: out || '(no output — remember to print(...) your conclusion)' };

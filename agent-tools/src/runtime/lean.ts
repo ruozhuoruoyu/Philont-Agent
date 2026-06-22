@@ -154,7 +154,10 @@ export const leanCheckTool: Tool = {
         description:
           'Complete Lean 4 source to check, e.g.:\n' +
           'theorem add_comm_nat (a b : Nat) : a + b = b + a := by omega\n' +
-          'Do NOT leave `sorry`/`admit` in it — those are reported as unverified.',
+          'Authoring rules:\n' +
+          '  • Do NOT leave `sorry`/`admit` — they are reported as UNVERIFIED (a placeholder hole proves nothing).\n' +
+          '  • "unknown identifier/constant" → missing import or typo, not a logic error.\n' +
+          '  • "unsolved goals" → the proof is incomplete; finish the remaining goal(s).',
       },
       timeoutMs: {
         type: 'number',
