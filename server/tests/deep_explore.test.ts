@@ -31,6 +31,7 @@ import {
   normalizeTechnique,
   scoreFrontierValues,
   buildStuckDirective,
+  discoverRoundWasSubstantive,
   buildDiscoverPrompt,
   createDeepExploreTool,
   roundWasSubstantive,
@@ -970,4 +971,17 @@ test('action=abandon truly closes the session (continue/status stop resuming it)
   const again = await tool.execute({ action: 'abandon' });
   assert.match(again.output, /No active deep-explore session/);
   mem.close();
+});
+
+// ── discoverRoundWasSubstantive: discover-mode brake (2026-06-24) ───────────────────────────────
+test('discoverRoundWasSubstantive: proving a node is substantive', () => {
+  assert.equal(discoverRoundWasSubstantive({ newProved: 1, survivorsBefore: 3, survivorsAfter: 3 }), true);
+});
+test('discoverRoundWasSubstantive: a net new surviving conjecture is substantive', () => {
+  assert.equal(discoverRoundWasSubstantive({ newProved: 0, survivorsBefore: 2, survivorsAfter: 3 }), true);
+});
+test('discoverRoundWasSubstantive: angles proposed but all die (no proof, no net survivor) → NOT substantive', () => {
+  // The Goldbach treadmill shape: proposes new framings each round, each refuted by computation.
+  assert.equal(discoverRoundWasSubstantive({ newProved: 0, survivorsBefore: 3, survivorsAfter: 3 }), false);
+  assert.equal(discoverRoundWasSubstantive({ newProved: 0, survivorsBefore: 3, survivorsAfter: 2 }), false);
 });

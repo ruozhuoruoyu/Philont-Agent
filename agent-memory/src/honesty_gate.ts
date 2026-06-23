@@ -193,6 +193,34 @@ export function shellLooksLikeWrite(command: string): boolean {
   return SHELL_WRITE_SIGNALS.some((re) => re.test(command));
 }
 
+// ── Execution / computation tools (session-aware fabrication detection) ────────────────
+//
+// Tools whose presence in a turn means real EXECUTION / COMPUTATION actually happened. Used by the
+// fabricated_execution_claim and run_promise_without_exec branches: an "I computed / I ran it" claim,
+// or a "现在跑 / let me run it" promise, is only honest if one of these fired this turn.
+//
+// Deliberately EXCLUDES writeFile/patch/downloadFile: writing a script is NOT running it — that is the
+// exact Goldbach trap (the agent wrote goldbach_quantum_3lines.py, then narrated computed eigenvalues
+// the script never produced). Only running counts as running.
+const EXECUTION_TOOLS: ReadonlySet<string> = new Set([
+  'shell',
+  'process',
+  'pariGp',
+  'z3Verify',
+  'magnitude',
+  'deep_explore',
+]);
+
+/** Whether a tool name denotes real execution/computation (not file-writing or reading). */
+export function isExecutionTool(name: string): boolean {
+  return EXECUTION_TOOLS.has(name);
+}
+
+/** Whether this turn actually executed/computed anything (success OR failure — running is running). */
+export function turnDidExecute(records: ReadonlyArray<{ toolName: string }>): boolean {
+  return records.some((r) => isExecutionTool(r.toolName));
+}
+
 // ── Public API ───────────────────────────────────────────────────────────
 
 export interface ToolResultRecord {
@@ -226,7 +254,9 @@ export interface HonestyEvaluation {
     | 'fabricated_size_claim'
     | 'fabricated_reasoning_state'
     | 'fabricated_round_result'
-    | 'artifact_claim_without_tools';
+    | 'artifact_claim_without_tools'
+    | 'fabricated_execution_claim'
+    | 'run_promise_without_exec';
   /** Matched claim phrase (used as reference in reminder message) */
   matchedClaim: string;
   /** tool_result counts for this turn */
@@ -262,6 +292,21 @@ export interface EvaluateOptions {
    * catch "I proved it / all paths closed" claims that the reasoning tree does not actually support.
    */
   reasoningState?: ReasoningSnapshot | null;
+  /**
+   * Per-session honesty history (supplied by chat-handler, undefined = session latch disabled). Lets the
+   * say-do-gap branch escalate a REPEATED unkept run-promise from medium to high — the prod loop where the
+   * agent promised "现在跑" three turns running without ever issuing a tool call.
+   */
+  session?: HonestySessionSnapshot;
+}
+
+/**
+ * Compact per-session honesty state passed in by the caller. unkeptRunPromise = last turn announced a run
+ * but issued no execution tool; priorViolations = honesty fires so far this session.
+ */
+export interface HonestySessionSnapshot {
+  unkeptRunPromise: boolean;
+  priorViolations: number;
 }
 
 /**
@@ -347,6 +392,68 @@ export function findOrderClaim(text: string): string | null {
 
 export function findRoundResultClaim(text: string): string | null {
   for (const re of REASONING_ROUND_RESULT_PATTERNS) {
+    const m = re.exec(text);
+    if (m) return m[0].slice(0, 60);
+  }
+  return null;
+}
+
+// ── Execution claim (this-turn "I ran / I computed it") ───────────────────────────────────
+//
+// An assertion that a computation / script / command WAS executed and produced a result THIS turn.
+// Distinct from a file-completion claim: it is about RESULTS of running something, not a delivered file.
+// The fabricated_execution_claim branch fires this against turnDidExecute() — claiming results while no
+// shell/pariGp/etc ran is the Goldbach fabrication ("三条计算均已执行（shell 输出完整返回）" + invented numbers).
+//
+// Assertive past/present only; future intent ("现在跑") and negation ("没跑/还没执行") are screened by
+// EXEC_ANTI_PATTERNS so they fall through to findRunPromise / pass instead of false-firing here.
+const EXECUTION_CLAIM_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:计算|脚本|命令|代码|程序|模拟|演化|对角化|本征|谱)[^。！？\n]{0,12}(?:已|都)?(?:执行完毕|执行成功|执行完成|跑完|跑通|运行完毕|运行成功|算完|计算完成|计算完毕)/,
+  /(?:已|都|均)(?:执行完毕|执行成功|跑完|跑通|运行完毕|运行成功|计算完成|计算完毕|算完)/,
+  /(?:三条|两条|多条|各条|每条)[^。！？\n]{0,8}(?:计算|线|脚本)[^。！？\n]{0,8}(?:执行|跑|运行|完成)/,
+  /shell[^。！？\n]{0,12}(?:输出[^。！？\n]{0,6}返回|执行完毕|成功返回|跑完|返回(?:结果|完整))/i,
+  /(?:命令|脚本|计算)[^。！？\n]{0,10}(?:成功)?返回(?:了)?(?:结果|完整|数据)/,
+  /\b(?:executed|ran)\s+(?:the\s+)?(?:script|computation|command|code|simulation|calculation)s?\b/i,
+  /\bcomputation(?:s)?\s+(?:is|are|was|were|now)?\s*(?:complete|completed|done|finished)\b/i,
+  /\b(?:all\s+)?(?:three|two)\s+(?:calculations?|computations?|lines?)\s+(?:executed|ran|completed|done)\b/i,
+];
+
+// Future intent / negation / hypothetical → NOT a this-turn execution claim.
+const EXEC_ANTI_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:现在|这就|马上|立刻|即将|接下来|准备|打算|将要|稍后)[^。！？\n]{0,6}(?:跑|执行|运行|算)/,
+  /(?:没|未|还没|尚未|不曾|没有)[^。！？\n]{0,4}(?:跑|执行|运行|算|返回)/,
+  /(?:如果|若|一旦|待)[^。！？\n]{0,10}(?:跑|执行|运行|算)/,
+  /\b(?:will|going to|about to|let me|i'?ll|gonna|plan to|haven'?t|did\s*not|didn'?t|not\s+yet)\b[^.!?\n]{0,12}\b(?:run|execute|compute)\b/i,
+];
+
+export function findExecutionClaim(text: string): string | null {
+  for (const re of EXECUTION_CLAIM_PATTERNS) {
+    const m = re.exec(text);
+    if (!m) continue;
+    const at = m.index;
+    const ctx = text.slice(Math.max(0, at - 20), at + m[0].length + 10);
+    if (EXEC_ANTI_PATTERNS.some((anti) => anti.test(ctx))) continue;
+    return m[0].slice(0, 60);
+  }
+  return null;
+}
+
+// ── Run promise (future "现在跑 / let me run it" with no tool call) ─────────────────────────
+//
+// The say-do gap: the reply ENDS announcing it will run, but the turn issued no execution tool. On its
+// own a soft miss; on repeat in the same session (prod: promised three turns running, never ran) the
+// caller-supplied session state escalates it to high.
+const RUN_PROMISE_PATTERNS: ReadonlyArray<RegExp> = [
+  /现在(?:就|立刻|马上)?(?:真)?(?:跑|执行|运行|算)/,
+  /这就(?:跑|执行|运行|开跑)/,
+  /(?:我来|我现在|马上|立刻)(?:跑|执行|运行)/,
+  /现在(?:立刻|马上)?(?:真)?(?:跑|执行|运行)/,
+  /\b(?:let me|i'?ll|i will|gonna|going to|about to)\s+(?:now\s+)?(?:run|execute|compute)\b/i,
+  /\b(?:running|executing)\s+(?:it\s+)?now\b/i,
+];
+
+export function findRunPromise(text: string): string | null {
+  for (const re of RUN_PROMISE_PATTERNS) {
     const m = re.exec(text);
     if (m) return m[0].slice(0, 60);
   }
@@ -456,6 +563,51 @@ export function evaluateHonesty(
           `call — never invented from the in-progress snapshot in the prompt.`,
       };
     }
+  }
+
+  // ── P0: fabricated_execution_claim ───────────────────────────────────────
+  // A this-turn EXECUTION/COMPUTATION claim ("已执行 / shell 输出完整返回 / ran the computation") with
+  // ZERO execution tools this turn. Generalizes fabricated_size_claim (file sizes) and
+  // artifact_claim_without_tools (file paths) to computed RESULTS — the form V4 Flash used on the
+  // Goldbach session (invented eigenvalues + "三条计算均已执行" narrated on a turn that ran no shell/pariGp).
+  const ranExecution = turnDidExecute(records);
+  const execClaim = findExecutionClaim(assistantText);
+  if (execClaim && !ranExecution) {
+    return {
+      severity: 'high',
+      reason: 'fabricated_execution_claim',
+      matchedClaim: execClaim,
+      okCount: ok,
+      failCount: fail,
+      unknownCount: unknown,
+      evidence:
+        `You claimed an execution/computation result ("${execClaim}"), but this turn issued ZERO ` +
+        `execution tool calls (no shell / pariGp / z3Verify / deep_explore). The computation never ran — ` +
+        `those numbers were not produced this turn. Actually run it, or tell the user plainly it has not run yet.`,
+    };
+  }
+
+  // ── say-do gap: run_promise_without_exec ─────────────────────────────────
+  // The reply announces a run ("现在跑 / let me run it") but issued no execution tool. Soft on first
+  // occurrence; escalated to high on repeat in the same session (caller supplies session state).
+  const runPromise = findRunPromise(assistantText);
+  if (runPromise && !ranExecution) {
+    const repeat =
+      !!opts.session && (opts.session.unkeptRunPromise || opts.session.priorViolations >= 1);
+    return {
+      severity: repeat ? 'high' : 'medium',
+      reason: 'run_promise_without_exec',
+      matchedClaim: runPromise,
+      okCount: ok,
+      failCount: fail,
+      unknownCount: unknown,
+      evidence: repeat
+        ? `You said "${runPromise}" but again issued no tool call — a repeated say-do gap this session. ` +
+          `Do NOT write "I'll run it" and stop; in this same reply CALL the shell/pariGp tool now, or state ` +
+          `plainly that you are not running it.`
+        : `You said "${runPromise}" but this turn issued no execution tool call. Announcing a run is not ` +
+          `running — call the tool in your reply instead of stating intent and ending the turn.`,
+    };
   }
 
   // 3 branches after the completion claim

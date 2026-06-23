@@ -46,6 +46,12 @@ const RATCHET_PIVOTS = 3;
  * regardless of attempts) — only the generic stall verdict.
  */
 const MIN_EPISODE_ATTEMPTS = 2;
+/**
+ * Dead-ends + refutations on the goal at/above which a STUCK session is treated as a self-derived no-go
+ * (de-facto intractable) even without a curated barrier match. Set high enough that ordinary backtracking
+ * doesn't trip it — only a session that has ruled out this many approaches AND is stuck. (2026-06-24)
+ */
+const DEAD_END_INTRACTABLE_THRESHOLD = 4;
 
 export interface ViabilityInput {
   /** Whether an owner-scoped active reasoning session exists. Gate is inert (continue) without one. */
@@ -88,6 +94,14 @@ export interface ViabilityInput {
    * turns running with nothing improving, that IS de-facto intractable → escalate pivot → stop. (2026-06-16)
    */
   repeatedPivotCount: number;
+  /**
+   * Dead-end + refuted nodes the CURRENT session has recorded on the goal (2026-06-24). When the agent
+   * itself has ruled out many approaches and is genuinely stuck, that is a self-derived no-go even when the
+   * goal matched NO curated barrier — the Goldbach run derived "additive-decay can't separate primes from
+   * semiprimes" itself, but goalIsOpenProblem stayed false (the exotic framing didn't match parity-barrier),
+   * so intractable never fired and the agent kept pitching new angles. Optional; defaults to 0.
+   */
+  deadEndCount?: number;
 }
 
 export interface ViabilityResult {
@@ -111,8 +125,13 @@ export function isStopVerdict(v: ViabilityVerdict): boolean {
  * downgrades the outcome. Deliberately matches the QUESTION form ("要我继续吗 / shall I continue"),
  * not the bare word 继续 (which legitimately appears in "reply 继续 to keep going").
  */
+// NOTE (2026-06-24): the verb enumeration below is a known-incomplete STOPGAP — it leaked "要不要试?" /
+// "要不要搞一下?" in production because 试/搞/碰 were not listed (and the next synonym will leak again).
+// Enumerating surface forms of "shall I continue" is a losing game against an open paraphrase space; the
+// REAL suppression is the intractable/self_derived_no_go verdict (computeViability) rewriting the reply so
+// no pitch is offered. This regex is only the post-regen confirm that a residual pitch was dropped.
 export const CONTINUATION_PITCH_RE =
-  /要(?:我|不要)?[^。\n？?]{0,14}(?:继续|推进|深入|开始|开攻|往下)[^。\n？?]{0,6}(?:[吗嘛]\s*[?？]?|[?？])|是否(?:要|需要|继续|推进)|要不要(?:我)?[^。\n？?]{0,10}(?:继续|推进|深入|开)|继续(?:推进|攻|探|深入)?\s*[?？]|shall I (?:continue|proceed|keep going|go on)|want me to (?:continue|keep|proceed|go on)|should I (?:continue|keep|proceed|go on)/i;
+  /要(?:我|不要)?[^。\n？?]{0,14}(?:继续|推进|深入|开始|开攻|往下|试|搞|碰)[^。\n？?]{0,6}(?:[吗嘛]\s*[?？]?|[?？])|是否(?:要|需要|继续|推进)|要不要(?:我)?[^。\n？?]{0,10}(?:继续|推进|深入|开|试|搞|碰)|继续(?:推进|攻|探|深入)?\s*[?？]|shall I (?:continue|proceed|keep going|go on)|want me to (?:continue|keep|proceed|go on)|should I (?:continue|keep|proceed|go on)/i;
 
 /**
  * WS2: the user EXPLICITLY accepts stopping / reframing (after a stop was recommended).
@@ -239,14 +258,22 @@ export function computeViability(input: ViabilityInput): ViabilityResult {
     input.status === 'stuck' ||
     input.noProgressRounds >= STUCK_ROUNDS ||
     (input.turnCount >= 15 && input.provedCount === 0);
-  if (input.goalIsOpenProblem && reallyStuck) {
-    reasons.push('goal_is_open_problem');
+  // A self-derived wall: the agent itself has recorded many dead-ends / refutations on the goal and is
+  // stuck. This generalizes intractable to goals with NO curated barrier match — the agent proving its own
+  // no-go (Goldbach: "additive splitting can't separate primes from semiprimes") should stop the treadmill
+  // just as a parity-barrier match would. Conservative: requires real stuckness, so a session backtracking
+  // its way toward a proof (dead-ends + ongoing progress) is not killed.
+  const selfDerivedWall = (input.deadEndCount ?? 0) >= DEAD_END_INTRACTABLE_THRESHOLD && reallyStuck;
+  if ((input.goalIsOpenProblem || selfDerivedWall) && reallyStuck) {
+    reasons.push(input.goalIsOpenProblem ? 'goal_is_open_problem' : 'self_derived_no_go');
     const name = input.barrierTitle ? input.barrierTitle.replace(/\s*[—–-].*$/, '').trim() : 'this goal';
     return {
       verdict: 'intractable',
       score: Math.max(score, STOP_SCORE),
       reasons,
-      evidence: `${name} is a known OPEN problem; the remaining directions are themselves unsolved research, not paths we can try here`,
+      evidence: input.goalIsOpenProblem
+        ? `${name} is a known OPEN problem; the remaining directions are themselves unsolved research, not paths we can try here`
+        : `the reasoning has recorded ${input.deadEndCount} dead-end(s) on this goal and is not advancing — the tried class of approaches is exhausted; this is out of reach for the current attack`,
       // No recommendedReframe — intractable must not hand the user a "try this" path.
     };
   }

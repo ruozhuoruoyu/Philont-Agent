@@ -127,7 +127,14 @@ import {
   InterruptMapper,
   detectTimeRetrospectiveQuery,
 } from '@agent/memory';
-import { evaluateHonesty, detectHalfFinishedTurn, findCompletionClaim } from '@agent/memory';
+import {
+  evaluateHonesty,
+  detectHalfFinishedTurn,
+  findCompletionClaim,
+  findRunPromise,
+  turnDidExecute,
+} from '@agent/memory';
+import { honestySessionStore } from './honesty_session_state.js';
 import {
   extractScheduleIdFromSession,
   summarizeTurnTrace,
@@ -6522,10 +6529,28 @@ async function runToolLoop(
         // tree state (null if none). Lets the gate catch "全部闭合 / proved / 最终判决" claims the tree
         // doesn't support, and round-result narration with no actual round this turn.
         const ownerReasoning = memory.reasoning.getMostRecentActiveSession(sessionId);
+        // Session-aware say-do-gap latch (PHILONT_HONESTY_SESSION=0 disables). Carries "promised a run but
+        // didn't" / fabrication count across turns so a REPEATED unkept run-promise escalates to high.
+        const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
         const honesty = evaluateHonesty(response.content, {
           toolResults: recentToolResults,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
+          session: honestySessionEnabled
+            ? {
+                unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,
+                priorViolations: honestySessionStore.get(sessionId).violationCount,
+              }
+            : undefined,
         });
+        // Fold this turn into the latch BEFORE acting on the verdict: a fresh "现在跑" with no execution
+        // tool arms it; an actual execution clears it; a fire bumps the violation counter.
+        if (honestySessionEnabled) {
+          honestySessionStore.update(sessionId, {
+            promisedRun: !!findRunPromise(response.content),
+            didExecute: turnDidExecute(recentToolResults),
+            fired: !!honesty,
+          });
+        }
         if (!honesty) {
           // Explicitly print "passed" status so tests can see the gate actually ran + no false positives
           const okN = recentToolResults.filter((r) => r.content.startsWith('✓')).length;
@@ -6576,6 +6601,23 @@ async function runToolLoop(
               `  3. When rewriting, use the number the tool actually returned (rounding is fine, but do not invent a number);\n` +
               `  4. If the tool returned an anomalous value (e.g. an 18-byte .docx — files < 256 bytes are usually a JSON error body, not real binary),\n` +
               `     tell the user honestly "this looks wrong — the API may have returned an error response" — **do not pretend success**.\n\n` +
+              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+          } else if (honesty.reason === 'fabricated_execution_claim') {
+            reminder =
+              `[drive Honesty/fabricated_execution] You wrote "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
+              `**This is the most serious dishonesty: reporting results of a computation that never ran this turn.**\n` +
+              `  1. Do NOT narrate numbers / eigenvalues / ratios / "shell 返回" you did not get from a tool THIS turn;\n` +
+              `  2. In this same reply, actually CALL the tool (shell / pariGp) and wait for its ✓ / ⚠ output;\n` +
+              `  3. Report ONLY what the tool returned — if it failed, say it failed;\n` +
+              `  4. If you will not run it now, tell the user plainly "not run yet" — never invent the result.\n\n` +
+              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+          } else if (honesty.reason === 'run_promise_without_exec') {
+            reminder =
+              `[drive Honesty/say_do_gap] You said "${honesty.matchedClaim}" but issued no tool call — ${honesty.evidence}\n\n` +
+              `**Announcing a run is not running. Close the say-do gap NOW:**\n` +
+              `  1. In THIS reply, call the shell / pariGp tool to actually run it — do not end the turn on "现在跑";\n` +
+              `  2. If you cannot or will not run it, say so plainly — do not promise a run you will not perform;\n` +
+              `  3. Never end a turn with "I'll run it now" and no tool call — that is the exact loop the user flagged.\n\n` +
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
           } else if (honesty.severity === 'high') {
             reminder =
@@ -6929,6 +6971,7 @@ async function runToolLoop(
             madeProgressThisTurn: advancedThisTurn && (ownerSession?.noProgressRounds ?? 1) === 0,
             repeatedPivotCount: priorPivotStreak,
             attemptsThisEpisode: vAttemptsThisEpisode,
+            deadEndCount: vSummary?.deadCount ?? 0,
           });
           // Ratchet bookkeeping (once per turn): a non-continue verdict extends the streak; continue resets it.
           if (!viabilityStreakUpdated) {

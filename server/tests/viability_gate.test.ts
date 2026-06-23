@@ -288,3 +288,38 @@ test('"算了吧"/"放弃吧" are acceptance, never commit even after a pitch', 
     assert.equal(d.doomReset, false, `acceptance must not reset doom: ${msg}`);
   }
 });
+
+// ── self_derived_no_go: dead-end count → de-facto intractable (2026-06-24) ──────────────────────
+// The Goldbach gap: the agent proved its OWN structural no-go ("additive splitting can't separate primes
+// from semiprimes") but goalIsOpenProblem stayed false (exotic framing didn't match the parity barrier),
+// so intractable never fired and it kept pitching new angles. Many dead-ends + stuck → de-facto out of reach.
+
+test('self_derived_no_go: many dead-ends + stuck → intractable even without a curated barrier', () => {
+  const v = computeViability(base({ status: 'stuck', provedCount: 0, deadEndCount: 4 }));
+  assert.equal(v.verdict, 'intractable');
+  assert.ok(v.reasons.includes('self_derived_no_go'));
+});
+
+test('self_derived_no_go: dead-ends but NOT stuck → not intractable (ordinary backtracking)', () => {
+  const v = computeViability(base({ status: 'active', noProgressRounds: 0, deadEndCount: 5, openFrontierCount: 4 }));
+  assert.notEqual(v.verdict, 'intractable');
+});
+
+test('self_derived_no_go: below threshold → not intractable', () => {
+  const v = computeViability(base({ status: 'stuck', provedCount: 0, deadEndCount: 2 }));
+  assert.notEqual(v.verdict, 'intractable');
+});
+
+test('self_derived_no_go: progress this turn vetoes it', () => {
+  const v = computeViability(base({ status: 'stuck', provedCount: 0, deadEndCount: 6, madeProgressThisTurn: true }));
+  assert.equal(v.verdict, 'continue');
+});
+
+// ── CONTINUATION_PITCH_RE stopgap: 试/搞 now caught (the leaked Goldbach pitch) ──────────────────
+test('CONTINUATION_PITCH_RE: "要不要试?" / "要不要搞一下?" now match (stopgap words)', () => {
+  assert.ok(CONTINUATION_PITCH_RE.test('要不要试？'));
+  assert.ok(CONTINUATION_PITCH_RE.test('要不要搞一下？'));
+  // regression: existing forms still match
+  assert.ok(CONTINUATION_PITCH_RE.test('要不要继续？'));
+  assert.ok(CONTINUATION_PITCH_RE.test('shall I continue?'));
+});

@@ -281,6 +281,24 @@ export function roundWasSubstantive(
 }
 
 /**
+ * Did a DISCOVER (experimental-math) round make substantive progress? (2026-06-24)
+ *
+ * Discover mode used to opt out of stuck judgment entirely ("getting stuck is not applicable"), making it a
+ * brakeless conjecture treadmill on an open problem — the Goldbach run generated a new angle every round
+ * (adjacency spectrum → quantum sieve → Witten index → SUSY), each one failing, with nothing ever proved.
+ * Substantive = it actually PROVED a node, OR it netted a NEW surviving conjecture (one that passed
+ * counterexample search and wasn't refuted). A round that only re-proposes angles that all die is NOT
+ * progress, so it feeds recordRoundProgress and eventually trips the stuck/redirect note + viability gate.
+ */
+export function discoverRoundWasSubstantive(input: {
+  newProved: number;
+  survivorsBefore: number;
+  survivorsAfter: number;
+}): boolean {
+  return input.newProved > 0 || input.survivorsAfter > input.survivorsBefore;
+}
+
+/**
  * Feasibility / no-go gate (the "parity-problem" tooth). Before grinding rounds on a goal, match it
  * (+ the method it names, + assumptions) against the KNOWN_BARRIERS library — meta-mathematical no-go
  * results proving a class of method cannot reach a class of goal (parity problem → a sieve can't prove
@@ -2338,6 +2356,24 @@ export function createDeepExploreTool(
     const newConjectures = after.filter((n) => n.kind === 'conjecture').length - beforeConjectures;
     const refuted = summary.newlyRefuted.length + summary.newDeadEnds.length;
     const survivors = after.filter((n) => n.kind === 'conjecture' && n.status === 'open');
+    // Discover-mode brake (2026-06-24): feed the SAME stuck signal prove rounds use, so a treadmill of
+    // failing angles trips the redirect note + viability gate instead of running forever.
+    const newProved =
+      after.filter((n) => n.status === 'proved').length -
+      before.filter((n) => n.status === 'proved').length;
+    const survivorsBefore = before.filter((n) => n.kind === 'conjecture' && n.status === 'open').length;
+    const discoverSubstantive = discoverRoundWasSubstantive({
+      newProved,
+      survivorsBefore,
+      survivorsAfter: survivors.length,
+    });
+    const discoverNoProgressRounds = reasoning.recordRoundProgress(session.id, discoverSubstantive);
+    const discoverStuckNote =
+      !discoverSubstantive && discoverNoProgressRounds >= STUCK_ESCALATE_AFTER
+        ? `\n⚠️ ${discoverNoProgressRounds} discover round(s) with no proof and no NET new surviving conjecture — ` +
+          `experimental conjecture-generation is not converging on this goal. Switch to action=continue to PROVE a ` +
+          `surviving conjecture, or report honestly that this angle is exhausted — do not keep proposing new framings.`
+        : '';
     const parts: string[] = [];
     parts.push(`${newConjectures} new data-backed conjecture(s) proposed (hung on the tree to prove later)`);
     if (refuted > 0) parts.push(`${refuted} killed by counterexample`);
@@ -2359,6 +2395,7 @@ export function createDeepExploreTool(
       output:
         `One round of experimental-math exploration: ${parts.join('; ')}.${tail}` +
         (list ? `\nAlive conjectures (run action=continue to prove one):\n${list}` : '') +
+        discoverStuckNote +
         `\nsession id: ${session.id}`,
     };
   }

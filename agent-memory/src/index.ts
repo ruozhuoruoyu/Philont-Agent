@@ -268,8 +268,16 @@ export {
   findCompletionClaim,
   findOrderClaim,
   classifyToolResult,
+  findExecutionClaim,
+  findRunPromise,
+  isExecutionTool,
+  turnDidExecute,
 } from './honesty_gate.js';
-export type { HonestyEvaluation, EvaluateOptions as HonestyEvaluateOptions } from './honesty_gate.js';
+export type {
+  HonestyEvaluation,
+  EvaluateOptions as HonestyEvaluateOptions,
+  HonestySessionSnapshot,
+} from './honesty_gate.js';
 export {
   detectHalfFinishedTurn,
   findCommitmentPhrase,
