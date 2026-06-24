@@ -11,6 +11,8 @@ import {
   isGenerativeGoal,
   classifyGoal,
   MIN_CANDIDATES,
+  MAX_CANDIDATES,
+  MAX_CANDIDATES_DECISION,
   SATURATED_IDLE,
   SATURATED_IDLE_DECISION,
 } from '../src/phase_gate.js';
@@ -57,6 +59,33 @@ test('diverge: a decision goal converges SOONER than open ideation at the same i
     assert.equal(diverge({ viableCandidates: 4, divergeIdleRounds: at, needsDecision: true }).phase, 'converge');
     assert.equal(diverge({ viableCandidates: 4, divergeIdleRounds: at, needsDecision: false }).phase, 'diverge');
   }
+});
+
+test('diverge: ceiling forces converge even when every round is productive (idle never accrues)', () => {
+  // The runaway: a productive diverge round resets the idle counter, so idle stays 0 forever. Without
+  // the ceiling this never converges (observed: 45 hypotheses, 5 rounds). The ceiling must fire anyway.
+  const dec = diverge({ viableCandidates: MAX_CANDIDATES_DECISION, divergeIdleRounds: 0, needsDecision: true });
+  assert.equal(dec.phase, 'converge');
+  assert.equal(dec.changed, true);
+  const ide = diverge({ viableCandidates: MAX_CANDIDATES, divergeIdleRounds: 0, needsDecision: false });
+  assert.equal(ide.phase, 'converge');
+  assert.equal(ide.changed, true);
+});
+
+test('diverge: a decision goal hits its (tighter) ceiling before open ideation does', () => {
+  assert.equal(MAX_CANDIDATES_DECISION <= MAX_CANDIDATES, true, 'decision ceiling is no looser than ideation');
+  // At the decision ceiling: a decision goal converges, but ideation (wider ceiling, idle still 0) does not.
+  if (MAX_CANDIDATES_DECISION < MAX_CANDIDATES) {
+    assert.equal(diverge({ viableCandidates: MAX_CANDIDATES_DECISION, divergeIdleRounds: 0, needsDecision: true }).phase, 'converge');
+    assert.equal(diverge({ viableCandidates: MAX_CANDIDATES_DECISION, divergeIdleRounds: 0, needsDecision: false }).phase, 'diverge');
+  }
+});
+
+test('diverge: the floor still gates the ceiling (no converge below MIN_CANDIDATES)', () => {
+  // Pathological config where the ceiling would be below the floor must never fire under the floor.
+  assert.equal(MAX_CANDIDATES_DECISION >= MIN_CANDIDATES, true, 'ceiling sits above the floor by construction');
+  const d = diverge({ viableCandidates: MIN_CANDIDATES - 1, divergeIdleRounds: 0, needsDecision: true });
+  assert.equal(d.phase, 'diverge');
 });
 
 test('converge: stays converge normally; only "all dead" reopens generation (no thrash)', () => {

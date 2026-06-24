@@ -6,11 +6,17 @@
  * in; this decides the phase the NEXT round should run.
  *
  * This is the ONE hard, ASYMMETRIC control point of the whole redesign:
- *   - DEFAULT stays diverge. converge must EARN its turn: premature convergence destroys the
- *     candidate space (the asymmetric cost), so converge requires the space to be POPULATED
- *     (≥ MIN_CANDIDATES viable candidates) AND generation to have SATURATED (≥ idle rounds with no
- *     NET-new candidate). A decision goal only RELAXES the saturation bar (to 1 idle round) — it
- *     never bypasses it, so we never converge on the very first productive round.
+ *   - DEFAULT stays diverge. converge must EARN its turn, but there are TWO ways to earn it:
+ *       (a) SATURATION — the space is POPULATED (≥ MIN_CANDIDATES viable candidates) AND generation
+ *           has SATURATED (≥ idle rounds with no NET-new candidate). A decision goal only RELAXES the
+ *           saturation bar (to 1 idle round) — it never bypasses it, so we never converge on the very
+ *           first productive round. This is the "generation petered out" exit.
+ *       (b) CEILING — viable candidates reach MAX_CANDIDATES (decision goals cap tighter). This is the
+ *           HARD backstop: a productive diverge round resets the idle counter (its whole job is to add
+ *           candidates), so saturation alone can run forever on a rich topic. Once enough options exist
+ *           to choose among, MORE options stop helping — force evaluation regardless of idle.
+ *     Premature convergence destroys the candidate space (the asymmetric cost), which is why the floor
+ *     (MIN_CANDIDATES) gates BOTH exits — the ceiling can never fire below the floor.
  *   - The only backward edge converge→diverge is the high bar `convergeAllDead` (every candidate
  *     was eliminated → the space was too small, regenerate). No other backward edge → no thrash.
  *
@@ -21,6 +27,16 @@ import type { ReasoningPhase, ReasoningSessionMode } from '@agent/memory';
 
 /** Minimum viable candidates before converge may even be considered (space must be populated). */
 export const MIN_CANDIDATES = 3;
+/**
+ * Ceiling: once this many viable candidates exist, converge regardless of saturation. A diverge round's
+ * job is to ADD candidates, so it resets the idle counter every productive round — on a rich topic the
+ * saturation exit can therefore never fire and generation runs unbounded (observed: 45 hypotheses over
+ * 5 rounds, never converged). The ceiling is the hard backstop: more options past this point stop
+ * helping and the space must be evaluated. A decision goal caps tighter (it must pick ONE, so a handful
+ * of strong options is enough); open ideation tolerates a wider field before being forced to evaluate.
+ */
+export const MAX_CANDIDATES = 16;
+export const MAX_CANDIDATES_DECISION = 8;
 /** Diverge idle rounds (no NET-new viable candidate) that count as "saturated" for open ideation. */
 export const SATURATED_IDLE = 2;
 /**
@@ -55,6 +71,17 @@ export function decidePhaseTransition(i: PhaseInput): PhaseDecision {
         phase: 'diverge',
         changed: false,
         reason: `space not yet populated (${i.viableCandidates}/${MIN_CANDIDATES} viable candidates) — keep generating`,
+      };
+    }
+    // Hard ceiling — converge regardless of saturation. A productive diverge round resets the idle
+    // counter, so without this the saturation exit can run forever on a rich topic. Gated by the floor
+    // above (ceiling > floor by construction), so this never bypasses the populated-space requirement.
+    const ceiling = i.needsDecision ? MAX_CANDIDATES_DECISION : MAX_CANDIDATES;
+    if (i.viableCandidates >= ceiling) {
+      return {
+        phase: 'converge',
+        changed: true,
+        reason: `${i.viableCandidates} viable candidates (≥ ${ceiling}) — enough to evaluate; more options stop helping, switch to evaluation`,
       };
     }
     const idleNeeded = i.needsDecision ? SATURATED_IDLE_DECISION : SATURATED_IDLE;
