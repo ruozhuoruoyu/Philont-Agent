@@ -1318,6 +1318,9 @@ export function renderDeliberatePrompt(session: ReasoningSession, nodes: Reasoni
 export function looksLikeUserData(ref: string): boolean {
   const r = ref.trim().toLowerCase();
   if (!r) return false;
+  // A bare external web URL is never the user's own data — even if its path contains a word like
+  // "values" (e.g. .../company-values). The user's data is cited via note/fact/file refs, not URLs.
+  if (/^https?:\/\//.test(r)) return false;
   return (
     /\b(note|notes|fact|facts|kb|file|files|memory|preference|prefers?|values?|priorit|user (said|stated|wants|prefers|values))\b/.test(r) ||
     /^(note|fact|kb|file|mem|memory):/.test(r) ||
@@ -2456,28 +2459,12 @@ export function createDeepExploreTool(
     const status = judgeConvergence(after);
     if (status !== 'active') reasoning.setSessionStatus(session.id, status);
 
-    // Phase C backward edge: if an active converge session has eliminated EVERY candidate (none open,
-    // none proved), the space was too small — reopen generation (diverge). High bar → no thrash. Inert
-    // unless phases are enabled.
-    let convergePhaseNote = '';
-    if (PHASES_ENABLED && session.phase === 'converge' && status === 'active') {
-      const cands = after.filter((n) => n.kind === 'construction' || n.kind === 'conjecture');
-      const openCands = cands.filter((n) => n.status === 'open').length;
-      const provedCands = cands.filter((n) => n.status === 'proved').length;
-      const decision = decidePhaseTransition({
-        phase: 'converge',
-        viableCandidates: openCands,
-        divergeIdleRounds: session.divergeIdleRounds,
-        needsDecision: goalNeedsDecision(session.goal, session.mode),
-        convergeAllDead: cands.length > 0 && openCands === 0 && provedCands === 0,
-      });
-      if (decision.changed) {
-        reasoning.setPhase(session.id, decision.phase);
-        reasoning.recordDivergeProgress(session.id, true); // reset idle so reopened generation starts fresh
-        deps.onMilestone?.(`Phase → generation: ${decision.reason}.`);
-        convergePhaseNote = `\n↩ Phase reopened to generation — ${decision.reason}. Reply "continue" to generate fresh options.`;
-      }
-    }
+    // NOTE: the converge→diverge backward edge (decidePhaseTransition convergeAllDead) is intentionally
+    // NOT wired here. It can only fire while status==='active', which means the frontier still has open
+    // non-candidate work — so reopening would interrupt it; and a formal proof session with a refuted
+    // 'construction' node would be wrongly flipped into discover. When candidates truly run out the
+    // session is already judged 'stuck' (frontier empty), which surfaces the redirect note. Auto-reopen
+    // is deferred until a signal that does not misfire on those cases. The pure gate keeps the branch.
 
     const text = renderProgressText(summary, result.hitCap, status, profile.settledVerb);
     deps.onMilestone?.(text);
@@ -2502,7 +2489,7 @@ export function createDeepExploreTool(
         ? `\n⚠️ No substantive progress for ${noProgressRounds} consecutive rounds — this frontier looks stuck. ` +
           `Consider redirecting: start a fresh angle (a different framing of the problem), or tell me which sub-problem to focus on.`
         : '';
-    return { success: true, output: `${text}${tail}${churnNote}${stuckNote}${convergePhaseNote}\nsession id: ${session.id}` };
+    return { success: true, output: `${text}${tail}${churnNote}${stuckNote}\nsession id: ${session.id}` };
   }
 
   // Diverge round: GENERATIVE phase — open up the space (formal: experimental-math/conjecture via

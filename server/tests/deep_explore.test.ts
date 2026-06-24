@@ -601,6 +601,8 @@ test('looksLikeUserData: user notes/facts/preferences true; bare web URL false',
   assert.equal(looksLikeUserData('用户说更看重稳定'), true);
   assert.equal(looksLikeUserData('the user prefers remote work'), true);
   assert.equal(looksLikeUserData('https://example.com/salary-survey'), false);
+  // A web URL whose PATH contains a keyword ("values") must still NOT count as the user's own data.
+  assert.equal(looksLikeUserData('https://glassdoor.com/company-values'), false);
   assert.equal(looksLikeUserData(''), false);
 });
 
