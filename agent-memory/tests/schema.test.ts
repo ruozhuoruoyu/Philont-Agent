@@ -36,7 +36,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 31);
+  assert.equal(SCHEMA_VERSION, 32);
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
   assert.ok(tableExists(db, 'reasoning_sessions'));
@@ -48,6 +48,9 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   assert.ok(hasColumn(db, 'reasoning_sessions', 'no_progress_rounds'), 'v29: reasoning_sessions 缺 no_progress_rounds');
   assert.ok(hasColumn(db, 'reasoning_sessions', 'auto_advance'), 'v30: reasoning_sessions 缺 auto_advance');
   assert.ok(hasColumn(db, 'reasoning_sessions', 'mode'), 'v31: reasoning_sessions 缺 mode');
+  assert.ok(hasColumn(db, 'reasoning_sessions', 'phase'), 'v32: reasoning_sessions 缺 phase');
+  assert.ok(hasColumn(db, 'reasoning_sessions', 'diverge_idle_rounds'), 'v32: reasoning_sessions 缺 diverge_idle_rounds');
+  assert.ok(hasColumn(db, 'reasoning_nodes', 'settle_basis'), 'v32: reasoning_nodes 缺 settle_basis');
 
   // v8: 全局时间线 session 行('global')由 initSchema 自动建,作为
   // K0 时间线 bookkeeping 的占位
