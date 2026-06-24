@@ -1,6 +1,7 @@
 # deep_explore — phase-aware redesign (diverge/converge × domain)
 
-Status: implemented (Phases A–E landed, behind `PHILONT_DEEP_EXPLORE_PHASES`, default off)
+Status: implemented (Phases A–E landed). `PHILONT_DEEP_EXPLORE_PHASES` default **ON** as of
+2026-06 for live dogfooding (disable with `=0`); not yet validated against a real LLM.
 Owner: ruozhuoruoyu
 Scope: `server/src/deep_explore.ts`, `server/src/viability_gate.ts` (sibling), `agent-memory/src/reasoning.ts` + `schema.ts`
 
@@ -153,8 +154,8 @@ Rules (asymmetric — **default stays diverge; converge must EARN its turn**, mi
   edge → no thrash.
 
 Constants (no per-deployment knobs, like viability_gate): `MIN_CANDIDATES`,
-`SATURATED_IDLE`. Whole feature behind `PHILONT_DEEP_EXPLORE_PHASES` (default `0` for
-initial rollout; off ⇒ exact current behavior).
+`SATURATED_IDLE`. Whole feature behind `PHILONT_DEEP_EXPLORE_PHASES` (default ON since 2026-06;
+set `=0` ⇒ exact legacy behavior).
 
 Wire: at the **end** of `runRound`, after progress accounting, call
 `decidePhaseTransition`; if it flips, `reasoning.setPhase(...)`, emit a one-line
@@ -194,7 +195,8 @@ Today `start` (2460) has **no inference**: `mode = params.mode==='deliberate' ? 
 
 ## 8. Backward compatibility & rollout
 
-- Master flag `PHILONT_DEEP_EXPLORE_PHASES` (default off). Off ⇒ `phase` ignored, all
+- Master flag `PHILONT_DEEP_EXPLORE_PHASES` (default ON since 2026-06; disable with `=0`/off/
+  false/no). Off ⇒ `phase` ignored, all
   paths identical to today. On ⇒ phase-aware dispatch + gate.
 - Existing sessions load with `phase='converge'`, `settle_basis=NULL` ⇒ behave exactly as
   now. `discover` action still works (now sets phase=diverge).

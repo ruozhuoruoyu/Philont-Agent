@@ -562,15 +562,18 @@ export function withNoProgressStop(
 const VALUE_GUIDED = process.env.PHILONT_DEEP_EXPLORE_VALUE_GUIDED !== '0';
 
 /**
- * Phase-aware deep_explore master switch (diverge/converge × domain redesign). OFF by default —
- * when off, session.phase is ignored and every round runs the converge path (today's behavior),
- * and `discover` stays formal-only. When on, runRound dispatches on session.phase and `discover`
- * becomes domain-aware (formal: experimental-math; deliberate: option/hypothesis generation).
- * env PHILONT_DEEP_EXPLORE_PHASES = 1 | on | true | yes.
+ * Phase-aware deep_explore master switch (diverge/converge × domain redesign). ON by default —
+ * runRound dispatches on session.phase and `discover` is domain-aware (formal: experimental-math;
+ * deliberate: option/hypothesis generation). Disable with PHILONT_DEEP_EXPLORE_PHASES=0 (or off/
+ * false/no) to revert to the legacy single-phase engine (phase ignored, `discover` formal-only).
+ *
+ * NOTE (2026-06): default flipped to on for live dogfooding. The phase machinery is covered by unit
+ * tests + mock smokes but has NOT yet been validated against a real LLM — watch classifyGoal domain
+ * routing, the diverge→converge gate timing, and deliberate diverge output quality on real runs.
  */
 const PHASES_ENABLED = (() => {
   const v = (process.env.PHILONT_DEEP_EXPLORE_PHASES ?? '').trim().toLowerCase();
-  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 })();
 
 /** UCB exploration coefficient: higher → more exploration of untried nodes. env PHILONT_DEEP_EXPLORE_UCB_C, default 0.7, range [0,5]. */
