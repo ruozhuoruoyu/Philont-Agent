@@ -179,3 +179,52 @@ test('setAutoAdvance / listAutoAdvanceSessions: 按 session opt-in 后台推进'
   assert.equal(mem.reasoning.listAutoAdvanceSessions().length, 0);
   mem.close();
 });
+
+// ── Phase A: phase / diverge_idle_rounds / settle_basis data layer ──────────────────────────────
+
+test('phase A: new session defaults to phase=converge, idle=0, node settleBasis=null', () => {
+  const mem = openMemoryDb(':memory:');
+  const { session, rootNode } = mem.reasoning.createSession({ goal: 'G' });
+  // Default preserves today's behavior: converge phase, no idle, unset basis.
+  assert.equal(session.phase, 'converge');
+  assert.equal(session.divergeIdleRounds, 0);
+  assert.equal(rootNode.settleBasis, null);
+  // Replays across reads (continue/status go through getSession).
+  assert.equal(mem.reasoning.getSession(session.id)!.phase, 'converge');
+  mem.close();
+});
+
+test('phase A: setPhase persists and replays via getSession', () => {
+  const mem = openMemoryDb(':memory:');
+  const { session } = mem.reasoning.createSession({ goal: 'G', mode: 'deliberate' });
+  mem.reasoning.setPhase(session.id, 'diverge');
+  assert.equal(mem.reasoning.getSession(session.id)!.phase, 'diverge');
+  // Ratchet back is allowed at the store level (gate enforces the policy, not the store).
+  mem.reasoning.setPhase(session.id, 'converge');
+  assert.equal(mem.reasoning.getSession(session.id)!.phase, 'converge');
+  mem.close();
+});
+
+test('phase A: recordDivergeProgress increments on idle, resets on net-new candidate', () => {
+  const mem = openMemoryDb(':memory:');
+  const { session } = mem.reasoning.createSession({ goal: 'G', mode: 'deliberate' });
+  assert.equal(mem.reasoning.recordDivergeProgress(session.id, false), 1);
+  assert.equal(mem.reasoning.recordDivergeProgress(session.id, false), 2);
+  assert.equal(mem.reasoning.recordDivergeProgress(session.id, true), 0, 'net-new candidate resets idle');
+  assert.equal(mem.reasoning.getSession(session.id)!.divergeIdleRounds, 0);
+  mem.close();
+});
+
+test('phase A: updateNode round-trips settleBasis; omitting it leaves the value unchanged', () => {
+  const mem = openMemoryDb(':memory:');
+  const { session, rootNode } = mem.reasoning.createSession({ goal: 'G', mode: 'deliberate' });
+  const [n] = mem.reasoning.addNodes(session.id, rootNode.id, [{ claim: 'value-laden Q', kind: 'subgoal' }]);
+  // Settle a preferential node.
+  const settled = mem.reasoning.updateNode(session.id, n.id, { status: 'proved', settleBasis: 'preferential' });
+  assert.equal(settled!.settleBasis, 'preferential');
+  // A later patch that omits settleBasis must not clobber it.
+  const again = mem.reasoning.updateNode(session.id, n.id, { result: 'grounded in user values' });
+  assert.equal(again!.settleBasis, 'preferential');
+  assert.equal(again!.result, 'grounded in user values');
+  mem.close();
+});

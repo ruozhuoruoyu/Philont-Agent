@@ -25,8 +25,25 @@ export type ReasoningSessionStatus = 'active' | 'solved' | 'stuck' | 'abandoned'
  * Persisted on the session so continue/status/finalize pick the same profile across turns. Default 'formal'.
  */
 export type ReasoningSessionMode = 'formal' | 'deliberate';
+/**
+ * Exploration phase (orthogonal to mode/domain): which kind of round the session runs.
+ *   - 'converge' : eliminative — decompose / discriminate / settle (today's default behavior).
+ *   - 'diverge'  : generative — open up the space (conjectures / candidate options) without
+ *                  settling; novelty/diversity favored over pruning.
+ * Session state, not constant: it ratchets diverge→converge via the transition gate. Default
+ * 'converge' so existing sessions are unchanged. (Phase A: persisted; dispatch wired in Phase B+.)
+ */
+export type ReasoningPhase = 'diverge' | 'converge';
 export type ReasoningNodeKind = 'subgoal' | 'lemma' | 'construction' | 'counterexample' | 'conjecture';
 export type ReasoningNodeStatus = 'open' | 'proved' | 'refuted' | 'dead_end' | 'blocked';
+/**
+ * For empirical-domain (deliberate) nodes: which kind of evidence settled the node.
+ *   - 'empirical'    : backed by an external cited source/observation (today's strict gate).
+ *   - 'preferential' : a value-laden conclusion grounded in the USER's own stated values/data
+ *                      (truth-maker is the user's utility, not the open web).
+ * null = unset → treated as 'empirical' (today's default). (Gate logic lands in Phase D.)
+ */
+export type ReasoningSettleBasis = 'empirical' | 'preferential';
 
 export interface ReasoningSession {
   id: string;
@@ -44,6 +61,10 @@ export interface ReasoningSession {
   autoAdvance: boolean;
   /** Which reasoning profile this session runs (formal proof vs general evidence-based deliberation). Default 'formal'. */
   mode: ReasoningSessionMode;
+  /** Exploration phase: 'converge' (eliminative, default) vs 'diverge' (generative). Ratchets diverge→converge. */
+  phase: ReasoningPhase;
+  /** Consecutive diverge rounds with no net-new viable candidate (saturation signal for the transition gate). */
+  divergeIdleRounds: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -66,6 +87,8 @@ export interface ReasoningNode {
   visits: number;
   /** Proof/exploration technique tag (behavior descriptor for MAP-Elites bucketing + novelty; null=unclassified) */
   technique: string | null;
+  /** For empirical (deliberate) nodes: evidence basis the node was settled on ('empirical'/'preferential'); null=unset (treated as empirical). */
+  settleBasis: ReasoningSettleBasis | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -81,6 +104,8 @@ interface SessionRow {
   no_progress_rounds: number;
   auto_advance: number;
   mode: string | null;
+  phase: string | null;
+  diverge_idle_rounds: number;
   created_at: number;
   updated_at: number;
 }
@@ -99,6 +124,7 @@ interface NodeRow {
   value: number | null;
   visits: number;
   technique: string | null;
+  settle_basis: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -115,6 +141,8 @@ function rowToSession(r: SessionRow): ReasoningSession {
     noProgressRounds: r.no_progress_rounds ?? 0,
     autoAdvance: !!r.auto_advance,
     mode: (r.mode === 'deliberate' ? 'deliberate' : 'formal') as ReasoningSessionMode,
+    phase: (r.phase === 'diverge' ? 'diverge' : 'converge') as ReasoningPhase,
+    divergeIdleRounds: r.diverge_idle_rounds ?? 0,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -137,6 +165,8 @@ function rowToNode(r: NodeRow): ReasoningNode {
     value: r.value ?? null,
     visits: r.visits ?? 0,
     technique: r.technique ?? null,
+    settleBasis:
+      r.settle_basis === 'empirical' || r.settle_basis === 'preferential' ? r.settle_basis : null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -334,6 +364,8 @@ export class ReasoningStore {
       result?: string | null;
       appendApproach?: string;
       addEvidence?: string;
+      /** Empirical-domain evidence basis ('empirical'/'preferential'); omit to leave unchanged. */
+      settleBasis?: ReasoningSettleBasis | null;
     },
   ): ReasoningNode | null {
     const node = this.getNode(sessionId, nodeId);
@@ -347,15 +379,16 @@ export class ReasoningStore {
     const evidence = patch.addEvidence
       ? [...node.evidenceRefs, patch.addEvidence]
       : node.evidenceRefs;
+    const settleBasis = patch.settleBasis !== undefined ? patch.settleBasis : node.settleBasis;
     const now = Date.now();
 
     this.db
-      .prepare<[string, string | null, string, string, number, string, string]>(
+      .prepare<[string, string | null, string, string, string | null, number, string, string]>(
         `UPDATE reasoning_nodes
-           SET status = ?, result = ?, approaches_tried_json = ?, evidence_refs_json = ?, updated_at = ?
+           SET status = ?, result = ?, approaches_tried_json = ?, evidence_refs_json = ?, settle_basis = ?, updated_at = ?
          WHERE id = ? AND session_id = ?`,
       )
-      .run(status, result, JSON.stringify(approaches), JSON.stringify(evidence), now, nodeId, sessionId);
+      .run(status, result, JSON.stringify(approaches), JSON.stringify(evidence), settleBasis, now, nodeId, sessionId);
     this.touchSession(sessionId, now);
     return this.getNode(sessionId, nodeId);
   }
@@ -400,6 +433,40 @@ export class ReasoningStore {
       .prepare<[string]>(`SELECT no_progress_rounds FROM reasoning_sessions WHERE id = ?`)
       .get(id) as { no_progress_rounds: number } | undefined;
     return row?.no_progress_rounds ?? 0;
+  }
+
+  /** Set the exploration phase (diverge/converge). Set by the transition gate; ratchets diverge→converge. */
+  setPhase(id: string, phase: ReasoningPhase): void {
+    this.db
+      .prepare<[string, number, string]>(
+        `UPDATE reasoning_sessions SET phase = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(phase, Date.now(), id);
+  }
+
+  /**
+   * Record whether a diverge round produced a net-new viable candidate. Net-new → reset the idle
+   * counter to 0; otherwise increment. Returns the new consecutive-idle count (saturation signal for
+   * the diverge→converge transition gate). Diverge analogue of recordRoundProgress.
+   */
+  recordDivergeProgress(id: string, madeProgress: boolean): number {
+    if (madeProgress) {
+      this.db
+        .prepare<[number, string]>(
+          `UPDATE reasoning_sessions SET diverge_idle_rounds = 0, updated_at = ? WHERE id = ?`,
+        )
+        .run(Date.now(), id);
+      return 0;
+    }
+    this.db
+      .prepare<[number, string]>(
+        `UPDATE reasoning_sessions SET diverge_idle_rounds = diverge_idle_rounds + 1, updated_at = ? WHERE id = ?`,
+      )
+      .run(Date.now(), id);
+    const row = this.db
+      .prepare<[string]>(`SELECT diverge_idle_rounds FROM reasoning_sessions WHERE id = ?`)
+      .get(id) as { diverge_idle_rounds: number } | undefined;
+    return row?.diverge_idle_rounds ?? 0;
   }
 
   /** Opt a session in/out of background auto-advance. */

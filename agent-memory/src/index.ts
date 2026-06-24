@@ -96,6 +96,8 @@ export { ReasoningStore, ReasoningNodeNotFoundError } from './reasoning.js';
 export type {
   ReasoningSession,
   ReasoningSessionMode,
+  ReasoningPhase,
+  ReasoningSettleBasis,
   ReasoningNode,
   ReasoningSessionStatus,
   ReasoningNodeKind,

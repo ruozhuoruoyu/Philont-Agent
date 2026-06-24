@@ -76,6 +76,8 @@ import {
   type ReasoningStore,
   type ReasoningSession,
   type ReasoningSessionMode,
+  type ReasoningPhase,
+  type ReasoningSettleBasis,
   type ReasoningNode,
   type ReasoningNodeKind,
   type ReasoningSessionStatus,
@@ -83,6 +85,7 @@ import {
   type SkillStore,
 } from '@agent/memory';
 import { currentSessionId } from './channels/turn_context.js';
+import { decidePhaseTransition, goalNeedsDecision, classifyGoal } from './phase_gate.js';
 
 const VALID_KINDS: ReadonlySet<string> = new Set([
   'subgoal',
@@ -558,6 +561,18 @@ export function withNoProgressStop(
  */
 const VALUE_GUIDED = process.env.PHILONT_DEEP_EXPLORE_VALUE_GUIDED !== '0';
 
+/**
+ * Phase-aware deep_explore master switch (diverge/converge × domain redesign). OFF by default —
+ * when off, session.phase is ignored and every round runs the converge path (today's behavior),
+ * and `discover` stays formal-only. When on, runRound dispatches on session.phase and `discover`
+ * becomes domain-aware (formal: experimental-math; deliberate: option/hypothesis generation).
+ * env PHILONT_DEEP_EXPLORE_PHASES = 1 | on | true | yes.
+ */
+const PHASES_ENABLED = (() => {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_PHASES ?? '').trim().toLowerCase();
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+})();
+
 /** UCB exploration coefficient: higher → more exploration of untried nodes. env PHILONT_DEEP_EXPLORE_UCB_C, default 0.7, range [0,5]. */
 const UCB_C = (() => {
   const n = Number(process.env.PHILONT_DEEP_EXPLORE_UCB_C);
@@ -653,6 +668,15 @@ export const REASON_TOOL_DEFS: ToolDefinition[] = [
           type: 'array',
           items: { type: 'string' },
           description: 'Sources / observations backing the conclusion (a citation, URL, fact key, or file). REQUIRED to settle a finding in deliberate (evidence-based) mode; optional in formal proof mode.',
+        },
+        basis: {
+          type: 'string',
+          enum: ['empirical', 'preferential'],
+          description:
+            'DELIBERATE mode only. How this finding is settled: "empirical" (default) = a factual claim backed by an external ' +
+            'cited source/observation; "preferential" = a VALUE-laden conclusion whose truth-maker is the USER\'s own utility — ' +
+            'it must be grounded in the user\'s stated values/data (their notes/facts/files), NOT the open web. Use preferential ' +
+            'for "what should I prefer / which fits ME" findings so they are not wrongly rejected for lacking an external citation.',
         },
       },
       required: ['nodeId', 'status'],
@@ -1271,7 +1295,8 @@ export function renderDeliberatePrompt(session: ReasoningSession, nodes: Reasoni
   lines.push('');
   lines.push('## Your actions (tools)');
   lines.push('- reason_decompose(parentNodeId, subClaims[]): split a question into concrete sub-questions (kind="subgoal") or candidate options (kind="construction"). **Primary action.**');
-  lines.push('- reason_record(nodeId, status, result, evidence[], approach?): settle a sub-question. status=proved = "established"; refuted = "ruled out by evidence"; dead_end = "cannot be resolved with available evidence". **You MUST pass `evidence` (the sources/observations you relied on) to settle a finding — a conclusion with no cited evidence is NOT accepted.**');
+  lines.push('- reason_record(nodeId, status, result, evidence[], basis?, approach?): settle a sub-question. status=proved = "established"; refuted = "ruled out by evidence"; dead_end = "cannot be resolved with available evidence". **You MUST pass `evidence` (the sources/observations you relied on) to settle a finding — a conclusion with no cited evidence is NOT accepted.**');
+  lines.push('  · For a FACTUAL sub-question use basis="empirical" (default) — cite an external source. For a VALUE-laden one ("what should I prefer / which fits ME"), use basis="preferential" and ground it in the USER\'s own values/data (searchNotes / getFact / readFile) — an external citation cannot settle what the user wants.');
   lines.push('- webSearch / webFetch / fetchUrl: gather external evidence; read the actual source, do not settle on a snippet alone.');
   lines.push('- searchNotes / searchKB / getFact / listFacts / readFile: the USER’s own data and your memory — often the most decisive evidence (their constraints, preferences, prior facts). Check these BEFORE the open web.');
   lines.push('');
@@ -1285,21 +1310,51 @@ export function renderDeliberatePrompt(session: ReasoningSession, nodes: Reasoni
   return lines.join('\n');
 }
 
-/** Skeptic prompt for DELIBERATE mode: an evidence reviewer (is the conclusion actually supported?). */
+/**
+ * Does an evidence ref ground a PREFERENTIAL (value-laden) finding in the USER's own data/values
+ * rather than the open web? A bare external web URL does not (the web cannot know the user's utility);
+ * a reference to the user's notes/facts/files or a stated preference does. Pure, conservative.
+ */
+export function looksLikeUserData(ref: string): boolean {
+  const r = ref.trim().toLowerCase();
+  if (!r) return false;
+  return (
+    /\b(note|notes|fact|facts|kb|file|files|memory|preference|prefers?|values?|priorit|user (said|stated|wants|prefers|values))\b/.test(r) ||
+    /^(note|fact|kb|file|mem|memory):/.test(r) ||
+    /笔记|备忘|记忆|偏好|价值|优先|用户(说|表示|想要|倾向|看重)/.test(ref)
+  );
+}
+
+/**
+ * Skeptic prompt for DELIBERATE mode: an evidence reviewer. For an EMPIRICAL finding it asks "is the
+ * conclusion actually supported by external evidence?"; for a PREFERENTIAL (value-laden) finding it
+ * asks "is this consistent with the USER's stated values, and does it avoid imposing a value the user
+ * never endorsed?" — because a value judgment's truth-maker is the user's utility, not a citation.
+ */
 export function buildDeliberateSkepticPrompt(
   claim: string,
   argument: string | null,
   goal: string,
   context: string[],
   settledClaims: string[],
+  basis?: ReasoningSettleBasis,
 ): string {
+  const preferential = basis === 'preferential';
   const lines: string[] = [];
-  lines.push('You are a strict evidence reviewer. Someone claims the sub-question below has been SETTLED.');
-  lines.push('Your only task: decide whether the conclusion is ACTUALLY supported by the evidence given — try hard to find a hole, do not just agree.');
+  lines.push(
+    preferential
+      ? 'You are a strict reviewer of a VALUE-LADEN conclusion. Someone claims the sub-question below has been SETTLED as a matter of the USER\'s preference/values.'
+      : 'You are a strict evidence reviewer. Someone claims the sub-question below has been SETTLED.',
+  );
+  lines.push(
+    preferential
+      ? "Your only task: decide whether this conclusion is genuinely grounded in the USER's OWN stated values/data — not the reviewer's or the open web's — and does not smuggle in a value the user never endorsed. Try hard to find a hole."
+      : 'Your only task: decide whether the conclusion is ACTUALLY supported by the evidence given — try hard to find a hole, do not just agree.',
+  );
   lines.push('');
   lines.push(`## Sub-question / claim\n${claim}`);
   lines.push('');
-  lines.push(`## The conclusion + cited evidence\n${argument && argument.trim() ? argument : '(no evidence cited — which is itself disqualifying)'}`);
+  lines.push(`## The conclusion + cited ${preferential ? 'user values/data' : 'evidence'}\n${argument && argument.trim() ? argument : '(nothing cited — which is itself disqualifying)'}`);
   lines.push('');
   lines.push(`## Context: the overall question\n${goal}`);
   if (context.length) lines.push(`\n## Given context\n${context.map((a) => `- ${a}`).join('\n')}`);
@@ -1308,10 +1363,17 @@ export function buildDeliberateSkepticPrompt(
   }
   lines.push('');
   lines.push('## Review discipline');
-  lines.push('- You may use webSearch / webFetch / readFile / memory recall to CHECK whether the cited evidence actually says what is claimed, and whether a contradicting source exists.');
-  lines.push('- REFUTE if: the conclusion is not actually supported by the cited evidence; the evidence is missing, weak, or misread; a contradicting source exists; or the reasoning is motivated (cherry-picked) rather than balanced.');
-  lines.push('- **If you are unsure it is genuinely evidence-backed → verdict REFUTED** (a finding requires real support; any doubt fails).');
-  lines.push('- Only when the conclusion is clearly and fairly supported by the cited evidence → verdict HOLDS.');
+  if (preferential) {
+    lines.push('- You may use searchNotes / getFact / readFile / memory recall to CHECK what the user has actually said they value/want.');
+    lines.push("- REFUTE if: the conclusion is not actually grounded in the USER's stated values/data; it relies on the open web or the reviewer's own taste; it imposes a value/priority the user never endorsed; or it contradicts a preference the user did state.");
+    lines.push('- **If you are unsure it genuinely reflects the user\'s own values → verdict REFUTED** (a preference finding requires the user\'s real input; any doubt fails).');
+    lines.push('- Only when the conclusion clearly and fairly follows from the user\'s OWN stated values/data → verdict HOLDS.');
+  } else {
+    lines.push('- You may use webSearch / webFetch / readFile / memory recall to CHECK whether the cited evidence actually says what is claimed, and whether a contradicting source exists.');
+    lines.push('- REFUTE if: the conclusion is not actually supported by the cited evidence; the evidence is missing, weak, or misread; a contradicting source exists; or the reasoning is motivated (cherry-picked) rather than balanced.');
+    lines.push('- **If you are unsure it is genuinely evidence-backed → verdict REFUTED** (a finding requires real support; any doubt fails).');
+    lines.push('- Only when the conclusion is clearly and fairly supported by the cited evidence → verdict HOLDS.');
+  }
   lines.push('');
   lines.push('## Output format');
   lines.push('First briefly state your reasons (if refuting, name the specific gap / missing or contradicting evidence), then on a **single final line** output one of:');
@@ -1380,8 +1442,22 @@ export interface ReasoningProfile {
   settledVerb: string;
   /** No-progress call cap for withNoProgressStop (deliberate batches parallel lookups → needs more headroom). */
   noProgressCap: number;
-  buildRoundPrompt(session: ReasoningSession, nodes: ReasoningNode[], lessons: string[]): string;
+  /** Converge round (eliminative: decompose / discriminate / settle) — today's default round. */
+  buildConvergePrompt(session: ReasoningSession, nodes: ReasoningNode[], lessons: string[]): string;
   buildUserMessage(session: ReasoningSession, isFresh: boolean): string;
+  // ── Diverge phase (generative: open up the space, don't settle) ──────────────────────────────
+  /** Diverge round system prompt (formal: experimental-math/conjecture; deliberate: option/hypothesis generation). */
+  buildDivergePrompt(session: ReasoningSession, nodes: ReasoningNode[], lessons: string[], seed: string): string;
+  /** Diverge round user message. */
+  buildDivergeUserMessage(session: ReasoningSession, seed: string): string;
+  /** Node kinds counted as "viable candidates" produced by a diverge round (saturation accounting). */
+  divergeNodeKinds: readonly ReasoningNodeKind[];
+  /** Noun for a diverge candidate in user-facing text (e.g. 'data-backed conjecture' | 'candidate option/hypothesis'). */
+  divergeNoun: string;
+  /** Verb for the converge phase a candidate awaits ('prove' | 'evaluate'). */
+  divergeLaterVerb: string;
+  /** Milestone label for a diverge round ('Experimental-math round' | 'Diverge round'). */
+  divergeMilestoneLabel: string;
   /** One-shot start-of-session grounding pass prompt (formal: literature/SOTA/no-go; deliberate: factors/tradeoffs/pitfalls). */
   buildGroundingPrompt(goal: string, assumptions: string[]): string;
   buildSkepticPrompt(
@@ -1390,9 +1466,85 @@ export interface ReasoningProfile {
     goal: string,
     assumptions: string[],
     settledClaims: string[],
+    basis?: ReasoningSettleBasis,
   ): string;
-  settlePrecheck(node: ReasoningNode, result: string | null, incomingEvidence: string[]): { ok: boolean; reason?: string };
+  settlePrecheck(
+    node: ReasoningNode,
+    result: string | null,
+    incomingEvidence: string[],
+    basis?: ReasoningSettleBasis,
+  ): { ok: boolean; reason?: string };
   renderReport(session: ReasoningSession, nodes: ReasoningNode[]): string;
+}
+
+/**
+ * Round prompt for DELIBERATE × DIVERGE — the generative pass for a real-world question (the missing
+ * cell of the domain×phase matrix). Job: OPEN UP the space of possible answers (diverse candidate
+ * options / rival hypotheses / framings), NOT settle or pick. Breadth + genuine variety beat depth;
+ * eliminate only the plainly incoherent (late safety net). Settling is the converge phase's job.
+ */
+export function buildDeliberateDivergePrompt(
+  session: ReasoningSession,
+  nodes: ReasoningNode[],
+  lessons: string[] = [],
+  seed = '',
+): string {
+  const lines: string[] = [];
+  lines.push(
+    'You are a DIVERGENT option-generation engine working a hard, open-ended question. This round your ' +
+      'job is to OPEN UP the space of possible answers — generate DIVERSE candidate options, rival ' +
+      'hypotheses, and framings. Breadth and genuine variety beat depth: cover fundamentally different ' +
+      'kinds of answer, not variations of one. You are NOT settling or picking a winner this round.',
+  );
+  lines.push('');
+  lines.push('## The question');
+  lines.push(session.goal);
+  if (seed.trim()) {
+    lines.push('');
+    lines.push(`## Focus this round`);
+    lines.push(seed.trim());
+  }
+  if (session.assumptions.length) {
+    lines.push('');
+    lines.push('## Given context');
+    for (const a of session.assumptions) lines.push(`- ${a}`);
+  }
+  for (const l of renderSessionBarriers(session.id)) lines.push(l);
+  for (const l of renderSessionLiterature(session.id, DELIBERATE_LIT_TYPE_LABEL, '## Known about this question going in (retrieved this session, cited)')) lines.push(l);
+
+  // Mount point: candidates hang on the root node (the question itself).
+  const root = nodes.find((n) => n.parentId === null);
+  // Show the candidates already on the tree so this round adds genuinely NEW angles, not duplicates.
+  const candidates = nodes.filter((n) => n.kind === 'construction' || n.kind === 'conjecture');
+  if (candidates.length) {
+    lines.push('');
+    lines.push(`## Candidates already on the tree (${candidates.length} — do NOT repeat these; add NEW angles)`);
+    for (const n of candidates.slice(0, 20)) {
+      const tag = n.status === 'refuted' || n.status === 'dead_end' ? ' [ruled out]' : '';
+      lines.push(`- [${n.id}] (${DELIBERATE_KIND_LABEL[n.kind]}) ${n.claim}${tag}`);
+    }
+  }
+
+  for (const l of lessons) lines.push(l);
+  for (const l of renderRecentToolFailures(session.id)) lines.push(l);
+
+  lines.push('');
+  lines.push('## Your actions (tools)');
+  if (root) {
+    lines.push(`- reason_decompose(parentNodeId, subClaims[]): hang each candidate on the root node [${root.id}] via reason_decompose (parentNodeId=${root.id}) — kind='construction' for an OPTION/answer, kind='conjecture' for a HYPOTHESIS/explanation. **Primary action.**`);
+  } else {
+    lines.push("- reason_decompose(parentNodeId, subClaims[]): hang each candidate on the tree — kind='construction' for an OPTION/answer, kind='conjecture' for a HYPOTHESIS/explanation. **Primary action.**");
+  }
+  lines.push('- webSearch / searchNotes / searchKB / getFact / readFile: only LIGHT checks that a candidate is VIABLE (not obviously dead). Do NOT try to prove or fully evaluate one — that is the next (converge) phase.');
+  lines.push("- reason_record(nodeId, refuted, ...): use ONLY to kill a candidate that is plainly incoherent or self-contradictory (a late safety net). Do NOT record anything as 'proved'/'settled' this round.");
+  lines.push('');
+  lines.push('## How to diverge (discipline)');
+  lines.push('1. **Round 1: generate 3–6 GENUINELY DIFFERENT candidates** via reason_decompose — different kinds of answer, not rephrasings of one. Unconventional / rare angles are valuable.');
+  lines.push('2. **Later rounds: add only candidates that open a NEW angle** not already on the tree. Quality of variety over quantity.');
+  lines.push('3. **Do NOT settle, rank, or pick.** Keep candidates open; eliminate only the plainly incoherent.');
+  lines.push('4. **If you cannot add a genuinely new viable candidate, say so** — an honest "the space looks saturated" beats padding with near-duplicates (a round that adds nothing new signals it is time to switch to evaluation).');
+  lines.push('5. **Only use real node ids** from the tree / returned by decompose; never invent ids.');
+  return lines.join('\n');
 }
 
 export const FORMAL_PROFILE: ReasoningProfile = {
@@ -1400,7 +1552,7 @@ export const FORMAL_PROFILE: ReasoningProfile = {
   toolAllow: DEEP_EXPLORE_RESEARCH_ALLOW,
   settledVerb: 'proved',
   noProgressCap: NO_PROGRESS_CAP,
-  buildRoundPrompt: (session, nodes, lessons) => renderTreePrompt(session, nodes, lessons),
+  buildConvergePrompt: (session, nodes, lessons) => renderTreePrompt(session, nodes, lessons),
   buildUserMessage: (session, isFresh) =>
     isFresh
       ? `${session.goal}\n\n[FRESH session — only the root node exists.] Your FIRST action MUST be ` +
@@ -1408,6 +1560,14 @@ export const FORMAL_PROFILE: ReasoningProfile = {
         `pariGp or any computation before the root is decomposed — a round that only computes without ` +
         `committing to the tree wastes the entire time budget and will be cut short.`
       : 'Continue advancing the current reasoning tree; prefer the most promising open node on the frontier.',
+  buildDivergePrompt: (session, nodes, lessons, seed) => buildDiscoverPrompt(session, nodes, seed, lessons),
+  buildDivergeUserMessage: (session, seed) =>
+    `Do experimental-math exploration around "${seed.trim() || session.goal}": first use pariGp to compute data and find patterns, ` +
+    `then hang conjectures that have pariGp evidence (counterexamples already searched) on the tree via reason_decompose (kind='conjecture'); record any killed by a counterexample as refuted.`,
+  divergeNodeKinds: ['conjecture'],
+  divergeNoun: 'data-backed conjecture',
+  divergeLaterVerb: 'prove',
+  divergeMilestoneLabel: 'Experimental-math round',
   buildGroundingPrompt: (goal, assumptions) => buildLiteratureGroundingPrompt(goal, assumptions),
   buildSkepticPrompt: (claim, argument, goal, assumptions, settledClaims) =>
     buildSkepticSystemPrompt(claim, argument, goal, assumptions, settledClaims),
@@ -1423,7 +1583,7 @@ export const DELIBERATE_PROFILE: ReasoningProfile = {
   // which killed a focused round one step before its settle. ~5-6 batched iterations of headroom; the
   // time-based stop (half the round budget) still cuts true spinning.
   noProgressCap: Math.max(18, NO_PROGRESS_CAP),
-  buildRoundPrompt: (session, nodes, lessons) => renderDeliberatePrompt(session, nodes, lessons),
+  buildConvergePrompt: (session, nodes, lessons) => renderDeliberatePrompt(session, nodes, lessons),
   buildUserMessage: (session, isFresh) =>
     isFresh
       ? `${session.goal}\n\n[FRESH session — only the root node exists.] Your FIRST action MUST be ` +
@@ -1431,12 +1591,35 @@ export const DELIBERATE_PROFILE: ReasoningProfile = {
         `before the question is decomposed — a round that only browses without committing sub-questions to ` +
         `the tree wastes the budget and will be cut short.`
       : 'Continue: pick the most important open sub-question, gather evidence (the user’s memory & files first, then the web) for it, and settle it ONLY when the conclusion is backed by cited evidence.',
+  buildDivergePrompt: (session, nodes, lessons, seed) => buildDeliberateDivergePrompt(session, nodes, lessons, seed),
+  buildDivergeUserMessage: (session, seed) =>
+    `${seed.trim() || session.goal}\n\nGenerate a DIVERSE set of candidate options / rival hypotheses for the question and ` +
+    `hang each on the tree via reason_decompose (kind='construction' for an option, 'conjecture' for a hypothesis). ` +
+    `Do NOT settle them — just open up the space. Aim for genuine variety, not variations of one answer.`,
+  divergeNodeKinds: ['construction', 'conjecture'],
+  divergeNoun: 'candidate option/hypothesis',
+  divergeLaterVerb: 'evaluate',
+  divergeMilestoneLabel: 'Diverge round',
   buildGroundingPrompt: (goal, assumptions) => buildDeliberateGroundingPrompt(goal, assumptions),
-  buildSkepticPrompt: (claim, argument, goal, assumptions, settledClaims) =>
-    buildDeliberateSkepticPrompt(claim, argument, goal, assumptions, settledClaims),
-  settlePrecheck: (node, _result, incomingEvidence) => {
-    const have = node.evidenceRefs.length + incomingEvidence.length;
-    return have > 0
+  buildSkepticPrompt: (claim, argument, goal, assumptions, settledClaims, basis) =>
+    buildDeliberateSkepticPrompt(claim, argument, goal, assumptions, settledClaims, basis),
+  settlePrecheck: (node, _result, incomingEvidence, basis) => {
+    const allEvidence = [...node.evidenceRefs, ...incomingEvidence];
+    if (basis === 'preferential') {
+      // A value-laden conclusion's truth-maker is the USER's utility — it must cite the user's own
+      // data/values, not the open web (which cannot know what the user wants).
+      const userGrounded = allEvidence.some(looksLikeUserData);
+      return userGrounded
+        ? { ok: true }
+        : {
+            ok: false,
+            reason:
+              "a value/preference finding must be grounded in the USER's own stated values or data — cite their " +
+              'notes/facts/files (searchNotes / getFact / readFile) or a preference they actually stated, not just the open web',
+          };
+    }
+    // empirical (default): at least one cited source/observation (today's gate).
+    return allEvidence.length > 0
       ? { ok: true }
       : {
           ok: false,
@@ -1664,6 +1847,7 @@ export function buildScorerPrompt(
   lines.push('Give each subgoal a score in 0~1 measuring the payoff of "attacking it right now":');
   lines.push('  score ≈ importance to the root proposition (how much proving it advances the root) × current tractability (is there a ready idea/tool to make progress now).');
   lines.push('High = both pivotal and currently workable; low = either irrelevant to the root, or no foothold right now.');
+  lines.push('When several open subgoals are RIVAL / mutually-exclusive candidate answers, also reward DISCRIMINATION: prefer the one whose resolution would split the field — confirm or eliminate the most alternatives at once — over one merely important in isolation (strong inference: run the test that kills the most rival hypotheses).');
   lines.push('');
   lines.push(`## Root proposition\n${goal}`);
   if (assumptions.length) lines.push(`## Known assumptions\n${assumptions.map((a) => `- ${a}`).join('\n')}`);
@@ -1795,7 +1979,7 @@ export function makeReasoningToolRunner(
   reasoning: ReasoningStore,
   sessionId: string,
   delegate: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>,
-  verifyProved?: (node: ReasoningNode, argument: string | null) => Promise<VerificationTally | null>,
+  verifyProved?: (node: ReasoningNode, argument: string | null, basis?: ReasoningSettleBasis) => Promise<VerificationTally | null>,
   actions?: ActionLog,
   profile: ReasoningProfile = FORMAL_PROFILE,
 ): (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult> {
@@ -1846,6 +2030,12 @@ export function makeReasoningToolRunner(
       const evidence = Array.isArray(input.evidence)
         ? input.evidence.filter((e): e is string => typeof e === 'string' && e.trim().length > 0).map((e) => e.trim())
         : [];
+      // Settle basis (deliberate only): 'empirical' (default) vs 'preferential' (value-laden, grounded
+      // in the user's own data). Drives the precheck gate + the skeptic review + what is persisted.
+      const basis: ReasoningSettleBasis | undefined =
+        input.basis === 'preferential' ? 'preferential' : input.basis === 'empirical' ? 'empirical' : undefined;
+      const settleBasisToStore: ReasoningSettleBasis | undefined =
+        profile.id === 'deliberate' ? (basis ?? 'empirical') : undefined;
       if (!RECORD_STATUSES.has(status)) {
         return { ok: false, output: '', error: `status must be proved/refuted/dead_end, got ${String(status)}` };
       }
@@ -1871,7 +2061,7 @@ export function makeReasoningToolRunner(
         }
         // Profile settle-precheck (deliberate: require cited evidence). On reject keep any gathered evidence,
         // leave the node open, and tell the model what is missing.
-        const pre = profile.settlePrecheck(target, result, evidence);
+        const pre = profile.settlePrecheck(target, result, evidence, basis);
         if (!pre.ok) {
           writeEvidence(nodeId);
           reasoning.updateNode(sessionId, nodeId, { appendApproach: `not ${profile.settledVerb}: ${pre.reason ?? 'precheck failed'}` });
@@ -1922,7 +2112,7 @@ export function makeReasoningToolRunner(
         }
         // Adversarial review (skeptics), when enabled.
         if (verifyProved) {
-          const tally = await verifyProved(target, result);
+          const tally = await verifyProved(target, result, basis);
           if (tally && !tally.confirmed) {
             const objection = tally.topObjection ? `: ${tally.topObjection}` : '';
             writeEvidence(nodeId); // keep the evidence the model gathered, even though it didn't pass
@@ -1937,14 +2127,14 @@ export function makeReasoningToolRunner(
                 (tally.topObjection ? `\nMain objection: ${tally.topObjection}` : ''),
             };
           }
-          reasoning.updateNode(sessionId, nodeId, { status: 'proved', result });
+          reasoning.updateNode(sessionId, nodeId, { status: 'proved', result, settleBasis: settleBasisToStore });
           writeEvidence(nodeId);
           const vmark =
             tally && tally.validVotes > 0 ? ` (passed adversarial verification by ${tally.validVotes} reviewers)` : '';
           return { ok: true, output: `Recorded [${nodeId}] = ${profile.settledVerb}${result ? `: ${result}` : ''}${vmark}` };
         }
         // No skeptics: commit directly.
-        reasoning.updateNode(sessionId, nodeId, { status: 'proved', result });
+        reasoning.updateNode(sessionId, nodeId, { status: 'proved', result, settleBasis: settleBasisToStore });
         writeEvidence(nodeId);
         return { ok: true, output: `Recorded [${nodeId}] = ${profile.settledVerb}${result ? `: ${result}` : ''}` };
       }
@@ -2055,12 +2245,12 @@ export function createDeepExploreTool(
   // against the session budget. SKEPTIC_COUNT=0 disables, reverting to old behaviour.
   function buildVerifyProved(session: ReasoningSession, abortSignal: AbortSignal, profile: ReasoningProfile) {
     if (SKEPTIC_COUNT <= 0) return undefined;
-    return async (node: ReasoningNode, argument: string | null): Promise<VerificationTally> => {
+    return async (node: ReasoningNode, argument: string | null, basis?: ReasoningSettleBasis): Promise<VerificationTally> => {
       const all = reasoning.getNodes(session.id);
       const provedClaims = all
         .filter((n) => n.status === 'proved' && n.id !== node.id)
         .map((n) => n.claim);
-      const sys = profile.buildSkepticPrompt(node.claim, argument, session.goal, session.assumptions, provedClaims);
+      const sys = profile.buildSkepticPrompt(node.claim, argument, session.goal, session.assumptions, provedClaims, basis);
       // Skeptics get the profile's research tools minus pariGp (formal: z3+recall; deliberate: web+recall).
       // 2026-06-08: pariGp is excluded — skeptics burned their whole budget retrying malformed PARI/GP
       // scripts instead of reviewing; z3 covers rigorous formal refutation, web covers evidence checks.
@@ -2140,6 +2330,12 @@ export function createDeepExploreTool(
     // Resolve the reasoning profile (formal proof vs general evidence-based deliberation) from the session.
     const profile = PROFILES[session.mode] ?? FORMAL_PROFILE;
     const rt = PROFILE_RT[profile.id];
+    // Phase dispatch (diverge/converge × domain redesign): when phases are enabled and the session is in
+    // the generative phase, run a diverge round instead of the eliminative converge body. Flag off →
+    // phase ignored → always converge (today's behavior).
+    if (PHASES_ENABLED && session.phase === 'diverge') {
+      return runDivergeRound(session, '');
+    }
     // Feasibility gate: populate (or re-derive after a restart) this session's known barriers so the
     // round prompt can inject them. Cheap, pure, cached per session.
     ensureBarriers(session);
@@ -2184,7 +2380,7 @@ export function createDeepExploreTool(
     // record the starting frontier ids for UCB visit accounting.
     const before = reasoning.getNodes(session.id);
     const frontierStartIds = new Set(computeFrontier(before).map((n) => n.id));
-    const systemPrompt = profile.buildRoundPrompt(session, before, collectComputeLessons(skills));
+    const systemPrompt = profile.buildConvergePrompt(session, before, collectComputeLessons(skills));
     const userMessage =
       profile.buildUserMessage(session, before.length <= 1) + buildStuckDirective(session.noProgressRounds ?? 0);
 
@@ -2260,6 +2456,29 @@ export function createDeepExploreTool(
     const status = judgeConvergence(after);
     if (status !== 'active') reasoning.setSessionStatus(session.id, status);
 
+    // Phase C backward edge: if an active converge session has eliminated EVERY candidate (none open,
+    // none proved), the space was too small — reopen generation (diverge). High bar → no thrash. Inert
+    // unless phases are enabled.
+    let convergePhaseNote = '';
+    if (PHASES_ENABLED && session.phase === 'converge' && status === 'active') {
+      const cands = after.filter((n) => n.kind === 'construction' || n.kind === 'conjecture');
+      const openCands = cands.filter((n) => n.status === 'open').length;
+      const provedCands = cands.filter((n) => n.status === 'proved').length;
+      const decision = decidePhaseTransition({
+        phase: 'converge',
+        viableCandidates: openCands,
+        divergeIdleRounds: session.divergeIdleRounds,
+        needsDecision: goalNeedsDecision(session.goal, session.mode),
+        convergeAllDead: cands.length > 0 && openCands === 0 && provedCands === 0,
+      });
+      if (decision.changed) {
+        reasoning.setPhase(session.id, decision.phase);
+        reasoning.recordDivergeProgress(session.id, true); // reset idle so reopened generation starts fresh
+        deps.onMilestone?.(`Phase → generation: ${decision.reason}.`);
+        convergePhaseNote = `\n↩ Phase reopened to generation — ${decision.reason}. Reply "continue" to generate fresh options.`;
+      }
+    }
+
     const text = renderProgressText(summary, result.hitCap, status, profile.settledVerb);
     deps.onMilestone?.(text);
     const tail =
@@ -2283,29 +2502,28 @@ export function createDeepExploreTool(
         ? `\n⚠️ No substantive progress for ${noProgressRounds} consecutive rounds — this frontier looks stuck. ` +
           `Consider redirecting: start a fresh angle (a different framing of the problem), or tell me which sub-problem to focus on.`
         : '';
-    return { success: true, output: `${text}${tail}${churnNote}${stuckNote}\nsession id: ${session.id}` };
+    return { success: true, output: `${text}${tail}${churnNote}${stuckNote}${convergePhaseNote}\nsession id: ${session.id}` };
   }
 
-  // Experimental-math (explore) round: compute first, then conjecture. Reuses the same
-  // mini-loop / tools / verification hooks; only swaps prompt + closing stats.
-  // No value-guided node selection (explore is generative, not selecting from a frontier);
-  // no stuck judgment (discovery mode — "getting stuck" is not applicable).
-  async function runDiscoverRound(session: ReasoningSession, seed: string): Promise<ToolResult> {
+  // Diverge round: GENERATIVE phase — open up the space (formal: experimental-math/conjecture via
+  // pariGp; deliberate: candidate option/hypothesis generation). Reuses the same mini-loop / tools /
+  // verification hooks; only swaps prompt + candidate accounting + closing stats. No value-guided node
+  // selection (generative, not selecting from a frontier); "stuck" is redefined as saturation (no NET
+  // new viable candidate). Profile-driven so both domains share one body.
+  async function runDivergeRound(session: ReasoningSession, seed: string): Promise<ToolResult> {
     if (session.budgetSpent >= SESSION_TOKEN_BUDGET) {
       return {
         success: true,
         output: `This session has used ${session.budgetSpent} tokens, hitting the budget cap (${SESSION_TOKEN_BUDGET}); paused.`,
       };
     }
-    // Discover (experimental-math) is FORMAL-only for now — it is pariGp-driven conjecture generation.
-    const profile = FORMAL_PROFILE;
-    const rt = PROFILE_RT.formal;
+    const profile = PROFILES[session.mode] ?? FORMAL_PROFILE;
+    const rt = PROFILE_RT[profile.id];
+    const candKinds = new Set<ReasoningNodeKind>(profile.divergeNodeKinds);
     const before = reasoning.getNodes(session.id);
-    const beforeConjectures = before.filter((n) => n.kind === 'conjecture').length;
-    const systemPrompt = buildDiscoverPrompt(session, before, seed, collectComputeLessons(skills));
-    const userMessage =
-      `Do experimental-math exploration around "${seed.trim() || session.goal}": first use pariGp to compute data and find patterns, ` +
-      `then hang conjectures that have pariGp evidence (counterexamples already searched) on the tree via reason_decompose (kind='conjecture'); record any killed by a counterexample as refuted.`;
+    const beforeCandidates = before.filter((n) => candKinds.has(n.kind)).length;
+    const systemPrompt = profile.buildDivergePrompt(session, before, collectComputeLessons(skills), seed);
+    const userMessage = profile.buildDivergeUserMessage(session, seed);
 
     const ctrl = new AbortController();
     let timedOut = false;
@@ -2353,49 +2571,74 @@ export function createDeepExploreTool(
 
     const after = reasoning.getNodes(session.id);
     const summary = summarizeProgress(before, after);
-    const newConjectures = after.filter((n) => n.kind === 'conjecture').length - beforeConjectures;
+    const newCandidates = after.filter((n) => candKinds.has(n.kind)).length - beforeCandidates;
     const refuted = summary.newlyRefuted.length + summary.newDeadEnds.length;
-    const survivors = after.filter((n) => n.kind === 'conjecture' && n.status === 'open');
-    // Discover-mode brake (2026-06-24): feed the SAME stuck signal prove rounds use, so a treadmill of
-    // failing angles trips the redirect note + viability gate instead of running forever.
+    const survivors = after.filter((n) => candKinds.has(n.kind) && n.status === 'open');
+    // Saturation brake: feed the SAME stuck signal converge rounds use (recordRoundProgress → drives the
+    // existing redirect note + viability gate), so a treadmill of failing angles trips the brake instead
+    // of running forever. ALSO update diverge_idle_rounds (recordDivergeProgress) as the saturation
+    // signal the diverge→converge transition gate (Phase C) will read.
     const newProved =
       after.filter((n) => n.status === 'proved').length -
       before.filter((n) => n.status === 'proved').length;
-    const survivorsBefore = before.filter((n) => n.kind === 'conjecture' && n.status === 'open').length;
-    const discoverSubstantive = discoverRoundWasSubstantive({
+    const survivorsBefore = before.filter((n) => candKinds.has(n.kind) && n.status === 'open').length;
+    const divergeSubstantive = discoverRoundWasSubstantive({
       newProved,
       survivorsBefore,
       survivorsAfter: survivors.length,
     });
-    const discoverNoProgressRounds = reasoning.recordRoundProgress(session.id, discoverSubstantive);
-    const discoverStuckNote =
-      !discoverSubstantive && discoverNoProgressRounds >= STUCK_ESCALATE_AFTER
-        ? `\n⚠️ ${discoverNoProgressRounds} discover round(s) with no proof and no NET new surviving conjecture — ` +
-          `experimental conjecture-generation is not converging on this goal. Switch to action=continue to PROVE a ` +
-          `surviving conjecture, or report honestly that this angle is exhausted — do not keep proposing new framings.`
+    const idleNoProgressRounds = reasoning.recordRoundProgress(session.id, divergeSubstantive);
+    const divergeIdleRounds = reasoning.recordDivergeProgress(session.id, divergeSubstantive);
+    // Phase C transition gate: after a diverge round, decide whether the space is populated + saturated
+    // enough to switch to converge (evaluation). Asymmetric — converge must EARN its turn. Inert unless
+    // phases are enabled. The gate sets the phase the NEXT round will run.
+    let phaseNote = '';
+    if (PHASES_ENABLED) {
+      const decision = decidePhaseTransition({
+        phase: 'diverge',
+        viableCandidates: survivors.length,
+        divergeIdleRounds,
+        needsDecision: goalNeedsDecision(session.goal, session.mode),
+        convergeAllDead: false,
+      });
+      if (decision.changed) {
+        reasoning.setPhase(session.id, decision.phase);
+        deps.onMilestone?.(`Phase → evaluation: ${decision.reason}.`);
+        phaseNote = `\n✅ Phase switched to evaluation — ${decision.reason}. Reply "continue" to start weighing the candidates.`;
+      }
+    }
+    const noun = profile.divergeNoun;
+    const verb = profile.divergeLaterVerb;
+    const divergeStuckNote =
+      !divergeSubstantive && idleNoProgressRounds >= STUCK_ESCALATE_AFTER
+        ? `\n⚠️ ${idleNoProgressRounds} diverge round(s) with no settlement and no NET new viable ${noun} — ` +
+          `generation is not converging on this goal. Switch to action=continue to ${verb} a surviving ${noun}, ` +
+          `or report honestly that this angle is exhausted — do not keep proposing near-duplicates.`
         : '';
+    const killLabel = profile.id === 'formal' ? 'killed by counterexample' : 'ruled out as incoherent';
     const parts: string[] = [];
-    parts.push(`${newConjectures} new data-backed conjecture(s) proposed (hung on the tree to prove later)`);
-    if (refuted > 0) parts.push(`${refuted} killed by counterexample`);
-    parts.push(`${survivors.length} conjecture(s) currently alive`);
+    parts.push(`${newCandidates} new ${noun}(s) proposed (hung on the tree to ${verb} later)`);
+    if (refuted > 0) parts.push(`${refuted} ${killLabel}`);
+    parts.push(`${survivors.length} ${noun}(s) currently alive`);
     const list = survivors.slice(0, 5).map((n) => `- [${n.id}] ${n.claim}`).join('\n');
     const tail =
       result.error === 'aborted'
         ? stalled.value
-          ? '\n(no new conjectures / progress for a while — stopped early; saved. Try a different angle, or continue.)'
+          ? '\n(no new candidates / progress for a while — stopped early; saved. Try a different angle, or continue.)'
           : timedOut
             ? `\n(hit the time cap; saved — you can keep exploring)`
             : '\n(this round was aborted; saved)'
         : result.hitCap
           ? '\n(hit the iteration cap; you can explore again)'
           : '';
-    deps.onMilestone?.(`Experimental-math round: ${parts.join('; ')}.`);
+    deps.onMilestone?.(`${profile.divergeMilestoneLabel}: ${parts.join('; ')}.`);
     return {
       success: true,
       output:
-        `One round of experimental-math exploration: ${parts.join('; ')}.${tail}` +
-        (list ? `\nAlive conjectures (run action=continue to prove one):\n${list}` : '') +
-        discoverStuckNote +
+        `${profile.divergeMilestoneLabel} — ${parts.join('; ')}.${tail}` +
+        (list ? `\nAlive ${noun}(s) (run action=continue to ${verb} one):\n${list}` : '') +
+        divergeStuckNote +
+        phaseNote +
         `\nsession id: ${session.id}`,
     };
   }
@@ -2432,7 +2675,8 @@ export function createDeepExploreTool(
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['start', 'continue', 'discover', 'status', 'finalize', 'abandon', 'auto_on', 'auto_off'] },
-        mode: { type: 'string', enum: ['formal', 'deliberate'], description: 'action=start: "formal" (default, math/proof) or "deliberate" (general evidence-based judgment — decisions/diagnosis/due-diligence).' },
+        mode: { type: 'string', enum: ['formal', 'deliberate'], description: 'action=start: "formal" (math/proof) or "deliberate" (general evidence-based judgment — decisions/diagnosis/due-diligence). Omit to auto-detect from the goal.' },
+        phase: { type: 'string', enum: ['diverge', 'converge'], description: 'action=start (optional): "diverge" to begin by GENERATING candidate options/conjectures, "converge" to begin evaluating/proving. Omit to auto-detect (open-ended goals → diverge; a stated target → converge).' },
         goal: { type: 'string', description: 'action=start: the proposition to prove (formal) or the question to think through (deliberate)' },
         seed: { type: 'string', description: 'action=explore optional: the topic/object to focus this round on (e.g. a family of polynomials, a sequence)' },
         assumptions: {
@@ -2457,8 +2701,22 @@ export function createDeepExploreTool(
         const assumptions = Array.isArray(params.assumptions)
           ? params.assumptions.filter((a): a is string => typeof a === 'string' && a.trim().length > 0)
           : [];
-        const mode: ReasoningSessionMode = params.mode === 'deliberate' ? 'deliberate' : 'formal';
-        const { session } = reasoning.createSession({ goal, assumptions, ownerSessionId: owner, mode });
+        // Phase E: auto-detect domain (mode) + initial phase from the goal when not given explicitly.
+        // Explicit params always win. Inert unless phases are enabled → off = today's behavior (default formal).
+        const explicitMode = params.mode === 'formal' || params.mode === 'deliberate';
+        const explicitPhase = params.phase === 'diverge' || params.phase === 'converge';
+        const auto = PHASES_ENABLED && (!explicitMode || !explicitPhase) ? classifyGoal(goal) : null;
+        const mode: ReasoningSessionMode = explicitMode ? (params.mode as ReasoningSessionMode) : (auto?.mode ?? 'formal');
+        const initialPhase: ReasoningPhase = !PHASES_ENABLED
+          ? 'converge'
+          : explicitPhase
+            ? (params.phase as ReasoningPhase)
+            : (auto?.initialPhase ?? 'converge');
+        let { session } = reasoning.createSession({ goal, assumptions, ownerSessionId: owner, mode });
+        if (PHASES_ENABLED && initialPhase === 'diverge') {
+          reasoning.setPhase(session.id, 'diverge');
+          session = reasoning.getSession(session.id) ?? session; // refetch so runRound dispatches the diverge round
+        }
         // Literature grounding: one-shot web pass surveying what is already known (cited cards), injected
         // into every round prompt + merged into the start milestone below. Runs before the first round.
         const litCards = await groundFromLiterature(session);
@@ -2530,9 +2788,11 @@ export function createDeepExploreTool(
             : [];
           session = reasoning.createSession({ goal, assumptions, ownerSessionId: owner }).session;
         }
-        // Discover is the experimental-MATH loop (pariGp-driven conjecture generation) — running it
-        // against a deliberate session would aim a math prompt at a decision/judgment question.
-        if (session.mode === 'deliberate') {
+        // discover = the DIVERGE (generative) round. For formal it is the experimental-MATH loop
+        // (pariGp-driven conjecture generation); for deliberate it is candidate option/hypothesis
+        // generation — but only when the phase feature is enabled. With phases OFF, deliberate diverge
+        // does not exist yet, so aiming the (formal) math prompt at a judgment question is rejected.
+        if (session.mode === 'deliberate' && !PHASES_ENABLED) {
           return {
             success: false,
             output: '',
@@ -2542,7 +2802,10 @@ export function createDeepExploreTool(
               'investigating sub-questions, or decompose candidate options/hypotheses there instead.',
           };
         }
-        return runDiscoverRound(session, seed);
+        // Enter the diverge phase so a subsequent `continue` keeps generating until the transition gate
+        // (end of runDivergeRound) flips the session to converge. Inert unless phases are enabled.
+        if (PHASES_ENABLED && session.phase !== 'diverge') reasoning.setPhase(session.id, 'diverge');
+        return runDivergeRound(session, seed);
       }
 
       if (action === 'status') {

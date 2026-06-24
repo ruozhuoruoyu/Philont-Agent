@@ -33,6 +33,7 @@ import {
   buildStuckDirective,
   discoverRoundWasSubstantive,
   buildDiscoverPrompt,
+  buildDeliberateDivergePrompt,
   createDeepExploreTool,
   roundWasSubstantive,
   parseLiteratureCards,
@@ -45,6 +46,7 @@ import {
   DELIBERATE_RESEARCH_ALLOW,
   renderDeliberatePrompt,
   buildDeliberateSkepticPrompt,
+  looksLikeUserData,
   buildDeliberateGroundingPrompt,
   DELIBERATE_LIT_TYPE_LABEL,
 } from '../src/deep_explore.js';
@@ -535,6 +537,97 @@ test('buildDiscoverPrompt:含探索主题/挂载点 rootId/pariGp 纪律/conject
   // seed 为空时回落到 session.goal
   assert.match(buildDiscoverPrompt(session, nodes, ''), /素数生成多项式/);
   mem.close();
+});
+
+// ── Phase B: deliberate × diverge (generative pass for real-world questions) ─────────────────────
+
+test('buildDeliberateDivergePrompt: generative vocabulary, do-not-settle, option/hypothesis kinds, lists existing candidates', () => {
+  const mem = openMemoryDb(':memory:');
+  const { session, rootNode } = mem.reasoning.createSession({ goal: '该不该接这个 offer', mode: 'deliberate' });
+  // An existing candidate on the tree (so the prompt tells the model not to repeat it).
+  mem.reasoning.addNodes(session.id, rootNode.id, [{ claim: '接 offer 并搬城市', kind: 'construction' }]);
+  const nodes = mem.reasoning.getNodes(session.id);
+  const p = buildDeliberateDivergePrompt(session, nodes, [], '只看 18 个月内');
+  // Divergent framing, not eliminative.
+  assert.match(p, /DIVERGENT/);
+  assert.match(p, /OPEN UP the space/);
+  assert.match(p, /NOT settling/);
+  // Candidate kinds wired to construction=option / conjecture=hypothesis.
+  assert.match(p, /kind='construction' for an OPTION/);
+  assert.match(p, /kind='conjecture' for a HYPOTHESIS/);
+  // Root mount point exposed so the model knows where to hang candidates (fresh session has no candidates yet).
+  assert.match(p, new RegExp(`root node \\[${rootNode.id}\\]`));
+  // Lists the existing candidate so new rounds add NEW angles.
+  assert.match(p, /Candidates already on the tree/);
+  assert.match(p, /接 offer 并搬城市/);
+  // Seed focus surfaces.
+  assert.match(p, /只看 18 个月内/);
+  // Empty seed falls back to the goal.
+  assert.match(buildDeliberateDivergePrompt(session, nodes, [], ''), /该不该接这个 offer/);
+  mem.close();
+});
+
+test('DELIBERATE_PROFILE diverge wiring: kinds, noun/verb, prompt + user message route to the generative pass', () => {
+  const mem = openMemoryDb(':memory:');
+  const { session } = mem.reasoning.createSession({ goal: 'Q', mode: 'deliberate' });
+  const nodes = mem.reasoning.getNodes(session.id);
+  assert.deepEqual([...DELIBERATE_PROFILE.divergeNodeKinds], ['construction', 'conjecture']);
+  assert.match(DELIBERATE_PROFILE.divergeNoun, /option|hypothesis/);
+  assert.equal(DELIBERATE_PROFILE.divergeLaterVerb, 'evaluate');
+  // buildDivergePrompt routes to the deliberate generative prompt.
+  assert.match(DELIBERATE_PROFILE.buildDivergePrompt(session, nodes, [], ''), /DIVERGENT/);
+  // User message instructs generation, not settling.
+  const um = DELIBERATE_PROFILE.buildDivergeUserMessage(session, '');
+  assert.match(um, /DIVERSE set of candidate/);
+  assert.match(um, /Do NOT settle/);
+  mem.close();
+});
+
+test('FORMAL_PROFILE.buildDivergePrompt still delegates to the experimental-math discover prompt (rename guard)', () => {
+  const mem = openMemoryDb(':memory:');
+  const { session } = mem.reasoning.createSession({ goal: '素数生成多项式' });
+  const nodes = mem.reasoning.getNodes(session.id);
+  assert.match(FORMAL_PROFILE.buildDivergePrompt(session, nodes, [], 'seed'), /experimental-mathematics engine/);
+  assert.deepEqual([...FORMAL_PROFILE.divergeNodeKinds], ['conjecture']);
+  assert.equal(FORMAL_PROFILE.divergeLaterVerb, 'prove');
+  mem.close();
+});
+
+// ── Phase D: settle_basis (empirical/preferential) + discrimination ──────────────────────────────
+
+test('looksLikeUserData: user notes/facts/preferences true; bare web URL false', () => {
+  assert.equal(looksLikeUserData('note:abc'), true);
+  assert.equal(looksLikeUserData('fact:salary'), true);
+  assert.equal(looksLikeUserData('用户说更看重稳定'), true);
+  assert.equal(looksLikeUserData('the user prefers remote work'), true);
+  assert.equal(looksLikeUserData('https://example.com/salary-survey'), false);
+  assert.equal(looksLikeUserData(''), false);
+});
+
+test('DELIBERATE settlePrecheck: empirical needs any evidence; preferential needs USER-grounded evidence', () => {
+  const n = node({ evidenceRefs: [] });
+  // empirical (default basis)
+  assert.equal(DELIBERATE_PROFILE.settlePrecheck(n, null, [], undefined).ok, false, 'no evidence → reject');
+  assert.equal(DELIBERATE_PROFILE.settlePrecheck(n, null, ['https://src/x'], undefined).ok, true, 'one source → ok');
+  // preferential: a bare web URL does NOT settle a value judgment
+  assert.equal(DELIBERATE_PROFILE.settlePrecheck(n, null, ['https://example.com/x'], 'preferential').ok, false, 'web URL cannot settle a preference');
+  // preferential: grounded in the user's own data → ok
+  assert.equal(DELIBERATE_PROFILE.settlePrecheck(n, null, ['note:用户更看重生活质量'], 'preferential').ok, true, 'user data grounds a preference');
+});
+
+test('buildDeliberateSkepticPrompt: preferential variant reviews user values; empirical reviews external evidence', () => {
+  const pref = buildDeliberateSkepticPrompt('该不该接 offer', 'arg', 'goal', [], [], 'preferential');
+  assert.match(pref, /VALUE-LADEN/);
+  assert.match(pref, /never endorsed/);
+  const emp = buildDeliberateSkepticPrompt('现金流能撑多久', 'arg', 'goal', [], [], 'empirical');
+  assert.match(emp, /cited evidence/);
+  assert.doesNotMatch(emp, /VALUE-LADEN/);
+});
+
+test('buildScorerPrompt: rewards discrimination among rival hypotheses (strong inference)', () => {
+  const p = buildScorerPrompt('G', [], [node({ id: 'a' })]);
+  assert.match(p, /DISCRIMINATION/);
+  assert.match(p, /rival/i);
 });
 
 test('explore 模式:无活会话→建会话,跑一轮用 pariGp 证据挂 conjecture 节点', async () => {

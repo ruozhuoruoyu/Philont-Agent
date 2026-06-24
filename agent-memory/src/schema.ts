@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 31;
+export const SCHEMA_VERSION = 32;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -987,6 +987,8 @@ function migrateV24ToV25(db: Database.Database): void {
       no_progress_rounds INTEGER NOT NULL DEFAULT 0,
       auto_advance      INTEGER NOT NULL DEFAULT 0,
       mode              TEXT NOT NULL DEFAULT 'formal',
+      phase             TEXT NOT NULL DEFAULT 'converge',
+      diverge_idle_rounds INTEGER NOT NULL DEFAULT 0,
       created_at        INTEGER NOT NULL,
       updated_at        INTEGER NOT NULL
     );
@@ -1099,6 +1101,25 @@ function migrateV30ToV31(db: Database.Database): void {
   if (!have.has('mode')) {
     db.exec(`ALTER TABLE reasoning_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'formal'`);
   }
+}
+
+/**
+ * v31→v32: phase-aware deep_explore (diverge/converge × domain redesign — Phase A data layer).
+ *   - reasoning_sessions.phase: the exploration phase the session is in. 'converge' (default) =
+ *     today's eliminative settle behavior; 'diverge' = generative round (the discover/option-
+ *     generation pass). Default 'converge' keeps every existing session byte-identical to today.
+ *   - reasoning_sessions.diverge_idle_rounds: consecutive diverge rounds with no net-new viable
+ *     candidate (saturation signal for the diverge→converge transition gate; mirror of
+ *     no_progress_rounds for the diverge phase).
+ *   - reasoning_nodes.settle_basis: for empirical-domain (deliberate) nodes, which evidence the
+ *     node was settled on — 'empirical' (external cited source) vs 'preferential' (the user's own
+ *     stated values/data). NULL = unset (treated as empirical, today's default gate).
+ * ADD COLUMN only; idempotent; skip if a table does not exist.
+ */
+function migrateV31ToV32(db: Database.Database): void {
+  addColumnIfMissing(db, 'reasoning_sessions', 'phase', "TEXT NOT NULL DEFAULT 'converge'");
+  addColumnIfMissing(db, 'reasoning_sessions', 'diverge_idle_rounds', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'reasoning_nodes', 'settle_basis', 'TEXT');
 }
 
 function migrateV19ToV20(db: Database.Database): void {
@@ -1339,6 +1360,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 31) {
     migrateV30ToV31(db);
+  }
+  if (current < 32) {
+    migrateV31ToV32(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns
