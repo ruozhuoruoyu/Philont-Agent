@@ -371,6 +371,14 @@ export interface PlanAndExecuteDeps {
   logger?: { log: (msg: string) => void; warn: (msg: string) => void };
   /** Progress callback, fired at the start and end of each sub-task */
   onProgress?: (text: string) => void;
+  /**
+   * Cross-layer skill-recall callback (agent-tools cannot import @agent/memory). The server
+   * constructs it from selectRelevantSkills() and renders a short text block of task-relevant
+   * skills/anti-patterns; it is appended to each sub-task systemPrompt. Synchronous because the
+   * underlying store is better-sqlite3 (sync). When undefined or it returns a blank string, the
+   * systemPrompt is byte-identical to before this callback existed (zero behavior change).
+   */
+  recall?: (query: string) => string;
 }
 
 const DEFAULT_BLACKLIST = new Set([
@@ -390,6 +398,7 @@ export function createPlanAndExecuteTool(deps: PlanAndExecuteDeps): Tool {
     toolBlacklist = DEFAULT_BLACKLIST,
     logger,
     onProgress,
+    recall,
   } = deps;
 
   return {
@@ -509,6 +518,7 @@ export function createPlanAndExecuteTool(deps: PlanAndExecuteDeps): Tool {
         budgetTracker,
         onProgress,
         logger,
+        recall,
       });
 
       onProgress?.(`▸ aggregate (${aggregateMode})`);
@@ -604,6 +614,8 @@ interface ExecutePhaseOptions {
   budgetTracker: PlanBudgetTracker;
   onProgress?: (text: string) => void;
   logger?: { log: (msg: string) => void; warn: (msg: string) => void };
+  /** See PlanAndExecuteDeps.recall — cross-layer skill-recall callback for the sub-task prompt. */
+  recall?: (query: string) => string;
 }
 
 async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult[]> {
@@ -619,6 +631,7 @@ async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult
     budgetTracker,
     onProgress,
     logger,
+    recall,
   } = opts;
 
   const results = new Map<string, SubTaskResult>();
@@ -680,6 +693,14 @@ async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult
       )
       .join('\n\n');
 
+    // Cross-layer skill recall: only when the server provided a callback AND it returns a
+    // non-empty block. When absent/blank the systemPrompt is byte-identical to before (no extra
+    // blank line or header), preserving zero behavior change with the flag OFF.
+    const recalled = recall ? recall(`${parentTask}\n${st.description}`).trim() : '';
+    const recallSection = recalled
+      ? `\n## Relevant learned skills / anti-patterns (apply these)\n${recalled}\n`
+      : '';
+
     const systemPrompt =
       `You are executing one sub-step of the complex task "${parentTask}".\n\n` +
       `**Current sub-task**: ${st.description}\n` +
@@ -690,6 +711,7 @@ async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult
       (completedSummaries
         ? `\n## Summary of completed upstream sub-tasks\n${completedSummaries}\n`
         : '') +
+      recallSection +
       `\nWhen done, reply in text with what you did + the artifact path (if any). Be concise, ≤300 characters.`;
 
     onProgress?.(
@@ -865,4 +887,5 @@ export const _internal = {
   detectCycle,
   topoSort,
   aggregateConcat,
+  runExecutePhase,
 };

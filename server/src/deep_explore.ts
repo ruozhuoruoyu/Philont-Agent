@@ -86,6 +86,7 @@ import {
 } from '@agent/memory';
 import { currentSessionId } from './channels/turn_context.js';
 import { decidePhaseTransition, goalNeedsDecision, classifyGoal } from './phase_gate.js';
+import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
 
 const VALID_KINDS: ReadonlySet<string> = new Set([
   'subgoal',
@@ -887,17 +888,40 @@ function renderRecentToolFailures(sessionId: string): string[] {
  * Matched by a keyword regex over name+description; top few only, to bound prompt size.
  */
 const COMPUTE_LESSON_RE = /\b(pari\/?gp|pari|gp-(syntax|type|varname|args|timeout)|z3|smt|computation)\b/i;
-function collectComputeLessons(skills: SkillStore | undefined): string[] {
+export function collectComputeLessons(skills: SkillStore | undefined, query = ''): string[] {
   if (!skills) return [];
   const seen = new Set<string>();
   const picks: { name: string; description: string }[] = [];
-  for (const s of [...skills.listNegative(30), ...skills.listByMaturity('playbook', 30)]) {
-    if (seen.has(s.name)) continue;
-    if (COMPUTE_LESSON_RE.test(`${s.name} ${s.description}`)) {
+  if (recallRelevanceEnabled()) {
+    // Relevance-gated path: select the negatives + playbook lessons most relevant to the current
+    // goal (jaccard re-rank over the FTS hit set), instead of the compute-keyword regex. This widens
+    // recall beyond pari/gp/z3 topics so non-formal explorations (which never matched the compute
+    // regex) also surface their learned lessons. Caps stay small (3 total).
+    const negatives = selectRelevantSkills(skills, query, {
+      pool: 'negative',
+      k: 3,
+      fallback: () => skills.listNegative(3),
+    });
+    const playbooks = selectRelevantSkills(skills, query, {
+      pool: 'playbook',
+      k: 3,
+      fallback: () => skills.listByMaturity('playbook', 3),
+    });
+    for (const s of [...negatives, ...playbooks]) {
+      if (seen.has(s.name)) continue;
       picks.push(s);
       seen.add(s.name);
+      if (picks.length >= 3) break;
     }
-    if (picks.length >= 3) break;
+  } else {
+    for (const s of [...skills.listNegative(30), ...skills.listByMaturity('playbook', 30)]) {
+      if (seen.has(s.name)) continue;
+      if (COMPUTE_LESSON_RE.test(`${s.name} ${s.description}`)) {
+        picks.push(s);
+        seen.add(s.name);
+      }
+      if (picks.length >= 3) break;
+    }
   }
   if (picks.length === 0) return [];
   const lines = ['', '## 📘 Learned lessons from past explorations — apply these'];
@@ -2238,7 +2262,13 @@ export function createDeepExploreTool(
     toolDefs: ToolDefinition[];
     whitelist: ReadonlySet<string>;
   } {
-    const researchDefs = readOnlyToolDefs.filter((d) => profile.toolAllow.has(d.name));
+    // Flag-gated: allow the model to actually pull a skill it discovers mid-exploration via use_skill.
+    // Built at point-of-use (not baked into the static *_RESEARCH_ALLOW const) so it stays absent when
+    // the flag is OFF — exact-match registry name is the snake_case 'use_skill' (cf. 'search_skills').
+    const toolAllow = recallRelevanceEnabled()
+      ? new Set<string>([...profile.toolAllow, 'use_skill'])
+      : profile.toolAllow;
+    const researchDefs = readOnlyToolDefs.filter((d) => toolAllow.has(d.name));
     return {
       researchDefs,
       toolDefs: [...REASON_TOOL_DEFS, ...researchDefs],
@@ -2391,7 +2421,7 @@ export function createDeepExploreTool(
     // record the starting frontier ids for UCB visit accounting.
     const before = reasoning.getNodes(session.id);
     const frontierStartIds = new Set(computeFrontier(before).map((n) => n.id));
-    const systemPrompt = profile.buildConvergePrompt(session, before, collectComputeLessons(skills));
+    const systemPrompt = profile.buildConvergePrompt(session, before, collectComputeLessons(skills, session.goal));
     const userMessage =
       profile.buildUserMessage(session, before.length <= 1) + buildStuckDirective(session.noProgressRounds ?? 0);
 
@@ -2517,7 +2547,7 @@ export function createDeepExploreTool(
     const candKinds = new Set<ReasoningNodeKind>(profile.divergeNodeKinds);
     const before = reasoning.getNodes(session.id);
     const beforeCandidates = before.filter((n) => candKinds.has(n.kind)).length;
-    const systemPrompt = profile.buildDivergePrompt(session, before, collectComputeLessons(skills), seed);
+    const systemPrompt = profile.buildDivergePrompt(session, before, collectComputeLessons(skills, session.goal), seed);
     const userMessage = profile.buildDivergeUserMessage(session, seed);
 
     const ctrl = new AbortController();

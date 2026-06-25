@@ -17,6 +17,7 @@ import {
   withNoProgressStop,
   makeReasoningToolRunner,
   DEEP_EXPLORE_RESEARCH_ALLOW,
+  collectComputeLessons,
   parseSkepticVerdict,
   tallyVerdicts,
   buildSkepticSystemPrompt,
@@ -1088,4 +1089,72 @@ test('discoverRoundWasSubstantive: angles proposed but all die (no proof, no net
   // The Goldbach treadmill shape: proposes new framings each round, each refuted by computation.
   assert.equal(discoverRoundWasSubstantive({ newProved: 0, survivorsBefore: 3, survivorsAfter: 3 }), false);
   assert.equal(discoverRoundWasSubstantive({ newProved: 0, survivorsBefore: 3, survivorsAfter: 2 }), false);
+});
+
+// ── P2: skill_recall relevance gating in deep_explore (flag-gated) ───────────────────────────────
+// Helper: seed a SkillStore with negatives + playbooks; toggle the flag around each assertion.
+function withFlag<T>(on: boolean, fn: () => T): T {
+  const prev = process.env.PHILONT_SKILL_RECALL_RELEVANCE;
+  if (on) process.env.PHILONT_SKILL_RECALL_RELEVANCE = '1';
+  else delete process.env.PHILONT_SKILL_RECALL_RELEVANCE;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_SKILL_RECALL_RELEVANCE;
+    else process.env.PHILONT_SKILL_RECALL_RELEVANCE = prev;
+  }
+}
+
+test('P2: use_skill is NOT baked into the static DEEP_EXPLORE_RESEARCH_ALLOW const (flag-OFF safety)', () => {
+  // The whitelist augmentation must happen at point-of-use, never on the exported static const,
+  // so an OFF process can never see use_skill leak into research mode.
+  assert.ok(!DEEP_EXPLORE_RESEARCH_ALLOW.has('use_skill'));
+  assert.ok(!DELIBERATE_RESEARCH_ALLOW.has('use_skill'));
+  // search_skills stays present in both branches.
+  assert.ok(DEEP_EXPLORE_RESEARCH_ALLOW.has('search_skills'));
+  assert.ok(DELIBERATE_RESEARCH_ALLOW.has('search_skills'));
+});
+
+test('P2: collectComputeLessons flag-OFF output is the verbatim compute-regex path (golden)', () => {
+  const mem = openMemoryDb(':memory:');
+  // A pari/gp negative (matches COMPUTE_LESSON_RE) and an UNRELATED negative (does not match).
+  mem.skills.createSkill({
+    name: 'avoid-pari-varname',
+    description: 'do not reuse pari/gp built-in name primes as a variable',
+    triggerKeywords: [], actionTemplate: '', whenToUse: '', kind: 'negative', maturity: 'playbook',
+  });
+  mem.skills.createSkill({
+    name: 'avoid-hardcode-secret',
+    description: 'never hardcode kubernetes secrets in a manifest',
+    triggerKeywords: [], actionTemplate: '', whenToUse: '', kind: 'negative', maturity: 'playbook',
+  });
+  // OFF: regex path keeps ONLY the compute-matching lesson, regardless of the query.
+  const off = withFlag(false, () => collectComputeLessons(mem.skills, 'kubernetes deployment scaling'));
+  assert.deepEqual(off, [
+    '',
+    '## 📘 Learned lessons from past explorations — apply these',
+    '- do not reuse pari/gp built-in name primes as a variable',
+  ]);
+  // Determinism: same input, same output.
+  assert.deepEqual(withFlag(false, () => collectComputeLessons(mem.skills, 'kubernetes deployment scaling')), off);
+  mem.close();
+});
+
+test('P2: collectComputeLessons flag-ON surfaces a query-relevant lesson the compute regex would miss', () => {
+  const mem = openMemoryDb(':memory:');
+  // A non-compute negative that the regex never matches but is relevant to a hardware goal.
+  mem.skills.createSkill({
+    name: 'avoid-hbm-bandwidth-overestimate',
+    description: 'do not overestimate hbm memory bandwidth when comparing gpu hardware',
+    triggerKeywords: ['hbm', 'bandwidth', 'gpu'], actionTemplate: '', whenToUse: '',
+    kind: 'negative', maturity: 'playbook',
+  });
+  const goal = 'compare gpu hbm memory bandwidth across hardware';
+  // OFF: regex path returns nothing (no compute-keyword match).
+  assert.deepEqual(withFlag(false, () => collectComputeLessons(mem.skills, goal)), []);
+  // ON: the relevance selector pulls the hardware lesson into the prompt.
+  const on = withFlag(true, () => collectComputeLessons(mem.skills, goal));
+  assert.ok(on.length > 0, 'flag ON should surface the relevant lesson');
+  assert.ok(on.some((l) => l.includes('hbm memory bandwidth')), 'expected the hbm lesson line');
+  mem.close();
 });

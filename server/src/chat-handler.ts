@@ -165,6 +165,7 @@ import { setConscienceLlm } from './conscience_gate.js';
 import { createAutoAdvanceLoop } from './deep_explore_autoadvance.js';
 import { semanticToolPhrase, semanticToolFailPhrase, summarizingPhrase, type PhraseLang } from './channel_phrases.js';
 import { wrapSkillToolWithReload } from './skill_install_wrapper.js';
+import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
 import { recentAttachments } from './channels/recent_attachments.js';
 import { persistToolResultIfFetched } from './fetched_resources_hook.js';
 import {
@@ -1532,6 +1533,20 @@ const planAndExecuteTool = createPlanAndExecuteTool({
     warn: (m) => console.warn(`[plan-execute] ${m}`),
   },
   onProgress: (text) => console.log(`[plan-execute] ${text}`),
+  // Cross-layer skill recall (P3): surface task-relevant anti-patterns into each sub-task's prompt
+  // so a corrected mistake does not recur in a blind sub-step. agent-tools cannot import memory, so
+  // the selection is done here and passed as a rendered text block. Flag OFF => returns '' =>
+  // sub-loop systemPrompt is byte-identical to today (zero behavior change).
+  recall: (q) =>
+    recallRelevanceEnabled()
+      ? selectRelevantSkills(memory.skills, q, {
+          pool: 'negative',
+          k: 5,
+          fallback: () => memory.skills.listNegative(5),
+        })
+          .map((s) => `- ${s.name}: ${s.description}`)
+          .join('\n')
+      : '',
 });
 
 // domain='self' → registerInternal path (plugin/external are not allowed to declare self)
@@ -2626,7 +2641,7 @@ export function splitPrefixBySection(raw: string): Array<{ title: string; chars:
  * prefix now only serves as a "highly condensed long-term fact index": facts / skills / negative skills /
  * self.summary. session-summary notes are no longer specially injected — the retriever treats them as ordinary notes.
  */
-function buildMemoryPrefix(signalBus?: TurnSignalBus): string {
+export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus): string {
   const lines: string[] = [];
 
   // Runtime environment (always-on, ≤1 line): informs the LLM of the true host OS / shell so it writes correct command dialect.
@@ -3043,16 +3058,30 @@ function buildMemoryPrefix(signalBus?: TurnSignalBus): string {
   const META_SKILL_NAMES = new Set(['clawhub', 'github-skills']);
   const SKILL_INDEX_MAX_LINES = 15;
   const SKILL_WHEN_TO_USE_TRUNC = 120;
-  const allTop = memory.skills.listAll(40);
-  const positives = allTop
-    .filter((s) =>
-      s.kind !== 'negative'
-      && !META_SKILL_NAMES.has(s.name)
-      // 2026-05-11: playbooks go in their own dedicated section "## Lessons I've Learned Before", not mixed into the skill index.
-      // Otherwise playbooks would be sorted by useCount too; always 0 → ranked last, never making top-15, effectively invisible.
-      && s.maturity !== 'playbook'
-    )
-    .slice(0, SKILL_INDEX_MAX_LINES);
+  // P1: relevance-recall flag. When OFF (default), the four skill selections below stay byte-identical
+  // to the historical global-top-N behavior. When ON (and a non-empty recall query is available), each
+  // section is selected by jaccard relevance to the current task at SMALLER caps to fight context bloat.
+  const relevanceOn = recallRelevanceEnabled() && recallQuery.trim().length > 0;
+  // Positive skill index: caps 15 (OFF) → 6 (ON).
+  const POSITIVE_CAP = relevanceOn ? 6 : SKILL_INDEX_MAX_LINES;
+  const positiveFallback = () =>
+    memory.skills
+      .listAll(40)
+      .filter((s) =>
+        s.kind !== 'negative'
+        && !META_SKILL_NAMES.has(s.name)
+        // 2026-05-11: playbooks go in their own dedicated section "## Lessons I've Learned Before", not mixed into the skill index.
+        // Otherwise playbooks would be sorted by useCount too; always 0 → ranked last, never making top-15, effectively invisible.
+        && s.maturity !== 'playbook'
+      );
+  const positives = relevanceOn
+    ? selectRelevantSkills(memory.skills, recallQuery, {
+        pool: 'positive',
+        k: POSITIVE_CAP,
+        // META filter baked into fallback; selector result is already pool-filtered (positive predicate).
+        fallback: positiveFallback,
+      }).filter((s) => !META_SKILL_NAMES.has(s.name))
+    : positiveFallback().slice(0, SKILL_INDEX_MAX_LINES);
   if (positives.length > 0) {
     lines.push('Available skills (use use_skill(name) to get details):');
     for (const s of positives) {
@@ -3084,10 +3113,25 @@ function buildMemoryPrefix(signalBus?: TurnSignalBus): string {
   // Makes the LLM see "how the same type of task failed last time" at turn start, reducing the probability of repeating mistakes.
   // Implementation: filter the maturity='playbook' pool for source LIKE 'plan-failure:%', take top 3 by created_at DESC.
   const FAILURE_MODE_TOP_N = 3;
-  const playbookPool = memory.skills.listByMaturity('playbook', 30);
-  const failurePlaybooks = playbookPool
-    .filter((p) => p.source?.startsWith('plan-failure:'))
-    .slice(0, FAILURE_MODE_TOP_N);
+  // P1: when relevance is ON, pull ONE relevance-ranked playbook superset (k=6) and partition it into the
+  // two playbook sections below (failure-patterns cap 3, lessons cap 3) — preserving the existing name-dedup
+  // so a failure-playbook never also appears as a lesson. When OFF, both sections use the original
+  // listByMaturity global ordering verbatim.
+  const pbSel = relevanceOn
+    ? selectRelevantSkills(memory.skills, recallQuery, {
+        pool: 'playbook',
+        k: 6,
+        fallback: () => memory.skills.listByMaturity('playbook', 30),
+      })
+    : null;
+  const failurePlaybooks = relevanceOn
+    ? pbSel!
+        .filter((p) => p.source?.startsWith('plan-failure:'))
+        .slice(0, FAILURE_MODE_TOP_N)
+    : memory.skills
+        .listByMaturity('playbook', 30)
+        .filter((p) => p.source?.startsWith('plan-failure:'))
+        .slice(0, FAILURE_MODE_TOP_N);
   if (failurePlaybooks.length > 0) {
     lines.push('');
     lines.push('## ❌ My past failure patterns');
@@ -3114,11 +3158,15 @@ function buildMemoryPrefix(signalBus?: TurnSignalBus): string {
   //
   // Exclude plan-failure playbooks already rendered in the "## ❌ My previous failure patterns" section above (avoid duplicate exposure).
   const PLAYBOOK_TOP_N = 5;
+  // P1: lessons cap 5 (OFF) → 3 (ON). When ON, partition the shared relevance-ranked playbook superset.
+  const LESSON_CAP = relevanceOn ? 3 : PLAYBOOK_TOP_N;
   const failureNames = new Set(failurePlaybooks.map((p) => p.name));
-  const playbooks = memory.skills
-    .listByMaturity('playbook', PLAYBOOK_TOP_N + failurePlaybooks.length)
-    .filter((p) => !failureNames.has(p.name))
-    .slice(0, PLAYBOOK_TOP_N);
+  const playbooks = relevanceOn
+    ? pbSel!.filter((p) => !failureNames.has(p.name)).slice(0, LESSON_CAP)
+    : memory.skills
+        .listByMaturity('playbook', PLAYBOOK_TOP_N + failurePlaybooks.length)
+        .filter((p) => !failureNames.has(p.name))
+        .slice(0, PLAYBOOK_TOP_N);
   if (playbooks.length > 0) {
     memory.metrics.increment('playbook.inject.turns'); // instrumentation: lesson actually reached the prompt
     lines.push('');
@@ -3142,7 +3190,14 @@ function buildMemoryPrefix(signalBus?: TurnSignalBus): string {
     lines.push('');
   }
 
-  const negatives = memory.skills.listNegative(20);
+  // P1: negatives cap 20 (OFF) → 5 (ON, relevance-selected). Floor stays min(5,corpus) naturally.
+  const negatives = relevanceOn
+    ? selectRelevantSkills(memory.skills, recallQuery, {
+        pool: 'negative',
+        k: 5,
+        fallback: () => memory.skills.listNegative(5),
+      })
+    : memory.skills.listNegative(20);
   if (negatives.length > 0) {
     memory.metrics.increment('antipattern.inject.turns'); // instrumentation
     lines.push('⚠️ The user has previously corrected these behaviors — avoid repeating them in the following situations:');
@@ -3913,7 +3968,7 @@ function buildFreshMessages(
   sessionId: string,
   signalBus?: TurnSignalBus,
 ): NativeMessage[] {
-  const memoryPrefix = buildMemoryPrefix(signalBus);
+  const memoryPrefix = buildMemoryPrefix(userMessageForRecall, signalBus);
   // 2026-05-09: autonomous turns (system:scheduled:*) only look at their own sessionId's
   // history. K0 timeline is global by default, but cross-session recall pulls other sessions'
   // (e.g. wechat) conversations into messages, misused by short_answer_binding / LLM reasoning

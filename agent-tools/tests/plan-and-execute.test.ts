@@ -458,3 +458,116 @@ test('用户参数 toolWhitelist:传给子 loop', async () => {
   assert.equal(r.success, true);
   assert.equal(runnerCalled, false, 'shell 不在白名单 → toolRunner 不应被调');
 });
+
+// ── P3: cross-layer recall callback injection into the sub-task systemPrompt ──
+
+/** Captures the systemPrompt passed to the first send() of each sub-loop, then ends with text. */
+function makeCapturingLLM(): {
+  llm: MiniLoopLLMClient;
+  prompts: string[];
+} {
+  const prompts: string[] = [];
+  return {
+    llm: {
+      async send(systemPrompt: string): Promise<MiniLoopLLMResponse> {
+        prompts.push(systemPrompt);
+        return { type: 'text', content: 'done', tokensUsed: 10 };
+      },
+    },
+    prompts,
+  };
+}
+
+const ONE_SUBTASK = [{ id: 'st-1', description: 'do the thing', dependsOn: [] }];
+
+test('P3 recall: undefined callback → systemPrompt has no recall section (byte-identical)', async () => {
+  const { llm, prompts } = makeCapturingLLM();
+  await _planAndExecuteInternal.runExecutePhase({
+    ordered: ONE_SUBTASK,
+    parentTask: 'parent task',
+    llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: NOOP_RUNNER,
+    toolBlacklist: new Set<string>(),
+    maxIters: 4,
+    budgetTracker: new PlanBudgetTracker(),
+    // recall intentionally omitted
+  });
+  assert.equal(prompts.length, 1);
+  assert.ok(
+    !prompts[0].includes('Relevant learned skills'),
+    'no recall header when callback absent',
+  );
+  // Exact tail unchanged (no extra blank line / header injected before it).
+  assert.match(
+    prompts[0],
+    /Expected output|do the thing[\s\S]*When done, reply in text/,
+  );
+});
+
+test('P3 recall: callback returns blank → systemPrompt byte-identical to undefined', async () => {
+  const a = makeCapturingLLM();
+  await _planAndExecuteInternal.runExecutePhase({
+    ordered: ONE_SUBTASK,
+    parentTask: 'parent task',
+    llm: a.llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: NOOP_RUNNER,
+    toolBlacklist: new Set<string>(),
+    maxIters: 4,
+    budgetTracker: new PlanBudgetTracker(),
+    recall: () => '   \n  ', // whitespace only → trimmed to '' → no section
+  });
+
+  const b = makeCapturingLLM();
+  await _planAndExecuteInternal.runExecutePhase({
+    ordered: ONE_SUBTASK,
+    parentTask: 'parent task',
+    llm: b.llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: NOOP_RUNNER,
+    toolBlacklist: new Set<string>(),
+    maxIters: 4,
+    budgetTracker: new PlanBudgetTracker(),
+    // no recall
+  });
+
+  assert.equal(a.prompts[0], b.prompts[0], 'blank recall == no recall (byte-identical)');
+});
+
+test('P3 recall: non-empty callback → recall section appended with query = parent + sub-task', async () => {
+  const { llm, prompts } = makeCapturingLLM();
+  const seenQueries: string[] = [];
+  await _planAndExecuteInternal.runExecutePhase({
+    ordered: ONE_SUBTASK,
+    parentTask: 'parent task',
+    llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: NOOP_RUNNER,
+    toolBlacklist: new Set<string>(),
+    maxIters: 4,
+    budgetTracker: new PlanBudgetTracker(),
+    recall: (q) => {
+      seenQueries.push(q);
+      return '- anti-x: never delete prod data';
+    },
+  });
+  assert.equal(prompts.length, 1);
+  assert.ok(
+    prompts[0].includes('## Relevant learned skills / anti-patterns (apply these)'),
+    'recall header present',
+  );
+  assert.ok(
+    prompts[0].includes('- anti-x: never delete prod data'),
+    'recall body present',
+  );
+  // query is parentTask + '\n' + sub-task description
+  assert.equal(seenQueries.length, 1);
+  assert.equal(seenQueries[0], 'parent task\ndo the thing');
+  // section sits before the closing "When done" line
+  assert.ok(
+    prompts[0].indexOf('Relevant learned skills') <
+      prompts[0].indexOf('When done, reply in text'),
+    'recall section precedes the closing instruction',
+  );
+});
