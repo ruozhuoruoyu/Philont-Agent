@@ -1499,7 +1499,9 @@ export function buildDeliberateDivergePrompt(
   lines.push(
     'You are a DIVERGENT option-generation engine working a hard, open-ended question. This round your ' +
       'job is to OPEN UP the space of possible answers — generate DIVERSE candidate options, rival ' +
-      'hypotheses, and framings. Breadth and genuine variety beat depth: cover fundamentally different ' +
+      'hypotheses, and framings. Each candidate must be a possible ANSWER to the question — a position / ' +
+      'verdict / explanation that later evidence could CONFIRM or REFUTE — NOT an evaluation dimension or ' +
+      'sub-topic to study. Breadth and genuine variety beat depth: cover fundamentally different ' +
       'kinds of answer, not variations of one. You are NOT settling or picking a winner this round.',
   );
   lines.push('');
@@ -1546,10 +1548,11 @@ export function buildDeliberateDivergePrompt(
   lines.push('');
   lines.push('## How to diverge (discipline)');
   lines.push('1. **Round 1: generate 3–6 GENUINELY DIFFERENT candidates** via reason_decompose — different kinds of answer, not rephrasings of one. Unconventional / rare angles are valuable.');
-  lines.push('2. **Later rounds: add only candidates that open a NEW angle** not already on the tree. Quality of variety over quantity.');
-  lines.push('3. **Do NOT settle, rank, or pick.** Keep candidates open; eliminate only the plainly incoherent.');
-  lines.push('4. **If you cannot add a genuinely new viable candidate, say so** — an honest "the space looks saturated" beats padding with near-duplicates (a round that adds nothing new signals it is time to switch to evaluation).');
-  lines.push('5. **Only use real node ids** from the tree / returned by decompose; never invent ids.');
+  lines.push('2. **A candidate is a possible ANSWER, never an evaluation dimension.** For a choice/comparison goal the candidates are rival VERDICTS — e.g. "A is more cost-effective", "B is", "it depends on scale: A above N concurrent users, B below" — each falsifiable by evidence. Do NOT hang the *criteria* you will weigh (cost / throughput / compliance / ecosystem / feasibility) as candidates: those are the evidence axes the converge phase scores, not answers. If the goal text itself lists dimensions, CONVERT them into rival positions — do not echo them back as nodes.');
+  lines.push('3. **Later rounds: add only candidates that open a NEW angle** not already on the tree. Quality of variety over quantity.');
+  lines.push('4. **Do NOT settle, rank, or pick.** Keep candidates open; eliminate only the plainly incoherent.');
+  lines.push('5. **If you cannot add a genuinely new viable candidate, say so** — an honest "the space looks saturated" beats padding with near-duplicates (a round that adds nothing new signals it is time to switch to evaluation).');
+  lines.push('6. **Only use real node ids** from the tree / returned by decompose; never invent ids.');
   return lines.join('\n');
 }
 
@@ -1601,6 +1604,8 @@ export const DELIBERATE_PROFILE: ReasoningProfile = {
   buildDivergeUserMessage: (session, seed) =>
     `${seed.trim() || session.goal}\n\nGenerate a DIVERSE set of candidate options / rival hypotheses for the question and ` +
     `hang each on the tree via reason_decompose (kind='construction' for an option, 'conjecture' for a hypothesis). ` +
+    `Each must be a possible ANSWER — a rival verdict/position evidence could confirm or refute — NOT an evaluation ` +
+    `dimension or criterion; if the goal lists dimensions, convert them into rival positions. ` +
     `Do NOT settle them — just open up the space. Aim for genuine variety, not variations of one answer.`,
   divergeNodeKinds: ['construction', 'conjecture'],
   divergeNoun: 'candidate option/hypothesis',

@@ -555,6 +555,12 @@ test('buildDeliberateDivergePrompt: generative vocabulary, do-not-settle, option
   // Candidate kinds wired to construction=option / conjecture=hypothesis.
   assert.match(p, /kind='construction' for an OPTION/);
   assert.match(p, /kind='conjecture' for a HYPOTHESIS/);
+  // Anti-pattern guard: a candidate is a possible ANSWER, not an evaluation dimension — for a
+  // choice/comparison goal whose text lists dimensions, the model must convert them into rival
+  // positions instead of echoing the dimensions back as nodes (the bug that mislabeled dimensions as 假说).
+  assert.match(p, /possible ANSWER/);
+  assert.match(p, /evaluation dimension/);
+  assert.match(p, /CONVERT them into rival positions/);
   // Root mount point exposed so the model knows where to hang candidates (fresh session has no candidates yet).
   assert.match(p, new RegExp(`root node \\[${rootNode.id}\\]`));
   // Lists the existing candidate so new rounds add NEW angles.
@@ -580,6 +586,9 @@ test('DELIBERATE_PROFILE diverge wiring: kinds, noun/verb, prompt + user message
   const um = DELIBERATE_PROFILE.buildDivergeUserMessage(session, '');
   assert.match(um, /DIVERSE set of candidate/);
   assert.match(um, /Do NOT settle/);
+  // Each candidate must be a possible ANSWER, not an evaluation dimension/criterion.
+  assert.match(um, /possible ANSWER/);
+  assert.match(um, /NOT an evaluation/);
   mem.close();
 });
 
