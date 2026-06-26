@@ -15,13 +15,13 @@ import type { Skill } from '@agent/memory'; // type export (index.ts:444, from '
 import { planTokenize as tokenize, planJaccard as jaccard } from '@agent/memory'; // index.ts:152-154
 
 /**
- * Feature flag. Default OFF: unset/'' => false. Matches the codebase's existing flag-parse style.
+ * Feature flag. Default ON: only an explicit off-ish value disables it (env is configured via the web-ui,
+ * so there is no local-env to set — on-by-default is the intended production behavior). Set
+ * PHILONT_SKILL_RECALL_RELEVANCE=0/off/false/no to revert to the legacy global-top-N selection.
  */
 export function recallRelevanceEnabled(): boolean {
-  return (
-    process.env.PHILONT_SKILL_RECALL_RELEVANCE === '1' ||
-    process.env.PHILONT_SKILL_RECALL_RELEVANCE === 'true'
-  );
+  const v = (process.env.PHILONT_SKILL_RECALL_RELEVANCE ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
 /**

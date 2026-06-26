@@ -24,14 +24,22 @@ import assert from 'node:assert/strict';
 // Pin an in-memory DB and a non-LLM provider BEFORE importing chat-handler (module-level init reads these).
 process.env.MEMORY_DB_PATH = ':memory:';
 process.env.LLM_PROVIDER = '';
-// Force the flag OFF for this test regardless of ambient environment.
-delete process.env.PHILONT_SKILL_RECALL_RELEVANCE;
+// The flag now defaults ON, so force it OFF explicitly for the golden (byte-identical) tests below.
+process.env.PHILONT_SKILL_RECALL_RELEVANCE = '0';
 
 const { buildMemoryPrefix, memory } = await import('../src/chat-handler.js');
 const { recallRelevanceEnabled } = await import('../src/skill_recall.js');
 
-test('P1: relevance flag defaults OFF', () => {
-  assert.equal(recallRelevanceEnabled(), false);
+test('P1: relevance flag defaults ON; "0" disables it', () => {
+  const prev = process.env.PHILONT_SKILL_RECALL_RELEVANCE;
+  try {
+    delete process.env.PHILONT_SKILL_RECALL_RELEVANCE;
+    assert.equal(recallRelevanceEnabled(), true, 'unset → ON (default)');
+    process.env.PHILONT_SKILL_RECALL_RELEVANCE = '0';
+    assert.equal(recallRelevanceEnabled(), false, '"0" → OFF');
+  } finally {
+    process.env.PHILONT_SKILL_RECALL_RELEVANCE = prev ?? '0';
+  }
 });
 
 test('P1 flag-OFF golden: prefix is byte-identical across different recall queries', () => {
@@ -79,7 +87,7 @@ test('P1 flag-ON wiring: a query-relevant positive skill is selected into the pr
     // An unrelated query should not surface this skill via relevance (jaccard ~ 0); with a near-empty
     // corpus the fallback fill could still include it, so we assert the relevance path at least runs
     // by confirming the ON output differs from the OFF output for the matching query.
-    process.env.PHILONT_SKILL_RECALL_RELEVANCE = '';
+    process.env.PHILONT_SKILL_RECALL_RELEVANCE = '0';
     const offPrefix = buildMemoryPrefix('calibrate the zarquon flux capacitor for warp resonance');
     // Both contain the skill (small corpus), but the ON/OFF caps differ; the test's purpose is to prove
     // the flag toggles a real code path without crashing and the relevant skill is present when ON.

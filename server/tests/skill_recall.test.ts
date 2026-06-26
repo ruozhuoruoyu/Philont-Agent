@@ -45,19 +45,21 @@ function add(
 }
 
 // (a) flag default OFF.
-test('recallRelevanceEnabled is false when flag unset', () => {
+test('recallRelevanceEnabled defaults ON; only an explicit off-ish value disables', () => {
   const prev = process.env.PHILONT_SKILL_RECALL_RELEVANCE;
   delete process.env.PHILONT_SKILL_RECALL_RELEVANCE;
   try {
-    assert.equal(recallRelevanceEnabled(), false);
+    assert.equal(recallRelevanceEnabled(), true, 'unset → ON (default)');
     process.env.PHILONT_SKILL_RECALL_RELEVANCE = '';
-    assert.equal(recallRelevanceEnabled(), false);
-    process.env.PHILONT_SKILL_RECALL_RELEVANCE = '0';
-    assert.equal(recallRelevanceEnabled(), false);
-    process.env.PHILONT_SKILL_RECALL_RELEVANCE = '1';
-    assert.equal(recallRelevanceEnabled(), true);
-    process.env.PHILONT_SKILL_RECALL_RELEVANCE = 'true';
-    assert.equal(recallRelevanceEnabled(), true);
+    assert.equal(recallRelevanceEnabled(), true, 'empty → ON');
+    for (const off of ['0', 'off', 'false', 'no', 'OFF']) {
+      process.env.PHILONT_SKILL_RECALL_RELEVANCE = off;
+      assert.equal(recallRelevanceEnabled(), false, `${off} → OFF`);
+    }
+    for (const on of ['1', 'true', 'on']) {
+      process.env.PHILONT_SKILL_RECALL_RELEVANCE = on;
+      assert.equal(recallRelevanceEnabled(), true, `${on} → ON`);
+    }
   } finally {
     if (prev === undefined) delete process.env.PHILONT_SKILL_RECALL_RELEVANCE;
     else process.env.PHILONT_SKILL_RECALL_RELEVANCE = prev;

@@ -6589,9 +6589,15 @@ async function runToolLoop(
         // didn't" / fabrication count across turns so a REPEATED unkept run-promise escalates to high.
         const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
         // Verb-agnostic announce-then-yield stall (e.g. ends with "正在调研中……" / commits to start
-        // deep_explore, but issues 0 tools → permanent stall). Gated for dogfooding; default OFF.
-        const announceStallEnabled =
-          process.env.PHILONT_HONESTY_ANNOUNCE === '1' || process.env.PHILONT_HONESTY_ANNOUNCE === 'true';
+        // deep_explore, but issues 0 tools → permanent stall). Default ON (env set via web-ui);
+        // PHILONT_HONESTY_ANNOUNCE=0/off/false/no disables.
+        const announceStallRaw = (process.env.PHILONT_HONESTY_ANNOUNCE ?? '').trim().toLowerCase();
+        const announceStallEnabled = !(
+          announceStallRaw === '0' ||
+          announceStallRaw === 'off' ||
+          announceStallRaw === 'false' ||
+          announceStallRaw === 'no'
+        );
         const honesty = evaluateHonesty(response.content, {
           toolResults: recentToolResults,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,

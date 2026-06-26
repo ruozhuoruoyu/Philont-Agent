@@ -1095,8 +1095,9 @@ test('discoverRoundWasSubstantive: angles proposed but all die (no proof, no net
 // Helper: seed a SkillStore with negatives + playbooks; toggle the flag around each assertion.
 function withFlag<T>(on: boolean, fn: () => T): T {
   const prev = process.env.PHILONT_SKILL_RECALL_RELEVANCE;
+  // Flag now defaults ON, so force OFF explicitly with '0' (not delete) for the off assertion.
   if (on) process.env.PHILONT_SKILL_RECALL_RELEVANCE = '1';
-  else delete process.env.PHILONT_SKILL_RECALL_RELEVANCE;
+  else process.env.PHILONT_SKILL_RECALL_RELEVANCE = '0';
   try {
     return fn();
   } finally {
