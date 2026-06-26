@@ -256,7 +256,8 @@ export interface HonestyEvaluation {
     | 'fabricated_round_result'
     | 'artifact_claim_without_tools'
     | 'fabricated_execution_claim'
-    | 'run_promise_without_exec';
+    | 'run_promise_without_exec'
+    | 'announced_action_without_doing';
   /** Matched claim phrase (used as reference in reminder message) */
   matchedClaim: string;
   /** tool_result counts for this turn */
@@ -298,6 +299,14 @@ export interface EvaluateOptions {
    * agent promised "现在跑" three turns running without ever issuing a tool call.
    */
   session?: HonestySessionSnapshot;
+  /**
+   * Enable the announced_action_without_doing branch (verb-agnostic say-do stall: the reply ENDS announcing
+   * an action in progress — "正在调研中……" / "I'm researching…" — or commits to research / starting a
+   * deep_explore, yet the turn issued ZERO tool calls). Gated (chat-handler reads PHILONT_HONESTY_ANNOUNCE)
+   * so it can be dogfooded before becoming default. Distinct from run_promise_without_exec, which only
+   * catches compute verbs (跑/执行/run) — this catches the research/session-start stall that escaped it.
+   */
+  detectAnnouncementStall?: boolean;
 }
 
 /**
@@ -460,6 +469,36 @@ export function findRunPromise(text: string): string | null {
   return null;
 }
 
+// ── Action announcement (verb-agnostic "I'm doing it now" with no tool call) ───────────────────
+//
+// The stall that escaped findRunPromise (whose verbs are only 跑/执行/run/execute/compute): the reply
+// ENDS announcing an action in progress and then yields — "正在调研中……", "我先做现状调研，再启动
+// deep_explore", "I'm researching…". In the async (WeChat) model, ending the turn = the agent waits for
+// the next user message, so "正在调研中……" with zero tools this turn becomes a permanent stall.
+//
+// The PRIMARY signal is structural, not a verb list: a present-progressive phrase that ENDS the message
+// with an ellipsis ("正在 X [中]……" / "…ing…"). Message FORM, not a specific verb — robust to rewording.
+// A small secondary set catches the common forward "我先…再启动…" / "I'll first research…" commitment.
+// The branch only fires when the turn issued ZERO tool calls (announced + did literally nothing).
+const ACTION_ANNOUNCEMENT_PATTERNS: ReadonlyArray<RegExp> = [
+  // Primary (verb-agnostic): present-progressive ending in an ellipsis — "正在……中……" / "正在搜索网络…".
+  /正在[^。！？\n]{1,24}?(?:中)?\s*(?:…|\.{2,})\s*$/,
+  /\b(?:i'?m\s+(?:now\s+)?|currently\s+|now\s+)?(?:search|research|investigat|look|gather|fetch|analy|work)[a-z]*\s*(?:into|on)?[^.!?\n]{0,24}(?:…|\.{2,})\s*$/i,
+  // Secondary (forward research / deep_explore-start commitment — bounded stopgap; the primary is the robust one).
+  /(?:我先|让我先|首先)[^。！？\n]{0,24}(?:调研|研究|搜索|检索|查阅|查证|收集|获取|了解|看看)/,
+  /(?:再|然后|接下来)[^。！？\n]{0,18}(?:启动|开始|进行)[^。！？\n]{0,16}(?:deep[_\s-]?explore|系统(?:性)?(?:分解|分析)|深入(?:分析|探索))/i,
+  /启动\s*deep[_\s-]?explore/i,
+  /\b(?:i'?ll|let me|i will|first[, ])[^.!?\n]{0,30}\b(?:research|investigate|look into|gather|start (?:a )?deep)\b/i,
+];
+
+export function findActionAnnouncement(text: string): string | null {
+  for (const re of ACTION_ANNOUNCEMENT_PATTERNS) {
+    const m = re.exec(text);
+    if (m) return m[0].trim().slice(0, 60);
+  }
+  return null;
+}
+
 export function evaluateHonesty(
   assistantText: string,
   opts: EvaluateOptions,
@@ -608,6 +647,37 @@ export function evaluateHonesty(
         : `You said "${runPromise}" but this turn issued no execution tool call. Announcing a run is not ` +
           `running — call the tool in your reply instead of stating intent and ending the turn.`,
     };
+  }
+
+  // ── say-do gap: announced_action_without_doing (verb-agnostic, gated) ─────
+  // The reply ENDS announcing an in-progress action ("正在调研中……") or commits to research / starting a
+  // deep_explore, yet the turn issued ZERO tool calls — so it stalls forever (turn end = yield). Distinct
+  // from run_promise_without_exec, whose verbs miss 调研/启动 deep_explore. "Did nothing" = no tool at all
+  // this turn (a research promise is kept by webSearch/deep_explore, which is not an EXECUTION tool, so we
+  // gate on records.length, not turnDidExecute). Repeat in-session escalates medium→high via the latch.
+  if (opts.detectAnnouncementStall && records.length === 0) {
+    const announced = findActionAnnouncement(assistantText);
+    if (announced) {
+      const repeat =
+        !!opts.session && (opts.session.unkeptRunPromise || opts.session.priorViolations >= 1);
+      return {
+        severity: repeat ? 'high' : 'medium',
+        reason: 'announced_action_without_doing',
+        matchedClaim: announced,
+        okCount: ok,
+        failCount: fail,
+        unknownCount: unknown,
+        evidence: repeat
+          ? `You again announced an action ("${announced}") but issued no tool call — a repeated say-do gap ` +
+            `this session. Do NOT trail off with a present-progressive "I'm researching…" / a "…" and stop: ` +
+            `in THIS reply call the tool now (webSearch / start deep_explore), or tell the user plainly you ` +
+            `are not doing it.`
+          : `You announced an action in progress ("${announced}") but this turn issued ZERO tool calls. ` +
+            `Ending the turn here yields control — the user is left on an in-progress "…" that never resolves. ` +
+            `Announcing is not doing: in THIS reply actually call the tool (webSearch / start deep_explore), ` +
+            `or say plainly you will not.`,
+      };
+    }
   }
 
   // 3 branches after the completion claim

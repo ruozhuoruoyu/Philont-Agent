@@ -272,6 +272,7 @@ export {
   classifyToolResult,
   findExecutionClaim,
   findRunPromise,
+  findActionAnnouncement,
   isExecutionTool,
   turnDidExecute,
 } from './honesty_gate.js';

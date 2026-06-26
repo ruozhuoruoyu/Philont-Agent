@@ -132,6 +132,7 @@ import {
   detectHalfFinishedTurn,
   findCompletionClaim,
   findRunPromise,
+  findActionAnnouncement,
   turnDidExecute,
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
@@ -6587,9 +6588,14 @@ async function runToolLoop(
         // Session-aware say-do-gap latch (PHILONT_HONESTY_SESSION=0 disables). Carries "promised a run but
         // didn't" / fabrication count across turns so a REPEATED unkept run-promise escalates to high.
         const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
+        // Verb-agnostic announce-then-yield stall (e.g. ends with "正在调研中……" / commits to start
+        // deep_explore, but issues 0 tools → permanent stall). Gated for dogfooding; default OFF.
+        const announceStallEnabled =
+          process.env.PHILONT_HONESTY_ANNOUNCE === '1' || process.env.PHILONT_HONESTY_ANNOUNCE === 'true';
         const honesty = evaluateHonesty(response.content, {
           toolResults: recentToolResults,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
+          detectAnnouncementStall: announceStallEnabled,
           session: honestySessionEnabled
             ? {
                 unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,
@@ -6597,11 +6603,15 @@ async function runToolLoop(
               }
             : undefined,
         });
-        // Fold this turn into the latch BEFORE acting on the verdict: a fresh "现在跑" with no execution
-        // tool arms it; an actual execution clears it; a fire bumps the violation counter.
+        // Fold this turn into the latch BEFORE acting on the verdict: a fresh "现在跑" / announced-but-
+        // did-nothing (0 tools) arms it; an actual execution clears it; a fire bumps the violation counter.
         if (honestySessionEnabled) {
+          const announcedStall =
+            announceStallEnabled &&
+            recentToolResults.length === 0 &&
+            !!findActionAnnouncement(response.content);
           honestySessionStore.update(sessionId, {
-            promisedRun: !!findRunPromise(response.content),
+            promisedRun: !!findRunPromise(response.content) || announcedStall,
             didExecute: turnDidExecute(recentToolResults),
             fired: !!honesty,
           });
@@ -6673,6 +6683,14 @@ async function runToolLoop(
               `  1. In THIS reply, call the shell / pariGp tool to actually run it — do not end the turn on "现在跑";\n` +
               `  2. If you cannot or will not run it, say so plainly — do not promise a run you will not perform;\n` +
               `  3. Never end a turn with "I'll run it now" and no tool call — that is the exact loop the user flagged.\n\n` +
+              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+          } else if (honesty.reason === 'announced_action_without_doing') {
+            reminder =
+              `[drive Honesty/say_do_gap] You announced "${honesty.matchedClaim}" but issued no tool call — ${honesty.evidence}\n\n` +
+              `**Announcing is not doing. Close the stall NOW (the turn is about to end = you yield and the in-progress "…" hangs forever):**\n` +
+              `  1. In THIS reply, actually take the action you announced — call webSearch / webFetch for research, or start deep_explore — do not end on a trailing "…";\n` +
+              `  2. If you genuinely cannot act now (missing input / not your call), say so plainly and ask the user — do not narrate progress you are not making;\n` +
+              `  3. Never end a turn with a present-progressive "I'm researching…" / a trailing "…" and zero tool calls — that is the exact stall the user flagged.\n\n` +
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
           } else if (honesty.severity === 'high') {
             reminder =
