@@ -17,6 +17,8 @@
  */
 
 import './load-env.js'; // must be first: loads dotenv override, overriding any shell/system residual env
+import { initFileLogging } from './file_logger.js';
+initFileLogging(); // tee console → ~/.philont/logs so headless-run evidence survives (PHILONT_FILE_LOG=0 to disable)
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { parseArgs } from 'node:util';

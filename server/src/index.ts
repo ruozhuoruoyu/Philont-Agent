@@ -44,6 +44,12 @@ import './proxy-bootstrap.js'; // second: install global outbound proxy before a
   }
 }
 
+// Tee console output to a daily-rotating file so tool-call evidence (web/compute success+failure,
+// deep_explore rounds, gate decisions) survives terminal scrollback — and gives honesty checks a
+// durable after-the-fact source. Best-effort, default ON (PHILONT_FILE_LOG=0 to disable).
+import { initFileLogging } from './file_logger.js';
+initFileLogging();
+
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { WebSocketServer } from 'ws';
 import {
