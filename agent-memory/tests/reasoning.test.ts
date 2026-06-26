@@ -145,6 +145,22 @@ test('owner scoping: pre-v28 NULL-owner session stays resumable by any channel (
   mem.close();
 });
 
+test('continue resolves to the most-recently-STARTED session, not a bumped-updated stale one (anti-ping-pong)', () => {
+  const mem = openMemoryDb(':memory:');
+  const owner = 'wechat:u:u';
+  const stale = mem.reasoning.createSession({ goal: 'GLM-910C vs H200', ownerSessionId: owner }).session;
+  const current = mem.reasoning.createSession({ goal: 'P vs NP', ownerSessionId: owner }).session;
+  // Simulate background work (autonomous tick / idle consolidator / a mis-resolved continue) bumping the
+  // OLDER session's updated_at far past the newer one's — the exact condition that made `continue` ping-pong.
+  mem.db
+    .prepare(`UPDATE reasoning_sessions SET updated_at = ? WHERE id = ?`)
+    .run(Date.now() + 1_000_000, stale.id);
+  // created_at is immutable → the resolver still pins to the session the user most recently started.
+  assert.equal(mem.reasoning.getMostRecentActiveSession(owner)!.id, current.id);
+  assert.equal(mem.reasoning.getMostRecentActiveSession()!.id, current.id, 'unscoped path too');
+  mem.close();
+});
+
 test('recordRoundProgress: 无进展累加 / 有进展清零(stuck 计数)', () => {
   const mem = openMemoryDb(':memory:');
   const { session } = mem.reasoning.createSession({ goal: 'G', ownerSessionId: 'u' });

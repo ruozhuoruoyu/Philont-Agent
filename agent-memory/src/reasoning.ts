@@ -264,12 +264,36 @@ export class ReasoningStore {
   }
 
   /**
-   * Most recent active session for `ownerSessionId` (default target for continue; avoids LLM
-   * hallucinating sessionId). Scoped to the owner so a continue on one channel never grabs another
-   * channel's reasoning. Omitting `ownerSessionId` falls back to the global most-recent (legacy).
+   * Default target for a bare `continue`/`status` (no id) — "the deep_explore the user is currently
+   * working on". Scoped to the owner so one channel never grabs another's reasoning.
+   *
+   * Ordered by **created_at DESC** (most recently STARTED), NOT updated_at: when a chat has more than
+   * one active session, an older one's updated_at gets bumped by background work (autonomous tick / idle
+   * consolidator / a mis-resolved continue), which made `continue` ping-pong onto a stale session (seen
+   * in prod: a P-vs-NP "继续" advanced a days-old GLM-910C session). created_at is immutable, so the
+   * resolver always pins to the session the user most recently chose to start = their current focus.
+   * Omitting `ownerSessionId` falls back to the global most-recently-started (legacy).
    */
   getMostRecentActiveSession(ownerSessionId?: string | null): ReasoningSession | null {
-    return this.listActiveSessions(ownerSessionId)[0] ?? null;
+    const row = (
+      ownerSessionId == null
+        ? this.db
+            .prepare(
+              `SELECT * FROM reasoning_sessions WHERE status = 'active'
+               ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+            )
+            .get()
+        : this.db
+            .prepare(
+              // Legacy NULL-owner sessions (pre-v28) stay resumable by any channel; every NEW session
+              // has a non-NULL owner and is strictly isolated (mirrors listActiveSessions).
+              `SELECT * FROM reasoning_sessions
+               WHERE status = 'active' AND (owner_session_id = ? OR owner_session_id IS NULL)
+               ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+            )
+            .get(ownerSessionId)
+    ) as SessionRow | undefined;
+    return row ? rowToSession(row) : null;
   }
 
   /**
