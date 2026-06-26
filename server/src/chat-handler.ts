@@ -5359,8 +5359,38 @@ async function handleChatSendInner(
     const response = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
 
     if (response.type === 'text') {
-      // Anti-fabrication: a no-tool first response that claims deep_explore round/session results
-      // is invented (no deep_explore ran). Replace with an honest message before it goes out.
+      // Forced-continue (mechanism, not prompt): the model recited deep_explore round results with ZERO
+      // deep_explore calls this turn (the "继续" recite-without-running stall). Rather than deflect to an
+      // honest "reply 继续" (which loops) or re-prompt (which the model ignores), GUARANTEE a real
+      // deep_explore(action=continue) runs now. Mirror the tool_use path exactly: push a synthetic
+      // assistant tool_use block (so the forthcoming tool_result has a matching tool_use — see the
+      // auth-resume note), then re-enter runToolLoop with that one call. #1's created_at resolution makes
+      // the forced continue target the session the user most recently started.
+      const deepExploreRanThisTurn = (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore');
+      if (
+        deepExploreForceAdvanceEnabled() &&
+        shouldForceDeepExploreAdvance(response.content, {
+          alreadyForced: !!signalBus.forcedDeepExploreContinue,
+          deepExploreRanThisTurn,
+          hasActiveSession: memory.reasoning.getMostRecentActiveSession(sessionId) != null,
+        })
+      ) {
+        signalBus.forcedDeepExploreContinue = true;
+        console.warn(
+          `[force-continue] session=${sessionId} model narrated deep_explore round results with 0 calls — forcing a real deep_explore(action=continue)`,
+        );
+        const forcedId = `forced-de-continue-${turnStartTs}`;
+        const forcedInput = { action: 'continue' };
+        messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: forcedId, name: 'deep_explore', input: forcedInput }] });
+        return await runToolLoop(
+          sessionId, messages, grants, audit,
+          [{ id: forcedId, name: 'deep_explore', input: forcedInput }],
+          [], 0,
+          onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
+        );
+      }
+      // Anti-fabrication backstop: when forcing is off / not possible (no active session), still replace
+      // a fabricated recite with an honest message before it goes out.
       const safeText = guardDeepExploreFabrication(response.content, signalBus);
       messages.push({ role: 'assistant', content: safeText });
       onDelta(safeText);
@@ -5627,6 +5657,8 @@ interface TurnSignalBus {
     toolResults: Array<{ toolName: string; content: string; toolInput?: Record<string, unknown> }>;
     assistantText: string;
   };
+  /** Set once when the forced-continue mechanism has injected a real deep_explore(continue) this turn (anti-reentry). */
+  forcedDeepExploreContinue?: boolean;
   /**
    * Total critical+high+normal count from InterruptDrainer.drain() this turn.
    * Updated by buildMemoryPrefix at drain time. ≥ 1 is treated as interruptDrained.
@@ -5720,6 +5752,33 @@ function guardDeepExploreFabrication(text: string, signalBus: TurnSignalBus): st
     '[fabrication-gate] blocked fabricated deep_explore progress (response claimed round/session results but no deep_explore call this turn)',
   );
   return DEEP_EXPLORE_FABRICATION_REPLY;
+}
+
+/**
+ * 2026-06-26: forced-continue mechanism (the structural fix the rewrite-only fabrication-gate could not
+ * give). When the model recites deep_explore round results without running a round (the "继续" stall),
+ * the gate above could only swap the text for an honest deflection — which loops ("继续 → 请回复继续 →
+ * 继续 …"). Prompt directives (COMMIT_TO_EXECUTION_DIRECTIVE) also kept failing. So instead of asking the
+ * model again, the harness GUARANTEES a real deep_explore(action=continue) runs this turn (see the call
+ * site). Default ON (env via web-ui); PHILONT_DEEP_EXPLORE_FORCE_CONTINUE=0/off/false/no disables.
+ */
+function deepExploreForceAdvanceEnabled(): boolean {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_FORCE_CONTINUE ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/**
+ * Pure decision for the forced-continue mechanism. Forcing is warranted only when the model's text
+ * narrates deep_explore round/session results (DEEP_EXPLORE_FABRICATION_RE) yet it did NOT call
+ * deep_explore this turn — the recite-without-running stall — AND forcing is safe: not already forced
+ * this turn, no deep_explore advanced this turn, and an active session exists to continue.
+ */
+export function shouldForceDeepExploreAdvance(
+  text: string,
+  ctx: { alreadyForced: boolean; deepExploreRanThisTurn: boolean; hasActiveSession: boolean },
+): boolean {
+  if (ctx.alreadyForced || ctx.deepExploreRanThisTurn || !ctx.hasActiveSession) return false;
+  return DEEP_EXPLORE_FABRICATION_RE.test(text);
 }
 
 async function runToolLoop(
