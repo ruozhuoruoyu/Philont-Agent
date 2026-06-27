@@ -449,6 +449,12 @@ const EXEC_ANTI_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:会|将|准备|打算|可以|需要|计划|尝试|试着|想要?|打算去|去)[^。！？\n]{0,4}(?:编译|构建|安装|部署|复现|跑通)/,
   /(?:没|未|还没|尚未|无法|不能|不曾|无须|不必)[^。！？\n]{0,12}(?:编译|构建|安装|跑通|测试|验证|复现)/,
   /\b(?:will|going to|about to|let me|i'?ll|gonna|plan to|need to|can|could|would|haven'?t|did\s*not|didn'?t|not\s+yet|try(?:ing)?\s+to)\b[^.!?\n]{0,14}\b(?:compil|build|install|test|reproduc)/i,
+  // Retraction / disclaimer of a PRIOR claim — the model coming clean ("我上轮承认 X 是虚构的", "earlier I
+  // falsely said I compiled it") must NOT re-trip the gate. Otherwise honesty is impossible: quoting the
+  // lie to retract it re-fires the gate → a forced regen → a confession loop that eats the real answer
+  // (observed on a WeChat research turn that produced only meta-confession, never the requested survey).
+  /(?:虚构|编造|谎称|杜撰|捏造|不实|假的|不是真的|并非真|没真|承认|纠正|更正|澄清|收回|上一?[轮条次]|之前(?:声称|说过|讲过|报告))/,
+  /\b(?:fabricat|made[- ]?up|falsely|was (?:false|untrue|not true|a lie)|earlier i (?:said|claimed)|i retract|to be clear[, ]+i did not|i never (?:actually )?(?:ran|built|compiled|tested))\b/i,
 ];
 
 export function findExecutionClaim(text: string): string | null {

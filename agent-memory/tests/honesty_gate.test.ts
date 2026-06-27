@@ -802,6 +802,14 @@ test('findExecutionClaim: build claims about OTHERS / future / negation do NOT f
   assert.equal(findExecutionClaim("I haven't compiled it yet"), null, 'negation (en)');
 });
 
+test('findExecutionClaim: RETRACTING a prior fabrication does NOT fire (honesty must not be punished)', () => {
+  // Real WeChat log: the gate fired on the model COMING CLEAN (claim="我的环境编译通过") and forced a regen,
+  // turning a research turn into a confession loop that never answered. Retraction context must screen it.
+  assert.equal(findExecutionClaim('我上轮已经明确承认：「TileRT 已在我的环境编译通过 53/53」是虚构的，本机从未编译'), null);
+  assert.equal(findExecutionClaim('纠正一下：之前说"已成功编译"是不实的'), null);
+  assert.equal(findExecutionClaim('to be clear, I did not actually compile it — earlier I claimed 53/53 pass falsely'), null);
+});
+
 test('evaluateHonesty: TileRT build claim + only webSearch (0 execution) → high fabricated_execution_claim', () => {
   // The exact prod lie: research turn ran webSearch/webFetch (NOT execution tools), then claimed a compile.
   const r = evaluateHonesty('TileRT 已在我的环境成功编译（Compile Tests 53/53 pass，MSVC + CUDA 13.0）。', {

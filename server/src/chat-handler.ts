@@ -5750,15 +5750,20 @@ export function buildTurnLedgerContract(records: InTurnToolRecord[]): string {
     : '\nNOTE: none of the tools above runs code / builds / installs / tests / computes — so THIS turn you ' +
       'have NOT compiled, run, tested, installed, reproduced, or computed anything.';
   return (
-    '[THIS-TURN EXECUTION LEDGER — read before you answer]\n' +
+    '[THIS-TURN EXECUTION LEDGER — internal guardrail, read before you answer]\n' +
     'The ONLY operations you actually performed this turn (ground truth — real tool calls + their results):\n' +
     renderTurnLedger(records) +
     execNote +
-    '\nCONTRACT: any claim that you RAN / BUILT / COMPILED / INSTALLED / TESTED / VERIFIED / REPRODUCED / ' +
-    'COMPUTED something — and ANY concrete result you attribute to it (a pass count like "53/53 pass", a ' +
-    'measured number, "succeeded", a toolchain or version) — MUST correspond to a real tool in the ledger ' +
-    'above. If it is not in the ledger, you did not do it: say so plainly. "I could not run / compile / ' +
-    'verify this here" is always an acceptable, non-penalized way to answer — fabricating a result is not.'
+    '\nCONTRACT 1/2 (do not fabricate): any claim that you RAN / BUILT / COMPILED / INSTALLED / TESTED / ' +
+    'VERIFIED / REPRODUCED / COMPUTED something — and ANY concrete result you attribute to it (a pass count ' +
+    'like "53/53 pass", a measured number, "succeeded", a toolchain or version) — MUST correspond to a real ' +
+    'tool in the ledger above. If it is not there, you did not do it: say so plainly when it is germane.\n' +
+    'CONTRACT 2/2 (but still ANSWER): this ledger is INTERNAL. Do NOT quote it, do NOT narrate "my research ' +
+    'is all from webSearch", and do NOT re-litigate earlier turns or pre-emptively protest your own honesty — ' +
+    'none of that answers the user. Lead with the question the user ACTUALLY asked, answered directly and ' +
+    'concretely; webSearch / webFetch findings in the ledger ARE solid evidence, so commit to a concrete ' +
+    'recommendation rather than deflecting with "should I try it?". Reserve "I could not run/compile/verify X ' +
+    'here" for when it is genuinely germane — it is a valid answer, not a pre-emptive disclaimer to open with.'
   );
 }
 

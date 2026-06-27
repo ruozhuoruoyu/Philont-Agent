@@ -45,6 +45,16 @@ test('buildTurnLedgerContract: research-only turn (webSearch/webFetch) → contr
   assert.match(out, /53\/53 pass/, 'names the exact fabrication shape as the thing to not invent');
 });
 
+test('buildTurnLedgerContract: contract tells the model to STILL answer (anti over-correction / no meta-talk)', () => {
+  // The over-correction regression: after being caught fabricating, the model spent its reply re-confessing
+  // and narrating "my research is all from webSearch" instead of answering. Contract 2/2 must redirect it.
+  const out = buildTurnLedgerContract([rec('webSearch')]);
+  assert.match(out, /still ANSWER/i, 'has the "but still answer" half');
+  assert.match(out, /Do NOT quote it/i, 'tells the model the ledger is internal, not to surface');
+  assert.match(out, /directly and\s+concretely/i, 'pushes a direct concrete answer');
+  assert.match(out, /not a pre-emptive disclaimer/i, 'do not open with a defensive disclaimer');
+});
+
 test('buildTurnLedgerContract: a real executor ran (shell) → contract WITHOUT the "did not run" note', () => {
   const out = buildTurnLedgerContract([rec('shell', true, '53 passed')]);
   assert.match(out, /CONTRACT/);
