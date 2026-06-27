@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 32;
+export const SCHEMA_VERSION = 33;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -168,7 +168,10 @@ CREATE TABLE IF NOT EXISTS memory_skills (
   kind             TEXT NOT NULL DEFAULT 'positive',
   -- v10: skill source tag. NULL = locally written / reflectively generated; 'clawhub:<slug>@<version>' = installed from ClawHub.
   -- Used to distinguish external skills in list/uninstall, and to append [clawhub] tag in system prompt index.
-  source           TEXT
+  source           TEXT,
+  -- v33 (H2): callable-recipe fields. NULL = advisory lesson (today's behavior); set = verified callable recipe.
+  verification     TEXT,   -- JSON RecipeVerification { kind, check }
+  tool_policy      TEXT    -- JSON string[] of allowed tool names
 );
 
 CREATE INDEX IF NOT EXISTS idx_skills_use_count ON memory_skills(use_count DESC);
@@ -1122,6 +1125,12 @@ function migrateV31ToV32(db: Database.Database): void {
   addColumnIfMissing(db, 'reasoning_nodes', 'settle_basis', 'TEXT');
 }
 
+/** v32 → v33 (H2): callable-recipe columns on memory_skills. Both nullable → existing skills stay advisory. */
+function migrateV32ToV33(db: Database.Database): void {
+  addColumnIfMissing(db, 'memory_skills', 'verification', 'TEXT');
+  addColumnIfMissing(db, 'memory_skills', 'tool_policy', 'TEXT');
+}
+
 function migrateV19ToV20(db: Database.Database): void {
   if (!tableExists(db, 'memory_plans')) return; // guard: fresh init already has the column
   const cols = db.prepare(`PRAGMA table_info(memory_plans)`).all() as Array<{
@@ -1363,6 +1372,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 32) {
     migrateV31ToV32(db);
+  }
+  if (current < 33) {
+    migrateV32ToV33(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

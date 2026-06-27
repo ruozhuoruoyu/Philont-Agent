@@ -36,7 +36,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 32);
+  assert.equal(SCHEMA_VERSION, 33);
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
   assert.ok(tableExists(db, 'reasoning_sessions'));
@@ -109,6 +109,10 @@ test('fresh DB: initSchema creates current schema with all new tables and column
 
   // memory_skills 反馈环列
   for (const col of ['success_count', 'failure_count', 'last_failure_at']) {
+    assert.ok(hasColumn(db, 'memory_skills', col), `memory_skills 缺列 ${col}`);
+  }
+  // v33 (H2): callable-recipe columns
+  for (const col of ['verification', 'tool_policy']) {
     assert.ok(hasColumn(db, 'memory_skills', col), `memory_skills 缺列 ${col}`);
   }
 
