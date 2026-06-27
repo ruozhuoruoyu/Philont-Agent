@@ -143,3 +143,50 @@ export async function classifyIntent(
   }
   return parseIntentDecision(raw);
 }
+
+// ── Wiring helpers (pure) ────────────────────────────────────────────────────────────────────────
+//
+// Per the confirmed behavior: SUGGEST by default, but go straight in when the user explicitly signaled
+// depth/commitment (深入/深度/系统/彻底…) or the classifier is highly confident. plan-route reuses the
+// existing slow→plan protocol; deep_explore-route injects a nudge into the system prefix.
+
+const DEPTH_SIGNAL_RE =
+  /深入|深度|系统(?:地|性)?|彻底|全面|仔细|认真|好好(?:地)?|详细|深挖|钻研|逐一|逐条|严谨|\bin[-\s]?depth\b|\bthorough|\bsystematic|\brigorous|\bdeep[-\s]?dive\b/i;
+
+/** Did the user explicitly ask for depth/thoroughness → start the engine directly instead of offering. */
+export function userSignaledDepth(msg: string): boolean {
+  return DEPTH_SIGNAL_RE.test(msg ?? '');
+}
+
+/** plan route with enough confidence → drive the existing slow→plan protocol (reuse, don't reinvent). */
+export function planRouteWantsSlow(dec: IntentDecision | null): boolean {
+  return !!dec && dec.route === 'plan' && dec.confidence >= 0.6;
+}
+
+/**
+ * The deep_explore nudge appended to the system prefix (messages[0]). START directly on explicit depth or
+ * high confidence; otherwise instruct the model to OFFER a one-line suggestion before answering flat.
+ * Returns '' for non-deep_explore routes (the caller skips).
+ */
+export function buildDeepExploreNudge(dec: IntentDecision | null, explicitDepth: boolean): string {
+  if (!dec || dec.route !== 'deep_explore') return '';
+  const mode = dec.domain ?? 'deliberate';
+  const goStraightIn = explicitDepth || dec.confidence >= 0.8;
+  if (goStraightIn) {
+    return (
+      '\n\n[intent-router] This turn is a deliberate reasoning task (deep_explore domain=' +
+      mode +
+      '). START a deep_explore session for it now (action=start, mode=' +
+      mode +
+      ') and work it through the engine — do NOT answer with a flat one-shot web-search dump. The engine ' +
+      'structures the reasoning, verifies, and persists so it can be continued.'
+    );
+  }
+  return (
+    '\n\n[intent-router] This turn looks like a deliberate reasoning task (deep_explore domain=' +
+    mode +
+    ') that the deep_explore engine would handle better — structured, verifiable, and persistent (so you ' +
+    'build on it instead of re-searching the same ground each turn). Before answering flat, briefly OFFER ' +
+    'the user ONE sentence: ask whether to run it as a deep_explore session. Do not over-explain the offer.'
+  );
+}

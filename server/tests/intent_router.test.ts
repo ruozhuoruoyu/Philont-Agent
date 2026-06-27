@@ -10,6 +10,10 @@ import {
   buildIntentPrompt,
   parseIntentDecision,
   classifyIntent,
+  userSignaledDepth,
+  planRouteWantsSlow,
+  buildDeepExploreNudge,
+  type IntentDecision,
 } from '../src/intent_router.js';
 
 test('intentRouterEnabled: default ON, =0/off disables', () => {
@@ -117,4 +121,44 @@ test('classifyIntent: aux call throws → null (degrade to today behavior, never
     call: async () => { throw new Error('aux down'); },
   });
   assert.equal(dec, null);
+});
+
+const dExplore = (over: Partial<IntentDecision> = {}): IntentDecision => ({ route: 'deep_explore', domain: 'deliberate', confidence: 0.6, reason: 'r', ...over });
+
+test('userSignaledDepth: explicit depth/commitment words → true', () => {
+  for (const t of ['深度调研哪个适合', '深入分析一下', '系统地梳理', '彻底搞清楚', 'do a thorough investigation', 'deep dive into this']) {
+    assert.equal(userSignaledDepth(t), true, t);
+  }
+  for (const t of ['调研有没有类似方案', '今天天气如何', 'what is X']) {
+    assert.equal(userSignaledDepth(t), false, t);
+  }
+});
+
+test('planRouteWantsSlow: plan route ≥0.6 → reuse slow protocol; below / other routes → no', () => {
+  assert.equal(planRouteWantsSlow({ route: 'plan', confidence: 0.7, reason: 'r' }), true);
+  assert.equal(planRouteWantsSlow({ route: 'plan', confidence: 0.4, reason: 'r' }), false);
+  assert.equal(planRouteWantsSlow(dExplore({ confidence: 0.99 })), false, 'deep_explore is not plan');
+  assert.equal(planRouteWantsSlow(null), false);
+});
+
+test('buildDeepExploreNudge: SUGGEST when ambiguous, START when explicit-depth or high-confidence', () => {
+  // ambiguous (no depth word, mid confidence) → offer
+  const offer = buildDeepExploreNudge(dExplore({ confidence: 0.6 }), false);
+  assert.match(offer, /OFFER the user ONE sentence/i);
+  assert.doesNotMatch(offer, /START a deep_explore session/);
+
+  // explicit depth → start directly
+  const startByDepth = buildDeepExploreNudge(dExplore({ confidence: 0.6 }), true);
+  assert.match(startByDepth, /START a deep_explore session/);
+
+  // high confidence → start directly even without an explicit depth word
+  const startByConf = buildDeepExploreNudge(dExplore({ confidence: 0.85 }), false);
+  assert.match(startByConf, /START a deep_explore session/);
+
+  // carries the domain through to mode=
+  assert.match(buildDeepExploreNudge(dExplore({ domain: 'formal', confidence: 0.9 }), false), /mode=formal/);
+
+  // non-deep_explore → empty (caller skips)
+  assert.equal(buildDeepExploreNudge({ route: 'plan', confidence: 0.9, reason: 'r' }, true), '');
+  assert.equal(buildDeepExploreNudge(null, true), '');
 });

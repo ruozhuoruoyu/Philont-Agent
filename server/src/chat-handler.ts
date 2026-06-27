@@ -161,6 +161,13 @@ import {
   autoClassify as autoClassifyTaskMode,
   quickSignatureHash as quickTaskSignatureHash,
 } from './task_mode_classifier.js';
+import {
+  classifyIntent,
+  planRouteWantsSlow,
+  buildDeepExploreNudge,
+  userSignaledDepth,
+  type IntentDecision,
+} from './intent_router.js';
 import { replyWithMediaTool } from './tools/reply_with_media.js';
 import { setConscienceLlm } from './conscience_gate.js';
 import { createAutoAdvanceLoop } from './deep_explore_autoadvance.js';
@@ -4275,6 +4282,9 @@ export async function handleChatSend(
   //   - PHILONT_AUTO_TASK_MODE=0: disabled by env
   //
   // Misclassify fast→slow = soft cost (turn runs longer); misclassify slow→fast = impossible (one-directional).
+  // intentDecision (aux-LLM 3-way router) is computed in the same gate and survives to the messages[0]
+  // injection below, where a deep_explore route adds its nudge. plan route reuses this slow→plan path.
+  let intentDecision: IntentDecision | null = null;
   if (
     process.env.PHILONT_AUTO_TASK_MODE !== '0' &&
     !pending &&
@@ -4288,11 +4298,21 @@ export async function handleChatSend(
       taskSignatureCandidate: sig,
       plans: memory.plans,
     });
-    if (cls.isSlow) {
+    // Aux-LLM 3-way router: returns null when disabled / unconfigured / trivial / aux fails → behavior is
+    // exactly today's. plan with enough confidence joins the existing slow→plan path; deep_explore is
+    // applied as a system-prefix nudge once messages[0] exists.
+    intentDecision = await classifyIntent(userMessage);
+    signalBus.intentDecision = intentDecision; // carried to handleChatSendInner for the deep_explore nudge
+    if (intentDecision) {
+      console.log(`[intent-router] session=${sessionId} route=${intentDecision.route}${intentDecision.domain ? `:${intentDecision.domain}` : ''} conf=${intentDecision.confidence}`);
+    }
+    if (cls.isSlow || planRouteWantsSlow(intentDecision)) {
       taskModeStore.set(
         sessionId,
         'slow',
-        `auto:heuristic:${cls.reasons.join(',')}`,
+        cls.isSlow
+          ? `auto:heuristic:${cls.reasons.join(',')}`
+          : `auto:intent:plan:${intentDecision?.confidence ?? ''}`,
       );
       audit.append('self_domain_write', {
         source: 'auto_task_mode',
@@ -5369,6 +5389,26 @@ async function handleChatSendInner(
     );
   }
 
+  // Intent router: a deep_explore-routed turn gets a system-prefix nudge (START directly on explicit depth /
+  // high confidence, else OFFER one line). Skipped when a reasoning session is already active for this owner
+  // — the model continues that one, so we don't spawn duplicate sessions (the clutter fixed earlier).
+  const intentDecision = signalBus.intentDecision ?? null;
+  if (messages[0] && intentDecision?.route === 'deep_explore') {
+    let hasActiveExplore = false;
+    try {
+      hasActiveExplore = memory.reasoning.listActiveSessions().some((s) => s.ownerSessionId === sessionId);
+    } catch {
+      /* reasoning store query failed — fall through and let the nudge fire */
+    }
+    if (!hasActiveExplore) {
+      const nudge = buildDeepExploreNudge(intentDecision, userSignaledDepth(userMessage));
+      if (nudge) {
+        messages[0] = { ...messages[0], content: messages[0].content + nudge };
+        console.log(`[intent-router] session=${sessionId} injected deep_explore nudge (mode=${intentDecision.domain ?? 'deliberate'})`);
+      }
+    }
+  }
+
   messages.push({ role: 'user', content: userMessage });
 
   // v7: drive runtime evaluation — let intrinsic-drives score and inject before user message is queued and LLM is called.
@@ -5788,6 +5828,8 @@ interface TurnSignalBus {
     toolResults: Array<{ toolName: string; content: string; toolInput?: Record<string, unknown> }>;
     assistantText: string;
   };
+  /** Aux-LLM intent route for this turn (computed in handleChatSend, read in handleChatSendInner for the deep_explore nudge). */
+  intentDecision?: IntentDecision | null;
   /** Set once when the forced-continue mechanism has injected a real deep_explore(continue) this turn (anti-reentry). */
   forcedDeepExploreContinue?: boolean;
   /**
