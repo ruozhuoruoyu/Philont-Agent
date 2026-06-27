@@ -15,17 +15,33 @@
  */
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 import type { ToolResult } from '@agent/policy';
+import { scoreTrajectory, DEFAULT_LOOP_CONTRACT, type TickOutcome } from './goal_loop.js';
 
-/** Stop auto-advancing a session after this many consecutive no-progress rounds (then escalate). */
-const STUCK_STOP = (() => {
-  const n = Number(process.env.PHILONT_DEEP_EXPLORE_AUTO_STUCK_STOP);
-  return Number.isInteger(n) && n >= 1 ? n : 3;
+/**
+ * Per-loop ROUNDS budget (S2 consent model): pause + ask after this many advanced rounds — a cost
+ * checkpoint, NOT a silent kill (the user re-commits to add another batch). The real $ ceiling is the
+ * per-session token budget (PHILONT_DEEP_EXPLORE_TOKEN_BUDGET, default 300k, enforced via budget_spent).
+ */
+const MAX_ROUNDS = (() => {
+  const n = Number(process.env.PHILONT_GOAL_LOOP_MAX_ROUNDS);
+  return Number.isInteger(n) && n >= 1 ? n : 20;
 })();
 
-/** Global gate. Off by default → the loop never arms → zero behaviour change. */
+/** Stuck threshold (consecutive no-progress rounds → escalate). Overrides scoreTrajectory's stuckAfter. */
+const STUCK_STOP = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_AUTO_STUCK_STOP);
+  return Number.isInteger(n) && n >= 1 ? n : DEFAULT_LOOP_CONTRACT.stuckAfter;
+})();
+
+/**
+ * Global gate. DEFAULT ON: the real gate is the per-session commit (auto_advance=1 via deep_explore
+ * auto_on) — listAutoAdvanceSessions only returns committed sessions, so nothing runs until the user (or
+ * an approved drive) commits a session. PHILONT_DEEP_EXPLORE_AUTO_ADVANCE=0/off/false/no disables the
+ * whole driver.
+ */
 export function autoAdvanceEnabled(): boolean {
   const v = (process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE ?? '').trim().toLowerCase();
-  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
 export interface AutoAdvanceDeps {
@@ -52,6 +68,10 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   let running = false;
+  /** Rounds this driver has advanced per session (in-memory budget counter; resets on restart). */
+  const roundsAdvanced = new Map<string, number>();
+  /** S3 contract — DEFAULT_LOOP_CONTRACT with stuckAfter overridden by the env STUCK_STOP. */
+  const contract = { ...DEFAULT_LOOP_CONTRACT, stuckAfter: STUCK_STOP };
 
   async function tickOnce(): Promise<void> {
     if (stopped || running) return;
@@ -62,18 +82,38 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
       for (const s of sessions) {
         if (stopped) break;
 
-        // Stop condition: stuck too long → pause auto-advance and escalate to the user.
-        if (s.noProgressRounds >= STUCK_STOP) {
+        // 1. Per-loop ROUNDS budget — pause + ask (cost checkpoint, not a silent kill).
+        const rounds = roundsAdvanced.get(s.id) ?? 0;
+        if (rounds >= MAX_ROUNDS) {
           deps.reasoning.setAutoAdvance(s.id, false);
+          roundsAdvanced.delete(s.id);
           deps.notify(
-            `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 连续 ${s.noProgressRounds} 轮无进展(卡住)。` +
-              `回复"继续"手动推进,或换个角度重启。`,
+            `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 跑满 ${MAX_ROUNDS} 轮预算。回复"自动推进"再加一批,或"停"。`,
             { important: true },
           );
           continue;
         }
 
-        // Advance one round in a background context (system: → longer cap, no user waiting).
+        // 2. Direction (S3): decide BEFORE spending another round. The session's noProgressRounds IS the
+        //    trailing flat-tick run → scoreTrajectory turns it into continue / switch_engine / escalate.
+        const flatHist: TickOutcome[] = Array.from({ length: s.noProgressRounds }, () => ({
+          progress: 0,
+          bodyKind: 'deep_explore' as const,
+        }));
+        const decision = scoreTrajectory(flatHist, contract).decision;
+        if (decision === 'escalate' || decision === 'switch_engine') {
+          deps.reasoning.setAutoAdvance(s.id, false);
+          roundsAdvanced.delete(s.id);
+          deps.notify(
+            decision === 'switch_engine'
+              ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 这条路连续 ${s.noProgressRounds} 轮没产出——换个角度/模式可能更有效。回复"继续"原路推进、或换个角度、或"停"。`
+              : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 连续 ${s.noProgressRounds} 轮无进展(卡住)。回复"继续"手动推进,或换个角度重启。`,
+            { important: true },
+          );
+          continue;
+        }
+
+        // 3. Advance one round in a background context (system: → longer cap, no user waiting).
         let out: ToolResult | null = null;
         try {
           out = await deps.runInContext(`system:auto-advance:${s.id}`, () => deps.advanceSession(s));
@@ -87,15 +127,19 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
         if (!fresh || fresh.status !== 'active') {
           // Solved / closed → stop and report.
           deps.reasoning.setAutoAdvance(s.id, false);
+          roundsAdvanced.delete(s.id);
           deps.notify(
             `✅ 自动推进结束:"${s.goal.slice(0, 50)}" 状态=${fresh?.status ?? 'closed'}。\n${(out?.output ?? '').slice(0, 600)}`,
             { important: true },
           );
-        } else if (fresh.noProgressRounds === 0) {
-          // The counter reset → this round made progress → milestone (web-ui live; not pushed every round).
-          deps.notify(`🔬 自动推进:"${s.goal.slice(0, 40)}"\n${(out?.output ?? '').slice(0, 600)}`);
+        } else {
+          roundsAdvanced.set(s.id, rounds + 1);
+          if (fresh.noProgressRounds === 0) {
+            // The counter reset → this round made progress → milestone (not pushed every round).
+            deps.notify(`🔬 自动推进:"${s.goal.slice(0, 40)}"\n${(out?.output ?? '').slice(0, 600)}`);
+          }
+          // else: no progress this round but not yet stuck → stay quiet (avoid spam).
         }
-        // else: no progress this round but not yet at the stuck-stop → stay quiet (avoid spam).
       }
     } catch (e) {
       console.warn('[auto-advance] tick error', e);
@@ -111,18 +155,22 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
     timer = setTimeout(() => {
       void tickOnce().finally(scheduleNext);
     }, intervalMs);
+    timer.unref?.(); // default-on now → don't let this background timer keep the process alive
   }
 
   return {
     start: () => {
       if (stopped) return;
       if (!autoAdvanceEnabled()) {
-        console.log('[auto-advance] disabled (set PHILONT_DEEP_EXPLORE_AUTO_ADVANCE=on to enable opt-in background rounds)');
+        console.log('[auto-advance] disabled (PHILONT_DEEP_EXPLORE_AUTO_ADVANCE=0)');
         return;
       }
       if (timer) return;
       scheduleNext();
-      console.log(`[auto-advance] armed (opt-in per session via deep_explore auto_on; tick=${intervalMs}ms, stuck-stop=${STUCK_STOP})`);
+      console.log(
+        `[auto-advance] armed, default-on (runs only sessions committed via deep_explore auto_on; ` +
+          `tick=${intervalMs}ms, rounds-budget=${MAX_ROUNDS}, stuck-stop=${STUCK_STOP})`,
+      );
     },
     stop: () => {
       stopped = true;

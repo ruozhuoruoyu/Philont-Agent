@@ -1,11 +1,15 @@
 /**
- * Auto-advance loop decision logic (Part 2). The round runner / push / ALS are mocked — this verifies
- * the loop's branching: gate off → no-op; stuck → pause + escalate; progress → milestone; solved → stop.
+ * Auto-advance loop (the deep_explore-body goal-loop driver, S2 P1). Round runner / push / ALS are mocked
+ * — this verifies the branching: gate off → no-op; default ON; scoreTrajectory direction (switch_engine /
+ * escalate); progress → milestone; solved → stop; rounds budget → pause + ask.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createAutoAdvanceLoop, autoAdvanceEnabled } from '../src/deep_explore_autoadvance.js';
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
+
+// MAX_ROUNDS is captured at module load → set a small budget BEFORE importing, so the budget-cap test is fast.
+process.env.PHILONT_GOAL_LOOP_MAX_ROUNDS = '2';
+const { createAutoAdvanceLoop, autoAdvanceEnabled } = await import('../src/deep_explore_autoadvance.js');
 
 function sess(over: Partial<ReasoningSession>): ReasoningSession {
   return {
@@ -27,9 +31,21 @@ function fakeStore(opts: { active: ReasoningSession[]; afterRound?: (id: string)
 
 const passthroughCtx = async <T>(_sid: string, fn: () => Promise<T>): Promise<T> => fn();
 
-test('auto-advance: 开关关 → 不推进', async () => {
-  delete process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE;
-  assert.equal(autoAdvanceEnabled(), false);
+test('auto-advance: 默认 ON; =0 才关', () => {
+  const prev = process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE;
+  try {
+    delete process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE;
+    assert.equal(autoAdvanceEnabled(), true, '默认 ON (per-session commit is the real gate)');
+    process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = '0';
+    assert.equal(autoAdvanceEnabled(), false, '=0 关');
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE;
+    else process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = prev;
+  }
+});
+
+test('auto-advance: 关闭(=0)→ 不推进', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = '0';
   let advanced = 0;
   const { store } = fakeStore({ active: [sess({ id: 'a' })] });
   const loop = createAutoAdvanceLoop({
@@ -40,6 +56,24 @@ test('auto-advance: 开关关 → 不推进', async () => {
   });
   await loop.tickOnce();
   assert.equal(advanced, 0);
+});
+
+test('auto-advance: 2 轮无进展(switchAfter)→ 暂停 + 建议换角度,不推进', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  let advanced = 0;
+  const notes: Array<{ text: string; important?: boolean }> = [];
+  const { store, calls } = fakeStore({ active: [sess({ id: 'a', noProgressRounds: 2 })] });
+  const loop = createAutoAdvanceLoop({
+    reasoning: store,
+    advanceSession: async () => { advanced++; return { success: true, output: '' }; },
+    runInContext: passthroughCtx,
+    notify: (text, opts) => notes.push({ text, important: opts?.important }),
+  });
+  await loop.tickOnce();
+  assert.equal(advanced, 0, 'switch_engine pauses before advancing');
+  assert.deepEqual(calls.setAutoAdvance, [['a', false]]);
+  assert.match(notes[0].text, /换/);
+  assert.equal(notes[0].important, true);
 });
 
 test('auto-advance: 卡住(noProgressRounds≥3)→ 暂停 + important 升级,不推进', async () => {
@@ -78,6 +112,28 @@ test('auto-advance: 有进展(counter 归零)→ 推进 + 里程碑(非 importan
   assert.equal(advanced, 1);
   assert.equal(notes.length, 1);
   assert.equal(notes[0].important, undefined);
+});
+
+test('auto-advance: rounds budget → 跑满 N 轮暂停 + 问加批', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  let advanced = 0;
+  const notes: Array<{ text: string; important?: boolean }> = [];
+  const { store, calls } = fakeStore({
+    active: [sess({ id: 'a', noProgressRounds: 0 })],
+    afterRound: (id) => sess({ id, status: 'active', noProgressRounds: 0 }), // always progress → never stuck
+  });
+  const loop = createAutoAdvanceLoop({
+    reasoning: store,
+    advanceSession: async () => { advanced++; return { success: true, output: 'progress' }; },
+    runInContext: passthroughCtx,
+    notify: (text, opts) => notes.push({ text, important: opts?.important }),
+  });
+  await loop.tickOnce(); // advance 1
+  await loop.tickOnce(); // advance 2 (= MAX_ROUNDS)
+  await loop.tickOnce(); // budget hit → pause, no 3rd advance
+  assert.equal(advanced, 2, 'advanced exactly the budget (MAX_ROUNDS=2)');
+  assert.deepEqual(calls.setAutoAdvance, [['a', false]]);
+  assert.match(notes[notes.length - 1].text, /预算/);
 });
 
 test('auto-advance: 解出/闭合 → 停止 + important 通知', async () => {
