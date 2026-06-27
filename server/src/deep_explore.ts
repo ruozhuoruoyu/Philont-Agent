@@ -61,6 +61,7 @@
 import type { Tool, ToolDefinition, ToolResult } from '@agent/policy';
 import {
   runMiniAgentLoop,
+  runParallelSubAgents,
   matchBarriers,
   mentionsCircumvention,
   renderBarrierAdvisory,
@@ -392,6 +393,57 @@ export function parseLiteratureCards(text: string, max = LIT_GROUNDING_MAX_CARDS
     const source = typeof rec?.source === 'string' ? rec.source.trim() : '';
     out.push({ claim: claim.slice(0, 280), type: normalizeLiteratureType(rec?.type), source: source.slice(0, 160) });
     if (out.length >= max) break;
+  }
+  return out;
+}
+
+// ── H1 — parallel sub-agent research grounding ────────────────────────────────────────────────────
+//
+// Default grounding is ONE mini-agent pass. When PHILONT_SUBAGENT_RESEARCH is on, the grounding fans out
+// into N isolated sub-agents (runParallelSubAgents), each searching a DISTINCT angle, then the cards are
+// merged + deduped. Each child has its own context (never sees a sibling's transcript), so the angles
+// stay genuinely independent. Costs ~fanout× the grounding LLM, so the fan-out is small and capped.
+
+export function subAgentResearchEnabled(): boolean {
+  const v = (process.env.PHILONT_SUBAGENT_RESEARCH ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+export function subAgentResearchFanout(): number {
+  const n = Number(process.env.PHILONT_SUBAGENT_RESEARCH_FANOUT);
+  if (!Number.isInteger(n)) return 3;
+  return Math.max(2, Math.min(4, n)); // 2..4 — enough angles for breadth without blowing up cost
+}
+
+/** Distinct research angles per domain — each becomes one isolated sub-agent's focus. */
+export function buildGroundingAngles(mode: ReasoningSessionMode, fanout: number): string[] {
+  const formal = [
+    'established results and current SOTA on this exact problem',
+    'known barriers / impossibility / no-go results that constrain it',
+    'promising techniques and partial progress to build on',
+    'adjacent fields or analogous problems whose methods might transfer',
+  ];
+  const deliberate = [
+    'key factors, hard data, and established findings that bear on the decision',
+    'tradeoffs, costs, and the main alternative options',
+    'risks, pitfalls, and documented failure modes',
+    'recent developments that change the picture',
+  ];
+  return (mode === 'deliberate' ? deliberate : formal).slice(0, Math.max(2, Math.min(4, fanout)));
+}
+
+/** Merge cards from parallel passes, deduping by normalized claim (keep first), capped to `max`. */
+export function mergeLiteratureCards(lists: ReadonlyArray<LiteratureCard[]>, max: number): LiteratureCard[] {
+  const seen = new Set<string>();
+  const out: LiteratureCard[] = [];
+  for (const list of lists) {
+    for (const c of list) {
+      const key = c.claim.toLowerCase().replace(/\s+/g, ' ').trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+      if (out.length >= max) return out;
+    }
   }
   return out;
 }
@@ -2330,6 +2382,53 @@ export function createDeepExploreTool(
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), LIT_GROUNDING_TIMEOUT_MS);
     let cards: LiteratureCard[] = [];
+
+    // H1: fan the grounding out into parallel isolated sub-agents, each on a distinct angle, then merge.
+    if (subAgentResearchEnabled()) {
+      try {
+        const angles = buildGroundingAngles(session.mode, subAgentResearchFanout());
+        const baseBudget = `\n\nBUDGET: at most ${LIT_GROUNDING_MAX_ITERS} tool round-trips. Search in the first 1-2 rounds, ` +
+          `read selectively, and OUTPUT THE JSON ARRAY by round ${Math.max(2, LIT_GROUNDING_MAX_ITERS - 1)}.`;
+        const tasks = angles.map((angle, i) => ({
+          id: `ground-${i}`,
+          systemPrompt:
+            profile.buildGroundingPrompt(session.goal, session.assumptions) +
+            `\n\nThis pass FOCUSES specifically on: ${angle}. Cover that angle well; let sibling passes cover the rest.` +
+            baseBudget,
+          userMessage: 'Run the grounding search for the goal/question above and output ONLY the JSON array of cards.',
+          toolWhitelist: WEB_TOOL_NAMES,
+          maxIters: LIT_GROUNDING_MAX_ITERS,
+        }));
+        const results = await runParallelSubAgents(tasks, {
+          llm: miniLoopLLM,
+          toolDefs: webDefs,
+          toolRunner: subTurnToolRunner,
+          concurrency: Math.min(3, tasks.length),
+          budgetTokens: SESSION_TOKEN_BUDGET, // a child that would start over the session budget is skipped
+          abortSignal: ctrl.signal,
+        });
+        let spent = 0;
+        const perAngleCards: LiteratureCard[][] = [];
+        for (const r of results) {
+          spent += r.tokensSpent;
+          if (r.status === 'success') perAngleCards.push(parseLiteratureCards(r.finalText, LIT_GROUNDING_MAX_CARDS));
+        }
+        reasoning.addBudgetSpent(session.id, spent);
+        cards = mergeLiteratureCards(perAngleCards, LIT_GROUNDING_MAX_CARDS);
+        const ok = results.filter((r) => r.status === 'success').length;
+        console.log(`[deep-explore] parallel grounding: ${ok}/${tasks.length} angles ok → ${cards.length} cards (${spent} tok)`);
+      } catch (e) {
+        console.warn(`[deep-explore] parallel grounding failed, falling back to single pass: ${String(e).slice(0, 160)}`);
+      }
+      // Only fall through to the single pass if parallel produced nothing AND we weren't aborted/timed out.
+      // (Don't clear the timer here — the single-pass fallback below still needs it.)
+      if (cards.length || ctrl.signal.aborted) {
+        clearTimeout(timer);
+        if (cards.length) sessionLiterature.set(session.id, cards);
+        return cards;
+      }
+    }
+
     try {
       const result = await runMiniAgentLoop({
         systemPrompt:

@@ -69,6 +69,9 @@ export type { AuxLLMRequest, AuxLLMCaller } from './utils/aux-llm.js';
 
 // mini-agent-loop: sub-turn kernel (used by planAndExecute and other composite tools)
 export { runMiniAgentLoop } from './utils/mini-agent-loop.js';
+// H1 — parallel isolated-context sub-agent orchestration (wired into deep_explore grounding at P1)
+export { runParallelSubAgents, aggregateSubAgentResults } from './control/parallelSubAgents.js';
+export type { SubTask as ParallelSubTask, SubAgentResult, ParallelSubAgentOptions } from './control/parallelSubAgents.js';
 export { HOST_IS_WINDOWS, hostShellLabel, hostEnvPromptLine } from './utils/host.js';
 export type {
   MiniLoopMessage,
