@@ -13,6 +13,10 @@ import {
   userSignaledDepth,
   planRouteWantsSlow,
   buildDeepExploreNudge,
+  deepExploreForceStartEnabled,
+  shouldForceDeepExploreStart,
+  buildForceStartInput,
+  messageIsSelfContainedGoal,
   type IntentDecision,
 } from '../src/intent_router.js';
 
@@ -164,4 +168,60 @@ test('buildDeepExploreNudge: SUGGEST when ambiguous, START when explicit-depth o
   // non-deep_explore → empty (caller skips)
   assert.equal(buildDeepExploreNudge({ route: 'plan', confidence: 0.9, reason: 'r' }, true), '');
   assert.equal(buildDeepExploreNudge(null, true), '');
+});
+
+test('deepExploreForceStartEnabled: default ON, =0 disables', () => {
+  const prev = process.env.PHILONT_DEEP_EXPLORE_FORCE_START;
+  try {
+    delete process.env.PHILONT_DEEP_EXPLORE_FORCE_START;
+    assert.equal(deepExploreForceStartEnabled(), true);
+    process.env.PHILONT_DEEP_EXPLORE_FORCE_START = '0';
+    assert.equal(deepExploreForceStartEnabled(), false);
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_FORCE_START;
+    else process.env.PHILONT_DEEP_EXPLORE_FORCE_START = prev;
+  }
+});
+
+test('shouldForceDeepExploreStart: fires only on deep_explore + explicit depth + no session + model skipped it', () => {
+  const base = {
+    decision: dExplore({ confidence: 0.9 }),
+    explicitDepth: true,
+    goalSubstantial: true,
+    alreadyForcedStart: false,
+    alreadyForcedContinue: false,
+    deepExploreRanThisTurn: false,
+    hasActiveSession: false,
+  };
+  assert.equal(shouldForceDeepExploreStart(base), true, 'the canonical case');
+  assert.equal(shouldForceDeepExploreStart({ ...base, explicitDepth: false }), false, 'no explicit depth → only soft OFFER, never force');
+  assert.equal(shouldForceDeepExploreStart({ ...base, goalSubstantial: false }), false, 'short context-dependent msg (重做) → no goal to start from');
+  assert.equal(shouldForceDeepExploreStart({ ...base, deepExploreRanThisTurn: true }), false, 'model already used the engine');
+  assert.equal(shouldForceDeepExploreStart({ ...base, hasActiveSession: true }), false, 'a session exists → continue path handles it');
+  assert.equal(shouldForceDeepExploreStart({ ...base, alreadyForcedStart: true }), false, 'anti-reentry');
+  assert.equal(shouldForceDeepExploreStart({ ...base, alreadyForcedContinue: true }), false, 'do not double-force in one turn');
+  assert.equal(shouldForceDeepExploreStart({ ...base, decision: { route: 'plan', confidence: 0.9, reason: 'r' } }), false, 'plan route → never force a deep_explore start');
+  assert.equal(shouldForceDeepExploreStart({ ...base, decision: null }), false);
+});
+
+test('buildForceStartInput: goal from message; mode only for formal/deliberate (discover omitted)', () => {
+  const a = buildForceStartInput(dExplore({ domain: 'deliberate' }), '深度调研 GLM5.2 在 910C 上的推理栈');
+  assert.deepEqual(a, { action: 'start', goal: '深度调研 GLM5.2 在 910C 上的推理栈', mode: 'deliberate' });
+
+  const f = buildForceStartInput(dExplore({ domain: 'formal' }), '证明 X');
+  assert.equal(f.mode, 'formal');
+
+  // discover is an ACTION not a mode → omit mode (engine auto-detects from goal)
+  const d = buildForceStartInput(dExplore({ domain: 'discover' }), '探索新角度');
+  assert.equal(d.mode, undefined);
+  assert.equal(d.action, 'start');
+
+  // goal is trimmed
+  assert.equal(buildForceStartInput(dExplore(), '  hi there  ').goal, 'hi there');
+});
+
+test('messageIsSelfContainedGoal: long enough to stand alone vs short context-dependent', () => {
+  assert.equal(messageIsSelfContainedGoal('深度探索基于昇腾910C集群的GLM5.2推理方案'), true);
+  assert.equal(messageIsSelfContainedGoal('调研深度不够，重做'), false, 'references prior topic, not a goal');
+  assert.equal(messageIsSelfContainedGoal('深入点'), false);
 });

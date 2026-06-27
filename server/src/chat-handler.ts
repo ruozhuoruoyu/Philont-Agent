@@ -166,6 +166,10 @@ import {
   planRouteWantsSlow,
   buildDeepExploreNudge,
   userSignaledDepth,
+  deepExploreForceStartEnabled,
+  shouldForceDeepExploreStart,
+  buildForceStartInput,
+  messageIsSelfContainedGoal,
   type IntentDecision,
 } from './intent_router.js';
 import { replyWithMediaTool } from './tools/reply_with_media.js';
@@ -5401,18 +5405,8 @@ async function handleChatSendInner(
   if (messages[0] && intentDecision?.route === 'deep_explore') {
     // Suppress the nudge only when a session is RECENTLY active (the user is mid-exploration now), NOT when
     // any session merely exists — the user accumulates stale never-closed sessions, and a blanket "any
-    // active" guard suppressed every nudge (the feature looked dead). 20-min recency window via updatedAt.
-    let midExploration = false;
-    try {
-      const RECENT_MS = 20 * 60 * 1000;
-      const now = Date.now();
-      midExploration = memory.reasoning
-        .listActiveSessions()
-        .some((s) => s.ownerSessionId === sessionId && now - s.updatedAt < RECENT_MS);
-    } catch {
-      /* reasoning store query failed — fall through and let the nudge fire */
-    }
-    if (!midExploration) {
+    // active" guard suppressed every nudge (the feature looked dead). Same recency guard as force-start.
+    if (!hasRecentlyActiveExploreSession(sessionId)) {
       const nudge = buildDeepExploreNudge(intentDecision, userSignaledDepth(userMessage));
       if (nudge) {
         messages[0] = { ...messages[0], content: messages[0].content + nudge };
@@ -5500,6 +5494,38 @@ async function handleChatSendInner(
         );
         const forcedId = `forced-de-continue-${turnStartTs}`;
         const forcedInput = { action: 'continue' };
+        messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: forcedId, name: 'deep_explore', input: forcedInput }] });
+        return await runToolLoop(
+          sessionId, messages, grants, audit,
+          [{ id: forcedId, name: 'deep_explore', input: forcedInput }],
+          [], 0,
+          onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
+        );
+      }
+      // Force-START (mechanism, not prompt): the intent router routed this turn to deep_explore AND the
+      // user explicitly asked for depth (深入/深度…), but the model answered flat without ever calling
+      // deep_explore. Soft nudges lose to the model's flat-search default (4-turn field evidence), so
+      // GUARANTEE a real deep_explore(action=start) — grounding + round 1 — mirroring force-continue.
+      if (
+        deepExploreForceStartEnabled() &&
+        shouldForceDeepExploreStart({
+          decision: signalBus.intentDecision ?? null,
+          explicitDepth: userSignaledDepth(userMessage),
+          goalSubstantial: messageIsSelfContainedGoal(userMessage),
+          alreadyForcedStart: !!signalBus.forcedDeepExploreStart,
+          alreadyForcedContinue: !!signalBus.forcedDeepExploreContinue,
+          deepExploreRanThisTurn,
+          // RECENCY, not mere existence: a stale never-closed session must not block a fresh explicit-depth
+          // dive (the same backlog that broke the nudge guard). Consistent with hasRecentlyActiveExploreSession.
+          hasActiveSession: hasRecentlyActiveExploreSession(sessionId),
+        })
+      ) {
+        signalBus.forcedDeepExploreStart = true;
+        const forcedInput = buildForceStartInput(signalBus.intentDecision ?? null, userMessage);
+        console.warn(
+          `[force-start] session=${sessionId} deep_explore route + explicit depth but model answered flat — forcing deep_explore(action=start, mode=${forcedInput.mode ?? 'auto'})`,
+        );
+        const forcedId = `forced-de-start-${turnStartTs}`;
         messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: forcedId, name: 'deep_explore', input: forcedInput }] });
         return await runToolLoop(
           sessionId, messages, grants, audit,
@@ -5834,6 +5860,24 @@ export function refreshTurnLedgerContract(messages: NativeMessage[], records: In
   messages[0] = { ...sys, content: block ? base + TURN_LEDGER_MARK_START + block + TURN_LEDGER_MARK_END : base };
 }
 
+/**
+ * Is the user mid-exploration RIGHT NOW (a reasoning session for this owner touched within the last 20 min)?
+ * Recency, not mere existence — the user accumulates stale never-closed sessions, and treating those as
+ * "active" suppressed both the deep_explore nudge and the force-start (the feature looked dead). Shared by
+ * both so they stay consistent.
+ */
+function hasRecentlyActiveExploreSession(sessionId: string): boolean {
+  try {
+    const RECENT_MS = 20 * 60 * 1000;
+    const now = Date.now();
+    return memory.reasoning
+      .listActiveSessions()
+      .some((s) => s.ownerSessionId === sessionId && now - s.updatedAt < RECENT_MS);
+  } catch {
+    return false; // reasoning store query failed — treat as "not mid-exploration" so the feature still fires
+  }
+}
+
 interface TurnSignalBus {
   honesty?: {
     evaluation: HonestyEvaluation;
@@ -5844,6 +5888,8 @@ interface TurnSignalBus {
   intentDecision?: IntentDecision | null;
   /** Set once when the forced-continue mechanism has injected a real deep_explore(continue) this turn (anti-reentry). */
   forcedDeepExploreContinue?: boolean;
+  /** Set once when the forced-START mechanism has injected a real deep_explore(start) this turn (anti-reentry). */
+  forcedDeepExploreStart?: boolean;
   /**
    * Total critical+high+normal count from InterruptDrainer.drain() this turn.
    * Updated by buildMemoryPrefix at drain time. ≥ 1 is treated as interruptDrained.

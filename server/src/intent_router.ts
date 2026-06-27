@@ -167,6 +167,58 @@ export function planRouteWantsSlow(dec: IntentDecision | null): boolean {
   return !!dec && dec.route === 'plan' && dec.confidence >= 0.6;
 }
 
+// ── Force-START (mechanism, not prompt) ──────────────────────────────────────────────────────────
+//
+// Field evidence (4 WeChat turns): for deep_explore-routed research requests the model keeps doing flat
+// main-loop webSearch and ignores the soft START nudge. Soft prompts lose to the model's flat-search
+// default. So when the user EXPLICITLY asked for depth and the model still answered flat without ever
+// calling deep_explore, the harness synthesizes a real deep_explore(action=start) — grounding + round 1 —
+// exactly like force-continue guarantees a continue. Gated by explicitDepth so it never fires on a casual
+// research question (those only ever get the soft OFFER).
+
+export function deepExploreForceStartEnabled(): boolean {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_FORCE_START ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+export function shouldForceDeepExploreStart(opts: {
+  decision: IntentDecision | null;
+  explicitDepth: boolean;
+  /** The message carries a self-contained goal (long enough to stand alone, not a bare "重做"/"深入点"). */
+  goalSubstantial: boolean;
+  alreadyForcedStart: boolean;
+  alreadyForcedContinue: boolean;
+  deepExploreRanThisTurn: boolean;
+  hasActiveSession: boolean;
+}): boolean {
+  if (opts.alreadyForcedStart || opts.alreadyForcedContinue) return false; // anti-reentry
+  if (!opts.decision || opts.decision.route !== 'deep_explore') return false;
+  if (!opts.explicitDepth) return false; // only the confirmed "明确要深度才直接进" case
+  // A forced session needs a real goal. Short context-dependent messages ("调研深度不够，重做", "深入点")
+  // point at the PRIOR topic the harness can't capture as a goal → don't auto-start a garbage session.
+  if (!opts.goalSubstantial) return false;
+  if (opts.deepExploreRanThisTurn) return false; // model already used the engine → nothing to force
+  if (opts.hasActiveSession) return false; // a session exists → continue path / force-continue handles it
+  return true;
+}
+
+/** Does the message carry a self-contained reasoning goal? (Crude length proxy; dense Chinese ≥ ~12 chars.) */
+export function messageIsSelfContainedGoal(userMessage: string): boolean {
+  return (userMessage ?? '').trim().length >= 12;
+}
+
+/** Build the synthetic deep_explore(start) input. mode is passed only for formal/deliberate (discover is an
+ * action, not a mode); omitted → the engine auto-detects the domain from the goal. goal = the user message. */
+export function buildForceStartInput(
+  decision: IntentDecision | null,
+  userMessage: string,
+): { action: 'start'; goal: string; mode?: 'formal' | 'deliberate' } {
+  const goal = (userMessage ?? '').trim().slice(0, 2000);
+  const dom = decision?.domain;
+  const mode = dom === 'formal' || dom === 'deliberate' ? dom : undefined;
+  return mode ? { action: 'start', goal, mode } : { action: 'start', goal };
+}
+
 /**
  * The deep_explore nudge appended to the system prefix (messages[0]). START directly on explicit depth or
  * high confidence; otherwise instruct the model to OFFER a one-line suggestion before answering flat.
