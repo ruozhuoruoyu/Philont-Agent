@@ -164,6 +164,7 @@ import {
 import { replyWithMediaTool } from './tools/reply_with_media.js';
 import { setConscienceLlm } from './conscience_gate.js';
 import { createAutoAdvanceLoop } from './deep_explore_autoadvance.js';
+import { createFollowUpLoop } from './deep_explore_followup.js';
 import { semanticToolPhrase, semanticToolFailPhrase, summarizingPhrase, type PhraseLang } from './channel_phrases.js';
 import { wrapSkillToolWithReload } from './skill_install_wrapper.js';
 import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
@@ -2039,6 +2040,27 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
   },
 });
 deepExploreAutoAdvance.start();
+
+// Proactive follow-up (S2 REPORT slice): ask the user about a quiet deep_explore session that still has
+// OPEN frontier nodes (the user stopped replying "继续"). Does NOT run the round — just surfaces + asks,
+// once per session. Default ON (PHILONT_DEEP_EXPLORE_FOLLOWUP=0 to disable). Reuses the same notify path.
+export const deepExploreFollowUp = createFollowUpLoop({
+  reasoning: memory.reasoning,
+  notify: (text, opts) => {
+    for (const [, send] of webuiClients) send({ type: 'milestone', text });
+    if (opts?.important) {
+      void pushDispatcher
+        .enqueue({
+          severity: 'urgent',
+          kind: 'deep_explore:followup',
+          targetRef: `deep_explore:followup:${Date.now()}`,
+          text,
+        })
+        .catch(() => {});
+    }
+  },
+});
+deepExploreFollowUp.start();
 
 const intentClassifier = process.env.LLM_PROVIDER === 'anthropic'
   ? new LLMIntentClassifier(async (prompt) => {
