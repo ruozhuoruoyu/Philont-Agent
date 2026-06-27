@@ -425,10 +425,11 @@ const EXECUTION_CLAIM_PATTERNS: ReadonlyArray<RegExp> = [
   /\b(?:executed|ran)\s+(?:the\s+)?(?:script|computation|command|code|simulation|calculation)s?\b/i,
   /\bcomputation(?:s)?\s+(?:is|are|was|were|now)?\s*(?:complete|completed|done|finished)\b/i,
   /\b(?:all\s+)?(?:three|two)\s+(?:calculations?|computations?|lines?)\s+(?:executed|ran|completed|done)\b/i,
-  // Build / compile / install / test SELF-claims WITH a result — the TileRT fabrication class
-  // ("已在我的环境成功编译（Compile Tests 53/53 pass，MSVC + CUDA 13.0）"). Self-anchored (我的环境 /
-  // 已成功 / "Compile Tests X/Y pass") so it does NOT fire on descriptions of OTHERS' builds ("X 团队成功
-  // 编译"). Claiming a build/test/install result with no shell/process this turn = the same fabrication.
+  // Build / compile / install / test SELF-claims WITH a result — the TileRT fabrication class (the model
+  // claimed "compiled in my environment, Compile Tests 53/53 pass, MSVC + CUDA 13.0"). The CJK alternatives
+  // below are anchored on a self-subject (my-environment / already-succeeded / "Compile Tests X/Y pass") so
+  // they do NOT fire on descriptions of OTHERS' builds. Claiming a build/test/install result with no
+  // shell/process this turn is the same fabrication as the compute case.
   /(?:我(?:的)?(?:环境|机器|本地|这边)|本地(?:环境)?|in\s+my\s+(?:environment|setup|machine))[^。！？\n]{0,16}(?:成功|编译(?:通过|成功)?|跑通|测试(?:通过|全过)|验证(?:通过)?|安装(?:成功)?|\d+\s*\/\s*\d+\s*(?:pass|通过|tests?))/i,
   /(?:compile\s*tests?|测试|tests?)\s*[:：]?\s*\d+\s*\/\s*\d+\s*(?:pass|passed|ok|通过|全过)/i,
   /(?:已成功|已经成功|我(?:已)?成功)(?:编译|构建|安装|部署|复现|跑通)/,
@@ -443,8 +444,8 @@ const EXEC_ANTI_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:没|未|还没|尚未|不曾|没有)[^。！？\n]{0,4}(?:跑|执行|运行|算|返回)/,
   /(?:如果|若|一旦|待)[^。！？\n]{0,10}(?:跑|执行|运行|算)/,
   /\b(?:will|going to|about to|let me|i'?ll|gonna|plan to|haven'?t|did\s*not|didn'?t|not\s+yet)\b[^.!?\n]{0,12}\b(?:run|execute|compute)\b/i,
-  // Build / compile / install / test — future intent and negation (so "会去编译" / "还没在我的环境编译"
-  // / "haven't built it" fall through to a promise/pass instead of false-firing as a done-claim).
+  // Build / compile / install / test — future intent and negation (so "will compile" / "haven't built it
+  // yet", in either language, fall through to a promise/pass instead of false-firing as a done-claim).
   /(?:会|将|准备|打算|可以|需要|计划|尝试|试着|想要?|打算去|去)[^。！？\n]{0,4}(?:编译|构建|安装|部署|复现|跑通)/,
   /(?:没|未|还没|尚未|无法|不能|不曾|无须|不必)[^。！？\n]{0,12}(?:编译|构建|安装|跑通|测试|验证|复现)/,
   /\b(?:will|going to|about to|let me|i'?ll|gonna|plan to|need to|can|could|would|haven'?t|did\s*not|didn'?t|not\s+yet|try(?:ing)?\s+to)\b[^.!?\n]{0,14}\b(?:compil|build|install|test|reproduc)/i,

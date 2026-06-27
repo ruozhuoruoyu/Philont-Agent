@@ -5718,6 +5718,65 @@ function renderTurnLedger(records: InTurnToolRecord[]): string {
   return lines.join('\n');
 }
 
+/**
+ * S1 P1 — generation-time execution-ledger CONTRACT (anti-fabrication, structural prevention).
+ *
+ * The honesty gate is a post-hoc DETECTOR: it must enumerate phrasings ("成功编译", "53/53 pass", …) and
+ * will always miss novel ones (that enumeration treadmill is why the fabrication problem recurs). This is
+ * the PREVENTION layer and it is phrasing-agnostic: before each in-loop model call we append this turn's
+ * REAL tool ledger + an explicit contract to the system context (messages[0]), so the model sees, while it
+ * writes, that it only ran webSearch/webFetch (say) and therefore cannot claim it compiled/ran/tested
+ * anything. The TileRT "compiled in my environment, Compile Tests 53/53 pass" lie is impossible to write
+ * with the ledger in view.
+ *
+ * Injected into messages[0] (the system prefix, BEFORE turnStart) — the same slot every other dynamic
+ * injection uses — so it is invisible to extractRecentToolResults and never blinds the honesty/numeric
+ * gates. Replaced (not accumulated) each iteration via markers. Default ON; PHILONT_TURN_LEDGER_CONTRACT=
+ * 0/off/false/no disables it and leaves messages byte-identical.
+ */
+export function turnLedgerContractEnabled(): boolean {
+  const v = (process.env.PHILONT_TURN_LEDGER_CONTRACT ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+const TURN_LEDGER_MARK_START = '\n\n<<TURN_EXECUTION_LEDGER>>\n';
+const TURN_LEDGER_MARK_END = '\n<</TURN_EXECUTION_LEDGER>>';
+
+export function buildTurnLedgerContract(records: InTurnToolRecord[]): string {
+  if (!records.length) return '';
+  const didExec = turnDidExecute(records);
+  const execNote = didExec
+    ? ''
+    : '\nNOTE: none of the tools above runs code / builds / installs / tests / computes — so THIS turn you ' +
+      'have NOT compiled, run, tested, installed, reproduced, or computed anything.';
+  return (
+    '[THIS-TURN EXECUTION LEDGER — read before you answer]\n' +
+    'The ONLY operations you actually performed this turn (ground truth — real tool calls + their results):\n' +
+    renderTurnLedger(records) +
+    execNote +
+    '\nCONTRACT: any claim that you RAN / BUILT / COMPILED / INSTALLED / TESTED / VERIFIED / REPRODUCED / ' +
+    'COMPUTED something — and ANY concrete result you attribute to it (a pass count like "53/53 pass", a ' +
+    'measured number, "succeeded", a toolchain or version) — MUST correspond to a real tool in the ledger ' +
+    'above. If it is not in the ledger, you did not do it: say so plainly. "I could not run / compile / ' +
+    'verify this here" is always an acceptable, non-penalized way to answer — fabricating a result is not.'
+  );
+}
+
+/** Refresh (replace, never accumulate) the turn-ledger contract block inside messages[0] (system prefix). */
+export function refreshTurnLedgerContract(messages: NativeMessage[], records: InTurnToolRecord[]): void {
+  if (!turnLedgerContractEnabled()) return;
+  const sys = messages[0];
+  if (!sys || typeof sys.content !== 'string') return;
+  let base = sys.content;
+  const s = base.indexOf(TURN_LEDGER_MARK_START);
+  if (s >= 0) {
+    const e = base.indexOf(TURN_LEDGER_MARK_END, s);
+    base = e >= 0 ? base.slice(0, s) + base.slice(e + TURN_LEDGER_MARK_END.length) : base.slice(0, s);
+  }
+  const block = buildTurnLedgerContract(records);
+  messages[0] = { ...sys, content: block ? base + TURN_LEDGER_MARK_START + block + TURN_LEDGER_MARK_END : base };
+}
+
 interface TurnSignalBus {
   honesty?: {
     evaluation: HonestyEvaluation;
@@ -6698,6 +6757,11 @@ async function runToolLoop(
       });
       onStatus?.(summarizingPhrase(statusLang));
     }
+
+    // S1 P1: refresh this-turn's execution-ledger contract into the system prefix so the model sees what it
+    // actually ran (and what it did NOT) BEFORE it writes — prevents build/run/test fabrication phrasing-
+    // agnostically, as opposed to the post-hoc honesty gate that has to enumerate phrasings.
+    refreshTurnLedgerContract(messages, signalBus.inTurnRecords ?? []);
 
     const response = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
 
