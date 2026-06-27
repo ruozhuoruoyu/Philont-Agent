@@ -4306,7 +4306,12 @@ export async function handleChatSend(
     if (intentDecision) {
       console.log(`[intent-router] session=${sessionId} route=${intentDecision.route}${intentDecision.domain ? `:${intentDecision.domain}` : ''} conf=${intentDecision.confidence}`);
     }
-    if (cls.isSlow || planRouteWantsSlow(intentDecision)) {
+    // A deep_explore route is AUTHORITATIVE: do NOT let the legacy slow heuristic upgrade it to the plan
+    // protocol (observed: "深度探索…技术栈和解决方案" routed deep_explore:0.95 but the heuristic's 建设/生产
+    // keywords forced slow→plan_draft, hijacking the reasoning task into the build pipeline). Reasoning tasks
+    // go to deep_explore (via the nudge below); only plan/direct routes (or no router) keep the heuristic.
+    const intentSaysExplore = intentDecision?.route === 'deep_explore';
+    if (!intentSaysExplore && (cls.isSlow || planRouteWantsSlow(intentDecision))) {
       taskModeStore.set(
         sessionId,
         'slow',
@@ -5394,13 +5399,20 @@ async function handleChatSendInner(
   // — the model continues that one, so we don't spawn duplicate sessions (the clutter fixed earlier).
   const intentDecision = signalBus.intentDecision ?? null;
   if (messages[0] && intentDecision?.route === 'deep_explore') {
-    let hasActiveExplore = false;
+    // Suppress the nudge only when a session is RECENTLY active (the user is mid-exploration now), NOT when
+    // any session merely exists — the user accumulates stale never-closed sessions, and a blanket "any
+    // active" guard suppressed every nudge (the feature looked dead). 20-min recency window via updatedAt.
+    let midExploration = false;
     try {
-      hasActiveExplore = memory.reasoning.listActiveSessions().some((s) => s.ownerSessionId === sessionId);
+      const RECENT_MS = 20 * 60 * 1000;
+      const now = Date.now();
+      midExploration = memory.reasoning
+        .listActiveSessions()
+        .some((s) => s.ownerSessionId === sessionId && now - s.updatedAt < RECENT_MS);
     } catch {
       /* reasoning store query failed — fall through and let the nudge fire */
     }
-    if (!hasActiveExplore) {
+    if (!midExploration) {
       const nudge = buildDeepExploreNudge(intentDecision, userSignaledDepth(userMessage));
       if (nudge) {
         messages[0] = { ...messages[0], content: messages[0].content + nudge };

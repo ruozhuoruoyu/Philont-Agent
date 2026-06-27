@@ -171,7 +171,10 @@ export function planRouteWantsSlow(dec: IntentDecision | null): boolean {
 export function buildDeepExploreNudge(dec: IntentDecision | null, explicitDepth: boolean): string {
   if (!dec || dec.route !== 'deep_explore') return '';
   const mode = dec.domain ?? 'deliberate';
-  const goStraightIn = explicitDepth || dec.confidence >= 0.8;
+  // START directly ONLY when the USER signaled depth (深入/深度/系统/彻底…) — the confirmed "明确要深度才直接
+  // 进" behavior. Classifier confidence measures "is this deep_explore", NOT "how much depth the user wants",
+  // so a high-confidence light "调研一下" still only gets an OFFER, never an auto-started session.
+  const goStraightIn = explicitDepth;
   if (goStraightIn) {
     return (
       '\n\n[intent-router] This turn is a deliberate reasoning task (deep_explore domain=' +

@@ -151,12 +151,13 @@ test('buildDeepExploreNudge: SUGGEST when ambiguous, START when explicit-depth o
   const startByDepth = buildDeepExploreNudge(dExplore({ confidence: 0.6 }), true);
   assert.match(startByDepth, /START a deep_explore session/);
 
-  // high confidence → start directly even without an explicit depth word
-  const startByConf = buildDeepExploreNudge(dExplore({ confidence: 0.85 }), false);
-  assert.match(startByConf, /START a deep_explore session/);
+  // high confidence but NO explicit depth → still only OFFER (conf measures route, not desired depth)
+  const highConfNoDepth = buildDeepExploreNudge(dExplore({ confidence: 0.95 }), false);
+  assert.match(highConfNoDepth, /OFFER the user ONE sentence/i);
+  assert.doesNotMatch(highConfNoDepth, /START a deep_explore session/);
 
   // carries the domain through to mode=
-  assert.match(buildDeepExploreNudge(dExplore({ domain: 'formal', confidence: 0.9 }), false), /mode=formal/);
+  assert.match(buildDeepExploreNudge(dExplore({ domain: 'formal', confidence: 0.9 }), true), /mode=formal/);
 
   // non-deep_explore → empty (caller skips)
   assert.equal(buildDeepExploreNudge({ route: 'plan', confidence: 0.9, reason: 'r' }, true), '');
