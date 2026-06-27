@@ -2642,6 +2642,41 @@ export function splitPrefixBySection(raw: string): Array<{ title: string; chars:
  * prefix now only serves as a "highly condensed long-term fact index": facts / skills / negative skills /
  * self.summary. session-summary notes are no longer specially injected — the retriever treats them as ordinary notes.
  */
+/** S1 execution-ledger anchor flag. Default ON; PHILONT_EXECUTION_LEDGER=0/off/false/no disables. */
+function executionLedgerEnabled(): boolean {
+  const v = (process.env.PHILONT_EXECUTION_LEDGER ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/**
+ * S1 — execution-ledger anchor (`docs/design/execution_ledger_anchor.md`). Renders the owner's active
+ * deep_explore reasoning session as an AUTHORITATIVE read-only snapshot (open frontier / proved / dead)
+ * plus a generation contract: round / settlement / solved / computed claims must come from a real tool
+ * result THIS TURN, not narrated from this stored snapshot. Appended to the system-prompt area at the very
+ * end (recency, survives the cap), so it does NOT trip extractRecentToolResults (which parses messages,
+ * not the prefix). Empty when the flag is off / there is no active session.
+ *
+ * P0 scope = the tree snapshot going IN (the anti-recite anchor). The this-turn tool ledger at generation
+ * time is still handled by the honesty/numeric gates + force-continue; P1 folds that in here too.
+ */
+function buildExecutionLedger(): string[] {
+  if (!executionLedgerEnabled()) return [];
+  const sess = memory.reasoning.getMostRecentActiveSession(currentSessionId() ?? null);
+  if (!sess) return [];
+  const snap = memory.reasoning.summarizeSession(sess.id);
+  if (!snap) return [];
+  const goal = sess.goal.length > 80 ? sess.goal.slice(0, 80) + '…' : sess.goal;
+  return [
+    '## 🔒 Active reasoning — GROUND TRUTH (stored snapshot, NOT produced this turn)',
+    `  goal: ${goal}`,
+    `  tree: ${snap.openFrontierCount} open · ${snap.provedCount} proved · ${snap.deadCount} dead-end (session ${snap.status})`,
+    '  CONTRACT: any claim of a deep_explore round / "第N轮" / settled / solved / a computed number MUST ' +
+      'come from a tool you actually ran THIS TURN. The counts above are a stored snapshot — do NOT report ' +
+      "them as this turn's progress. If no tool ran this turn you have NOT advanced it this turn: say so, " +
+      'or call deep_explore(action=continue) now.',
+  ];
+}
+
 export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus): string {
   const lines: string[] = [];
 
@@ -3447,7 +3482,12 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
     console.warn('[user-pattern] inject failed, skipped', e);
   }
 
-  if (lines.length === 0) return '';
+  // S1 anchor: computed once, appended AFTER the cap logic (never truncated) and OUTSIDE the memory-layer
+  // block. Empty string ⇒ byte-identical to before (flag off / no active session).
+  const ledger = buildExecutionLedger();
+  const ledgerTail = ledger.length ? '\n' + ledger.join('\n') : '';
+
+  if (lines.length === 0) return ledgerTail;
 
   const raw =
     '\n\n[Memory layer — the following is already known; no need to ask or query again]\n' +
@@ -3479,11 +3519,12 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
     );
     return (
       raw.slice(0, MEMORY_PREFIX_TOTAL_CAP) +
-      `\n...[memory prefix too long, truncated. Original ${raw.length} chars]\n[End of memory layer]`
+      `\n...[memory prefix too long, truncated. Original ${raw.length} chars]\n[End of memory layer]` +
+      ledgerTail
     );
   }
   console.log(`[memory-prefix] size=${raw.length} chars`);
-  return raw;
+  return raw + ledgerTail;
 }
 
 /**

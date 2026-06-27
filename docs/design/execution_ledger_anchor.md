@@ -79,7 +79,7 @@ fabrication.
 
 1. **Placement.** Ledger goes at the END of the prefix, adjacent to the response instruction (recency /
    not lost-in-the-middle), NOT mixed into the 25 KB middle.
-2. **Always-on vs gated.** Recommend always-render the ledger (it is small) behind
+2. **Always-on vs gated.** Always-render the ledger (it is small), default ON, behind
    `PHILONT_EXECUTION_LEDGER` default ON; the generation-contract line is part of the same flag.
 3. **Snapshot labelling.** Reasoning snapshot MUST carry the "not this-turn" label — this is the bit that
    stops recite-as-fresh. Non-negotiable.
