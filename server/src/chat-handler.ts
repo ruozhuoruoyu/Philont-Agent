@@ -2047,16 +2047,20 @@ deepExploreAutoAdvance.start();
 export const deepExploreFollowUp = createFollowUpLoop({
   reasoning: memory.reasoning,
   notify: (text, opts) => {
-    for (const [, send] of webuiClients) send({ type: 'milestone', text });
-    if (opts?.important) {
+    // Route to the channel the session was STARTED in — a WeChat-started exploration must not spam the
+    // web-ui stream (and vice versa). Unknown / legacy-null owner → web-ui as the fallback surface.
+    const owner = opts?.ownerSessionId ?? '';
+    if (owner.startsWith('wechat:')) {
       void pushDispatcher
         .enqueue({
           severity: 'urgent',
           kind: 'deep_explore:followup',
-          targetRef: `deep_explore:followup:${Date.now()}`,
+          targetRef: `deep_explore:followup:${owner}`,
           text,
         })
         .catch(() => {});
+    } else {
+      for (const [, send] of webuiClients) send({ type: 'milestone', text });
     }
   },
 });

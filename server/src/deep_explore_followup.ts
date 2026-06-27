@@ -50,7 +50,9 @@ export function shouldAskFollowUp(
 export interface FollowUpDeps {
   reasoning: ReasoningStore;
   /** Proactively notify the user (same shape as deep_explore_autoadvance). */
-  notify: (text: string, opts?: { important?: boolean }) => void;
+  /** Proactively notify the user. `ownerSessionId` lets the caller route the ask to the channel the
+   * session was started in (e.g. WeChat), instead of blasting every surface. */
+  notify: (text: string, opts?: { important?: boolean; ownerSessionId?: string }) => void;
   /** ms between scans (silence is in hours, so a coarse cadence is fine). Default 10 min. */
   intervalMs?: number;
   /** Silence threshold ms. Default from env (6 h). */
@@ -82,6 +84,11 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
     } catch {
       return;
     }
+    // Collect ALL newly-quiet open sessions, then ask about exactly ONE (the most recently STARTED — the
+    // current focus, = what "继续" targets), and mark the WHOLE batch as asked. This is the anti-spam
+    // fix: a chat with dozens of stale open sessions must NOT get one message per session per tick.
+    const nowMs = now();
+    const candidates: Array<{ id: string; goal: string; createdAt: number; owner: string | null; open: number }> = [];
     for (const s of sessions) {
       let snap;
       try {
@@ -96,15 +103,24 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
         updatedAt: s.updatedAt,
         openFrontierCount: snap.openFrontierCount,
       };
-      if (!shouldAskFollowUp(c, { now: now(), silenceMs, alreadyAsked: asked })) continue;
-      asked.add(s.id);
-      const goal = s.goal.length > 50 ? s.goal.slice(0, 50) + '…' : s.goal;
-      deps.notify(
-        `🔬 探索还挂着:"${goal}" 还有 ${snap.openFrontierCount} 个开放节点没推进(你已有一段时间没回"继续")。` +
-          `要我接着推进吗?回复"继续",或让我后台自动推进。`,
-        { important: true },
-      );
+      if (!shouldAskFollowUp(c, { now: nowMs, silenceMs, alreadyAsked: asked })) continue;
+      candidates.push({ id: s.id, goal: s.goal, createdAt: s.createdAt, owner: s.ownerSessionId, open: snap.openFrontierCount });
     }
+    if (candidates.length === 0) return;
+
+    candidates.sort((a, b) => b.createdAt - a.createdAt); // most recently started first = current focus
+    const primary = candidates[0];
+    for (const c of candidates) asked.add(c.id); // silence the whole batch — no drip, one ask per batch
+    const goal = primary.goal.length > 50 ? primary.goal.slice(0, 50) + '…' : primary.goal;
+    const others = candidates.length - 1;
+    const text =
+      others > 0
+        ? `🔬 你有 ${candidates.length} 个 deep_explore 探索挂着没推进,最近的:"${goal}"(${primary.open} 个开放节点)。` +
+          `继续它回复"继续";其余更早的要挑一个或清理,跟我说就行。`
+        : `🔬 探索还挂着:"${goal}" 还有 ${primary.open} 个开放节点没推进(你已有一段时间没回"继续")。` +
+          `要我接着推进吗?回复"继续",或让我后台自动推进。`;
+    // Route to the channel the session was started in (e.g. WeChat) — don't blast every surface.
+    deps.notify(text, { important: true, ownerSessionId: primary.owner ?? undefined });
   }
 
   function scheduleNext(): void {
