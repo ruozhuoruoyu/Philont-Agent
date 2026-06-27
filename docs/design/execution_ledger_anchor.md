@@ -1,6 +1,6 @@
 # Execution-Ledger Anchor — answer from the ledger, not the narrative
 
-Status: DESIGN (not yet implemented). Author: ruozhuoruoyu.
+Status: P0 IMPLEMENTED (commit b4b7d61, default ON); P1/P2 design. Author: ruozhuoruoyu.
 The single highest-leverage structural change: it replaces a fleet of downstream honesty CATCHERS with
 one upstream GROUND TRUTH. Anchored to real `file:line`.
 
@@ -79,8 +79,8 @@ fabrication.
 
 1. **Placement.** Ledger goes at the END of the prefix, adjacent to the response instruction (recency /
    not lost-in-the-middle), NOT mixed into the 25 KB middle.
-2. **Always-on vs gated.** Always-render the ledger (it is small), default ON, behind
-   `PHILONT_EXECUTION_LEDGER` default ON; the generation-contract line is part of the same flag.
+2. **Always-on vs gated.** Always-render the ledger (it is small), **default ON** behind
+   `PHILONT_EXECUTION_LEDGER` (`=0/off` kill-switch); the generation-contract line is part of the same flag.
 3. **Snapshot labelling.** Reasoning snapshot MUST carry the "not this-turn" label — this is the bit that
    stops recite-as-fresh. Non-negotiable.
 4. **Pitfall to avoid (known).** A string-content user/ledger message can be mis-parsed as a turn boundary
@@ -90,13 +90,16 @@ fabrication.
 
 ## 6. Rollout
 
-- **P0** promote `renderTurnLedger` + a `renderReasoningSnapshot` into a single `buildExecutionLedger()`
-  block; inject at prefix end with the contract line; behind `PHILONT_EXECUTION_LEDGER` (default OFF for
-  first ship → byte-identical when off, golden-snapshot tested like skill-recall). Verify the
-  extractRecentToolResults boundary parser is not tripped.
-- **P1** flip default ON after dogfood; measure: `fabricated_round_result` / `fabricated_execution_claim`
-  fire rate should DROP (the gate becomes a rare backstop, not a frequent catcher) — `[learning-stats]`
-  already counts honesty fires.
+- **P0 ✅ DONE (b4b7d61)** `buildExecutionLedger()` = active-reasoning snapshot (open/proved/dead + goal)
+  + contract, appended at the prefix END after the cap logic (never truncated) and outside the
+  `[Memory layer]` block (system-prompt area → does not trip extractRecentToolResults). Flag
+  `PHILONT_EXECUTION_LEDGER` **default ON**, `=0/off` kill-switch → byte-identical. Tests: execution_ledger
+  3/3; full suite 747 pass / 9 pre-existing with the anchor live. (P0 scope = the snapshot going IN; the
+  this-turn tool ledger at generation time still lives in the gates + force-continue.)
+- **P1** fold the this-turn `renderTurnLedger(inTurnRecords)` into the same block at generation time
+  (re-inject before the final response, not just turn start); measure: `fabricated_round_result` /
+  `fabricated_execution_claim` fire rate should DROP (the gate becomes a rare backstop) —
+  `[learning-stats]` already counts honesty fires.
 - **P2** provenance binding (3.3) if residual fabrication remains.
 
 ## 7. Non-goals
