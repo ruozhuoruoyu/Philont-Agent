@@ -44,6 +44,8 @@ test('shouldClassifyIntent: skip trivial (acks / 继续 / short), classify subst
     '帮我把 TileRT 接入并在本机跑通',
     '评估一下自研推理引擎值不值得做',
     '北京今天天气怎么样还有顺便看下明天', // even a longer lookup gets classified → aux says "direct"
+    '调研深度不够，重做', // dense Chinese (9 chars) — must NOT be skipped (the prod miss)
+    '为什么会崩', // 5 chars, substantive diagnosis
   ]) {
     assert.equal(shouldClassifyIntent(t), true, `substantive: ${t}`);
   }

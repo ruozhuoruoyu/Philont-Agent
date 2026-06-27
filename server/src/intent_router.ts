@@ -50,7 +50,11 @@ const TRIVIAL_TURN_RE =
 
 export function shouldClassifyIntent(userMessage: string): boolean {
   const t = (userMessage ?? '').trim();
-  if (t.length < 12) return false; // greetings / acks / "继续" — never deliberate
+  // Floor is deliberately tiny — dense Chinese commands are short ("调研深度不够，重做" is 9 chars, "为什么会崩"
+  // is 5) and a 12-char floor wrongly skipped them (observed: "调研深度不够，重做" fell through to flat
+  // webSearch). Only 1-3 char fragments are pure noise; the ack/greeting regex catches the rest, and the
+  // aux call cheaply returns "direct" for whatever chitchat slips past.
+  if (t.length < 4) return false;
   if (TRIVIAL_TURN_RE.test(t)) return false;
   return true;
 }
