@@ -5506,12 +5506,29 @@ async function handleChatSendInner(
       // user explicitly asked for depth (深入/深度…), but the model answered flat without ever calling
       // deep_explore. Soft nudges lose to the model's flat-search default (4-turn field evidence), so
       // GUARANTEE a real deep_explore(action=start) — grounding + round 1 — mirroring force-continue.
+      // Resolve the goal: a self-contained message is its own goal; a short context-dependent "重做/深入点"
+      // gets its goal derived from the recent transcript (the topic being redone) — only then does a redo
+      // reach the engine instead of falling through to flat search.
+      const selfContained = messageIsSelfContainedGoal(userMessage);
+      const baseEligible =
+        deepExploreForceStartEnabled() &&
+        (signalBus.intentDecision?.route === 'deep_explore') &&
+        userSignaledDepth(userMessage) &&
+        !deepExploreRanThisTurn &&
+        !signalBus.forcedDeepExploreStart &&
+        !signalBus.forcedDeepExploreContinue &&
+        !hasRecentlyActiveExploreSession(sessionId);
+      const forceGoal = baseEligible
+        ? selfContained
+          ? userMessage.trim()
+          : await deriveRedoGoal(sessionId, userMessage) // aux: pull the topic being redone from context
+        : null;
       if (
         deepExploreForceStartEnabled() &&
         shouldForceDeepExploreStart({
           decision: signalBus.intentDecision ?? null,
           explicitDepth: userSignaledDepth(userMessage),
-          goalSubstantial: messageIsSelfContainedGoal(userMessage),
+          goalSubstantial: !!forceGoal && forceGoal.trim().length >= 12,
           alreadyForcedStart: !!signalBus.forcedDeepExploreStart,
           alreadyForcedContinue: !!signalBus.forcedDeepExploreContinue,
           deepExploreRanThisTurn,
@@ -5521,7 +5538,7 @@ async function handleChatSendInner(
         })
       ) {
         signalBus.forcedDeepExploreStart = true;
-        const forcedInput = buildForceStartInput(signalBus.intentDecision ?? null, userMessage);
+        const forcedInput = buildForceStartInput(signalBus.intentDecision ?? null, forceGoal ?? userMessage);
         console.warn(
           `[force-start] session=${sessionId} deep_explore route + explicit depth but model answered flat — forcing deep_explore(action=start, mode=${forcedInput.mode ?? 'auto'})`,
         );
@@ -5875,6 +5892,41 @@ function hasRecentlyActiveExploreSession(sessionId: string): boolean {
       .some((s) => s.ownerSessionId === sessionId && now - s.updatedAt < RECENT_MS);
   } catch {
     return false; // reasoning store query failed — treat as "not mid-exploration" so the feature still fires
+  }
+}
+
+/**
+ * Derive a force-start goal for a SHORT context-dependent message ("重做深度调研" / "深入点") that refers back
+ * to an earlier topic. messageIsSelfContainedGoal is false for these, so without this the force-start would
+ * skip and the redo falls through to flat search (observed). A cheap aux call reads the recent transcript
+ * and names the concrete topic being redone. Returns null when unconfigured / no context / no clear goal.
+ */
+async function deriveRedoGoal(sessionId: string, currentMessage: string): Promise<string | null> {
+  if (!isAuxLLMConfigured()) return null;
+  let recent: Array<{ role: string; content: string }>;
+  try {
+    recent = memory.raw.getMessages(sessionId).slice(-12) as Array<{ role: string; content: string }>;
+  } catch {
+    return null;
+  }
+  const transcript = recent
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => `${m.role}: ${String(m.content ?? '').slice(0, 300)}`)
+    .join('\n');
+  if (!transcript.trim()) return null;
+  try {
+    const raw = await callAuxLLM({
+      system: 'You extract a concrete research goal from a conversation. Output only the goal sentence.',
+      user:
+        `The user just said "${currentMessage}", which refers back to an earlier research topic (a redo / ` +
+        `"do it deeper"). From the conversation below, state in ONE concrete sentence the research goal they ` +
+        `want pursued. Output ONLY that sentence — no preamble, no quotes.\n\nConversation:\n${transcript}`,
+      maxTokens: 200,
+    });
+    const goal = (raw ?? '').trim().replace(/^["'「『]|["'」』]$/g, '').trim().slice(0, 500);
+    return goal.length >= 12 ? goal : null;
+  } catch {
+    return null;
   }
 }
 
