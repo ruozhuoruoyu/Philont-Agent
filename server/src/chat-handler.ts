@@ -6019,7 +6019,7 @@ const DEEP_EXPLORE_ONE_ROUND_MSG =
  * (round/session events), not generic words like 死胡同/已证, to avoid false-positives on summaries.
  */
 const DEEP_EXPLORE_FABRICATION_RE =
-  /时间帽|第\s*\d+\s*轮|\d+\s*开\s*(?:→|->|—>)\s*\d+\s*开|已启动[^。\n]{0,40}session\s*[0-9a-fA-F][0-9a-fA-F-]{5,}/;
+  /时间帽|第\s*\d+\s*轮|\d+\s*开\s*(?:→|->|—>)\s*\d+\s*开|已启动[^。\n]{0,40}session\s*[0-9a-fA-F][0-9a-fA-F-]{5,}|(?:session|deep[\s_-]?explore)[^.\n]{0,30}\badvanced\b|\badvanced\b[^.\n]{0,15}(?:one\s+)?(?:more\s+)?rounds?\b|\bcontinue\s+advanced\b|\b\d+\s+proved\b[^.\n]{0,15}\bopen\b|\bproved\s*[=:]\s*\d+|\bcheck\s+(?:the\s+)?status[^.\n]{0,24}(?:then\s+|and\s+)?(?:advance|continue)\b/i;
 const DEEP_EXPLORE_FABRICATION_REPLY =
   '## For User\n' +
   '我这一回合并没有真正运行 deep_explore——"第N轮 / 已证 / 时间帽 / x开→y开 / 已启动 session" 这类是**已保存的状态快照,不是这次跑出来的**。' +

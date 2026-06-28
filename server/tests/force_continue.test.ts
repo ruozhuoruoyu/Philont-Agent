@@ -40,3 +40,23 @@ test('does NOT force when there is no active session to continue', () => {
 test('does NOT force on ordinary text without round/session jargon (no false positive)', () => {
   assert.equal(shouldForceDeepExploreAdvance(NORMAL, base), false);
 });
+
+// English recite (the v4-pro stall observed in prod: tools=0, narrates "advanced" without running).
+test('forces on ENGLISH recite: "session advanced" / "advanced one more round" / "Proved=3" / "N open"', () => {
+  for (const t of [
+    '## Work Log\nDeep explore action=continue → session advanced. After this, status.',
+    '## Work Log\nContinue advanced one more round. Let me check status. Proved=3, open=8.',
+    '## For User\nAdvanced one round; current 1 proved / 14 open / 0 dead ends.',
+    '## Work Log\nFollowing the skill template: first check status, then advance.',
+    '## Work Log\nLet me check the status, then advance the deep_explore session.',
+  ]) {
+    assert.equal(shouldForceDeepExploreAdvance(t, base), true, `should force on: ${t.slice(0, 40)}`);
+  }
+});
+
+test('English: no false positive on an ordinary research answer', () => {
+  assert.equal(
+    shouldForceDeepExploreAdvance('## For User\nSGLang + FP8 + EAGLE MTP is the best inference stack; here is why.', base),
+    false,
+  );
+});
