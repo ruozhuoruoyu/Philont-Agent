@@ -855,3 +855,9 @@ function tightenPermissions(dbPath: string): void {
     }
   }
 }
+
+// Goal-loop runtime contract + trajectory scoring (S2/S3) and drives→goals + trait-tuned contracts (S4).
+// Pure policy needed by BOTH the autonomous drivers (this layer) and the server-side GoalLoopDriver, so it
+// lives in the shared lower layer (server can depend on agent-memory, not vice versa).
+export * from './goal_loop.js';
+export * from './drives_to_goals.js';

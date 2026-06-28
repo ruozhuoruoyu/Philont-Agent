@@ -15,7 +15,7 @@
  */
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 import type { ToolResult } from '@agent/policy';
-import { scoreTrajectory, DEFAULT_LOOP_CONTRACT, type TickOutcome } from './goal_loop.js';
+import { scoreTrajectory, DEFAULT_LOOP_CONTRACT, type TickOutcome } from '@agent/memory';
 
 /**
  * Per-loop ROUNDS budget (S2 consent model): pause + ask after this many advanced rounds — a cost
