@@ -4782,6 +4782,10 @@ async function handleChatSendInner(
   // WeChat channel uses Chinese; all other channels use English.
   const statusLang: PhraseLang = resolveResponseLanguage({ channel: sessionId }) === 'Chinese' ? 'zh' : 'en';
 
+  // B (2026-06-28): flag a deep_explore STATUS/COUNT query so force-continue can't hijack it into a 6-min
+  // advancing round and the fabrication gate doesn't block the snapshot answer (read by both downstream).
+  signalBus.userAsksExploreStatus = userAsksExploreStatus(userMessage);
+
   // Skill hot-reload: if the revision has changed, inject a skill catalog update notification before this turn's message
   const seen = sessionSkillsRevision.get(sessionId) ?? 0;
   if (seen < skillsRevision) {
@@ -5482,6 +5486,9 @@ async function handleChatSendInner(
       const deepExploreRanThisTurn = (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore');
       if (
         deepExploreForceAdvanceEnabled() &&
+        // A status/count question ("how many unfinished explores?") must never be forced into a 6-min
+        // advancing round — the model narrating the saved snapshot is the correct answer, not a stall.
+        !signalBus.userAsksExploreStatus &&
         shouldForceDeepExploreAdvance(response.content, {
           alreadyForced: !!signalBus.forcedDeepExploreContinue,
           deepExploreRanThisTurn,
@@ -5943,6 +5950,13 @@ interface TurnSignalBus {
   /** Set once when the forced-START mechanism has injected a real deep_explore(start) this turn (anti-reentry). */
   forcedDeepExploreStart?: boolean;
   /**
+   * This turn's user message is a STATUS/COUNT/LIST query about deep_explore ("how many unfinished
+   * explores", "状态/进度") rather than a request to advance. Suppresses force-continue (a status question
+   * must not be hijacked into a 6-min advancing round) and the fabrication gate (reporting the saved
+   * snapshot IS the correct answer to a status question, not a faked round). Set in handleChatSendInner.
+   */
+  userAsksExploreStatus?: boolean;
+  /**
    * Total critical+high+normal count from InterruptDrainer.drain() this turn.
    * Updated by buildMemoryPrefix at drain time. ≥ 1 is treated as interruptDrained.
    */
@@ -6030,6 +6044,9 @@ const DEEP_EXPLORE_FABRICATION_REPLY =
 /** Returns the safe outgoing text: if it fabricates deep_explore progress (claims a round/session result with no deep_explore call this turn), replace it with an honest message. */
 function guardDeepExploreFabrication(text: string, signalBus: TurnSignalBus): string {
   const calledDeepExplore = (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore');
+  // A status/count question was asked → reporting the saved snapshot ("2 proved / 17 open") IS the answer,
+  // not a faked round; don't replace it. (force-continue is suppressed for the same case.)
+  if (signalBus.userAsksExploreStatus) return text;
   if (calledDeepExplore || !DEEP_EXPLORE_FABRICATION_RE.test(text)) return text;
   console.warn(
     '[fabrication-gate] blocked fabricated deep_explore progress (response claimed round/session results but no deep_explore call this turn)',
@@ -6048,6 +6065,21 @@ function guardDeepExploreFabrication(text: string, signalBus: TurnSignalBus): st
 function deepExploreForceAdvanceEnabled(): boolean {
   const v = (process.env.PHILONT_DEEP_EXPLORE_FORCE_CONTINUE ?? '').trim().toLowerCase();
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/**
+ * True when the user's message is a STATUS / COUNT / LIST query ABOUT deep_explore — asking what state
+ * the exploration(s) are in, not asking to advance one. Requires BOTH an explore reference AND a
+ * status/count/list cue (so "继续" / "深入研究X" never match). Used to stop force-continue from hijacking a
+ * "how many unfinished explores?" question into a 6-minute advancing round, and to let the model answer
+ * such a question from the (per-turn-refreshed) session snapshot instead of being blocked by the
+ * fabrication gate. Reporting saved state in answer to a status question is correct, not a faked round.
+ */
+const EXPLORE_REF_RE = /deep[\s_-]?explore|探索|推演|reasoning\s+session|exploration/i;
+const EXPLORE_STATUS_CUE_RE =
+  /多少|几个|哪些|列(?:表|出|一下)|清单|进度|状态|到哪了?|未结[束完]|没结[束完]|还(?:有|剩|在)|在跑|运行中|开着|挂着|how\s+many|status|progress|\blist\b|which|running|still\s+open|in\s+progress/i;
+export function userAsksExploreStatus(message: string): boolean {
+  return EXPLORE_REF_RE.test(message) && EXPLORE_STATUS_CUE_RE.test(message);
 }
 
 /**

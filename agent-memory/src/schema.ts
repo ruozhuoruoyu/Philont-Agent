@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 33;
+export const SCHEMA_VERSION = 34;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -992,6 +992,7 @@ function migrateV24ToV25(db: Database.Database): void {
       mode              TEXT NOT NULL DEFAULT 'formal',
       phase             TEXT NOT NULL DEFAULT 'converge',
       diverge_idle_rounds INTEGER NOT NULL DEFAULT 0,
+      rounds_run        INTEGER NOT NULL DEFAULT 0,
       created_at        INTEGER NOT NULL,
       updated_at        INTEGER NOT NULL
     );
@@ -1129,6 +1130,17 @@ function migrateV31ToV32(db: Database.Database): void {
 function migrateV32ToV33(db: Database.Database): void {
   addColumnIfMissing(db, 'memory_skills', 'verification', 'TEXT');
   addColumnIfMissing(db, 'memory_skills', 'tool_policy', 'TEXT');
+}
+
+/**
+ * v33 → v34: add reasoning_sessions.rounds_run — a cumulative count of advancing rounds run for the
+ * session (never reset, unlike no_progress_rounds). Backs the deliberate auto-answer round ceiling: a
+ * deliberate session that keeps slowly settling (so no_progress_rounds never climbs) but never converges
+ * is forced to deliver its synthesis after N rounds instead of asking the user to "继续" forever. Must
+ * persist (the session spans turns/days/server restarts), so it cannot live in process memory.
+ */
+function migrateV33ToV34(db: Database.Database): void {
+  addColumnIfMissing(db, 'reasoning_sessions', 'rounds_run', 'INTEGER NOT NULL DEFAULT 0');
 }
 
 function migrateV19ToV20(db: Database.Database): void {
@@ -1375,6 +1387,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 33) {
     migrateV32ToV33(db);
+  }
+  if (current < 34) {
+    migrateV33ToV34(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

@@ -70,6 +70,8 @@ export interface ReasoningSession {
   phase: ReasoningPhase;
   /** Consecutive diverge rounds with no net-new viable candidate (saturation signal for the transition gate). */
   divergeIdleRounds: number;
+  /** Cumulative count of advancing rounds run (never reset). Backs the deliberate auto-answer round ceiling. */
+  roundsRun: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -111,6 +113,7 @@ interface SessionRow {
   mode: string | null;
   phase: string | null;
   diverge_idle_rounds: number;
+  rounds_run: number;
   created_at: number;
   updated_at: number;
 }
@@ -148,6 +151,7 @@ function rowToSession(r: SessionRow): ReasoningSession {
     mode: (r.mode === 'deliberate' ? 'deliberate' : 'formal') as ReasoningSessionMode,
     phase: (r.phase === 'diverge' ? 'diverge' : 'converge') as ReasoningPhase,
     divergeIdleRounds: r.diverge_idle_rounds ?? 0,
+    roundsRun: r.rounds_run ?? 0,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -437,6 +441,19 @@ export class ReasoningStore {
         `UPDATE reasoning_sessions SET budget_spent = budget_spent + ?, updated_at = ? WHERE id = ?`,
       )
       .run(Math.max(0, Math.floor(tokens)), Date.now(), id);
+  }
+
+  /** Increment the cumulative advancing-round counter and return the new total. Backs the deliberate auto-answer round ceiling. */
+  incrementRoundsRun(id: string): number {
+    this.db
+      .prepare<[number, string]>(
+        `UPDATE reasoning_sessions SET rounds_run = rounds_run + 1, updated_at = ? WHERE id = ?`,
+      )
+      .run(Date.now(), id);
+    const row = this.db
+      .prepare<[string]>(`SELECT rounds_run FROM reasoning_sessions WHERE id = ?`)
+      .get(id) as { rounds_run: number } | undefined;
+    return row?.rounds_run ?? 0;
   }
 
   /**

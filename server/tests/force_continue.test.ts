@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 process.env.MEMORY_DB_PATH = ':memory:';
 process.env.LLM_PROVIDER = '';
 
-const { shouldForceDeepExploreAdvance } = await import('../src/chat-handler.js');
+const { shouldForceDeepExploreAdvance, userAsksExploreStatus } = await import('../src/chat-handler.js');
 
 // Recite: deep_explore round jargon ("第 N 轮", "x 开→y 开") narrated as if just produced.
 const RECITE = '## For User\n第 3 轮完成，已 settled Meta-complexity 分支；当前 5 开→4 开，剩 4 个开放节点。';
@@ -59,4 +59,25 @@ test('English: no false positive on an ordinary research answer', () => {
     shouldForceDeepExploreAdvance('## For User\nSGLang + FP8 + EAGLE MTP is the best inference stack; here is why.', base),
     false,
   );
+});
+
+// ── B: userAsksExploreStatus — a status/count question must not be hijacked into a 6-min advance ──────
+test('userAsksExploreStatus: count question about deep_explore → true', () => {
+  assert.equal(userAsksExploreStatus('现在有多少未结束的deep explore？'), true);
+  assert.equal(userAsksExploreStatus('deep explore 进度如何？'), true);
+  assert.equal(userAsksExploreStatus('还有哪些探索挂着没推进'), true);
+  assert.equal(userAsksExploreStatus('how many deep explores are still running?'), true);
+  assert.equal(userAsksExploreStatus('list the open explorations'), true);
+});
+
+test('userAsksExploreStatus: a request to ADVANCE is not a status query → false', () => {
+  assert.equal(userAsksExploreStatus('继续'), false);
+  assert.equal(userAsksExploreStatus('继续推进 deep explore'), false); // wants to advance, no status cue
+  assert.equal(userAsksExploreStatus('深入研究一下 GLM 架构'), false);  // start, not status
+  assert.equal(userAsksExploreStatus('ok'), false);
+});
+
+test('userAsksExploreStatus: status cue WITHOUT an explore reference → false (not about exploration)', () => {
+  assert.equal(userAsksExploreStatus('现在有多少未读消息？'), false);
+  assert.equal(userAsksExploreStatus('进度怎么样了'), false);
 });

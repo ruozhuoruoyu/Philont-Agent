@@ -1256,3 +1256,42 @@ test('DELIBERATE_PROFILE.renderReport(answered): ANSWERED head + closed framing,
   assert.ok(report.includes('evidence-backed answer'), 'closing should frame it as the answer');
   assert.ok(!/reply\s+"continue"/i.test(report), 'must NOT tell the user to reply continue (session is closed)');
 });
+
+test('shouldDeliberateAutoAnswer: enough cited evidence → answer even while still progressing (slow-grind exit)', () => {
+  // The real failure mode: settles ~1/round, substantive=true every round, open frontier GROWS, so the
+  // no-progress trigger never arms. The evidence trigger must fire on accumulated findings instead.
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'active', settledCount: 3, substantive: true, noProgressRounds: 0,
+      roundsRun: 2, enabled: true, minSettled: 1, patience: 2, enoughSettled: 3, maxRounds: 3,
+    }),
+    true,
+  );
+  // 2 settled, still progressing, not at ceiling → keep going (not enough yet).
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'active', settledCount: 2, substantive: true, noProgressRounds: 0,
+      roundsRun: 2, enabled: true, minSettled: 1, patience: 2, enoughSettled: 3, maxRounds: 3,
+    }),
+    false,
+  );
+});
+
+test('shouldDeliberateAutoAnswer: hard round ceiling backstops endless babysitting', () => {
+  // Settles slowly (only 1), still nominally progressing, never stalls — but hit the round ceiling → answer.
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'active', settledCount: 1, substantive: true, noProgressRounds: 0,
+      roundsRun: 3, enabled: true, minSettled: 1, patience: 2, enoughSettled: 3, maxRounds: 3,
+    }),
+    true,
+  );
+  // One round before the ceiling, not enough evidence, not stalled → keep going.
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'active', settledCount: 1, substantive: true, noProgressRounds: 0,
+      roundsRun: 2, enabled: true, minSettled: 1, patience: 2, enoughSettled: 3, maxRounds: 3,
+    }),
+    false,
+  );
+});

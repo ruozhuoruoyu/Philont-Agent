@@ -275,6 +275,27 @@ const DELIBERATE_ANSWER_PATIENCE = (() => {
   const n = Number(process.env.PHILONT_DEEP_EXPLORE_ANSWER_PATIENCE);
   return Number.isInteger(n) && n >= 1 ? n : 2;
 })();
+/**
+ * Evidence-sufficiency trigger: settled findings at/above which a deliberate session has enough cited
+ * evidence to ANSWER, so it delivers even while nominally "still progressing" — the slow-grind failure
+ * mode where it settles ~1/round but the open frontier keeps growing, so the no-progress trigger never
+ * arms and the user is asked to "继续" forever (observed: proved 2→3→4→4 over 4 rounds, open stuck ~21).
+ * env PHILONT_DEEP_EXPLORE_ANSWER_ENOUGH, default 3, min 1.
+ */
+const DELIBERATE_ANSWER_ENOUGH = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_ANSWER_ENOUGH);
+  return Number.isInteger(n) && n >= 1 ? n : 3;
+})();
+/**
+ * Hard round-ceiling backstop: a deliberate session that settles so slowly that neither the no-progress
+ * nor the evidence trigger fires is forced to deliver after this many advancing rounds, instead of asking
+ * the user to keep typing "继续". Bounds babysitting regardless of convergence. env
+ * PHILONT_DEEP_EXPLORE_ANSWER_MAX_ROUNDS, default 3, min 1.
+ */
+const DELIBERATE_ANSWER_MAX_ROUNDS = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_ANSWER_MAX_ROUNDS);
+  return Number.isInteger(n) && n >= 1 ? n : 3;
+})();
 
 /**
  * Did this round make SUBSTANTIVE progress, or just trivial churn around a wall? Substantive =
@@ -1306,11 +1327,15 @@ export function judgeConvergence(
 
 /**
  * Deliberate auto-answer decision (pure, testable). judgeConvergence is proof-shaped, so a deliberate
- * session never reaches a terminal state on its own and would emit "reply continue" forever. This is the
- * missing terminal condition: deliver the synthesis and close 'answered' when the session has gathered
- * enough cited-evidence findings AND either the frontier emptied ('stuck') or converge has stalled (no
- * substantive progress for ≥ patience rounds). Returns false for formal mode, the disabled flag, the
- * already-terminal statuses ('solved' / 'answered' / 'abandoned'), or too little evidence.
+ * session never reaches a terminal state on its own and would emit "reply continue" forever. This supplies
+ * the missing terminal condition. Once it has ≥ minSettled cited findings, it delivers the synthesis and
+ * closes 'answered' on ANY of:
+ *   • frontier emptied ('stuck') — nothing left to gather;
+ *   • converge stalled — no substantive progress for ≥ patience rounds (the original case);
+ *   • evidence sufficient — ≥ enoughSettled cited findings, so it can answer even while still nominally
+ *     progressing (the slow-grind case: settles ~1/round but the open frontier keeps growing);
+ *   • round ceiling — ≥ maxRounds advancing rounds run, a hard backstop against endless babysitting.
+ * Returns false for formal mode, the disabled flag, the already-terminal statuses, or too little evidence.
  */
 export function shouldDeliberateAutoAnswer(input: {
   profileId: ReasoningSessionMode;
@@ -1318,19 +1343,25 @@ export function shouldDeliberateAutoAnswer(input: {
   settledCount: number;
   substantive: boolean;
   noProgressRounds: number;
+  roundsRun?: number;
   enabled?: boolean;
   minSettled?: number;
   patience?: number;
+  enoughSettled?: number;
+  maxRounds?: number;
 }): boolean {
   const enabled = input.enabled ?? deliberateAutoAnswerEnabled();
   if (!enabled || input.profileId !== 'deliberate') return false;
   if (input.settledCount < (input.minSettled ?? DELIBERATE_ANSWER_MIN_SETTLED)) return false;
+  if (input.status === 'answered' || input.status === 'solved' || input.status === 'abandoned') return false;
   if (input.status === 'stuck') return true; // frontier exhausted → nothing left to gather; answer with what we have
-  return (
-    input.status === 'active' &&
-    !input.substantive &&
-    input.noProgressRounds >= (input.patience ?? DELIBERATE_ANSWER_PATIENCE)
-  );
+  if (input.status !== 'active') return false;
+  // Evidence sufficient → answer even if still nominally progressing (slow-grind exit).
+  if (input.settledCount >= (input.enoughSettled ?? DELIBERATE_ANSWER_ENOUGH)) return true;
+  // Hard round-ceiling backstop → bound babysitting regardless of convergence.
+  if ((input.roundsRun ?? 0) >= (input.maxRounds ?? DELIBERATE_ANSWER_MAX_ROUNDS)) return true;
+  // Stalled converge → deliver what we have.
+  return !input.substantive && input.noProgressRounds >= (input.patience ?? DELIBERATE_ANSWER_PATIENCE);
 }
 
 function renderProgressText(s: ProgressSummary, hitCap: boolean, status: ReasoningSessionStatus, settledVerb = 'proved'): string {
@@ -2618,6 +2649,9 @@ export function createDeepExploreTool(
         output: `This reasoning session has used ${session.budgetSpent} tokens, hitting the budget cap (${SESSION_TOKEN_BUDGET}); paused. Continue later with a fresh angle, or treat it as stuck.`,
       };
     }
+    // Count this advancing round (cumulative, persisted) — backs the deliberate auto-answer round ceiling.
+    // Incremented for both diverge and converge rounds so the ceiling reflects total babysitting rounds.
+    const roundsRun = reasoning.incrementRoundsRun(session.id);
     // Resolve the reasoning profile (formal proof vs general evidence-based deliberation) from the session.
     const profile = PROFILES[session.mode] ?? FORMAL_PROFILE;
     const rt = PROFILE_RT[profile.id];
@@ -2760,6 +2794,7 @@ export function createDeepExploreTool(
         settledCount: after.filter((n) => n.status === 'proved').length,
         substantive,
         noProgressRounds,
+        roundsRun,
       })
     ) {
       reasoning.setSessionStatus(session.id, 'answered');
