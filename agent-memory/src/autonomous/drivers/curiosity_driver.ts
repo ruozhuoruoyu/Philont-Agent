@@ -22,6 +22,7 @@ import type {
   InitiativeProposal,
   MemorySnapshot,
 } from '../types.js';
+import { shouldPromoteToGoal, DEFAULT_TRAITS, type TraitProfile } from '../../drives_to_goals.js';
 
 // ── extractSpecificTokens (ported from kernel_drives.ts) ─────────────────────
 //
@@ -132,6 +133,14 @@ export interface CuriosityDriverConfig {
    * read the action ledger / barriers). Undefined = never suppress (back-compat).
    */
   isSystemStuck?: () => boolean;
+  /**
+   * S4 P1: when true (default), a sustained high-stake dormant pursuit is proposed as a COMMITTED
+   * deep_explore goal-loop (promote_goal_loop) rather than a one-shot lookup — the drive → goal promotion.
+   * Set false to keep the legacy one-shot dormant lookup.
+   */
+  promoteToGoalLoop?: boolean;
+  /** S4: trait profile (server-derived from drive_config via deriveTraitProfile); tunes the promotion bar. */
+  traits?: TraitProfile;
 }
 
 export const DEFAULT_CURIOSITY_CONFIG: CuriosityDriverConfig = {
@@ -139,6 +148,7 @@ export const DEFAULT_CURIOSITY_CONFIG: CuriosityDriverConfig = {
   pursuitAgingDays: 14,
   pursuitMinStakeWeight: 7,
   maxProposals: 3,
+  promoteToGoalLoop: true,
 };
 
 const DRIVER_NAME = 'curiosity';
@@ -222,22 +232,45 @@ export class CuriosityDriver implements Driver {
       if (snap.recentDoneTargetRefs.has(targetRef)) continue;
 
       const ageDays = Math.floor((snap.now - lastTouched) / 86_400_000);
-      proposals.push({
-        kind: 'curiosity_dormant_pursuit',
-        driver: DRIVER_NAME,
-        targetRef,
-        rationale:
-          `pursuit "${p.title}" stake=${p.stakeWeight}/10 has not been touched for ${ageDays} days ` +
-          `and has no evidenceRefs; should actively advance or re-evaluate`,
-        utility: scoreDormancyUtility(p.stakeWeight, ageDays),
-        budgetEstimate: 1800,
-        plan: [
-          {
-            tool: 'search_notes',
-            params: { query: p.title },
-          },
-        ],
-      });
+      // S4 P1: a sustained, high-stake, open theme is worth COMMITTING as a deep_explore goal-loop, not just
+      // a one-off lookup. stake = stakeWeight/10; a committed-and-aged high-stake pursuit IS sustained, so
+      // its stakeWeight doubles as the recurrence proxy; a pursuit is an open theme (openEnded).
+      const promote =
+        this.cfg.promoteToGoalLoop !== false &&
+        shouldPromoteToGoal(
+          { stake: p.stakeWeight / 10, recurrence: p.stakeWeight, openEnded: true },
+          this.cfg.traits ?? DEFAULT_TRAITS,
+        );
+      if (promote) {
+        proposals.push({
+          kind: 'promote_goal_loop',
+          driver: DRIVER_NAME,
+          targetRef: `goal-loop:pursuit:${p.id}`,
+          rationale:
+            `pursuit "${p.title}" (stake ${p.stakeWeight}/10, dormant ${ageDays}d) is a sustained high-stake ` +
+            `open theme — commit it as a deep_explore goal-loop rather than a one-off lookup`,
+          utility: scoreDormancyUtility(p.stakeWeight, ageDays) + 0.05,
+          budgetEstimate: 3000,
+          plan: [{ tool: 'deep_explore', params: { action: 'start', mode: 'deliberate', goal: p.title } }],
+        });
+      } else {
+        proposals.push({
+          kind: 'curiosity_dormant_pursuit',
+          driver: DRIVER_NAME,
+          targetRef,
+          rationale:
+            `pursuit "${p.title}" stake=${p.stakeWeight}/10 has not been touched for ${ageDays} days ` +
+            `and has no evidenceRefs; should actively advance or re-evaluate`,
+          utility: scoreDormancyUtility(p.stakeWeight, ageDays),
+          budgetEstimate: 1800,
+          plan: [
+            {
+              tool: 'search_notes',
+              params: { query: p.title },
+            },
+          ],
+        });
+      }
     }
 
     // Sort by utility and truncate to top-N (driver self-limits)

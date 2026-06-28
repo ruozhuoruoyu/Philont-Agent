@@ -22,6 +22,29 @@ export const DEFAULT_TRAITS: TraitProfile = { competitiveness: 0.5, curiosity: 0
 
 const clamp01 = (x: number): number => Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
 
+/** Normalized 0..1 drive intensities the server can read off the real drive_config / driveBounds. */
+export interface DriveSignals {
+  /** TaskCommitmentDrive intensity → 好胜. */
+  competitiveness?: number;
+  /** CuriosityDrive intensity → 好奇. */
+  curiosity?: number;
+  /** commitment_pressure → 尽责. */
+  conscientiousness?: number;
+}
+
+/**
+ * Derive a TraitProfile from real drive intensities (S4 (a)). A missing signal falls back to the neutral
+ * default, so a partially-configured agent still gets a sensible profile. Pure; the server feeds it the
+ * actual drive_config values, the drivers consume the result.
+ */
+export function deriveTraitProfile(signals: DriveSignals = {}): TraitProfile {
+  return {
+    competitiveness: clamp01(signals.competitiveness ?? DEFAULT_TRAITS.competitiveness),
+    curiosity: clamp01(signals.curiosity ?? DEFAULT_TRAITS.curiosity),
+    conscientiousness: clamp01(signals.conscientiousness ?? DEFAULT_TRAITS.conscientiousness),
+  };
+}
+
 /**
  * Map a trait profile onto a loop contract. Traits TUNE, never override, the spine:
  *   - 好胜 → more rounds + a higher stuck threshold (try harder before declaring stuck), but stuckAfter

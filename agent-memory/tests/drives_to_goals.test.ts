@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { traitTunedContract, shouldPromoteToGoal, DEFAULT_TRAITS } from '../src/drives_to_goals.js';
+import { traitTunedContract, shouldPromoteToGoal, DEFAULT_TRAITS, deriveTraitProfile } from '../src/drives_to_goals.js';
 import { DEFAULT_LOOP_CONTRACT } from '../src/goal_loop.js';
 
 test('traitTunedContract: 好胜 → more rounds + higher stuck threshold (but stuck > switch)', () => {
@@ -41,4 +41,16 @@ test('shouldPromoteToGoal: 好奇 lowers the recurrence bar (commit to a theme s
   const fire = { stake: 0.8, recurrence: 1, openEnded: true };
   assert.equal(shouldPromoteToGoal(fire, { ...DEFAULT_TRAITS, curiosity: 1 }), true, 'very curious → commits at recurrence 1');
   assert.equal(shouldPromoteToGoal(fire, { ...DEFAULT_TRAITS, curiosity: 0 }), false, 'incurious → needs more recurrence');
+});
+
+test('deriveTraitProfile: maps drive signals, clamps, defaults missing to neutral 0.5', () => {
+  assert.deepEqual(deriveTraitProfile({ competitiveness: 0.9, curiosity: 0.2, conscientiousness: 0.7 }),
+    { competitiveness: 0.9, curiosity: 0.2, conscientiousness: 0.7 });
+  // missing signals → neutral default
+  assert.deepEqual(deriveTraitProfile({ curiosity: 0.8 }),
+    { competitiveness: 0.5, curiosity: 0.8, conscientiousness: 0.5 });
+  // out-of-range / NaN → clamped (NaN is not nullish, so ?? doesn't default it; clamp01 maps it to 0)
+  assert.deepEqual(deriveTraitProfile({ competitiveness: 2, curiosity: -1, conscientiousness: NaN }),
+    { competitiveness: 1, curiosity: 0, conscientiousness: 0 });
+  assert.deepEqual(deriveTraitProfile(), { competitiveness: 0.5, curiosity: 0.5, conscientiousness: 0.5 });
 });

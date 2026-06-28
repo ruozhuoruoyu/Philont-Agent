@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {
   GapDriver,
   CuriosityDriver,
+  DEFAULT_CURIOSITY_CONFIG,
   extractSpecificTokens,
   type MemorySnapshot,
 } from '../src/index.js';
@@ -339,8 +340,19 @@ test('CuriosityDriver: 已 done targetRef 跳过', () => {
   assert.equal(ps.length, 0);
 });
 
-test('CuriosityDriver: dormant high-stake pursuit 命中', () => {
+test('CuriosityDriver: dormant high-stake pursuit → promote to goal-loop (S4, default)', () => {
   const d = new CuriosityDriver();
+  const ps = d.propose(snap({
+    activePursuits: [pursuit({ stakeWeight: 8, lastTouchedAt: NOW - 30 * 86_400_000 })],
+  }));
+  assert.equal(ps.length, 1);
+  assert.equal(ps[0].kind, 'promote_goal_loop');
+  assert.equal(ps[0].targetRef, 'goal-loop:pursuit:p1');
+  assert.equal(ps[0].plan?.[0].tool, 'deep_explore', 'promotion starts a deep_explore goal-loop');
+});
+
+test('CuriosityDriver: promoteToGoalLoop=false → legacy one-shot dormant lookup', () => {
+  const d = new CuriosityDriver({ ...DEFAULT_CURIOSITY_CONFIG, promoteToGoalLoop: false });
   const ps = d.propose(snap({
     activePursuits: [pursuit({ stakeWeight: 8, lastTouchedAt: NOW - 30 * 86_400_000 })],
   }));
