@@ -444,16 +444,22 @@ export function parseLiteratureCards(text: string, max = LIT_GROUNDING_MAX_CARDS
   return out;
 }
 
-// ── H1 — parallel sub-agent research grounding ────────────────────────────────────────────────────
+// ── H1 — parallel sub-agent research grounding (DEFAULT OFF — mis-targeted, see below) ───────────────
 //
-// Default grounding is ONE mini-agent pass. When PHILONT_SUBAGENT_RESEARCH is on, the grounding fans out
-// into N isolated sub-agents (runParallelSubAgents), each searching a DISTINCT angle, then the cards are
-// merged + deduped. Each child has its own context (never sees a sibling's transcript), so the angles
-// stay genuinely independent. Costs ~fanout× the grounding LLM, so the fan-out is small and capped.
-
+// Grounding is ONE mini-agent pass. When PHILONT_SUBAGENT_RESEARCH is explicitly enabled, it instead fans
+// out into N isolated sub-agents (runParallelSubAgents), each searching a DISTINCT angle, merged + deduped.
+//
+// 2026-06-29: defaulted OFF. Wiring parallel sub-agents into per-round reasoning grounding was the WRONG
+// use case: it runs every round, the children bypass the session-level web dedup, and 3–4 angles re-fetch
+// the same canonical sources — so a 6-minute round is spent crawling instead of reasoning/settling (the
+// observed "deep_explore keeps getting slower / never converges" symptom). Multi-agent's real payoff is
+// context-isolated breadth reads and parallel ISOLATED EXECUTION of decomposed work (à la a coding
+// harness), not bolting parallel research onto every reasoning step. The fan-out stays behind the flag
+// for experiments; deep_explore's default is the single, lighter grounding pass. Opt in with
+// PHILONT_SUBAGENT_RESEARCH=1/on.
 export function subAgentResearchEnabled(): boolean {
   const v = (process.env.PHILONT_SUBAGENT_RESEARCH ?? '').trim().toLowerCase();
-  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
 }
 
 export function subAgentResearchFanout(): number {

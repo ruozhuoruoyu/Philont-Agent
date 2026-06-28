@@ -12,14 +12,16 @@ import {
   type LiteratureCard,
 } from '../src/deep_explore.js';
 
-test('subAgentResearchEnabled: default ON, =0/off disables', () => {
+test('subAgentResearchEnabled: default OFF (mis-targeted; opt-in only), =1/on enables', () => {
   const prev = process.env.PHILONT_SUBAGENT_RESEARCH;
   try {
     delete process.env.PHILONT_SUBAGENT_RESEARCH;
+    assert.equal(subAgentResearchEnabled(), false, 'default OFF — fan-out is opt-in');
+    process.env.PHILONT_SUBAGENT_RESEARCH = '1';
+    assert.equal(subAgentResearchEnabled(), true);
+    process.env.PHILONT_SUBAGENT_RESEARCH = 'on';
     assert.equal(subAgentResearchEnabled(), true);
     process.env.PHILONT_SUBAGENT_RESEARCH = '0';
-    assert.equal(subAgentResearchEnabled(), false);
-    process.env.PHILONT_SUBAGENT_RESEARCH = 'off';
     assert.equal(subAgentResearchEnabled(), false);
   } finally {
     if (prev === undefined) delete process.env.PHILONT_SUBAGENT_RESEARCH;
