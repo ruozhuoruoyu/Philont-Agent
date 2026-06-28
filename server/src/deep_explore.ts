@@ -547,6 +547,45 @@ const NO_PROGRESS_CAP = (() => {
 })();
 
 /**
+ * Web-lookup cap inside a DIVERGE round. Diverge GENERATES candidates (reason_decompose) from what the
+ * session already knows + the up-front grounding pass; the web is only for LIGHT viability checks. Weak
+ * models ignore that prompt discipline and browse instead (observed: a diverge round made 10 web calls and
+ * 0 tree commits, then got cut for no progress — a whole 200s round produced nothing). Default 3; set
+ * PHILONT_DEEP_EXPLORE_DIVERGE_WEB_CAP=999 to effectively disable.
+ */
+const DIVERGE_WEB_CAP = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_DIVERGE_WEB_CAP);
+  return Number.isInteger(n) && n >= 0 ? n : 3;
+})();
+
+/**
+ * Wrap a tool runner so that after `cap` web-tool calls, further web calls are BLOCKED with a directive to
+ * decompose now instead of searching — a mechanism backstop (not a prompt) for the diverge round's
+ * "generate, don't browse" job. Non-web tools always pass through. Pure (per-round closure counter).
+ */
+export function withWebCallCap(
+  base: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>,
+  opts: { cap: number; webTools: ReadonlySet<string> },
+): (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult> {
+  let webCalls = 0;
+  return async (name, input) => {
+    if (opts.webTools.has(name)) {
+      if (webCalls >= opts.cap) {
+        return {
+          ok: true,
+          output:
+            `⚠ Web-lookup budget for this generation round is spent (${opts.cap} used). STOP searching — ` +
+            `propose your candidate options/hypotheses NOW via reason_decompose, from what you already know ` +
+            `and the grounding above. Generation, not evidence-gathering, is this round's job.`,
+        };
+      }
+      webCalls++;
+    }
+    return base(name, input);
+  };
+}
+
+/**
  * Wrap a round's tool runner so the round aborts early once it has made NO tree progress for
  * NO_PROGRESS_CAP consecutive tool calls. "Progress" = a successful reason_decompose / reason_record
  * (any status — recording a dead_end IS progress, it's backtracking). pariGp/recall/failed calls do
@@ -2672,6 +2711,8 @@ export function createDeepExploreTool(
       // Stop a round that has made NO tree commit for half the round budget (the slow all-pariGp spin).
       { noProgressTimeoutMs: Math.round(roundDeadlineMs * 0.5), noProgressCap: profile.noProgressCap },
     );
+    // Diverge browses-instead-of-generating backstop: cap web lookups so the round must decompose.
+    const cappedRunner = withWebCallCap(boundRunner, { cap: DIVERGE_WEB_CAP, webTools: WEB_TOOL_NAMES });
     let result;
     try {
       result = await runMiniAgentLoop({
@@ -2679,7 +2720,7 @@ export function createDeepExploreTool(
         userMessage,
         llm: miniLoopLLM,
         toolDefs: rt.toolDefs,
-        toolRunner: boundRunner,
+        toolRunner: cappedRunner,
         maxIters,
         toolWhitelist: rt.whitelist,
         onStatus: deps.onStatus,
