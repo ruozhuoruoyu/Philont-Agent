@@ -67,6 +67,32 @@ function maskKey(key: string | undefined): string {
 const TOOL_RESULT_PLACEHOLDER =
   '(tool call not executed — interrupted by authorization/gate or superseded; treat as no-op)';
 
+/**
+ * True if any assistant message carries a tool_use block but NO thinking block. Under DeepSeek/Anthropic
+ * thinking mode, a tool_use assistant turn MUST echo its thinking block — a harness-injected / reconstructed
+ * tool_use (force-continue/force-start, auth-resume) has none, which 400s. The caller disables thinking for
+ * that send.
+ */
+export function hasToolUseWithoutThinking(messages: NativeMessage[]): boolean {
+  for (const m of messages) {
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) continue;
+    const blocks = m.content as Array<{ type?: string }>;
+    if (!blocks.some((b) => b?.type === 'tool_use')) continue;
+    if (!blocks.some((b) => b?.type === 'thinking' || b?.type === 'redacted_thinking')) return true;
+  }
+  return false;
+}
+
+/** Drop thinking / redacted_thinking blocks from assistant messages (for sends where thinking is disabled). */
+export function stripThinkingBlocks(messages: NativeMessage[]): NativeMessage[] {
+  return messages.map((m) => {
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) return m;
+    const blocks = m.content as Array<{ type?: string }>;
+    const filtered = blocks.filter((b) => b?.type !== 'thinking' && b?.type !== 'redacted_thinking');
+    return filtered.length === blocks.length ? m : ({ ...m, content: filtered } as NativeMessage);
+  });
+}
+
 export function repairToolResultPairing(messages: NativeMessage[]): NativeMessage[] {
   // Rebuild-guarantee (2026-05-31 upgrade): the old version only inserted missing tool_results
   // when none existed at all in the full array, and did **not relocate misplaced ones** (resume
@@ -458,11 +484,19 @@ class AnthropicAdapter implements LLMAdapter {
       // field on thinking-capable models (the reasoning_content echo-400 fix), and
       // resolveMaxTokens raises the ceiling for high/max effort so thinking tokens don't
       // starve the answer (the empty-text bug).
-      const wire = this.profile.buildReasoningWire(this.model, opts?.reasoning);
+      // DeepSeek/Anthropic thinking contract: an assistant turn carrying tool_use MUST include its thinking
+      // block when thinking is enabled. The harness sometimes injects / reconstructs a tool_use assistant
+      // turn WITHOUT one — force-continue / force-start synthetic deep_explore calls, auth-resume rebuilt
+      // calls — which 400s with "content[].thinking must be passed back". When the payload contains such a
+      // turn, disable thinking for THIS call AND strip thinking blocks, so there is no echo requirement and
+      // no present-but-disabled mismatch. Normal turns (model produced thinking+tool_use) are untouched.
+      const syntheticToolUse = hasToolUseWithoutThinking(messages);
+      const effReasoning = syntheticToolUse ? { ...opts?.reasoning, enabled: false } : opts?.reasoning;
+      const wire = this.profile.buildReasoningWire(this.model, effReasoning);
       const maxTokens = this.profile.resolveMaxTokens(this.model, opts?.reasoning, baseMaxTokens);
       // Repair tool_use ↔ tool_result pairing before sending the request (deepseek
       // multi-tool_use + auth-pause leaves dangling tool_use → 400).
-      const safeMessages = repairToolResultPairing(messages);
+      const safeMessages = repairToolResultPairing(syntheticToolUse ? stripThinkingBlocks(messages) : messages);
       // Build params as a Record then cast to the SDK param type at the boundary:
       // `output_config` and `thinking:{type:'disabled'}` (DeepSeek extension) are not in
       // the Anthropic SDK's typed surface, so a typed literal would not compile. The shape
