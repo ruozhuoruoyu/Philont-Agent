@@ -50,6 +50,7 @@ import {
   looksLikeUserData,
   buildDeliberateGroundingPrompt,
   DELIBERATE_LIT_TYPE_LABEL,
+  shouldDeliberateAutoAnswer,
 } from '../src/deep_explore.js';
 
 function node(over: Partial<ReasoningNode>): ReasoningNode {
@@ -1158,4 +1159,100 @@ test('P2: collectComputeLessons flag-ON surfaces a query-relevant lesson the com
   assert.ok(on.length > 0, 'flag ON should surface the relevant lesson');
   assert.ok(on.some((l) => l.includes('hbm memory bandwidth')), 'expected the hbm lesson line');
   mem.close();
+});
+
+// ── Deliberate auto-answer exit ramp (the terminal condition deliberate mode was missing) ───────────
+test('shouldDeliberateAutoAnswer: formal mode never auto-answers (proof has its own terminal)', () => {
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'formal', status: 'active', settledCount: 5, substantive: false, noProgressRounds: 9,
+      enabled: true,
+    }),
+    false,
+  );
+});
+
+test('shouldDeliberateAutoAnswer: disabled flag = legacy "reply continue forever" behavior', () => {
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'active', settledCount: 3, substantive: false, noProgressRounds: 9,
+      enabled: false,
+    }),
+    false,
+  );
+});
+
+test('shouldDeliberateAutoAnswer: needs ≥ minSettled cited findings before answering', () => {
+  // 0 settled → nothing to answer with, keep going even when stalled.
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'active', settledCount: 0, substantive: false, noProgressRounds: 9,
+      enabled: true, minSettled: 1, patience: 2,
+    }),
+    false,
+  );
+});
+
+test('shouldDeliberateAutoAnswer: stalled converge (no substantive progress past patience) → answer', () => {
+  // This is exactly the prod failure: 1 settled / many open, rounds making no substantive progress.
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'active', settledCount: 1, substantive: false, noProgressRounds: 2,
+      enabled: true, minSettled: 1, patience: 2,
+    }),
+    true,
+  );
+  // Still making progress → keep deliberating, do NOT cut it short.
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'active', settledCount: 1, substantive: true, noProgressRounds: 2,
+      enabled: true, minSettled: 1, patience: 2,
+    }),
+    false,
+  );
+  // Stalled but not yet past patience → give it another round.
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'active', settledCount: 1, substantive: false, noProgressRounds: 1,
+      enabled: true, minSettled: 1, patience: 2,
+    }),
+    false,
+  );
+});
+
+test('shouldDeliberateAutoAnswer: empty frontier (stuck) with evidence → answer, not "add ideas"', () => {
+  assert.equal(
+    shouldDeliberateAutoAnswer({
+      profileId: 'deliberate', status: 'stuck', settledCount: 2, substantive: false, noProgressRounds: 0,
+      enabled: true, minSettled: 1, patience: 2,
+    }),
+    true,
+  );
+});
+
+test('shouldDeliberateAutoAnswer: already-terminal statuses do not re-fire', () => {
+  for (const status of ['solved', 'answered', 'abandoned'] as const) {
+    assert.equal(
+      shouldDeliberateAutoAnswer({
+        profileId: 'deliberate', status, settledCount: 3, substantive: false, noProgressRounds: 9,
+        enabled: true,
+      }),
+      false,
+      `status=${status} must not auto-answer`,
+    );
+  }
+});
+
+test('DELIBERATE_PROFILE.renderReport(answered): ANSWERED head + closed framing, no "reply continue"', () => {
+  const nodes: ReasoningNode[] = [
+    node({ id: 'root', parentId: null, claim: 'Explain GLM-5.2 architecture', status: 'open' }),
+    node({ id: 'f1', parentId: 'root', claim: 'GLM-5.2 uses MoE with 256 experts', status: 'proved',
+      result: '744B total / ~40B active', evidenceRefs: ['https://example.com/glm52'], depth: 1 }),
+    node({ id: 'o1', parentId: 'root', claim: 'Exact DSA mechanism', status: 'open', depth: 1 }),
+  ];
+  const session = { id: 's1', goal: 'Explain GLM-5.2 architecture', mode: 'deliberate' } as any;
+  const report = DELIBERATE_PROFILE.renderReport(session, nodes, 'answered');
+  assert.ok(report.includes('✓ ANSWERED'), 'head should read ANSWERED');
+  assert.ok(report.includes('evidence-backed answer'), 'closing should frame it as the answer');
+  assert.ok(!/reply\s+"continue"/i.test(report), 'must NOT tell the user to reply continue (session is closed)');
 });

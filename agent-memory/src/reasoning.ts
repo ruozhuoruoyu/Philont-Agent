@@ -16,7 +16,12 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 
-export type ReasoningSessionStatus = 'active' | 'solved' | 'stuck' | 'abandoned';
+// 'answered' (2026-06-28): a DELIBERATE session that has gathered enough cited evidence and stopped
+// making converge progress — the engine auto-delivers its synthesis and closes here. Distinct from
+// 'solved' (a formal proof's root proved) and 'stuck' (frontier exhausted with nothing established):
+// 'answered' means "an evidence-backed answer was delivered." Terminal like solved/stuck (not 'active',
+// so getMostRecentActiveSession / listActiveSessions / auto-advance all stop resuming it).
+export type ReasoningSessionStatus = 'active' | 'solved' | 'stuck' | 'abandoned' | 'answered';
 /**
  * Reasoning mode = which domain "profile" the deep_explore engine runs:
  *   - 'formal'     : mathematical / formal proof — claims settled by machine-check + skeptic (z3/pari/…)

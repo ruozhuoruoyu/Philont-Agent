@@ -251,6 +251,32 @@ const SUBSTANTIVE_VALUE = (() => {
 })();
 
 /**
+ * Deliberate-mode auto-answer exit ramp (2026-06-28). judgeConvergence is proof-shaped: a session only
+ * reaches 'solved' when its ROOT node is proved. A DELIBERATE (research / judgment) question's root is
+ * never literally "proved", and its frontier rarely empties — so a deliberate session can ONLY terminate
+ * by hitting the per-round time cap, which emits "reply continue" round after round (observed in prod: a
+ * GLM-5.2 research session stuck at 1 settled / 21 open, asking the user to babysit each round and never
+ * delivering an answer). This is the missing terminal condition: once a deliberate session has gathered
+ * enough CITED-evidence findings AND a converge round stops making substantive progress (or the frontier
+ * empties), auto-deliver the synthesis report and close the session 'answered'. Default ON; disable with
+ * PHILONT_DEEP_EXPLORE_DELIBERATE_AUTOANSWER=0 (reverts to today's "reply continue forever" behavior).
+ */
+export function deliberateAutoAnswerEnabled(): boolean {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_DELIBERATE_AUTOANSWER ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+/** Min cited-evidence findings before a deliberate session may auto-answer. env PHILONT_DEEP_EXPLORE_ANSWER_MIN_SETTLED, default 1, min 1. */
+const DELIBERATE_ANSWER_MIN_SETTLED = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_ANSWER_MIN_SETTLED);
+  return Number.isInteger(n) && n >= 1 ? n : 1;
+})();
+/** Consecutive no-substantive-progress converge rounds before auto-answering. env PHILONT_DEEP_EXPLORE_ANSWER_PATIENCE, default 2, min 1. */
+const DELIBERATE_ANSWER_PATIENCE = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_ANSWER_PATIENCE);
+  return Number.isInteger(n) && n >= 1 ? n : 2;
+})();
+
+/**
  * Did this round make SUBSTANTIVE progress, or just trivial churn around a wall? Substantive =
  *  (1) a node went open→refuted/dead_end (a real kill / backtrack), OR
  *  (2) a node near the root (depth ≤ 1) was settled (matters regardless of value), OR
@@ -1278,6 +1304,35 @@ export function judgeConvergence(
   return 'active';
 }
 
+/**
+ * Deliberate auto-answer decision (pure, testable). judgeConvergence is proof-shaped, so a deliberate
+ * session never reaches a terminal state on its own and would emit "reply continue" forever. This is the
+ * missing terminal condition: deliver the synthesis and close 'answered' when the session has gathered
+ * enough cited-evidence findings AND either the frontier emptied ('stuck') or converge has stalled (no
+ * substantive progress for ≥ patience rounds). Returns false for formal mode, the disabled flag, the
+ * already-terminal statuses ('solved' / 'answered' / 'abandoned'), or too little evidence.
+ */
+export function shouldDeliberateAutoAnswer(input: {
+  profileId: ReasoningSessionMode;
+  status: ReasoningSessionStatus;
+  settledCount: number;
+  substantive: boolean;
+  noProgressRounds: number;
+  enabled?: boolean;
+  minSettled?: number;
+  patience?: number;
+}): boolean {
+  const enabled = input.enabled ?? deliberateAutoAnswerEnabled();
+  if (!enabled || input.profileId !== 'deliberate') return false;
+  if (input.settledCount < (input.minSettled ?? DELIBERATE_ANSWER_MIN_SETTLED)) return false;
+  if (input.status === 'stuck') return true; // frontier exhausted → nothing left to gather; answer with what we have
+  return (
+    input.status === 'active' &&
+    !input.substantive &&
+    input.noProgressRounds >= (input.patience ?? DELIBERATE_ANSWER_PATIENCE)
+  );
+}
+
 function renderProgressText(s: ProgressSummary, hitCap: boolean, status: ReasoningSessionStatus, settledVerb = 'proved'): string {
   const parts: string[] = [];
   if (s.decomposedInto > 0) parts.push(`+${s.decomposedInto} child nodes`);
@@ -1303,12 +1358,12 @@ function renderProgressText(s: ProgressSummary, hitCap: boolean, status: Reasoni
  * its own — without it, every round only says "session still active" and the run ends with no
  * conclusion. Session is left active so the user can still continue afterwards.
  */
-function renderFinalReport(session: ReasoningSession, nodes: ReasoningNode[]): string {
+function renderFinalReport(session: ReasoningSession, nodes: ReasoningNode[], statusOverride?: ReasoningSessionStatus): string {
   const oneLine = (s: string, max: number): string => {
     const t = s.replace(/\s+/g, ' ').trim();
     return t.length > max ? t.slice(0, max) + '…' : t;
   };
-  const status = judgeConvergence(nodes);
+  const status = statusOverride ?? judgeConvergence(nodes);
   const proved = nodes.filter((n) => n.status === 'proved');
   const refuted = nodes.filter((n) => n.status === 'refuted');
   const dead = nodes.filter((n) => n.status === 'dead_end');
@@ -1318,7 +1373,8 @@ function renderFinalReport(session: ReasoningSession, nodes: ReasoningNode[]): s
     .sort((a, b) => (b.value ?? 0.5) - (a.value ?? 0.5) || a.depth - b.depth)
     .slice(0, 8);
 
-  const head = status === 'solved' ? '✓ SOLVED' : status === 'stuck' ? '⚠ STUCK' : '◐ IN PROGRESS';
+  const head =
+    status === 'answered' ? '✓ ANSWERED' : status === 'solved' ? '✓ SOLVED' : status === 'stuck' ? '⚠ STUCK' : '◐ IN PROGRESS';
   const lines: string[] = [];
   lines.push(`# Deep-explore report — ${head}`);
   lines.push(`Goal: ${session.goal}`);
@@ -1348,9 +1404,11 @@ function renderFinalReport(session: ReasoningSession, nodes: ReasoningNode[]): s
     }
   }
   lines.push(
-    status === 'solved'
-      ? '\nRoot proposition proved — session complete.'
-      : '\nReply "continue" to keep advancing the open directions above.',
+    status === 'answered'
+      ? '\nThis is the conclusion from the work so far (session closed). To push any open direction above further, ask me to explore that specific point and I will start a fresh focused pass.'
+      : status === 'solved'
+        ? '\nRoot proposition proved — session complete.'
+        : '\nReply "continue" to keep advancing the open directions above.',
   );
   lines.push(`session id: ${session.id}`);
   return lines.join('\n');
@@ -1534,7 +1592,7 @@ export function buildDeliberateSkepticPrompt(
 }
 
 /** Wrap-up report for DELIBERATE mode (evidence-backed findings / ruled out / open). */
-function renderDeliberateReport(session: ReasoningSession, nodes: ReasoningNode[]): string {
+function renderDeliberateReport(session: ReasoningSession, nodes: ReasoningNode[], statusOverride?: ReasoningSessionStatus): string {
   const oneLine = (s: string, max: number): string => {
     const t = s.replace(/\s+/g, ' ').trim();
     return t.length > max ? t.slice(0, max) + '…' : t;
@@ -1545,8 +1603,9 @@ function renderDeliberateReport(session: ReasoningSession, nodes: ReasoningNode[
   const topOpen = [...frontier]
     .sort((a, b) => (b.value ?? 0.5) - (a.value ?? 0.5) || a.depth - b.depth)
     .slice(0, 8);
-  const status = judgeConvergence(nodes);
-  const head = status === 'solved' ? '✓ RESOLVED' : status === 'stuck' ? '⚠ STUCK' : '◐ IN PROGRESS';
+  const status = statusOverride ?? judgeConvergence(nodes);
+  const head =
+    status === 'answered' ? '✓ ANSWERED' : status === 'solved' ? '✓ RESOLVED' : status === 'stuck' ? '⚠ STUCK' : '◐ IN PROGRESS';
   const lines: string[] = [];
   lines.push(`# Deliberation report — ${head}`);
   lines.push(`Question: ${session.goal}`);
@@ -1573,9 +1632,11 @@ function renderDeliberateReport(session: ReasoningSession, nodes: ReasoningNode[
     for (const n of topOpen) lines.push(`- ${oneLine(n.claim, 200)}${n.value != null ? ` (value ${n.value.toFixed(2)})` : ''}`);
   }
   lines.push(
-    status === 'solved'
-      ? '\nQuestion resolved — session complete.'
-      : '\nReply "continue" to keep gathering evidence on the open sub-questions above.',
+    status === 'answered'
+      ? '\nThis is my evidence-backed answer (session closed). The open sub-questions above are what the evidence did not settle — ask me to dig into any specific one and I will start a fresh focused pass.'
+      : status === 'solved'
+        ? '\nQuestion resolved — session complete.'
+        : '\nReply "continue" to keep gathering evidence on the open sub-questions above.',
   );
   lines.push(`session id: ${session.id}`);
   return lines.join('\n');
@@ -1625,7 +1686,7 @@ export interface ReasoningProfile {
     incomingEvidence: string[],
     basis?: ReasoningSettleBasis,
   ): { ok: boolean; reason?: string };
-  renderReport(session: ReasoningSession, nodes: ReasoningNode[]): string;
+  renderReport(session: ReasoningSession, nodes: ReasoningNode[], statusOverride?: ReasoningSessionStatus): string;
 }
 
 /**
@@ -1726,7 +1787,7 @@ export const FORMAL_PROFILE: ReasoningProfile = {
   buildSkepticPrompt: (claim, argument, goal, assumptions, settledClaims) =>
     buildSkepticSystemPrompt(claim, argument, goal, assumptions, settledClaims),
   settlePrecheck: () => ({ ok: true }),
-  renderReport: (session, nodes) => renderFinalReport(session, nodes),
+  renderReport: (session, nodes, statusOverride) => renderFinalReport(session, nodes, statusOverride),
 };
 
 export const DELIBERATE_PROFILE: ReasoningProfile = {
@@ -1784,7 +1845,7 @@ export const DELIBERATE_PROFILE: ReasoningProfile = {
             'gather evidence and pass it via the `evidence` field, then settle again',
         };
   },
-  renderReport: (session, nodes) => renderDeliberateReport(session, nodes),
+  renderReport: (session, nodes, statusOverride) => renderDeliberateReport(session, nodes, statusOverride),
 };
 
 export const PROFILES: Record<ReasoningSessionMode, ReasoningProfile> = {
@@ -2685,6 +2746,27 @@ export function createDeepExploreTool(
     // Post-loop convergence judgment (sub-LLM is not given reason_close).
     const status = judgeConvergence(after);
     if (status !== 'active') reasoning.setSessionStatus(session.id, status);
+
+    // Deliberate auto-answer exit ramp: judgeConvergence is proof-shaped, so a deliberate (research /
+    // judgment) session has no terminal state it can actually reach — it only ever exits by hitting the
+    // per-round time cap, emitting "reply continue" round after round and forcing the user to babysit
+    // (observed: a GLM-5.2 session stuck at 1 settled / 21 open). Once it has gathered enough cited
+    // evidence AND converge has stopped making substantive progress (or the frontier emptied → 'stuck'),
+    // deliver the synthesis and close 'answered' instead of asking the user to keep typing "continue".
+    if (
+      shouldDeliberateAutoAnswer({
+        profileId: profile.id,
+        status,
+        settledCount: after.filter((n) => n.status === 'proved').length,
+        substantive,
+        noProgressRounds,
+      })
+    ) {
+      reasoning.setSessionStatus(session.id, 'answered');
+      const report = profile.renderReport(session, after, 'answered');
+      deps.onMilestone?.(report); // persist the conclusion as a chat bubble so it is not lost
+      return { success: true, output: report };
+    }
 
     // NOTE: the converge→diverge backward edge (decidePhaseTransition convergeAllDead) is intentionally
     // NOT wired here. It can only fire while status==='active', which means the frontier still has open
