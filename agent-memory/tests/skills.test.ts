@@ -569,19 +569,19 @@ test('scoreSkill: frequent success > rare success > frequent failure', () => {
     id: '1', name: 'winner', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 10, lastUsedAt: recent, createdAt: 0,
     successCount: 10, failureCount: 0, lastFailureAt: null, lastSuccessAt: recent,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
   };
   const rare = {
     id: '2', name: 'rare', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 1, lastUsedAt: recent, createdAt: 0,
     successCount: 1, failureCount: 0, lastFailureAt: null, lastSuccessAt: recent,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'draft' as const, kind: 'positive' as const, source: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'draft' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
   };
   const loser = {
     id: '3', name: 'loser', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 10, lastUsedAt: recent, createdAt: 0,
     successCount: 2, failureCount: 8, lastFailureAt: recent, lastSuccessAt: recent,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'deprecated' as const, kind: 'positive' as const, source: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'deprecated' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
   };
 
   const scores = [winner, rare, loser].map((s) => scoreSkill(s, now));
@@ -595,13 +595,13 @@ test('scoreSkill: recency decay discounts long-unused skills', () => {
     id: '1', name: 'old', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 5, lastUsedAt: now - 90 * 86_400_000, createdAt: 0,
     successCount: 5, failureCount: 0, lastFailureAt: null, lastSuccessAt: now - 90 * 86_400_000,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
   };
   const fresh = {
     id: '2', name: 'fresh', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 2, lastUsedAt: now, createdAt: 0,
     successCount: 2, failureCount: 0, lastFailureAt: null, lastSuccessAt: now,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
   };
 
   assert.ok(scoreSkill(fresh, now) > scoreSkill(old, now), '最近用的 > 90 天前用的');
@@ -804,7 +804,7 @@ test('scoreSkill: negative 比 positive 衰减更慢(同参数下分数更高)',
     id: '1', name: 'p', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 3, lastUsedAt: daysAgo60, createdAt: 0,
     successCount: 3, failureCount: 0, lastFailureAt: null, lastSuccessAt: daysAgo60,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
   };
   const negative = { ...positive, id: '2', name: 'n', kind: 'negative' as const };
   // positive half-life 30d → 60d 前用过衰减成 0.25;negative half-life 90d → 0.63
@@ -1145,4 +1145,26 @@ test('listBySourcePrefix: 按 registry 前缀筛选', () => {
 
   const ghs = skills.listBySourcePrefix('github:').map((s) => s.name);
   assert.deepEqual(ghs, ['gh-1']);
+});
+
+test('createSkill: verification + tool_policy round-trip (H2 recipe persistence); omitted → null', () => {
+  const { skills: store } = openMemoryDb(':memory:');
+
+  store.createSkill({
+    name: 'docx-convert-recipe',
+    description: 'convert a doc to docx',
+    triggerKeywords: ['docx'],
+    actionTemplate: 'call shell pandoc then readFile',
+    verification: { kind: 'tool_result_ok', check: 'readFile' },
+    toolPolicy: ['shell', 'readFile'],
+  });
+  const r = store.getByName('docx-convert-recipe')!;
+  assert.deepEqual(r.verification, { kind: 'tool_result_ok', check: 'readFile' });
+  assert.deepEqual(r.toolPolicy, ['shell', 'readFile']);
+
+  // omitted → advisory lesson (both null), today's behavior
+  store.createSkill({ name: 'plain-lesson', description: 'a lesson', triggerKeywords: ['x'], actionTemplate: 'do x' });
+  const l = store.getByName('plain-lesson')!;
+  assert.equal(l.verification, null);
+  assert.equal(l.toolPolicy, null);
 });

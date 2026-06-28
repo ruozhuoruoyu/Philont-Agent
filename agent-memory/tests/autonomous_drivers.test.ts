@@ -92,6 +92,8 @@ function skill(over: Partial<Skill> = {}): Skill {
     maturity: 'draft',
     kind: 'positive',
     source: null,
+    verification: null,
+    toolPolicy: null,
     ...over,
   };
 }

@@ -1,6 +1,7 @@
 /**
  * Core types for the memory layer
  */
+import type { RecipeVerification } from './skill_recipes.js';
 
 // ── Layer 2: Structured Facts ─────────────────────────────────────────────────
 
@@ -209,6 +210,13 @@ export interface Skill {
    * appends an [origin] tag when source is non-null.
    */
   source: string | null;
+  /**
+   * v33 (H2): callable-recipe fields. NULL = advisory prose lesson (today's behavior). When both are set
+   * the skill is a verified CALLABLE recipe (isCallableRecipe): `verification` is the check that confirms
+   * "done" on reuse, `toolPolicy` is the allow-list of tools the recipe may call.
+   */
+  verification: RecipeVerification | null;
+  toolPolicy: string[] | null;
 }
 
 export interface SkillInput {
@@ -230,6 +238,9 @@ export interface SkillInput {
    * - reflection-generated skills: default 'draft' (waits for accumulated uses)
    */
   maturity?: SkillMaturity;
+  /** v33 (H2): optional callable-recipe fields. Omit/null → an advisory prose lesson (today's behavior). */
+  verification?: RecipeVerification | null;
+  toolPolicy?: string[] | null;
 }
 
 // ── Extraction Results ────────────────────────────────────────────────────────────

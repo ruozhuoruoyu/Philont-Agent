@@ -14,6 +14,7 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Skill, SkillInput, SkillMaturity } from './types.js';
+import type { RecipeVerification } from './skill_recipes.js';
 import { nextMaturity, parseMaturity } from './skill_maturity.js';
 
 /** SkillStore event payload */
@@ -41,6 +42,9 @@ interface SkillRow {
   source: string | null;
   /** v15: trigger scenario text (SKILL.md frontmatter when_to_use). Empty = NULL. */
   when_to_use: string | null;
+  /** v33 (H2): callable-recipe fields, JSON-encoded. NULL = advisory prose lesson. */
+  verification: string | null;
+  tool_policy: string | null;
 }
 
 /** Skill composite scoring constants */
@@ -105,7 +109,19 @@ function rowToSkill(row: SkillRow): Skill {
     maturity: parseMaturity(row.maturity, 'draft'),
     kind: row.kind === 'negative' ? 'negative' : 'positive',
     source: row.source ?? null,
+    verification: parseRecipeJson<RecipeVerification>(row.verification),
+    toolPolicy: parseRecipeJson<string[]>(row.tool_policy),
   };
+}
+
+/** Safe JSON parse for the v33 recipe columns — malformed / NULL → null (never throws). */
+function parseRecipeJson<T>(raw: string | null | undefined): T | null {
+  if (raw == null || raw === '') return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
 }
 
 export class SkillStore extends EventEmitter {
@@ -125,14 +141,18 @@ export class SkillStore extends EventEmitter {
     const source: string | null = input.source ?? null;
     const maturity: SkillMaturity = parseMaturity(input.maturity, 'draft');
     const whenToUse: string = input.whenToUse ?? '';
+    const verification: RecipeVerification | null = input.verification ?? null;
+    const toolPolicy: string[] | null = input.toolPolicy ?? null;
+    const verificationJson = verification ? JSON.stringify(verification) : null;
+    const toolPolicyJson = toolPolicy ? JSON.stringify(toolPolicy) : null;
 
     this.db
-      .prepare<[string, string, string, string, string, number, string, string | null, string, string | null]>(
+      .prepare<[string, string, string, string, string, number, string, string | null, string, string | null, string | null, string | null]>(
         `INSERT INTO memory_skills
-         (id, name, description, trigger_keywords, action_template, created_at, kind, source, maturity, when_to_use)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (id, name, description, trigger_keywords, action_template, created_at, kind, source, maturity, when_to_use, verification, tool_policy)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, input.name, input.description, keywordsJson, input.actionTemplate, createdAt, kind, source, maturity, whenToUse || null);
+      .run(id, input.name, input.description, keywordsJson, input.actionTemplate, createdAt, kind, source, maturity, whenToUse || null, verificationJson, toolPolicyJson);
 
     this.emit('changed', { type: 'created', name: input.name } satisfies SkillChangeEvent);
 
@@ -154,6 +174,8 @@ export class SkillStore extends EventEmitter {
       maturity,
       kind,
       source,
+      verification,
+      toolPolicy,
     };
   }
 
