@@ -7,6 +7,7 @@ import {
   isCallableRecipe,
   shouldAuthorRecipe,
   recipeReuseMaturityMove,
+  buildRecipeFields,
   type Recipe,
 } from '../src/skill_recipes.js';
 
@@ -37,4 +38,21 @@ test('shouldAuthorRecipe: only from a ledger-verified success with a verificatio
 test('recipeReuseMaturityMove: pass → promote, fail → demote/revise (SkillClaw evolution)', () => {
   assert.equal(recipeReuseMaturityMove(true), 'promote');
   assert.equal(recipeReuseMaturityMove(false), 'demote_revise');
+});
+
+test('buildRecipeFields: verification (assert) from deliverables + tool_policy recovered from step text', () => {
+  const r = buildRecipeFields({
+    planId: 'p1',
+    deliverables: ['register webhook', 'verify heartbeat'],
+    stepText: '1. call webSearch for docs\n2. run shell to register\n3. readFile to confirm',
+  });
+  assert.equal(r.verification.kind, 'assert');
+  assert.match(r.verification.check, /2 declared deliverable/);
+  assert.deepEqual([...r.toolPolicy].sort(), ['readFile', 'shell', 'webSearch']);
+});
+
+test('buildRecipeFields: no deliverables / no known tools → spec-coverage check + empty policy', () => {
+  const r = buildRecipeFields({ planId: 'p2', deliverables: [], stepText: 'do the thing manually' });
+  assert.match(r.verification.check, /spec-coverage gate passed/);
+  assert.deepEqual(r.toolPolicy, []);
 });

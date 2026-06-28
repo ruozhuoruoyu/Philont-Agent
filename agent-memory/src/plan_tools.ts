@@ -16,6 +16,7 @@
 import type { MemoryTool } from './tools.js';
 import type { PlanStore } from './plans.js';
 import type { SkillStore } from './skills.js';
+import { buildRecipeFields } from './skill_recipes.js';
 import type {
   DeliverableStatus,
   Plan,
@@ -345,8 +346,17 @@ function applyMECEFixation(
         reason: `MECE matched existing skill '${existing.name}' (Jaccard ${dupes[0].jaccard.toFixed(2)}); appended this plan's experience`,
       };
     }
-    // no match: create new_skill
+    // no match: create new_skill. H2 P1: a plan_close success has passed the spec-coverage gate, so author
+    // it as a callable RECIPE — attach a verification (spec coverage) + tool_policy (best-effort from the
+    // steps), not just a prose lesson. PHILONT_RECIPE_AUTHORING=0 → today's plain skill (verification null).
     const skillName = `${sig}-skill`;
+    const recipe = process.env.PHILONT_RECIPE_AUTHORING !== '0'
+      ? buildRecipeFields({
+          planId: plan.id,
+          deliverables: plan.deliverables.map((d) => d.description),
+          stepText: stepsTemplate,
+        })
+      : null;
     try {
       skills.createSkill({
         name: skillName,
@@ -357,6 +367,8 @@ function applyMECEFixation(
         maturity: 'draft',
         kind: 'positive',
         source: `plan-success:${plan.id}`,
+        verification: recipe?.verification ?? null,
+        toolPolicy: recipe?.toolPolicy ?? null,
       });
       return { kind: 'created', skillName };
     } catch (e) {

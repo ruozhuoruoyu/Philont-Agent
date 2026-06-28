@@ -33,6 +33,36 @@ export function isCallableRecipe(r: Pick<Recipe, 'verification' | 'steps' | 'too
   return r.verification != null && r.steps.trim().length > 0 && r.toolPolicy.length > 0;
 }
 
+/** Tool names recovered (best-effort) from a plan's step prose to form a recipe's tool_policy. */
+const TOOL_NAME_HINTS: readonly string[] = [
+  'webSearch', 'webFetch', 'shell', 'readFile', 'writeFile', 'pariGp', 'z3Verify', 'leanCheck', 'magnitude',
+  'deep_explore', 'search_notes', 'search_skills', 'get_fact', 'list_facts', 'store_fact', 'use_skill',
+  'planAndExecute', 'schedule_reminder', 'reply_with_media', 'browser',
+];
+
+export interface RecipeAuthorInput {
+  planId: string;
+  /** the deliverable labels the plan declared (its spec). */
+  deliverables: string[];
+  /** the plan's step-template text (action_template) — scanned for tool names. */
+  stepText: string;
+}
+
+/**
+ * Author the recipe fields (verification + tool_policy) from a VERIFIED plan-close success (H2 P1). The
+ * plan_close spec-coverage gate having passed IS the verification — an assertion that the declared
+ * deliverables were covered; the tool policy is recovered best-effort from the step text. Pure.
+ */
+export function buildRecipeFields(
+  input: RecipeAuthorInput,
+): { verification: RecipeVerification; toolPolicy: string[] } {
+  const toolPolicy = TOOL_NAME_HINTS.filter((t) => new RegExp(`\\b${t}\\b`, 'i').test(input.stepText));
+  const check = input.deliverables.length
+    ? `${input.deliverables.length} declared deliverable(s) covered: ${input.deliverables.slice(0, 6).join('; ')}`
+    : `plan ${input.planId} closed success (spec-coverage gate passed)`;
+  return { verification: { kind: 'assert', check: check.slice(0, 300) }, toolPolicy };
+}
+
 /**
  * Whether to author a recipe from a finished trajectory. Only from a LEDGER-VERIFIED success (S1 — never
  * from a narrated success, which could be fabricated) AND only when a verification check is present (so
