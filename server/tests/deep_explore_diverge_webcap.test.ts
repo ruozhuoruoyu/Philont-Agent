@@ -28,3 +28,41 @@ test('withWebCallCap: cap=0 blocks web immediately; non-web unaffected', async (
   assert.match((await runner('webSearch', {})).output, /STOP searching/);
   assert.match((await runner('reason_record', {})).output, /ran reason_record/);
 });
+
+import { webDedupEnabled, webDedupKey } from '../src/deep_explore.js';
+
+test('webDedupEnabled: default ON, =0 off', () => {
+  const prev = process.env.PHILONT_DEEP_EXPLORE_WEB_DEDUP;
+  try {
+    delete process.env.PHILONT_DEEP_EXPLORE_WEB_DEDUP;
+    assert.equal(webDedupEnabled(), true);
+    process.env.PHILONT_DEEP_EXPLORE_WEB_DEDUP = '0';
+    assert.equal(webDedupEnabled(), false);
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_WEB_DEDUP;
+    else process.env.PHILONT_DEEP_EXPLORE_WEB_DEDUP = prev;
+  }
+});
+
+test('webDedupKey: normalizes fetch URL (#/?/trailing-slash collapse, version stays distinct)', () => {
+  assert.equal(
+    webDedupKey('webFetch', { url: 'https://arxiv.org/html/2506.12708v3/' }),
+    webDedupKey('webFetch', { url: 'https://ARXIV.org/html/2506.12708v3#S3.SS3' }),
+    'same page, different fragment/case/slash → same key',
+  );
+  assert.notEqual(
+    webDedupKey('webFetch', { url: 'https://arxiv.org/html/2506.12708' }),
+    webDedupKey('webFetch', { url: 'https://arxiv.org/html/2506.12708v3' }),
+    'different version = different document → distinct',
+  );
+});
+
+test('webDedupKey: normalizes search query (case/whitespace); null for non-web / empty', () => {
+  assert.equal(
+    webDedupKey('webSearch', { query: 'CloudMatrix-Infer  arxiv 2506.12708' }),
+    webDedupKey('webSearch', { query: 'cloudmatrix-infer arxiv 2506.12708' }),
+  );
+  assert.equal(webDedupKey('reason_decompose', { parentNodeId: 'n1' }), null);
+  assert.equal(webDedupKey('webFetch', {}), null);
+  assert.equal(webDedupKey('webSearch', { query: '   ' }), null);
+});

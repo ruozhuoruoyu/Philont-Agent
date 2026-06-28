@@ -563,6 +563,36 @@ const DIVERGE_WEB_CAP = (() => {
  * decompose now instead of searching — a mechanism backstop (not a prompt) for the diverge round's
  * "generate, don't browse" job. Non-web tools always pass through. Pure (per-round closure counter).
  */
+/**
+ * Cross-round web-call dedup (per deep_explore session). A diverge/converge round re-running an identical
+ * webFetch(url) or webSearch(query) it already ran THIS session is pure waste (observed: the same arxiv
+ * paper fetched dozens of times). The runner returns a "you already did this — move on" stub for a repeat.
+ * Default ON; PHILONT_DEEP_EXPLORE_WEB_DEDUP=0/off disables. State is per session id; cleared on session end.
+ */
+export function webDedupEnabled(): boolean {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_WEB_DEDUP ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+const sessionWebKeys = new Map<string, Set<string>>();
+
+/** Normalized dedup key for a webFetch/webSearch call, or null for any other tool. */
+export function webDedupKey(name: string, input: Record<string, unknown>): string | null {
+  if (name === 'webFetch') {
+    const url = typeof input.url === 'string' ? input.url : '';
+    if (!url) return null;
+    // Drop #fragment / ?query / trailing slash so the same page (e.g. arxiv html sections) collapses; a
+    // different version (…12708 vs …12708v3) stays distinct (correctly — they are different documents).
+    return `fetch:${url.trim().toLowerCase().replace(/[#?].*$/, '').replace(/\/+$/, '')}`;
+  }
+  if (name === 'webSearch') {
+    const q = typeof input.query === 'string' ? input.query : '';
+    if (!q.trim()) return null;
+    return `search:${q.trim().toLowerCase().replace(/\s+/g, ' ')}`;
+  }
+  return null;
+}
+
 export function withWebCallCap(
   base: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>,
   opts: { cap: number; webTools: ReadonlySet<string> },
@@ -2282,6 +2312,27 @@ export function makeReasoningToolRunner(
       }
       writeEvidence(nodeId);
       return { ok: true, output: `Recorded [${nodeId}] = ${status}${result ? `: ${result}` : ''}` };
+    }
+
+    // Cross-round web dedup: re-fetching the same URL / re-running the same query across rounds is the
+    // observed waste (one arxiv paper fetched dozens of times over a session). Short-circuit a repeat with a
+    // directive to move on, rather than burning a round-trip + iteration on a fetch we already did.
+    if (webDedupEnabled()) {
+      const dkey = webDedupKey(name, input);
+      if (dkey) {
+        const seen = sessionWebKeys.get(sessionId) ?? new Set<string>();
+        if (seen.has(dkey)) {
+          return {
+            ok: true,
+            output:
+              `⚠ DUPLICATE: you already ran ${name}(${dkey.slice(dkey.indexOf(':') + 1).slice(0, 90)}) earlier ` +
+              `this session — that result is already in your context. Do NOT repeat it: use what you have, or ` +
+              `pick a genuinely NEW source/query, then commit a node (reason_decompose / reason_record).`,
+          };
+        }
+        seen.add(dkey);
+        sessionWebKeys.set(sessionId, seen);
+      }
     }
 
     // Delegate everything else (read-only research tools + verify teeth z3Verify/pariGp/magnitude).
