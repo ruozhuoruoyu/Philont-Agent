@@ -12,11 +12,11 @@
 
 **Philont is [loop engineering](#loop-engineering-the-rigor-lives-in-the-loop-not-the-prompt) taken to its conclusion** — the 2026 discipline of putting an agent's reliability in the *loop it runs*, not the *prompt it reads*. A prompt instruction is a suggestion the model can ignore; a loop is code it cannot. The result is a self-hostable AI agent that has personality, drives its own learning, and reasons through hard problems step by step. Most open-source agents — [OpenClaw](https://github.com/openclaw/openclaw), [Hermes](https://github.com/NousResearch/hermes-agent), and the rest — are **task runners**: powerful at carrying out what you ask, but tools all the same. Philont is built to be something else: a **being** — an agent with an independent character, intrinsic curiosity, and a compulsion to understand before it acts. It grows with every session, teaches itself from failure, and never pretends to have succeeded when it hasn't.
 
-Concretely, that means: a **5-layer memory** carried across every session and channel; a **dual-mode deep-reasoning engine** ([`deep_explore`](#deep-reasoning-one-engine-two-modes)) for both formal proof and evidence-based judgment; **intrinsic drives** that research and self-review while you're away; mechanism-enforced **honesty** and **plan → execute → revise** rigor; a **permission matrix + audit log** on every tool call; **MCP** for any external capability; and one process that reaches you on **WeChat, Telegram, a web UI, or a headless CLI**.
+Concretely, that means: a **5-layer memory** carried across every session and channel; a **dual-mode deep-exploring engine** ([`deep_explore`](#deep-exploring-one-engine-two-modes)) for both formal proof and evidence-based judgment; **intrinsic drives** that research and self-review while you're away; mechanism-enforced **honesty** and **plan → execute → revise** rigor; a **permission matrix + audit log** on every tool call; **MCP** for any external capability; and one process that reaches you on **WeChat, Telegram, a web UI, or a headless CLI**.
 
 And because its intelligence lives in the **architecture, not the model**, Philont runs all of this on a model that costs a fraction of the frontier — typically **~100× cheaper per token** than agents that depend on a top-tier model. Bring your own: Claude, DeepSeek, GLM, Kimi, MiniMax, Gemini, or your own endpoint. See [Why a cheap model is enough](#why-a-cheap-model-is-enough).
 
-> 📖 **New: the [Philont Wiki](https://github.com/ruozhuoruoyu/Philont-Agent/wiki)** — a bilingual (English / 中文) developer guide that goes deeper than this README: the [architecture](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Architecture), the [plan protocol](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Plan-Protocol), the [honesty gates](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Honesty-Gates), [deep reasoning](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Deep-Reasoning), and exactly [why a cheap model is enough](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough) — each grounded in the code.
+> 📖 **New: the [Philont Wiki](https://github.com/ruozhuoruoyu/Philont-Agent/wiki)** — a bilingual (English / 中文) developer guide that goes deeper than this README: the [architecture](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Architecture), the [plan protocol](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Plan-Protocol), the [honesty gates](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Honesty-Gates), [deep exploring](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Deep-Reasoning), and exactly [why a cheap model is enough](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough) — each grounded in the code.
 
 ---
 
@@ -43,7 +43,7 @@ The open-source agent field competes on cost-per-token, tool count, and integrat
 | Core model | extrinsic task runner | task runner + learning loop | **autonomous being with intrinsic drives** |
 | Acts on its own initiative | ⚠️ scheduled | ⚠️ scheduled cron | ✅ curiosity · pursuit · commitment drives |
 | Self-learning from its own **failures** | ❌ | ⚠️ learns from successful runs, not failures | ✅ failure notes · anti-patterns · **honesty gates against pretended success** |
-| Step-by-step deep reasoning | ❌ | ❌ | ✅ `deep_explore` — dual-mode tree (formal proof · evidence-based deliberation) |
+| Step-by-step deep exploring | ❌ | ❌ | ✅ `deep_explore` — dual-mode tree (formal proof · evidence-based deliberation) |
 | Built-in permission / audit layer | command allowlist | command approval | ✅ 3×4 capability matrix · validator chain · SHA-256 audit log |
 | Runs complex tasks on a **cheap** model | ⚠️ leans on a strong model for hard tasks | ⚠️ leans on a strong model for hard tasks | ✅ **DeepSeek V4 Flash — ~100× cheaper** |
 | BYOK / model freedom | ✅ | ✅ | ✅ |
@@ -56,7 +56,7 @@ OpenClaw and Hermes are excellent at *doing what you ask*. Philont is built to *
 
 Other agents push complex reasoning, planning, and memory **into the prompt**, so they need a frontier model (Claude Opus, GPT-class) to hold it all together every turn — and they pay frontier prices for every token.
 
-Philont moves that work **into the runtime**. A kernel-style separation puts the heavy lifting in the **policy layer** — multi-step deep-reasoning loops, 5-layer persistent memory, self-learning, and honesty gates — while the model is only ever asked to take the *next* step. The intelligence comes from the architecture, not from the size of the model behind the API.
+Philont moves that work **into the runtime**. A kernel-style separation puts the heavy lifting in the **policy layer** — multi-step deep-exploring loops, 5-layer persistent memory, self-learning, and honesty gates — while the model is only ever asked to take the *next* step. The intelligence comes from the architecture, not from the size of the model behind the API.
 
 Concretely, the gap between a frontier model and a cheap one shows up as a handful of predictable failure modes on long, multi-step tasks: it **wings the task** instead of planning, **declares success it didn't achieve**, **fabricates** a number or a file it never wrote, **retries the same broken call** instead of changing approach, or **closes a half-finished job as done**. A frontier model suppresses these in its head — and you pay for that judgment on every token. Philont catches each one in the runtime instead, with **mechanism-enforced guardrails that the model cannot ignore** (a gate is code, not a prompt instruction). That is the actual reason a cheap model is enough — the rigor lives in the harness:
 
@@ -70,7 +70,7 @@ Concretely, the gap between a frontier model and a cheap one shows up as a handf
 | **Closes a half-done task as "success"** | **`plan_close` spec-coverage (C1–C4)** · `agent-memory/src/plan_tools.ts` | A plan closes *success* only if every declared deliverable is `done`/`skipped` **and** no step's evidence contains failure signals (`ENOENT`, `fetch failed`, …). Claim success with partial deliverables and it is **auto-converted to an honest failure** — a partial run can't masquerade as a win, and the failure feeds a reusable playbook. |
 | **Over- or under-thinks** every request equally | **`task_mode_classify`** · `agent-memory/src/task_mode.ts` | The model self-assesses complexity once per turn, so only genuinely multi-step, world-changing tasks pay the full plan protocol — and the mode is *derived from plan state*, so it can't quietly switch back to fast mode to dodge the protocol mid-task. |
 
-Add the deep-reasoning engine ([`deep_explore`](#deep-reasoning-one-engine-two-modes), with its machine-checked verification teeth) and the 5-layer memory that carries context across turns, and the model never has to hold the whole task in its head at once: it is asked **one small, well-scoped step at a time, and every answer is checked before it counts.**
+Add the deep-exploring engine ([`deep_explore`](#deep-exploring-one-engine-two-modes), with its machine-checked verification teeth) and the 5-layer memory that carries context across turns, and the model never has to hold the whole task in its head at once: it is asked **one small, well-scoped step at a time, and every answer is checked before it counts.**
 
 The result: tasks that would otherwise demand a frontier model run comfortably on **DeepSeek V4 Flash** — roughly **100× cheaper per token**. Where token-efficiency-focused agents shave ~1.5–3× off the bill by trimming the harness, Philont changes the model class entirely. And it's still BYOK: point it at Claude or GPT when you want maximum ceiling, drop to Flash when you want maximum economy.
 
@@ -83,7 +83,7 @@ The result: tasks that would otherwise demand a frontier model run comfortably o
 | **Independent personality** | Philont carries a persistent character across every conversation — not a system-prompt trick, but a live identity shaped by what it has learned, the values it holds, and the person it knows you to be. It pushes back when something conflicts with its principles. |
 | **Intrinsic drives → goal-loops** | Most agents are purely *extrinsically driven* — they wait for a task, execute it, and stop. Philont has goals of its own: a **curiosity engine** researches knowledge gaps at idle time, a **pursuit driver** advances stalled long-term goals unasked, and a **task-commitment drive** pushes back on itself before giving up on a reachable problem. A sustained, high-stake theme isn't a one-shot lookup — it's **promoted to a committed goal-loop** that runs under a budgeted contract (and personality traits tune how hard it tries). It acts because it wants to, not only because you told it to. |
 | **Self-learning evolution** | Every failure matters. When Philont hits a wall, it doesn't quietly move on — it writes an honest failure note, distils a rule, and crystallises a reusable skill. Skills carry maturity grades and confidence decay. And a *verified* success becomes a **callable recipe** — its steps, the tools it's allowed to use, and the check that confirms "done" — so the loop gets better at a task by reuse, not by re-deriving it each time. Knowledge evolves instead of accumulating unchecked. |
-| **Deep reasoning** | Hard problems get a [`deep_explore`](#deep-reasoning-one-engine-two-modes) session: a persistent reasoning **tree** that decomposes the problem and only commits a claim after it survives **adversarial verification** — formal mode for mathematical proof, deliberate mode for evidence-based judgment. Full machinery below. |
+| **Deep exploring** | Hard problems get a [`deep_explore`](#deep-exploring-one-engine-two-modes) session: a persistent reasoning **tree** that decomposes the problem and only commits a claim after it survives **adversarial verification** — formal mode for mathematical proof, deliberate mode for evidence-based judgment. Full machinery below. |
 
 ---
 
@@ -92,18 +92,18 @@ The result: tasks that would otherwise demand a frontier model run comfortably o
 | | |
 |---|---|
 | **Honesty guardrails** | Gates catch pretended success, fabricated numbers, and half-finished hand-offs — and force an honest regeneration. You can't learn from a failure you pretended didn't happen. |
-| **Plan → execute → revise, enforced** | Complex tasks aren't winged. For a multi-step job the agent is **mechanism-forced** through a protocol — *draft a plan (every step with a verifiable deliverable) → execute it step by step → `plan_revise` to route around any step that fails → close only with a verified outcome* — and a gate (`plan_protocol_gate`) literally blocks it from acting before a plan exists, while `plan_close` refuses to let a half-finished run pass as success. See [why this is what makes a cheap model enough](#why-a-cheap-model-is-enough). This is the protocol for **changing the world** (deploy, register, send, deliver an artifact); its sibling `deep_explore` is the protocol for **changing what you know** — see [the rule of thumb](#deep-reasoning-one-engine-two-modes) for which one a task should take. |
+| **Plan → execute → revise, enforced** | Complex tasks aren't winged. For a multi-step job the agent is **mechanism-forced** through a protocol — *draft a plan (every step with a verifiable deliverable) → execute it step by step → `plan_revise` to route around any step that fails → close only with a verified outcome* — and a gate (`plan_protocol_gate`) literally blocks it from acting before a plan exists, while `plan_close` refuses to let a half-finished run pass as success. See [why this is what makes a cheap model enough](#why-a-cheap-model-is-enough). This is the protocol for **changing the world** (deploy, register, send, deliver an artifact); its sibling `deep_explore` is the protocol for **changing what you know** — see [the rule of thumb](#deep-exploring-one-engine-two-modes) for which one a task should take. |
 | **Permission layer** | Every tool call is checked against a 3×4 capability matrix (read/write/execute × local/network/system/self): external writes and command execution require explicit per-capability approval, and a SHA-256-chained audit log records everything. A validator chain adds a sensitive-path denylist (blocks tool reads/writes to `~/.ssh`, `.env`, `/etc/shadow`, …) and hard-denies catastrophic shell commands (`rm -rf /`, `mkfs`, `dd`, fork bombs, secret-exfil pipes). Boundary-crossing actions are gated and audited — see **[SECURITY-DESIGN.md](SECURITY-DESIGN.md)** for exactly what is and isn't enforced today (SSRF allowlisting and OS sandboxing are on the roadmap, not yet shipped). |
 | **Conscience gate (optional)** | Off by default. When enabled, every outbound message to a person (WeChat/Telegram) is first judged by one LLM call against a short no-harm constitution — defamation, doxxing, disinformation, harm-enabling instructions — before it's sent. Fail-open by design: a judge error never blocks a reply. |
 | **5-layer persistent memory** | SQLite-backed raw timeline, action log, full-text-search notes (FTS5), structured facts, and learned skills — all cross-session. The agent remembers. |
 | **MCP bridge & plugins** | Mount any MCP server (browser automation, code execution, external APIs) or load sandboxed third-party plugins. Playwright MCP gives it a full browser. |
 | **Lives where you are** | One server process drives a Lit Web UI, WeChat, Telegram, and a headless CLI. |
-| **Mechanism, not policy** | Kernel-style separation: the core defines *how* tools execute and how policy is enforced; complex capabilities (self-learning, deep reasoning, memory) live in the policy/userspace layer, not in the model — which is [why a cheap model is enough](#why-a-cheap-model-is-enough). |
+| **Mechanism, not policy** | Kernel-style separation: the core defines *how* tools execute and how policy is enforced; complex capabilities (self-learning, deep exploring, memory) live in the policy/userspace layer, not in the model — which is [why a cheap model is enough](#why-a-cheap-model-is-enough). |
 | **Bring your own model** | Any Anthropic- or OpenAI-compatible endpoint: Claude, DeepSeek, GLM, Kimi, MiniMax, Gemini, or your own. Switch with a config change — no code edits, no lock-in. |
 
 ---
 
-## Deep reasoning: one engine, two modes
+## Deep exploring: one engine, two modes
 
 `deep_explore` is a persistent reasoning **tree** that runs the same loop in every domain — *decompose → claim → **verify** → backtrack* — accumulating what's settled vs still open across turns (you can resume days later). What changes between domains is the **verification substrate**, and that is exactly what its two modes swap:
 
@@ -173,7 +173,7 @@ Everything is configured via environment variables (`.env` in the repo root, or 
 | `LLM_PROVIDER` | `anthropic` | `anthropic` \| `openai` \| `glm` \| `kimi` \| `minimax` \| `gemini`. |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` | — | Any OpenAI-compatible endpoint (DeepSeek, Together, local, …). |
 | `PHILONT_MCP_BROWSER` | off | Browser automation via Playwright MCP. |
-| `PHILONT_DEEP_EXPLORE` | on | Multi-step deep reasoning tool. |
+| `PHILONT_DEEP_EXPLORE` | on | Multi-step deep exploring tool. |
 | `PHILONT_INTENT_ROUTER` | on | Turn-entry router: sends each request to the engine that fits — deep_explore (think) / plan (build) / direct. |
 | `PHILONT_DEEP_EXPLORE_AUTO_ADVANCE` | on | Background goal-loop driver: advances a *committed* deep_explore session on its own, within a rounds/token budget, pausing to report. |
 | `PHILONT_AUTONOMOUS` / `PHILONT_AUTONOMOUS_DAILY_TOKENS` | on / `20000` | Idle-time autonomous loop and its daily token ceiling. |
@@ -285,7 +285,7 @@ Philont stands on the shoulders of two open-source agents we genuinely admire �
 - our path-ACL workspace-root resolution is modeled on OpenClaw's `media-tool-shared.ts` → `agent-policy/src/validators/pathAcl.ts`;
 - Philont's skills loader is **compatible with the OpenClaw / `clawhub` skill convention** (`<workdir>/skills/`), so skills installed the OpenClaw way work in Philont unchanged → `agent-tools/src/skills/loader.ts`.
 
-We also reference [Claude Code](https://claude.com/claude-code)'s WebFetch design and several research papers (FunSearch, LATS, Self-Consistency, …) in the deep-reasoning module; those are credited inline where used. Thank you to all of these projects and their authors.
+We also reference [Claude Code](https://claude.com/claude-code)'s WebFetch design and several research papers (FunSearch, LATS, Self-Consistency, …) in the deep-exploring module; those are credited inline where used. Thank you to all of these projects and their authors.
 
 ---
 
