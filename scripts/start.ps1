@@ -10,6 +10,32 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..'))
 
+# Disable console QuickEdit mode. Otherwise a click / text-selection in this window PAUSES console output;
+# the launcher's stdout write then blocks, it stops draining the agent's stdout pipe, the pipe buffer fills,
+# and the agent's own stdout write blocks -> the WHOLE agent event loop freezes (autonomous loop + the
+# in-flight turn) until a key is pressed. Observed in the wild as a turn "hanging" for hours. Disabling
+# QuickEdit makes a click never pause output. Best-effort; non-fatal if it fails.
+try {
+    if (-not ([System.Management.Automation.PSTypeName]'Win32.PhilontConsole').Type) {
+        Add-Type -Name PhilontConsole -Namespace Win32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern System.IntPtr GetStdHandle(int handle);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetConsoleMode(System.IntPtr handle, out uint mode);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetConsoleMode(System.IntPtr handle, uint mode);
+'@
+    }
+    $stdin = [Win32.PhilontConsole]::GetStdHandle(-10)  # STD_INPUT_HANDLE
+    $mode = 0
+    if ([Win32.PhilontConsole]::GetConsoleMode($stdin, [ref]$mode)) {
+        $QUICK_EDIT = 0x40
+        $EXTENDED_FLAGS = 0x80
+        $newMode = ($mode -band (-bnot $QUICK_EDIT)) -bor $EXTENDED_FLAGS
+        [void][Win32.PhilontConsole]::SetConsoleMode($stdin, $newMode)
+        Write-Host "Console QuickEdit disabled (a click no longer freezes the agent)." -ForegroundColor DarkGray
+    }
+} catch {
+    Write-Host "Could not disable console QuickEdit (non-fatal): $_" -ForegroundColor DarkGray
+}
+
 if (-not (Test-Path 'launcher/dist/index.js') -or -not (Test-Path 'web-ui/dist')) {
     Write-Host "Build output missing (launcher/dist or web-ui/dist). Run .\scripts\build-all.ps1 first." -ForegroundColor Red
     exit 1

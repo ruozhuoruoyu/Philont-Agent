@@ -131,8 +131,10 @@ export function initFileLogging(): void {
       enc?: unknown,
       cb?: unknown,
     ): boolean => {
-      // Console first — never let file logging block or drop real output.
-      const ret = orig(chunk as never, enc as never, cb as never);
+      // File FIRST: writeSync to a local fd is fast and won't pause; the original console/pipe write can
+      // BLOCK when the terminal is paused (Windows QuickEdit click-to-pause backs up the launcher pipe).
+      // Writing the file first means the line is durably on disk even if the subsequent console write then
+      // stalls — the file stays the ahead-of-console source of truth. Best-effort; failure never blocks output.
       try {
         const now = new Date();
         const f = ensureFd(now);
@@ -152,7 +154,7 @@ export function initFileLogging(): void {
         fd = null;
         fdDay = '';
       }
-      return ret;
+      return orig(chunk as never, enc as never, cb as never);
     };
   }
 
