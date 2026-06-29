@@ -144,7 +144,7 @@ The honesty mechanism reaches here too: a node claimed *proved* on an order-boun
 
 ## Quick start
 
-> **Platform status:** Developed and tested on **Windows only**. macOS and Linux have not been tested by the author — the runtime is cross-platform in principle, but rough edges are expected. If you run Philont on macOS or Linux and hit issues (or get it working), please open an issue or PR.
+> **Platform status:** Developed on **Windows** and verified on **Linux** (Node 20: `build-all.sh` runs clean, the agent server boots, and the SQLite-backed memory works end to end). **macOS has not been tested yet.** The runtime is cross-platform by design (shell execution branches per OS), so on macOS expect mostly-works with rough edges — if you run it there, please open an issue or PR with what you hit.
 
 > **Prerequisites:** Node.js ≥ 20 and an Anthropic- or OpenAI-compatible API key.
 > No Rust toolchain needed — the runtime is pure TypeScript.
