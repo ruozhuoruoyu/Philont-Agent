@@ -251,19 +251,26 @@ const SUBSTANTIVE_VALUE = (() => {
 })();
 
 /**
- * Deliberate-mode auto-answer exit ramp (2026-06-28). judgeConvergence is proof-shaped: a session only
- * reaches 'solved' when its ROOT node is proved. A DELIBERATE (research / judgment) question's root is
- * never literally "proved", and its frontier rarely empties — so a deliberate session can ONLY terminate
- * by hitting the per-round time cap, which emits "reply continue" round after round (observed in prod: a
- * GLM-5.2 research session stuck at 1 settled / 21 open, asking the user to babysit each round and never
- * delivering an answer). This is the missing terminal condition: once a deliberate session has gathered
- * enough CITED-evidence findings AND a converge round stops making substantive progress (or the frontier
- * empties), auto-deliver the synthesis report and close the session 'answered'. Default ON; disable with
- * PHILONT_DEEP_EXPLORE_DELIBERATE_AUTOANSWER=0 (reverts to today's "reply continue forever" behavior).
+ * Deliberate-mode auto-answer exit ramp — DEFAULT OFF as of 2026-06-29 (was ON 06-28). The idea: a
+ * deliberate session's root is never literally "proved" so it can only ever exit on the per-round time
+ * cap ("reply continue" forever); auto-deliver the synthesis once enough cited evidence accrues. But as
+ * shipped it was net-harmful in production:
+ *   1. the thresholds (settled≥N / rounds≥N) are CUMULATIVE over a session's whole life, so a MATURE
+ *      session (5 proved from prior days) auto-answers on the user's FIRST "继续" — closing a session the
+ *      user explicitly told to keep going;
+ *   2. 'answered' is terminal + continue/status resolve active-only, so the NEXT "继续" silently hops to a
+ *      different real backlog session (the user had ≥4 never-closed sessions);
+ *   3. the model, fed wildly inconsistent numbers/topics turn-to-turn with no signal the harness switched
+ *      sessions, confabulated — escalating to a FALSE self-incriminating "confession" that the honesty
+ *      gate passed. The root cause is an incoherent world handed to the model, which more honesty gates
+ *      cannot fix.
+ * Reverted to opt-in to stop the bleeding. Redesign (suggestion not force-close on an explicit "继续";
+ * per-turn not lifetime sufficiency; focus-stable continue/status resolution; loud session-switch notice)
+ * is tracked separately. Opt in for experiments with PHILONT_DEEP_EXPLORE_DELIBERATE_AUTOANSWER=1/on.
  */
 export function deliberateAutoAnswerEnabled(): boolean {
   const v = (process.env.PHILONT_DEEP_EXPLORE_DELIBERATE_AUTOANSWER ?? '').trim().toLowerCase();
-  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
 }
 /** Min cited-evidence findings before a deliberate session may auto-answer. env PHILONT_DEEP_EXPLORE_ANSWER_MIN_SETTLED, default 1, min 1. */
 const DELIBERATE_ANSWER_MIN_SETTLED = (() => {
