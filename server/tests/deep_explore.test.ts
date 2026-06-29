@@ -1295,3 +1295,52 @@ test('shouldDeliberateAutoAnswer: hard round ceiling backstops endless babysitti
     false,
   );
 });
+
+test('action=list enumerates all open sessions; abandon by id closes a specific one (F4)', async () => {
+  const mem = openMemoryDb(':memory:');
+  const llm: MiniLoopLLMClient = { async send() { return { type: 'text' as const, content: 'x' }; } };
+  const { tool } = createDeepExploreTool({
+    reasoning: mem.reasoning, miniLoopLLM: llm,
+    subTurnToolRunner: async () => ({ ok: true, output: '' }), readOnlyToolDefs: [],
+  });
+  mem.reasoning.createSession({ goal: 'CloudMatrix 方案评估' });
+  const { session: s2 } = mem.reasoning.createSession({ goal: 'P vs NP 三大障碍' });
+  mem.reasoning.createSession({ goal: '主力模型选型' });
+
+  // list sees ALL three (the count/list the model previously had no tool to obtain → guessed "only 1")
+  const list = await tool.execute({ action: 'list' });
+  assert.equal(list.success, true);
+  assert.match(list.output, /3 open deep-explore session/);
+  for (const g of ['CloudMatrix', 'P vs NP', '主力模型选型']) assert.ok(list.output.includes(g), `list missing ${g}`);
+
+  // abandon a SPECIFIC backlog session by 8-char id prefix
+  const ab = await tool.execute({ action: 'abandon', sessionId: s2.id.slice(0, 8) });
+  assert.equal(ab.success, true);
+  assert.match(ab.output, /CLOSED/);
+  assert.equal(mem.reasoning.getSession(s2.id)!.status, 'abandoned');
+
+  // now 2 open, and the abandoned one is gone from the list
+  const list2 = await tool.execute({ action: 'list' });
+  assert.match(list2.output, /2 open deep-explore session/);
+  assert.ok(!list2.output.includes('P vs NP'), 'abandoned session must not be listed');
+
+  // a non-matching id → friendly message, nothing closed
+  const miss = await tool.execute({ action: 'abandon', sessionId: 'zzzzzzzz' });
+  assert.match(miss.output, /No open session matches/);
+  assert.match((await tool.execute({ action: 'list' })).output, /2 open deep-explore session/);
+
+  mem.close();
+});
+
+test('action=list: no open sessions → says so (does not invent a count)', async () => {
+  const mem = openMemoryDb(':memory:');
+  const llm: MiniLoopLLMClient = { async send() { return { type: 'text' as const, content: 'x' }; } };
+  const { tool } = createDeepExploreTool({
+    reasoning: mem.reasoning, miniLoopLLM: llm,
+    subTurnToolRunner: async () => ({ ok: true, output: '' }), readOnlyToolDefs: [],
+  });
+  const r = await tool.execute({ action: 'list' });
+  assert.equal(r.success, true);
+  assert.match(r.output, /No open deep-explore sessions/);
+  mem.close();
+});

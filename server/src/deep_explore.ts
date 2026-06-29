@@ -3012,15 +3012,17 @@ export function createDeepExploreTool(
       'action="continue": keep advancing the most recent in-progress session (no id needed).\n' +
       'action="discover": **experimental-math mode** — use pariGp to compute data and find patterns, propose evidence-backed new conjectures and prune them by counterexample search, ' +
       'hanging survivors on the tree to prove later. Good when you don\'t yet know what to prove and want to discover patterns/conjectures first. Takes an optional seed (topic) or goal (creates a session if none is active).\n' +
-      'action="status": just view the current tree\'s progress, without advancing. ' +
+      'action="status": just view the CURRENT (most-recent) session\'s tree progress, without advancing. ' +
       '**Grounding rule: before you state ANY claim about exploration state — what is proved, what is still open, how many nodes, or whether a direction is "new/untried" — you MUST call action=status first and base the claim on what it returns. Never assert tree state, progress, or novelty from memory.** (status is read-only and needs no authorization.)\n' +
+      'action="list": read-only — enumerate ALL open sessions (id, goal, proved/open counts, last-active). ' +
+      '**Use this whenever the user asks HOW MANY explorations are open / to LIST them — never guess the count or assume there is only one; there are often several.**\n' +
       'action="finalize": produce a wrap-up report of the whole tree so far (established lemmas, refuted/dead-end branches, most promising open directions), without advancing. ' +
       'Use this to give the user a conclusion when they ask to wrap up / for results, or for an open-ended problem that will not converge to a clean "solved" on its own.\n' +
-      'action="abandon": CLOSE the current session for good (it stops being resumable). Use when the user asks to close/drop/stop the exploration — finalize alone does NOT close anything.',
+      'action="abandon": CLOSE a session for good (it stops being resumable). Pass sessionId (id/prefix from action=list) to close a SPECIFIC backlog session, or omit to close the most-recent one. Use when the user asks to close/drop/stop an exploration — finalize alone does NOT close anything.',
     schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['start', 'continue', 'discover', 'status', 'finalize', 'abandon', 'auto_on', 'auto_off'] },
+        action: { type: 'string', enum: ['start', 'continue', 'discover', 'status', 'list', 'finalize', 'abandon', 'auto_on', 'auto_off'] },
         mode: { type: 'string', enum: ['formal', 'deliberate'], description: 'action=start: "formal" (math/proof) or "deliberate" (general evidence-based judgment — decisions/diagnosis/due-diligence). Omit to auto-detect from the goal.' },
         phase: { type: 'string', enum: ['diverge', 'converge'], description: 'action=start (optional): "diverge" to begin by GENERATING candidate options/conjectures, "converge" to begin evaluating/proving. Omit to auto-detect (open-ended goals → diverge; a stated target → converge).' },
         goal: { type: 'string', description: 'action=start: the proposition to prove (formal) or the question to think through (deliberate)' },
@@ -3029,6 +3031,10 @@ export function createDeepExploreTool(
           type: 'array',
           items: { type: 'string' },
           description: 'action=start optional: known assumptions',
+        },
+        sessionId: {
+          type: 'string',
+          description: 'action=abandon optional: the id (full or 8-char prefix from action=list) of the session to close. Omit to close the most-recent active one.',
         },
       },
       required: ['action'],
@@ -3154,6 +3160,37 @@ export function createDeepExploreTool(
         return runDivergeRound(session, seed);
       }
 
+      if (action === 'list') {
+        // Read-only enumeration of ALL open sessions for this owner — the count/list the autonomous
+        // followup loop already computes from listActiveSessions(), now reachable by the conversational
+        // model so "how many explorations are open?" is answered from ground truth, not guessed.
+        const sessions = reasoning.listActiveSessions(owner);
+        if (sessions.length === 0) return { success: true, output: 'No open deep-explore sessions.' };
+        // Order by created_at DESC so #1 is exactly what action=continue / "继续" resolves to
+        // (getMostRecentActiveSession). updatedAt is shown as "last active".
+        const ordered = [...sessions].sort((a, b) => b.createdAt - a.createdAt);
+        const nowMs = Date.now();
+        const rel = (ms: number): string => {
+          const d = Math.max(0, nowMs - ms);
+          const h = Math.floor(d / 3_600_000);
+          if (h < 1) return 'just now';
+          if (h < 24) return `${h}h ago`;
+          return `${Math.floor(h / 24)}d ago`;
+        };
+        const lines = ordered.map((s, i) => {
+          const snap = reasoning.summarizeSession(s.id);
+          const goal = s.goal.length > 64 ? s.goal.slice(0, 64) + '…' : s.goal;
+          const counts = snap ? `${snap.provedCount} proved / ${snap.openFrontierCount} open` : '(empty)';
+          return `${i + 1}. [${s.id.slice(0, 8)}] "${goal}" — ${counts} · last active ${rel(s.updatedAt)}`;
+        });
+        return {
+          success: true,
+          output:
+            `${sessions.length} open deep-explore session(s):\n${lines.join('\n')}\n` +
+            `(#1 is what "继续"/continue advances; close any with action=abandon + its id)`,
+        };
+      }
+
       if (action === 'status') {
         const session = reasoning.getMostRecentActiveSession(owner);
         if (!session) return { success: true, output: 'No deep-exploreing session is in progress right now.' };
@@ -3182,8 +3219,20 @@ export function createDeepExploreTool(
         // (which only reports — the session stays active) and then told the user "closed" — a lie
         // forced by a missing capability. abandon sets status='abandoned' so continue/status/finalize
         // stop resuming it; the tree stays in the DB.
-        const session = reasoning.getMostRecentActiveSession(owner);
-        if (!session) return { success: true, output: 'No active deep-explore session to abandon.' };
+        // sessionId (full or 8-char prefix from action=list) targets a SPECIFIC backlog session — so the
+        // user can clear old sessions (P-vs-NP, …), not just the most-recent active one. Omit → most recent.
+        const rawId = typeof params.sessionId === 'string' ? params.sessionId.trim() : '';
+        let session: ReasoningSession | null;
+        if (rawId) {
+          const candidates = reasoning.listActiveSessions(owner);
+          session = candidates.find((s) => s.id === rawId || s.id.startsWith(rawId)) ?? null;
+          if (!session) {
+            return { success: true, output: `No open session matches id "${rawId}". Run action=list to see the open sessions and their ids.` };
+          }
+        } else {
+          session = reasoning.getMostRecentActiveSession(owner);
+          if (!session) return { success: true, output: 'No active deep-explore session to abandon.' };
+        }
         reasoning.setSessionStatus(session.id, 'abandoned');
         return {
           success: true,
