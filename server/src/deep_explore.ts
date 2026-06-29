@@ -653,6 +653,39 @@ export function webDedupKey(name: string, input: Record<string, unknown>): strin
   return null;
 }
 
+/**
+ * Wrap a tool runner so a repeat web call (same webFetch URL / webSearch query) within a session is
+ * short-circuited instead of re-hitting the network. Shares sessionWebKeys with the main reasoning loop:
+ * a finding from a fetch is meant to be captured into the tree, so re-fetching it — by a later round, the
+ * grounding pass, or a skeptic — is waste. The main reasoning runner has this inline; this wrapper brings
+ * the SAME dedup to the sub-loops that delegate straight to subTurnToolRunner (grounding + skeptics, which
+ * previously bypassed it and drove the observed iter-N/6 re-fetch storms). Honors PHILONT_DEEP_EXPLORE_WEB_DEDUP.
+ */
+export function withSessionWebDedup(
+  delegate: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>,
+  sessionId: string,
+): (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult> {
+  return async (name, input) => {
+    if (webDedupEnabled()) {
+      const dkey = webDedupKey(name, input);
+      if (dkey) {
+        const seen = sessionWebKeys.get(sessionId) ?? new Set<string>();
+        if (seen.has(dkey)) {
+          return {
+            ok: true,
+            output:
+              `⚠ DUPLICATE: ${name}(${dkey.slice(dkey.indexOf(':') + 1).slice(0, 90)}) was already run this ` +
+              `session — that finding should be captured in the tree. Do NOT re-fetch: use what is there, or pick a genuinely NEW source/query.`,
+          };
+        }
+        seen.add(dkey);
+        sessionWebKeys.set(sessionId, seen);
+      }
+    }
+    return delegate(name, input);
+  };
+}
+
 export function withWebCallCap(
   base: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>,
   opts: { cap: number; webTools: ReadonlySet<string> },
@@ -2539,16 +2572,23 @@ export function createDeepExploreTool(
         .filter((n) => n.status === 'proved' && n.id !== node.id)
         .map((n) => n.claim);
       const sys = profile.buildSkepticPrompt(node.claim, argument, session.goal, session.assumptions, provedClaims, basis);
-      // Skeptics get the profile's research tools minus pariGp (formal: z3+recall; deliberate: web+recall).
+      // Skeptics get the profile's research tools minus pariGp.
       // 2026-06-08: pariGp is excluded — skeptics burned their whole budget retrying malformed PARI/GP
-      // scripts instead of reviewing; z3 covers rigorous formal refutation, web covers evidence checks.
-      const skepticToolDefs = PROFILE_RT[profile.id].researchDefs.filter((d) => d.name !== 'pariGp');
+      // scripts instead of reviewing; z3 covers rigorous formal refutation.
+      // 2026-06-29 (1c): DELIBERATE skeptics no longer go on the web — they review the claim against the
+      // CITED evidence already gathered into the argument/tree, not by re-fetching (3 web-enabled skeptics
+      // re-crawling the same sources was the dominant deliberate re-fetch storm). Local recall (own
+      // notes/facts) stays; only webSearch/webFetch are dropped for deliberate.
+      const skepticToolDefs = PROFILE_RT[profile.id].researchDefs.filter(
+        (d) => d.name !== 'pariGp' && !(profile.id === 'deliberate' && WEB_TOOL_NAMES.has(d.name)),
+      );
       const tally = await runAdversarialVerification({
         llm: miniLoopLLM,
         systemPrompt: sys,
         count: SKEPTIC_COUNT,
-        toolDefs: skepticToolDefs, // read-only research + z3, no pariGp, no reason_*
-        toolRunner: subTurnToolRunner, // delegate directly; skeptics do not modify the tree
+        toolDefs: skepticToolDefs, // read-only research + z3, no pariGp, no reason_*; deliberate: no web
+        // 1a: share the session web-dedup so any remaining web call (formal skeptics) does not re-fetch.
+        toolRunner: withSessionWebDedup(subTurnToolRunner, session.id), // delegate directly; skeptics do not modify the tree
         whitelist: new Set(skepticToolDefs.map((d) => d.name)),
         maxIters: SKEPTIC_MAX_ITERS,
         onStatus: deps.onStatus,
@@ -2597,7 +2637,7 @@ export function createDeepExploreTool(
         const results = await runParallelSubAgents(tasks, {
           llm: miniLoopLLM,
           toolDefs: webDefs,
-          toolRunner: subTurnToolRunner,
+          toolRunner: withSessionWebDedup(subTurnToolRunner, session.id),
           concurrency: Math.min(3, tasks.length),
           budgetTokens: SESSION_TOKEN_BUDGET, // a child that would start over the session budget is skipped
           abortSignal: ctrl.signal,
@@ -2634,7 +2674,7 @@ export function createDeepExploreTool(
         userMessage: 'Run the grounding search for the goal/question above and output ONLY the JSON array of cards.',
         llm: miniLoopLLM,
         toolDefs: webDefs,
-        toolRunner: subTurnToolRunner, // the general runner CAN reach web; the per-round reasoning whitelist still cannot
+        toolRunner: withSessionWebDedup(subTurnToolRunner, session.id), // 2026-06-29: dedup the single grounding pass too; the general runner CAN reach web; the per-round reasoning whitelist still cannot
         maxIters: LIT_GROUNDING_MAX_ITERS,
         toolWhitelist: WEB_TOOL_NAMES,
         onStatus: deps.onStatus,

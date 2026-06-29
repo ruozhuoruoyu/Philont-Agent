@@ -51,6 +51,7 @@ import {
   buildDeliberateGroundingPrompt,
   DELIBERATE_LIT_TYPE_LABEL,
   shouldDeliberateAutoAnswer,
+  withSessionWebDedup,
 } from '../src/deep_explore.js';
 
 function node(over: Partial<ReasoningNode>): ReasoningNode {
@@ -1343,4 +1344,40 @@ test('action=list: no open sessions → says so (does not invent a count)', asyn
   assert.equal(r.success, true);
   assert.match(r.output, /No open deep-explore sessions/);
   mem.close();
+});
+
+test('withSessionWebDedup: repeat web call short-circuits; new/non-web pass; shared across runners by sessionId', async () => {
+  let calls = 0;
+  const delegate = async (name: string, _input: Record<string, unknown>) => {
+    calls++;
+    return { ok: true as const, output: `ran ${name}` };
+  };
+  const sid = 'dedup-unit-sess';
+  const grounding = withSessionWebDedup(delegate, sid);
+
+  // first fetch runs
+  let r = await grounding('webFetch', { url: 'https://arxiv.org/abs/2506.12708' });
+  assert.equal(calls, 1);
+  assert.match(r.output, /ran webFetch/);
+
+  // same URL (fragment normalized away) → short-circuited, delegate NOT hit again
+  r = await grounding('webFetch', { url: 'https://arxiv.org/abs/2506.12708#results' });
+  assert.equal(calls, 1, 'duplicate fetch must not reach the network');
+  assert.match(r.output, /DUPLICATE/);
+
+  // a SEPARATE runner with the SAME sessionId (e.g. a skeptic vs the grounding pass) shares the dedup
+  const skeptic = withSessionWebDedup(delegate, sid);
+  r = await skeptic('webFetch', { url: 'https://arxiv.org/abs/2506.12708' });
+  assert.equal(calls, 1, 'cross-runner same-session dedup');
+
+  // a genuinely new query runs; a non-web tool always delegates
+  await grounding('webSearch', { query: 'GLM-5.2 architecture' });
+  assert.equal(calls, 2);
+  await grounding('searchNotes', { query: 'anything' });
+  assert.equal(calls, 3, 'non-web tools are never deduped');
+
+  // a DIFFERENT session does not see sess-A's keys
+  const other = withSessionWebDedup(delegate, 'dedup-unit-sess-2');
+  await other('webFetch', { url: 'https://arxiv.org/abs/2506.12708' });
+  assert.equal(calls, 4, 'dedup is per-session');
 });
