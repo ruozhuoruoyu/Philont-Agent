@@ -145,7 +145,7 @@ The honesty mechanism reaches here too: a node claimed *proved* on an order-boun
 
 ## Quick start
 
-> **Platform status:** Developed on **Windows**; **Linux and macOS (Apple Silicon) are verified in CI** on every push — the build runs clean and the agent server boots and serves its memory API on all three. CI covers **build + boot** (mock mode), not a full LLM round-trip or the desktop launcher / messaging channels, so on Linux/macOS expect the core to work with the occasional rough edge in interactive use — if you hit one, please open an issue or PR.
+> **Platform status:** Developed on **Windows**; **Linux and macOS (Apple Silicon) build & boot are verified in CI** on every push. LLM calls and the WeChat / Telegram channels are plain HTTP, so they work the same on every platform. Hit a rough edge? Please open an issue or PR.
 
 > **Prerequisites:** Node.js ≥ 20 and an Anthropic- or OpenAI-compatible API key.
 > No Rust toolchain needed — the runtime is pure TypeScript.
