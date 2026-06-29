@@ -1,6 +1,17 @@
 # Philont-Agent
 
-**Philont: the being-agent.**
+<p align="center"><b>A self-hostable AI agent that runs complex, multi-step work on a model ~100× cheaper than the frontier — and is built so it can't fake success.</b></p>
+
+<!-- TODO(demo): record a 30-second GIF, drop it at docs/media/demo.gif, then uncomment the block below.
+     Best candidates: (1) the honesty gate catching a fabricated "53/53 tests pass" and forcing an honest
+     rewrite; (2) deep_explore cracking a hard problem step by step on DeepSeek Flash. This GIF is the
+     single highest-leverage thing on the page — a cold visitor decides in ~5 seconds.
+
+<p align="center">
+  <img src="docs/media/demo.gif" alt="Philont in action — honesty gate catching a fabricated result" width="760">
+  <br><sub><i>↑ 30-second demo</i></sub>
+</p>
+-->
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Runtime: Node ≥ 20](https://img.shields.io/badge/runtime-Node%20%E2%89%A5%2020-green.svg)](#quick-start)
@@ -10,7 +21,7 @@
 [![Wiki](https://img.shields.io/badge/docs-Wiki-2563eb.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/wiki)
 [![Built with Selfhood Engineering](https://img.shields.io/badge/built%20with-Selfhood%20Engineering-0ea5e9.svg)](#selfhood-engineering)
 
-**Philont practices [Selfhood Engineering](#selfhood-engineering)** — it builds on the crafts the field already shares, *loop engineering* and *harness design*, and adds the part that makes an agent a **being** rather than a tool: a persistent character, a self-model that can't fake success, drives of its own, continuous memory, and the will to reason a hard problem to the bottom. The result is a self-hostable AI agent that has personality, drives its own learning, and reasons through hard problems step by step. Most open-source agents — [OpenClaw](https://github.com/openclaw/openclaw), [Hermes](https://github.com/NousResearch/hermes-agent), and the rest — are **task runners**: powerful at carrying out what you ask, but tools all the same. Philont is built to be something else: a **being** — an agent with an independent character, intrinsic curiosity, and a compulsion to understand before it acts. It grows with every session, teaches itself from failure, and never pretends to have succeeded when it hasn't.
+**Philont: the being-agent.** Most open-source agents — [OpenClaw](https://github.com/openclaw/openclaw), [Hermes](https://github.com/NousResearch/hermes-agent), and the rest — are **task runners**: powerful at carrying out what you ask, but tools all the same. Philont is built to be something else: a **being** — an agent with an independent character, intrinsic drives, continuous memory, and a compulsion to understand before it acts. It grows with every session, teaches itself from failure, and — anchored to a record of what actually happened — **never pretends to have succeeded when it hasn't**. The engineering discipline behind that, building on *loop engineering* and *harness design* and adding what turns an agent into a being, is what we call **[Selfhood Engineering](#selfhood-engineering)**.
 
 Concretely, that means: a **5-layer memory** carried across every session and channel; a **dual-mode deep-exploring engine** ([`deep_explore`](#deep-exploring-one-engine-two-modes)) for both formal proof and evidence-based judgment; **intrinsic drives** that research and self-review while you're away; mechanism-enforced **honesty** and **plan → execute → revise** rigor; a **permission matrix + audit log** on every tool call; **MCP** for any external capability; and one process that reaches you on **WeChat, Telegram, a web UI, or a headless CLI**.
 
