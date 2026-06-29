@@ -13,6 +13,7 @@
 </p>
 -->
 
+[![CI](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Runtime: Node ≥ 20](https://img.shields.io/badge/runtime-Node%20%E2%89%A5%2020-green.svg)](#quick-start)
 [![Status: developer preview](https://img.shields.io/badge/status-developer%20preview-orange.svg)](#status)
@@ -144,7 +145,7 @@ The honesty mechanism reaches here too: a node claimed *proved* on an order-boun
 
 ## Quick start
 
-> **Platform status:** Developed on **Windows** and verified on **Linux** (Node 20: `build-all.sh` runs clean, the agent server boots, and the SQLite-backed memory works end to end). **macOS has not been tested yet.** The runtime is cross-platform by design (shell execution branches per OS), so on macOS expect mostly-works with rough edges — if you run it there, please open an issue or PR with what you hit.
+> **Platform status:** Developed on **Windows**; **Linux and macOS (Apple Silicon) are verified in CI** on every push — the build runs clean and the agent server boots and serves its memory API on all three. CI covers **build + boot** (mock mode), not a full LLM round-trip or the desktop launcher / messaging channels, so on Linux/macOS expect the core to work with the occasional rough edge in interactive use — if you hit one, please open an issue or PR.
 
 > **Prerequisites:** Node.js ≥ 20 and an Anthropic- or OpenAI-compatible API key.
 > No Rust toolchain needed — the runtime is pure TypeScript.
