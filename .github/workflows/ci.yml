@@ -37,6 +37,50 @@ jobs:
             echo "::endgroup::"
           done
 
+  smoke:
+    # Cross-platform build + boot smoke test. macos-latest is Apple Silicon
+    # (arm64) — this is how we verify macOS without owning a Mac: it exercises
+    # the native-module prebuilds (better-sqlite3 darwin-arm64) and the per-OS
+    # shell-exec branches. Mock mode (no API key) — verifies build + boot, not
+    # an LLM round-trip.
+    name: Build & boot smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Build libraries (dependency order) + install server deps
+        run: |
+          set -e
+          for pkg in agent-policy agent-tools agent-mcp agent-plugins agent-memory; do
+            echo "::group::$pkg"
+            (cd "$pkg" && npm install --no-audit --no-fund && npm run build)
+            echo "::endgroup::"
+          done
+          (cd server && npm install --no-audit --no-fund)
+
+      - name: Boot server and probe the memory API (mock mode)
+        run: |
+          set -e
+          (cd server && npm run dev > "$RUNNER_TEMP/philont-server.log" 2>&1 &)
+          up=0
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:20266/ || echo 000)
+            if [ "$code" = "200" ]; then echo "server up (HTTP $code) after ${i}s"; up=1; break; fi
+            sleep 1
+          done
+          stats=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:20266/api/memory/stats || echo 000)
+          echo "memory API: HTTP $stats"
+          echo "::group::server.log"; cat "$RUNNER_TEMP/philont-server.log" || true; echo "::endgroup::"
+          pkill -f "tsx src/index.ts" || true
+          test "$up" = "1" && test "$stats" = "200"
+
   typecheck:
     name: Type-check server & web-ui
     runs-on: ubuntu-latest
