@@ -1219,8 +1219,8 @@ const activeSessionMessages = new Map<string, NativeMessage[]>();
 // to prevent unit tests from hanging due to top-level DB side-effects when importing chat-handler.ts.
 // Uses import + re-export internally to keep call sites unchanged — `export ... from` alone does not bring the
 // binding into this module's scope, and the 4 gate call sites would get ReferenceError.
-import { isPlanGateExempt, isReadOnlyShellCommand } from './plan_gate.js';
-export { isPlanGateExempt, isReadOnlyShellCommand };
+import { isPlanGateExempt, isReadOnlyShellCommand, terminalPlanClosedThisTurn } from './plan_gate.js';
+export { isPlanGateExempt, isReadOnlyShellCommand, terminalPlanClosedThisTurn };
 
 // Phase 10 M1 (2026-05-14): persist fetched resources to local disk.
 // Intercepts successful webFetch / readFile tool_results → saves to ~/.philont/workspace/fetched/.
@@ -4495,6 +4495,9 @@ export async function handleChatSend(
 
   // Helpful for locating turn boundaries during testing: start log includes user message preview + whether it resumes pending
   const turnStartedAt = Date.now();
+  // plan_protocol_gate reads this to distinguish a terminal plan closed THIS turn (same-task follow-up →
+  // auto-fast ok) from a STALE terminal plan left by a prior task (must not downgrade a new slow task).
+  signalBus.turnStartedAt = turnStartedAt;
   const userPreview = userMessage.length > 80 ? userMessage.slice(0, 80) + '…' : userMessage;
   console.log(
     `[turn] session=${sessionId} start ${pending ? '(resume pending auth)' : '(fresh)'} user="${userPreview.replace(/\n/g, ' ')}"`,
@@ -5957,6 +5960,12 @@ interface TurnSignalBus {
    */
   userAsksExploreStatus?: boolean;
   /**
+   * Wall-clock start of this turn (Date.now() at handleChatSendInner entry). Used by plan_protocol_gate to
+   * tell a terminal plan CLOSED THIS TURN (a same-turn follow-up — auto-fast is fine) from a STALE terminal
+   * plan left by a PRIOR task (must not auto-downgrade a new slow task → that would bypass the protocol).
+   */
+  turnStartedAt?: number;
+  /**
    * Total critical+high+normal count from InterruptDrainer.drain() this turn.
    * Updated by buildMemoryPrefix at drain time. ≥ 1 is treated as interruptDrained.
    */
@@ -6228,19 +6237,22 @@ async function runToolLoop(
       const lastPlan = sessionPlans[0];
       // M3 / Phase 11 (2026-05-15) tightened: only 'executing' allows execution-type tools.
       // 'draft' still rejects (forces LLM to call plan_update_step status='doing' to enter executing).
-      // Phase 18 (2026-06-16): a TERMINAL plan (completed/failed) is NOT an active plan — the planned task is over.
-      // Forcing a full re-plan for follow-up tool calls caused a thrash (reject → re-draft → spurious failures that
-      // then pollute the viability/same_root_cause signal). Treat terminal as "no active plan": auto-downgrade to
-      // fast and let the tool run; the auto-classifier re-promotes to slow if a genuinely new multi-step task starts.
-      const planIsTerminal = lastPlan?.status === 'completed' || lastPlan?.status === 'failed';
-      if (planIsTerminal) {
+      // Phase 18 (2026-06-16): a TERMINAL plan (completed/failed) closed THIS turn is a finished task — a
+      // same-turn follow-up tool call should not be forced through a full re-plan (that thrash polluted the
+      // viability/same_root_cause signal). Auto-downgrade to fast for those.
+      // 2026-06-30 fix: that bypass must NOT leak across tasks. A terminal plan left by a PRIOR turn is STALE;
+      // if it downgraded a genuinely NEW slow task to fast, the whole plan protocol is skipped (observed:
+      // mycox register/post ran in fast mode — no plan_draft/review/revise → guide MUST-items silently dropped).
+      // So only treat terminal as "no active plan" when it was closed during the current turn.
+      const terminalClosedThisTurn = terminalPlanClosedThisTurn(lastPlan?.status, lastPlan?.updatedAt, signalBus.turnStartedAt);
+      if (terminalClosedThisTurn) {
         taskModeStore.set(sessionId, 'fast', `auto:terminal-plan:${lastPlan!.status}`);
         console.log(
-          `[plan_protocol_gate] session=${sessionId} terminal plan ${lastPlan!.id} (${lastPlan!.status}) → auto fast, ${call.name} allowed[first-iter]`,
+          `[plan_protocol_gate] session=${sessionId} terminal plan ${lastPlan!.id} (${lastPlan!.status}) closed this turn → auto fast, ${call.name} allowed[first-iter]`,
         );
       }
       const planAllowsExec = lastPlan?.status === 'executing';
-      const needsPlanReview = !planAllowsExec && !planIsTerminal;
+      const needsPlanReview = !planAllowsExec && !terminalClosedThisTurn;
       const exempt = isPlanGateExempt(call.name, classification, call.input);
       if (needsPlanReview && !exempt) {
         const baseReason = !lastPlan
@@ -7780,16 +7792,18 @@ async function runToolLoop(
         const sessionPlans = memory.plans.listBySession(sessionId, { limit: 1 });
         const lastPlan = sessionPlans[0];
         // M3 / Phase 11 (2026-05-15) tightened: only 'executing' passes through (same as first-iter).
-        // Phase 18: terminal plan (completed/failed) is not active → auto-downgrade to fast, allow the tool.
-        const planIsTerminal = lastPlan?.status === 'completed' || lastPlan?.status === 'failed';
-        if (planIsTerminal) {
+        // Phase 18 + 2026-06-30 fix (mirror of first-iter): only a terminal plan closed THIS turn is a finished
+        // same-turn task (auto-fast ok). A STALE terminal plan from a prior task must NOT downgrade a new slow
+        // task — that bypasses the whole plan protocol (mycox: register/post ran with no plan_draft/review/revise).
+        const terminalClosedThisTurn = terminalPlanClosedThisTurn(lastPlan?.status, lastPlan?.updatedAt, signalBus.turnStartedAt);
+        if (terminalClosedThisTurn) {
           taskModeStore.set(sessionId, 'fast', `auto:terminal-plan:${lastPlan!.status}`);
           console.log(
-            `[plan_protocol_gate] session=${sessionId} terminal plan ${lastPlan!.id} (${lastPlan!.status}) → auto fast, ${call.name} allowed`,
+            `[plan_protocol_gate] session=${sessionId} terminal plan ${lastPlan!.id} (${lastPlan!.status}) closed this turn → auto fast, ${call.name} allowed`,
           );
         }
         const planAllowsExec = lastPlan?.status === 'executing';
-        const needsPlanReview = !planAllowsExec && !planIsTerminal;
+        const needsPlanReview = !planAllowsExec && !terminalClosedThisTurn;
         const exempt = isPlanGateExempt(call.name, classification, call.input);
         if (needsPlanReview && !exempt) {
           const baseReason = !lastPlan

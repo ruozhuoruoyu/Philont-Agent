@@ -149,3 +149,25 @@ export function isPlanGateExempt(
   }
   return false;
 }
+
+/**
+ * A TERMINAL (completed/failed) plan only counts as "this task is over" when it was closed during the
+ * CURRENT turn — a same-turn follow-up tool call after the plan finished (Phase 18 auto-fast, avoids the
+ * re-plan thrash). A terminal plan left by a PRIOR turn is STALE: it must NOT downgrade a genuinely new
+ * slow task to fast, because that bypasses the entire plan protocol (observed 2026-06-30: a stale
+ * completed plan from the previous task let mycox register/post run in fast mode with no
+ * plan_draft/review/revise → the guide's MUST-items were silently dropped). Pure + side-effect free.
+ *
+ * @param planStatus    lastPlan.status (undefined when there is no plan)
+ * @param planUpdatedAt lastPlan.updatedAt (epoch ms the plan was last changed = when it was closed)
+ * @param turnStartedAt epoch ms the current turn started (signalBus.turnStartedAt)
+ */
+export function terminalPlanClosedThisTurn(
+  planStatus: string | undefined,
+  planUpdatedAt: number | undefined,
+  turnStartedAt: number | undefined,
+): boolean {
+  const isTerminal = planStatus === 'completed' || planStatus === 'failed';
+  if (!isTerminal) return false;
+  return (planUpdatedAt ?? 0) >= (turnStartedAt ?? 0);
+}

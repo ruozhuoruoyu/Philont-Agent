@@ -17,7 +17,28 @@ import assert from 'node:assert/strict';
 import {
   isPlanGateExempt,
   isReadOnlyShellCommand,
+  terminalPlanClosedThisTurn,
 } from '../src/plan_gate.js';
+
+// ── terminalPlanClosedThisTurn: terminal-plan auto-fast must not LEAK across tasks ──────────────────
+test('terminalPlanClosedThisTurn: completed plan closed THIS turn → true (same-turn follow-up, auto-fast ok)', () => {
+  const turnStart = 1000;
+  assert.equal(terminalPlanClosedThisTurn('completed', 1200, turnStart), true);
+  assert.equal(terminalPlanClosedThisTurn('failed', 1000, turnStart), true); // closed exactly at turn start
+});
+
+test('terminalPlanClosedThisTurn: STALE terminal plan from a PRIOR turn → false (must enforce protocol)', () => {
+  const turnStart = 5000;
+  // the mycox regression: a completed plan from the previous task (updatedAt < turnStart) must NOT downgrade
+  assert.equal(terminalPlanClosedThisTurn('completed', 1200, turnStart), false);
+  assert.equal(terminalPlanClosedThisTurn('failed', 4999, turnStart), false);
+});
+
+test('terminalPlanClosedThisTurn: non-terminal / missing plan → false (executing/draft/none never auto-fast here)', () => {
+  assert.equal(terminalPlanClosedThisTurn('executing', 9999, 1000), false);
+  assert.equal(terminalPlanClosedThisTurn('draft', 9999, 1000), false);
+  assert.equal(terminalPlanClosedThisTurn(undefined, 9999, 1000), false);
+});
 
 // ── isReadOnlyShellCommand:核心白名单 + 逃逸检测 ──────────────────────────────
 
