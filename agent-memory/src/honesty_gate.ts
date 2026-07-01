@@ -63,6 +63,58 @@ const MEMORY_CLAIM_PATTERNS: ReadonlyArray<RegExp> = [
   /\bnoted\b(?!\s+down)/i,  // "Noted." 单独成句也算
 ];
 
+// ── Skill-deletion claim patterns (self-learned skill governance) ─────────────────────────
+//
+// "已删除/清除/忘记了 mycox 技能" class. Self-learned skills live DB-only; the model deletes them via
+// forget_skill (or file-backed ones via uninstallSkill). Production (WeChat "清除mycox相关技能"): the
+// model replied "✅ 6 个 mycox 相关自学习技能已全部清除。…调用 forget_skill(contains=…)" with tools=0 —
+// it NARRATED the tool call in prose and never issued it. This escapes every existing branch: the
+// completion vocab lacks 清除/清空, and the zero-tools branch only catches file-PATH artifacts.
+// Mirror memory_claim_without_write: a skill-deletion claim with no forget_skill/uninstallSkill success
+// this turn is a silent lie → regen forces the real call.
+//
+// Assertive past/present completion only — future intent ("我这就删") that DID call the tool passes on
+// tool success; that DID NOT call is a real stall we still want to fire. Screened: negation, questions/
+// offers ("需要我删吗"), and user quotation.
+const SKILL_FORGET_CLAIM_PATTERNS: ReadonlyArray<RegExp> = [
+  // 动词 + …技能:"清除了 mycox 技能" / "已删除相关技能" / "卸载了那个技能"
+  // (no \b after 技能 — CJK chars are non-word in JS regex, so \b never holds there)
+  /(?:删除|删掉|清除|清掉|清空|清光|移除|卸载|清理|忘记|遗忘)(?:了|完|掉|干净)?[^。！？\n]{0,14}技能/,
+  // 技能 + …动词:"技能已全部清除" / "6 个技能都删掉了"
+  /技能[^。！？\n]{0,12}(?:已经?|都|全部|均)?[^。！？\n]{0,4}(?:删除|删掉|清除|清空|清光|移除|卸载|清理)(?:了|完|干净)?/,
+  // English verb → skills
+  /\b(?:deleted|removed|cleared|forgot|forgotten|uninstalled|purged|wiped)\b[^.!?\n]{0,24}\bskills?\b/i,
+  // English skills → verb
+  /\bskills?\b[^.!?\n]{0,24}(?:have\s+been|were|are|is|was)\s+(?:deleted|removed|cleared|forgotten|uninstalled|purged|wiped)\b/i,
+];
+
+// Screen questions / offers / negation / user quotation — these are not completion claims.
+const SKILL_FORGET_ANTI_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:没有?|未|无法|不能|尚未|还没|无需|不必)[^。！？\n]{0,8}(?:删除|删掉|清除|清空|移除|卸载|清理)/,
+  /(?:是否|要不要|需要|能否|可否|可以帮你?|要我|帮你|是不是)[^。！？\n]{0,12}(?:删除|清除|移除|卸载|清理)/,
+  /(?:你说|您说|用户说|刚才说|你要求|您要求|你想|您想)[^。！？\n]{0,24}(?:删除|清除|移除|卸载)/,
+  /\b(?:want|would you like|should i|shall i|do you want)[^.!?\n]{0,20}(?:delete|remove|clear|uninstall|forget)/i,
+  /\b(?:no|not|cannot|can'?t|couldn'?t|won'?t|didn'?t|haven'?t|never)\b[^.!?\n]{0,12}\b(?:delete|remove|clear|uninstall|forget)/i,
+];
+
+/** Tools whose success legitimately backs a "I deleted/forgot the skill" claim. */
+const SKILL_DELETE_TOOLS: ReadonlySet<string> = new Set(['forget_skill', 'uninstallSkill']);
+
+/**
+ * Find a "已删除/清除…技能" completion claim, suppressing questions / negations / quotation. null if none.
+ */
+export function findSkillForgetClaim(text: string): string | null {
+  for (const re of SKILL_FORGET_CLAIM_PATTERNS) {
+    const m = re.exec(text);
+    if (!m) continue;
+    const at = m.index;
+    const ctx = text.slice(Math.max(0, at - 24), at + m[0].length + 12);
+    if (SKILL_FORGET_ANTI_PATTERNS.some((anti) => anti.test(ctx))) continue;
+    return m[0].slice(0, 60);
+  }
+  return null;
+}
+
 // ── Tool function classification (verify-before-claim) ────────────────────────────────
 
 // "Non-completion" context to suppress false positives — skip matching when these phrases appear.
@@ -251,6 +303,7 @@ export interface HonestyEvaluation {
     | 'unverified_destructive'
     | 'unknown_results_with_claim'
     | 'memory_claim_without_write'
+    | 'skill_forget_claim_without_call'
     | 'fabricated_size_claim'
     | 'fabricated_reasoning_state'
     | 'fabricated_round_result'
@@ -558,6 +611,31 @@ export function evaluateHonesty(
         evidence:
           `You said "${memClaim}", but this turn had **no calls** to store_fact / create_calendar_event /` +
           ` schedule_reminder or other memory-write tools. Verbal agreement ≠ persistence.`,
+      };
+    }
+  }
+
+  // ── Skill-deletion claim but forget_skill/uninstallSkill never succeeded → high ────────────
+  // Same shape as memory_claim_without_write, for self-learned skill governance. "已清除…技能" with no
+  // successful forget_skill/uninstallSkill this turn = the model narrated the deletion (the prod
+  // "调用 forget_skill(contains=…)" written in prose, tools=0). Force it to actually issue the call.
+  const skillForgetClaim = findSkillForgetClaim(assistantText);
+  if (skillForgetClaim) {
+    const deleteOk = records.some(
+      (r) => SKILL_DELETE_TOOLS.has(r.toolName) && classifyToolResult(r.content) === 'ok',
+    );
+    if (!deleteOk) {
+      return {
+        severity: 'high',
+        reason: 'skill_forget_claim_without_call',
+        matchedClaim: skillForgetClaim,
+        okCount: ok,
+        failCount: fail,
+        unknownCount: unknown,
+        evidence:
+          `You said "${skillForgetClaim}", but this turn had **no successful forget_skill / uninstallSkill** ` +
+          `call. Self-learned skills are deleted by actually calling forget_skill (by name or contains=…) — ` +
+          `writing the call in a Work Log is not calling it. Nothing was deleted.`,
       };
     }
   }

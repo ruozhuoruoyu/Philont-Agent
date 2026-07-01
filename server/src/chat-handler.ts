@@ -7260,6 +7260,15 @@ async function runToolLoop(
               `  2. If you genuinely cannot act now (missing input / not your call), say so plainly and ask the user — do not narrate progress you are not making;\n` +
               `  3. Never end a turn with a present-progressive "I'm researching…" / a trailing "…" and zero tool calls — that is the exact stall the user flagged.\n\n` +
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+          } else if (honesty.reason === 'skill_forget_claim_without_call') {
+            reminder =
+              `[drive Honesty/skill_forget] You said "${honesty.matchedClaim}" but issued no successful forget_skill / uninstallSkill call — ${honesty.evidence}\n\n` +
+              `**Pick one of two paths — do not straddle**:\n` +
+              `  Path A · Actually delete: in THIS reply CALL forget_skill — forget_skill(contains="mycox") to bulk-delete every self-learned skill mentioning it, or forget_skill(name="<exact-slug>") for one. Then report the deleted names the tool returned (deleted=[…]).\n` +
+              `    - forget_skill removes DB-only self-learned skills; file-backed (bundled/installed) skills are protected and must go through uninstallSkill instead.\n` +
+              `  Path B · Correct yourself: honestly tell the user you have NOT deleted anything yet — do not write "已清除 / deleted" or narrate a forget_skill(…) call you did not issue.\n\n` +
+              `Writing the tool call in a Work Log is NOT calling it. Nothing was deleted until forget_skill returns ✓ with deleted names.\n` +
+              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
           } else if (honesty.severity === 'high') {
             reminder =
               `[drive Honesty/high] Your draft reply contains a completion claim "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +

@@ -273,6 +273,7 @@ export {
   findExecutionClaim,
   findRunPromise,
   findActionAnnouncement,
+  findSkillForgetClaim,
   isExecutionTool,
   turnDidExecute,
 } from './honesty_gate.js';
