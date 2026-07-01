@@ -327,6 +327,21 @@ export class SkillStore extends EventEmitter {
   }
 
   /**
+   * Every skill row, ALL maturities (incl. deprecated), no relevance ranking. For MAINTENANCE paths
+   * (bulk delete / audit) that must see the complete set — listAll / search both hide deprecated and
+   * rank+truncate, so neither can enumerate "all skills" for a criterion delete (prod: forget_skill
+   * "删除使用次数为0" could not reach deprecated/unranked skills). Not for LLM surfacing.
+   */
+  listAllForMaintenance(limit = 10000): Skill[] {
+    const rows = this.db
+      .prepare<[number]>(
+        `SELECT * FROM memory_skills ORDER BY use_count ASC, created_at DESC LIMIT ?`
+      )
+      .all(limit) as SkillRow[];
+    return rows.map(rowToSkill);
+  }
+
+  /**
    * List skills by maturity tier, sorted by created_at DESC (newest first).
    *
    * 2026-05-11: designed specifically for playbook section rendering. Playbook skills do not

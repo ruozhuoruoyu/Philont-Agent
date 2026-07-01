@@ -1413,7 +1413,10 @@ const forgetSkillTool: Tool = {
       }
 
       const query = { name, contains, maxUseCount };
-      const all = memory.skills.listAll(5000);
+      // Use the maintenance list (ALL maturities incl. deprecated, unranked) — listAll/search hide
+      // deprecated + rank+truncate, so a criterion delete must not go through them or it silently
+      // misses skills (prod: "94" claimed, most never targeted because search_skills is relevance FTS).
+      const all = memory.skills.listAllForMaintenance();
       const matches = selectSkillsToForget(all, onDisk, query);
       // Skills matching the criterion but protected because they are file-backed — reported so the true
       // "matched N, deleted M, skipped K file-backed" is visible (K left for uninstallSkill), not surfaced
