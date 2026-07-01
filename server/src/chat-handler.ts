@@ -229,6 +229,7 @@ import {
 import { renderDeterministicMaxIterSummary } from './max_iter_summary.js';
 import {
   computeViability,
+  viabilityActuatorRelevant,
   buildViabilityDirective,
   isStopVerdict,
   CONTINUATION_PITCH_RE,
@@ -7720,6 +7721,25 @@ async function runToolLoop(
             attemptsThisEpisode: vAttemptsThisEpisode,
             deadEndCount: vSummary?.deadCount ?? 0,
           });
+          // Cross-task hijack guard (2026-07-01): when an active reasoning session exists but THIS turn
+          // neither engaged it (no deep_explore call) nor pitched to continue it, the pivot directive would
+          // hijack an UNRELATED task. Prod: a "删除豆瓣技能" turn (forget_skill succeeded, clean reply) got
+          // pivoted into "模型选型推理当前状态…" because a stale never-closed model-selection session + a global
+          // same_root_cause inflated by the failing mycox-heartbeat pump tripped the pivot score. The actuator
+          // only makes sense on a reply that is actually pitching a doomed continuation of the session (or a
+          // session-less doom-grind, whose existing behavior is preserved via !ownerSession).
+          const vRelevantToThisTurn = viabilityActuatorRelevant({
+            hasActiveSession: !!ownerSession,
+            turnEngagedReasoning: (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore'),
+            replyPitchesContinuation: CONTINUATION_PITCH_RE.test(response.content),
+          });
+          if (v.verdict !== 'continue' && !vRelevantToThisTurn) {
+            console.log(
+              `[viability] session=${sessionId} verdict=${v.verdict} score=${v.score} SKIPPED — active session ` +
+              `but this turn neither ran deep_explore nor pitched continuation (unrelated task); not hijacking. ` +
+              `reasons=${v.reasons.join(',')}`,
+            );
+          } else {
           // Ratchet bookkeeping (once per turn): a non-continue verdict extends the streak; continue resets it.
           if (!viabilityStreakUpdated) {
             viabilityStreakUpdated = true;
@@ -7769,6 +7789,7 @@ async function runToolLoop(
               );
             }
           }
+          } // end vRelevantToThisTurn else
         } catch (e) {
           console.warn('[viability] gate failed (ignored):', e);
         }

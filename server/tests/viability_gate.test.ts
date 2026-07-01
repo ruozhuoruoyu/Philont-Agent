@@ -323,3 +323,34 @@ test('CONTINUATION_PITCH_RE: "要不要试?" / "要不要搞一下?" now match (
   assert.ok(CONTINUATION_PITCH_RE.test('要不要继续？'));
   assert.ok(CONTINUATION_PITCH_RE.test('shall I continue?'));
 });
+
+// ── viabilityActuatorRelevant: cross-task hijack guard ─────────────────────────────────────
+import { viabilityActuatorRelevant } from '../src/viability_gate.js';
+
+test('viabilityActuatorRelevant: active session + unrelated turn (no deep_explore, no pitch) → NOT relevant (prod douban hijack)', () => {
+  assert.equal(
+    viabilityActuatorRelevant({ hasActiveSession: true, turnEngagedReasoning: false, replyPitchesContinuation: false }),
+    false,
+  );
+});
+
+test('viabilityActuatorRelevant: turn ran deep_explore → relevant', () => {
+  assert.equal(
+    viabilityActuatorRelevant({ hasActiveSession: true, turnEngagedReasoning: true, replyPitchesContinuation: false }),
+    true,
+  );
+});
+
+test('viabilityActuatorRelevant: reply pitches continuation → relevant', () => {
+  assert.equal(
+    viabilityActuatorRelevant({ hasActiveSession: true, turnEngagedReasoning: false, replyPitchesContinuation: true }),
+    true,
+  );
+});
+
+test('viabilityActuatorRelevant: no active session (session-less doom-grind) → relevant (existing behavior preserved)', () => {
+  assert.equal(
+    viabilityActuatorRelevant({ hasActiveSession: false, turnEngagedReasoning: false, replyPitchesContinuation: false }),
+    true,
+  );
+});

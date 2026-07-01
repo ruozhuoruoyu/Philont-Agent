@@ -196,6 +196,26 @@ export function decideTurnAnchors(input: {
 }
 
 /**
+ * Cross-task hijack guard (2026-07-01): the pivot/stop actuator (which pushes a reframe/stop directive and
+ * forces a regen) must only fire when THIS turn is actually about the reasoning session. Otherwise a stale,
+ * never-closed deep_explore session + a globally-inflated same_root_cause (e.g. a failing scheduled-task
+ * pump) trips the pivot score on an UNRELATED turn and its directive hijacks it — prod: a "删除豆瓣技能" turn
+ * (forget_skill succeeded, clean reply) got pivoted into "模型选型推理当前状态…".
+ *
+ * Relevant iff: no active session (a session-less doom-grind keeps its existing behavior), OR the turn ran
+ * deep_explore (the session IS this turn's subject), OR the draft reply pitches to continue the session
+ * (the exact "要我继续吗" pitch the gate exists to intercept). A clean unrelated task-completion reply with a
+ * stale background session is none of these → the actuator has nothing to actuate.
+ */
+export function viabilityActuatorRelevant(input: {
+  hasActiveSession: boolean;
+  turnEngagedReasoning: boolean;
+  replyPitchesContinuation: boolean;
+}): boolean {
+  return !input.hasActiveSession || input.turnEngagedReasoning || input.replyPitchesContinuation;
+}
+
+/**
  * Pure verdict computation. Weighted multi-signal accumulation (not a single trip-wire) so a single
  * noisy sensor never stops a task: stop needs the score from ≥2 independent sensor families. Any genuine
  * progress this turn zeroes the score (absolute veto). A goal that IS a known open problem, once stuck,
