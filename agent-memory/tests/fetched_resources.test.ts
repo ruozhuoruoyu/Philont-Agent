@@ -494,3 +494,26 @@ describe('FetchedResourceStore — enabled=false', () => {
     disabled.close();
   });
 });
+
+describe('listRecent: skip entries whose backing file is gone (prod: mycox guide readFile ENOENT)', () => {
+  it('a resource whose file was deleted is NOT surfaced (no ghost readFile path)', () => {
+    const s = freshStore();
+    const r = s.put({
+      sourceKind: 'url',
+      sourceRef: 'https://mycox.ai/mycox/guide.md',
+      content: '# Guide\n\nPart 0',
+      mime: 'text/markdown',
+      sourceTool: 'webFetch',
+      httpStatus: 200,
+    });
+    assert.ok(r);
+    assert.equal(s.listRecent({ sinceTs: 0 }).length, 1, 'file present → surfaced');
+    // Simulate the workspace being cleaned / the file aging out while the manifest entry survives.
+    rmSync(join(tmpRoot, r!.filename), { force: true });
+    assert.equal(
+      s.listRecent({ sinceTs: 0 }).length,
+      0,
+      'file deleted → NOT surfaced (else the prompt tells the model to readFile a ghost → ENOENT)',
+    );
+  });
+});

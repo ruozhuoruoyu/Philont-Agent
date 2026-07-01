@@ -438,6 +438,15 @@ export class FetchedResourceStore {
     for (const entry of this.manifest.values()) {
       if (entry.fetched_at < since) continue;
       if (sessionId && entry.session_id !== sessionId) continue;
+      // Only surface resources whose backing file STILL EXISTS. The manifest entry survives the 7-day
+      // window, but the file may have been deleted (workspace cleaned / aged out). Surfacing a stale entry
+      // is worse than not surfacing it: the prompt tells the model "readFile the local path before using",
+      // so a ghost entry causes a guaranteed ENOENT every turn (prod: mycox guide readFile failed each turn,
+      // polluting the failure signal before the model fell back to webFetch). Mirror getContent's check;
+      // 'download' kinds are not backed by a file in baseDir, so they are exempt.
+      if (entry.source_kind !== 'download' && !existsSync(join(this.baseDir, entry.filename))) {
+        continue;
+      }
       out.push(this.entryToResource(entry));
     }
     out.sort((a, b) => b.fetchedAt - a.fetchedAt);
