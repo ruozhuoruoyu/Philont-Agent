@@ -93,3 +93,79 @@ test('createFollowUpLoop: many quiet open sessions → ONE batched ask (most rec
     else process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP = prev;
   }
 });
+
+test('shouldAutoAbandon: only after asked + still quiet + stuck + grace elapsed', async () => {
+  const { shouldAutoAbandon } = await import('../src/deep_explore_followup.js');
+  const GRACE = 24 * 3_600_000;
+  const base = { openFrontierCount: 5, updatedAt: 0, askedAt: 0, provedCount: 0 };
+  const ctx = { now: GRACE, graceMs: GRACE };
+  assert.equal(shouldAutoAbandon(base, ctx), true, 'asked + quiet + stuck + grace → archive');
+  assert.equal(shouldAutoAbandon({ ...base, askedAt: undefined }, ctx), false, 'never asked → no');
+  assert.equal(shouldAutoAbandon({ ...base, openFrontierCount: 0 }, ctx), false, 'already resolved → no');
+  assert.equal(shouldAutoAbandon({ ...base, provedCount: 2 }, ctx), false, 'made progress → never discard');
+  assert.equal(shouldAutoAbandon({ ...base, updatedAt: 1 }, ctx), false, 're-engaged after ask → no');
+  assert.equal(shouldAutoAbandon(base, { now: GRACE - 1, graceMs: GRACE }), false, 'grace not elapsed → no');
+});
+
+test('createFollowUpLoop: stuck session → ask leads with abandon option; auto-archives if ignored past grace', () => {
+  const prev = process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  const prevA = process.env.PHILONT_DEEP_EXPLORE_AUTOARCHIVE;
+  delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  delete process.env.PHILONT_DEEP_EXPLORE_AUTOARCHIVE; // default ON
+  try {
+    const sessions = [
+      { id: 'stuck', goal: '模型选型 DeepSeek vs Claude,开放节点都需外部实时数据', updatedAt: 0, createdAt: 0, ownerSessionId: 'wechat:u' },
+    ];
+    const abandoned: string[] = [];
+    const reasoning = {
+      listActiveSessions: () => sessions,
+      summarizeSession: () => ({ status: 'stuck', provedCount: 0, deadCount: 0, openFrontierCount: 5 }),
+      setSessionStatus: (id: string, st: string) => { if (st === 'abandoned') abandoned.push(id); },
+    } as unknown as Reasoning;
+    const asks: Array<{ text: string }> = [];
+    let clock = SIX_H;
+    const loop = createFollowUpLoop({
+      reasoning,
+      notify: (text) => asks.push({ text }),
+      silenceMs: SIX_H,
+      now: () => clock,
+    });
+    loop.tickOnce(); // asks once, stuck → 放弃 lead
+    assert.equal(asks.length, 1, 'asked once');
+    assert.match(asks[0].text, /放弃/, 'stuck session leads with the abandon option');
+    assert.equal(abandoned.length, 0, 'not archived on the ask tick');
+    clock = SIX_H + 24 * 3_600_000 + 1; // past grace, still no re-engagement
+    loop.tickOnce();
+    assert.deepEqual(abandoned, ['stuck'], 'auto-archived after grace');
+    assert.equal(asks.length, 2, 'notified about the archive');
+    assert.match(asks[1].text, /归档/, 'archive notice');
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP; else process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP = prev;
+    if (prevA === undefined) delete process.env.PHILONT_DEEP_EXPLORE_AUTOARCHIVE; else process.env.PHILONT_DEEP_EXPLORE_AUTOARCHIVE = prevA;
+  }
+});
+
+test('createFollowUpLoop: re-engagement after the ask cancels auto-archive', () => {
+  const prev = process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  try {
+    const session = { id: 's', goal: 'g', updatedAt: 0, createdAt: 0, ownerSessionId: 'wechat:u' };
+    const sessions = [session];
+    const abandoned: string[] = [];
+    const reasoning = {
+      listActiveSessions: () => sessions,
+      summarizeSession: () => ({ status: 'active', provedCount: 0, deadCount: 0, openFrontierCount: 3 }),
+      setSessionStatus: (id: string, st: string) => { if (st === 'abandoned') abandoned.push(id); },
+    } as unknown as Reasoning;
+    const asks: Array<{ text: string }> = [];
+    let clock = SIX_H;
+    const loop = createFollowUpLoop({ reasoning, notify: (t) => asks.push({ text: t }), silenceMs: SIX_H, now: () => clock });
+    loop.tickOnce(); // ask at SIX_H
+    session.updatedAt = SIX_H + 1; // user re-engaged (advanced the session) after the ask
+    clock = SIX_H + 24 * 3_600_000 + 1;
+    loop.tickOnce();
+    assert.equal(abandoned.length, 0, 're-engaged session is never auto-archived');
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP; else process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP = prev;
+  }
+});

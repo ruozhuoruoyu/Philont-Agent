@@ -47,6 +47,49 @@ export function shouldAskFollowUp(
   return ctx.now - c.updatedAt >= ctx.silenceMs; // gone quiet long enough
 }
 
+/**
+ * Auto-archive escalation (2026-07-01, user choice "ask once, then auto-archive if ignored"). A stale
+ * reasoning session that was ASKED about once, never re-engaged, and is genuinely stuck should not sit open
+ * forever — it stays as getMostRecentActiveSession fodder that keeps the ViabilityGate primed on unrelated
+ * turns. After a long grace it is set to 'abandoned' + the user is notified. Re-openable, so it never blocks
+ * the user while still keeping state tidy. Risky (closes user state) → gated by
+ * PHILONT_DEEP_EXPLORE_AUTOARCHIVE (default on).
+ */
+export function autoArchiveEnabled(): boolean {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_AUTOARCHIVE ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/** Grace AFTER the one follow-up ask before a still-quiet, still-stuck session is auto-archived. */
+const AUTO_ARCHIVE_GRACE_MS = 24 * 60 * 60 * 1000;
+
+export interface AutoAbandonCandidate {
+  openFrontierCount: number;
+  /** last activity (session.updatedAt). */
+  updatedAt: number;
+  /** when the one follow-up ask was sent (undefined = not asked yet this process). */
+  askedAt: number | undefined;
+  /** proved nodes — > 0 means real progress, so NOT a hopeless stall. */
+  provedCount: number;
+}
+
+/**
+ * Pure decision: auto-archive ONLY after the session was asked about once, the user did not re-engage
+ * (updatedAt has not advanced past the ask), it is still open, still has zero proofs (genuinely stuck), and
+ * a long grace period has elapsed since the ask. Re-engagement (updatedAt > askedAt) is handled by the
+ * caller (clears the ask); a proved node vetoes archival — real progress is never discarded.
+ */
+export function shouldAutoAbandon(
+  c: AutoAbandonCandidate,
+  ctx: { now: number; graceMs: number },
+): boolean {
+  if (c.openFrontierCount <= 0) return false; // already resolved — nothing to archive
+  if (c.askedAt === undefined) return false; // must ask before archiving
+  if (c.updatedAt > c.askedAt) return false; // user re-engaged after the ask → keep
+  if (c.provedCount > 0) return false; // made real progress → not a hopeless stall
+  return ctx.now - c.askedAt >= ctx.graceMs; // asked long ago, still quiet + unproven
+}
+
 export interface FollowUpDeps {
   reasoning: ReasoningStore;
   /** Proactively notify the user (same shape as deep_explore_autoadvance). */
@@ -72,7 +115,9 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
   const intervalMs = deps.intervalMs ?? 10 * 60_000;
   const silenceMs = deps.silenceMs ?? silenceMsFromEnv();
   const now = deps.now ?? (() => Date.now());
-  const asked = new Set<string>();
+  // id → askedAt (ms). Map (not Set) so the auto-archive pass knows WHEN we asked, and can tell a
+  // re-engagement (updatedAt advanced past askedAt) from prolonged silence.
+  const asked = new Map<string, number>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
 
@@ -84,12 +129,48 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
     } catch {
       return;
     }
-    // Collect ALL newly-quiet open sessions, then ask about exactly ONE (the most recently STARTED — the
-    // current focus, = what "继续" targets), and mark the WHOLE batch as asked. This is the anti-spam
-    // fix: a chat with dozens of stale open sessions must NOT get one message per session per tick.
     const nowMs = now();
-    const candidates: Array<{ id: string; goal: string; createdAt: number; owner: string | null; open: number }> = [];
+
+    // ── Pass 1: auto-archive escalation ──────────────────────────────────────────────────────────
+    // For a session we already asked about: if the user re-engaged (updatedAt advanced), clear the ask;
+    // else if it stayed quiet + stuck past the grace period, set it 'abandoned' and notify once (re-openable).
+    // `sessions` is a single snapshot fetched above, so a session archived here is still present in it for
+    // Pass 2 — track archived ids so Pass 2 does not re-ask a session we just closed.
+    const archivedThisTick = new Set<string>();
+    if (autoArchiveEnabled()) {
+      for (const s of sessions) {
+        const askedAt = asked.get(s.id);
+        if (askedAt === undefined) continue;
+        if (s.updatedAt > askedAt) { asked.delete(s.id); continue; } // re-engaged → leave it alone
+        let snap;
+        try { snap = deps.reasoning.summarizeSession(s.id); } catch { continue; }
+        if (!snap) continue;
+        if (
+          shouldAutoAbandon(
+            { openFrontierCount: snap.openFrontierCount, updatedAt: s.updatedAt, askedAt, provedCount: snap.provedCount },
+            { now: nowMs, graceMs: AUTO_ARCHIVE_GRACE_MS },
+          )
+        ) {
+          try { deps.reasoning.setSessionStatus(s.id, 'abandoned'); } catch { continue; }
+          asked.delete(s.id);
+          archivedThisTick.add(s.id);
+          const g = s.goal.length > 50 ? s.goal.slice(0, 50) + '…' : s.goal;
+          console.log(`[deep-explore-followup] auto-archived stale stuck session ${s.id} ("${g}")`);
+          deps.notify(
+            `🗂️ 卡住的探索「${g}」我先归档了——问过一次没推进、也一直没证出结果。要的话随时说一声,我给你重开。`,
+            { important: false, ownerSessionId: s.ownerSessionId ?? undefined },
+          );
+        }
+      }
+    }
+
+    // ── Pass 2: ask ONCE about the most recently-started newly-quiet open session ─────────────────
+    // Collect ALL newly-quiet open sessions, ask about exactly ONE (most recently STARTED = current focus,
+    // what "继续" targets), and mark the WHOLE batch as asked (anti-spam: no one-message-per-session drip).
+    const alreadyAsked = new Set(asked.keys());
+    const candidates: Array<{ id: string; goal: string; createdAt: number; owner: string | null; open: number; proved: number }> = [];
     for (const s of sessions) {
+      if (archivedThisTick.has(s.id)) continue; // just archived from the stale snapshot — do not re-ask
       let snap;
       try {
         snap = deps.reasoning.summarizeSession(s.id);
@@ -103,22 +184,34 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
         updatedAt: s.updatedAt,
         openFrontierCount: snap.openFrontierCount,
       };
-      if (!shouldAskFollowUp(c, { now: nowMs, silenceMs, alreadyAsked: asked })) continue;
-      candidates.push({ id: s.id, goal: s.goal, createdAt: s.createdAt, owner: s.ownerSessionId, open: snap.openFrontierCount });
+      if (!shouldAskFollowUp(c, { now: nowMs, silenceMs, alreadyAsked })) continue;
+      candidates.push({ id: s.id, goal: s.goal, createdAt: s.createdAt, owner: s.ownerSessionId, open: snap.openFrontierCount, proved: snap.provedCount });
     }
     if (candidates.length === 0) return;
 
     candidates.sort((a, b) => b.createdAt - a.createdAt); // most recently started first = current focus
     const primary = candidates[0];
-    for (const c of candidates) asked.add(c.id); // silence the whole batch — no drip, one ask per batch
+    for (const c of candidates) asked.set(c.id, nowMs); // silence the whole batch — one ask per batch
     const goal = primary.goal.length > 50 ? primary.goal.slice(0, 50) + '…' : primary.goal;
     const others = candidates.length - 1;
-    const text =
-      others > 0
-        ? `🔬 你有 ${candidates.length} 个 deep_explore 探索挂着没推进,最近的:"${goal}"(${primary.open} 个开放节点)。` +
-          `继续它回复"继续";其余更早的要挑一个或清理,跟我说就行。`
-        : `🔬 探索还挂着:"${goal}" 还有 ${primary.open} 个开放节点没推进(你已有一段时间没回"继续")。` +
-          `要我接着推进吗?回复"继续",或让我后台自动推进。`;
+    // A session with ZERO proofs is stuck — lead with the "abandon" option instead of pitching "continue"
+    // (prod: a model-selection session whose 5 open nodes all need external real-time data can't advance by
+    // reasoning). The user-facing text stays Chinese (WeChat convention).
+    const stuck = primary.proved === 0;
+    let text: string;
+    if (others > 0) {
+      text =
+        `🔬 你有 ${candidates.length} 个 deep_explore 探索挂着没推进,最近的:「${goal}」(${primary.open} 个开放节点)。` +
+        `要推进哪个回"继续";要清理某个说"放弃 <它>",或"全清"。`;
+    } else if (stuck) {
+      text =
+        `🔬 探索「${goal}」挂了一阵,还没证出任何结果(${primary.open} 个开放节点还开着)。` +
+        `要我放弃它吗?回"放弃"我就归档;想换个角度接着推进就回"继续"。`;
+    } else {
+      text =
+        `🔬 探索「${goal}」还有 ${primary.open} 个开放节点没推进(你已有一段时间没回"继续")。` +
+        `要我接着推进(回"继续")、后台自动推进,还是放弃归档(回"放弃")?`;
+    }
     // Route to the channel the session was started in (e.g. WeChat) — don't blast every surface.
     deps.notify(text, { important: true, ownerSessionId: primary.owner ?? undefined });
   }
