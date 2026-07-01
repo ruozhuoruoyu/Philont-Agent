@@ -5732,9 +5732,91 @@ async function handleChatSendInner(
           onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
         );
       }
+      // ── Honesty gate on a ZERO-tool-call first response ──────────────────────────────────────────
+      // runToolLoop's honesty gate only runs AFTER ≥1 tool call. A model that answers immediately with a
+      // fabricated completion claim ("✅ 已删除 3 个技能" / "已注册" with no tool call) bypassed it entirely
+      // (prod WeChat "删除豆瓣相关的自学习技能": tools=0, claimed deleted 3, no forget_skill, no [honesty] line).
+      // Run the same gate here once per turn; on a high-severity fire, force a single regeneration — if the
+      // model then actually calls a tool, route into runToolLoop; otherwise use the corrected text.
+      let firstTextContent = response.content;
+      if (!signalBus.firstTextHonestyChecked) {
+        signalBus.firstTextHonestyChecked = true;
+        const recentToolResults = extractRecentToolResults(messages);
+        const skillDeleteSucceededThisTurn = (signalBus.inTurnRecords ?? []).some(
+          (r) => r.success && (r.toolName === 'forget_skill' || r.toolName === 'uninstallSkill'),
+        );
+        const ownerReasoning = memory.reasoning.getMostRecentActiveSession(sessionId);
+        const announceStallRaw = (process.env.PHILONT_HONESTY_ANNOUNCE ?? '').trim().toLowerCase();
+        const announceStallEnabled = !(
+          announceStallRaw === '0' || announceStallRaw === 'off' ||
+          announceStallRaw === 'false' || announceStallRaw === 'no'
+        );
+        const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
+        const honesty = evaluateHonesty(firstTextContent, {
+          toolResults: recentToolResults,
+          reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
+          detectAnnouncementStall: announceStallEnabled,
+          skillDeleteSucceededThisTurn,
+          session: honestySessionEnabled
+            ? {
+                unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,
+                priorViolations: honestySessionStore.get(sessionId).violationCount,
+              }
+            : undefined,
+        });
+        if (honesty && honesty.severity === 'high') {
+          signalBus.honesty = { evaluation: honesty, toolResults: recentToolResults, assistantText: firstTextContent };
+          audit.append('self_domain_write', {
+            source: 'honesty_gate',
+            origin: 'Internal',
+            toolName: 'honesty_gate_fired',
+            sessionId,
+            severity: honesty.severity,
+            reason: honesty.reason,
+            failCount: honesty.failCount,
+            okCount: honesty.okCount,
+            matchedClaim: honesty.matchedClaim,
+          });
+          console.warn(
+            `[honesty] session=${sessionId} fired severity=${honesty.severity} reason=${honesty.reason} ` +
+            `failCount=${honesty.failCount} okCount=${honesty.okCount} claim="${honesty.matchedClaim}" (zero-tool first response)`,
+          );
+          messages.push({ role: 'assistant', content: firstTextContent });
+          messages.push({
+            role: 'user',
+            content:
+              `[drive Honesty/${honesty.reason}] ${honesty.evidence}\n\n` +
+              `**Do ONE of these in your reply — do not straddle**:\n` +
+              `  A · Actually perform it NOW by CALLING the tool (e.g. forget_skill / store_fact / shell) — ` +
+              `writing the call in a Work Log / prose is NOT calling it;\n` +
+              `  B · Correct yourself: tell the user honestly you have NOT done it yet.\n` +
+              `Do not repeat the claim "${honesty.matchedClaim}" unless a tool call THIS turn actually supports it.\n` +
+              `This is an intra-turn internal correction. Do not surface this reminder to the user.`,
+          });
+          onTrace?.({
+            kind: 'internal-gate', tier: 4,
+            text: `Honesty gate triggered (${honesty.severity}) on zero-tool reply, regenerating`,
+            meta: { gateName: 'Honesty', severity: honesty.severity },
+          });
+          const regen = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
+          if (regen.type !== 'text') {
+            // The model now actually calls a tool → run it through the normal loop (which also re-checks honesty).
+            const sanitizedRegen = sanitizeAssistantMessageBlocks(regen.assistantMessage);
+            messages.push(sanitizedRegen.msg);
+            return await runToolLoop(
+              sessionId, messages, grants, audit,
+              regen.calls, [], 0,
+              onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
+            );
+          }
+          firstTextContent = regen.content;
+        } else if (!honesty) {
+          console.log(`[honesty] session=${sessionId} passed (zero-tool first response)`);
+        }
+      }
       // Anti-fabrication backstop: when forcing is off / not possible (no active session), still replace
       // a fabricated recite with an honest message before it goes out.
-      const safeText = guardDeepExploreFabrication(response.content, signalBus);
+      const safeText = guardDeepExploreFabrication(firstTextContent, signalBus);
       messages.push({ role: 'assistant', content: safeText });
       onDelta(safeText);
       // Layer 0 append: assistant text response goes into the global timeline
@@ -6182,6 +6264,13 @@ interface TurnSignalBus {
    * Multiple runToolLoop calls within a single turn (auth resume / question resume) share the same array.
    */
   inTurnRecords?: InTurnToolRecord[];
+  /**
+   * 2026-07-01: the honesty gate on a ZERO-tool-call first response has run this turn (cap 1 regen). The
+   * runToolLoop gate only sees post-tool-call text; a model that answers immediately with a fabricated
+   * completion claim (e.g. "✅ 已删除 3 个技能" with no forget_skill call) bypassed honesty entirely. Set
+   * once the first-text gate fires + forces its single regeneration.
+   */
+  firstTextHonestyChecked?: boolean;
   /**
    * Phase 18 (2026-06-15) WS4: reflection emitted a recommend_stop verdict for this owner session on a
    * prior turn (persisted, read pre-LLM this turn). Arms the ViabilityGate score (+3). undefined = no signal.
