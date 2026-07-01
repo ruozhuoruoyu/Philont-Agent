@@ -208,6 +208,7 @@ import {
   buildReasoningProgressSection,
 } from './autonomous_progress_inject.js';
 import { createDeepExploreTool } from './deep_explore.js';
+import { selectSkillsToForget } from './forget_skill.js';
 import {
   renderResearchGrantPrompt,
   reconstructDmSessionId,
@@ -776,6 +777,17 @@ const idleConsolidator = startIdleConsolidator({
         console.log(
           `[interrupt] fire ${f.level} on ${f.signal} (value=${f.value.toFixed(2)}, was ${f.prevLevel})`,
         );
+        // Seam ①: a CRITICAL/HIGH crossing during idle is the agent's own "I should reach out"
+        // signal — route it to an actual outbound message instead of only bucketing for the
+        // next-turn prefix (which never fires unless the user speaks first).
+        if (f.level === 'CRITICAL' || f.level === 'HIGH') {
+          try {
+            const text = renderOutreachText(f.signal);
+            if (text) emitProactiveOutreach(text, `drive:${f.signal}`, `drive:${f.signal}:${f.level}`);
+          } catch (e) {
+            console.warn('[outreach] render/emit failed', e);
+          }
+        }
       }
     } catch (e) {
       console.error('[interrupt] mapper.tick failed', e);
@@ -1331,6 +1343,93 @@ const uninstallSkillSync = wrapSkillToolWithReload(
 // installed skill is usable the same turn (same rationale as installSkill).
 const installFromRegistrySync = wrapSkillToolWithReload(installSkillFromRegistryTool, reloadSkillsFromDisk);
 
+// forget_skill: delete SELF-LEARNED skills (reflection/plan-distilled, stored DB-only — the ones
+// uninstallSkill cannot reach because they have no SKILL.md on disk). This closes a real gap: the
+// model could `search_skills` and SEE these, and `uninstallSkill` only removes file-backed dirs, so a
+// "delete the X skills" request left DB-only self-learned skills behind (and the model would overclaim).
+//
+// Safety: file-backed skills (bundled / installed via installSkill — they have a SKILL.md on disk and a
+// non-trivial `source`) are NEVER deleted here. We compute the on-disk name set via the same loader the
+// reload-prune uses, and protect any skill whose name is on disk. `source` alone is NOT a reliable
+// "DB-only" signal (a bundled SKILL.md without a `source:` frontmatter field lands as source=NULL), so we
+// gate on actual disk presence, not on source.
+const forgetSkillTool: Tool = {
+  name: 'forget_skill',
+  description:
+    'Delete one or more SELF-LEARNED skills (the reflection/plan-distilled skills stored in the DB — exactly the ones ' +
+    'uninstallSkill cannot reach). Match by exact `name`, OR by `contains` (case-insensitive substring of the skill ' +
+    "name / description / trigger keywords — e.g. contains=\"mycox\" deletes every self-learned skill mentioning mycox). " +
+    'File-backed skills (bundled, or installed via installSkill — they have a SKILL.md on disk) are NEVER touched here; ' +
+    'use uninstallSkill for those. Returns the names actually deleted. NOTE: if a recurring source is still active ' +
+    '(a scheduled task that keeps failing, or a repeated task pattern), the skill can be re-learned later — stop that ' +
+    'source too, or it will come back.',
+  schema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'Exact skill name (slug) to delete.' },
+      contains: {
+        type: 'string',
+        description:
+          'Case-insensitive substring. Deletes EVERY self-learned skill whose name / description / trigger keywords ' +
+          'contain it. Use for bulk cleanup of a topic (e.g. "mycox").',
+      },
+    },
+  },
+  capability: 'write',
+  domain: 'self',
+  async execute(params: Record<string, unknown>) {
+    try {
+      const name = typeof params.name === 'string' ? params.name.trim() : '';
+      const contains = typeof params.contains === 'string' ? params.contains.trim() : '';
+      if (!name && !contains) {
+        return { success: false, output: '', error: 'forget_skill: provide `name` (exact) or `contains` (substring).' };
+      }
+
+      // On-disk skill names = file-backed (bundled / installed). Never delete these here.
+      let onDisk = new Set<string>();
+      try {
+        const parsed = await loadSkills(process.cwd(), [bundledSkillsDir]);
+        onDisk = new Set(parsed.map((p) => p.name));
+      } catch {
+        // Loader failure → conservatively fall through with an empty on-disk set; matching below is still
+        // bounded by name/contains, and the worst case is deleting a DB row that reload would re-import.
+      }
+
+      const matches = selectSkillsToForget(memory.skills.listAll(1000), onDisk, { name, contains });
+
+      if (matches.length === 0) {
+        if (name && onDisk.has(name)) {
+          return {
+            success: false,
+            output: '',
+            error: `'${name}' is a file-backed skill (has a SKILL.md on disk) — use uninstallSkill instead of forget_skill.`,
+          };
+        }
+        return {
+          success: false,
+          output: '',
+          error: `No self-learned skill matched ${name ? `name='${name}'` : `contains='${contains}'`}.`,
+        };
+      }
+
+      const deleted: string[] = [];
+      for (const s of matches) {
+        if (memory.skills.deleteSkill(s.name)) deleted.push(s.name);
+      }
+      return {
+        success: true,
+        output:
+          `🗑️ Forgot ${deleted.length} self-learned skill(s): ${deleted.join(', ')}\n` +
+          '(File-backed skills are untouched — use uninstallSkill for those. If a scheduled task or recurring ' +
+          'failure keeps re-learning a skill, stop that source too, or it will return.)',
+        data: { deleted },
+      };
+    } catch (e) {
+      return { success: false, output: '', error: `forget_skill failed: ${(e as Error).message}` };
+    }
+  },
+};
+
 const tools = createToolset({
   profile: 'server',
   customProfiles: {
@@ -1355,6 +1454,7 @@ const tools = createToolset({
     installSkillSync,
     uninstallSkillSync,
     installFromRegistrySync,
+    forgetSkillTool,
   ],
   // 2026-05-07: hook up SecretStore so the http tool uses the secured variant, supporting {SECRET_NAME}
   // placeholders. Credentials written by saveCredential can be referenced directly in http headers / body.
@@ -1377,6 +1477,7 @@ const PLAN_EXEC_BLACKLIST: ReadonlySet<string> = new Set([
   'installSkill',
   'uninstallSkill',
   'installSkillFromRegistry',
+  'forget_skill',
   // Credential recording is only allowed in user-driven turns; sub-loop inside planAndExecute / autonomous turns
   // cannot modify secrets.
   'saveCredential',
@@ -1407,6 +1508,7 @@ const AUTONOMOUS_TURN_BLACKLIST_HARDCODED: ReadonlySet<string> = new Set([
   'installSkill',
   'uninstallSkill',
   'installSkillFromRegistry',
+  'forget_skill',
   'forgetFact',
   'shell',
   'writeFile',
@@ -1959,6 +2061,75 @@ const autonomousInterruptSink: InterruptSink = {
     }
   },
 };
+
+// ── Seam ①: intrinsic-drive outreach (2026-06-30) ────────────────────────────────────────────
+//
+// Background: CRITICAL/HIGH crossings of the passive drive signals (commitment_pressure /
+// service_dormancy) used to land ONLY in the InterruptDrainer buckets, which are consumed by
+// buildMemoryPrefix — and that runs ONLY when the user sends a message. So the agent's own
+// "I should reach out" signal never reached the user unprompted; it merely coloured the next reply.
+// This closes the loop: an idle-time CRITICAL/HIGH crossing is routed to the same emitters the K8
+// high-findings use (connected web-ui sessions + pushDispatcher), reusing the dispatcher's
+// global-kill / per-peer opt-in / rate-limit / quiet-hours / 24h-dedup gates verbatim.
+//
+// Additive only — the signal still broadcasts to the drainer as before (mirrors how
+// autonomousInterruptSink does both sendHigh and the web-ui/push fan-out). Kill switch:
+// PHILONT_PROACTIVE_OUTREACH=0. Mapper fires on threshold *crossings* only (hysteresis + cooldown),
+// so a signal that stays HIGH across many idle ticks does not re-emit.
+function emitProactiveOutreach(text: string, kind: string, targetRef: string): void {
+  if (process.env.PHILONT_PROACTIVE_OUTREACH === '0') return;
+  // Web-ui: fan out to any connected session (no subscription/rate-limit; the user is at the chat).
+  for (const [, send] of webuiClients) {
+    try { send({ type: 'finding', text: `🔔 ${text}` }); }
+    catch (e) { console.warn('[outreach] webui send failed', e); }
+  }
+  // External channels (WeChat/Telegram): default-OFF + per-peer opt-in; dispatcher applies all gates.
+  void pushDispatcher
+    .enqueue({ severity: 'digest', kind, targetRef, text })
+    .then((r) => {
+      if (r.delivered > 0) {
+        internalAudit.append('self_domain_write', {
+          source: 'proactive_outreach',
+          origin: 'Internal',
+          toolName: 'push_delivered',
+          severity: 'digest',
+          kind,
+          targetRef,
+          delivered: r.delivered,
+          skipped: r.skipped.length,
+          failed: r.failed,
+        });
+      }
+    })
+    .catch((e) => console.warn('[outreach] dispatch threw', e));
+}
+
+/** Render a user-addressed outreach line for a drive signal, or null if there is nothing worth saying. */
+function renderOutreachText(signal: string): string | null {
+  if (signal === 'service_dormancy') {
+    const dorm = computeServiceDormancy({ lastAssistantTs: lastAssistantTs(), now: Date.now() });
+    const sb = signalState.getCommitmentBreakdown();
+    let t = `It's been ${dorm.hoursSinceLastServe.toFixed(1)}h since I last helped you.`;
+    if (sb && sb.contributors.length > 0) {
+      const items = sb.contributors.slice(0, 3).map((c) => {
+        const age = c.ageHours < 24 ? `${Math.round(c.ageHours)}h` : `${Math.round(c.ageHours / 24)}d`;
+        return `${c.title} (${age})`;
+      });
+      t += ` Still open: ${items.join('; ')}.`;
+    }
+    return t + ` Anything you'd like me to pick up?`;
+  }
+  if (signal === 'commitment_pressure') {
+    const sb = signalState.getCommitmentBreakdown();
+    if (!sb || sb.activeCount === 0) return null;
+    const items = sb.contributors.slice(0, 3).map((c) => {
+      const age = c.ageHours < 24 ? `${Math.round(c.ageHours)}h` : `${Math.round(c.ageHours / 24)}d`;
+      return `${c.title} (pending ${age})`;
+    });
+    return `I'm still carrying ${sb.activeCount} open item(s) for you: ${items.join('; ')}. Want me to push any forward?`;
+  }
+  return null;
+}
 
 const autonomousExecutor = new StandardExecutor({
   facts: memory.facts,
