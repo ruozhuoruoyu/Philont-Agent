@@ -78,3 +78,37 @@ test('forget_skill: empty query selects nothing (caller rejects)', () => {
 test('forget_skill: no match returns empty', () => {
   assert.deepEqual(selectSkillsToForget(SKILLS, new Set(), { contains: 'nonexistent-topic' }), []);
 });
+
+// ── max_use_count criterion (bulk "delete unused" — prod: 26 one-by-one calls + 7 file-backed fails) ──
+const U = (name: string, useCount: number): ForgettableSkill => ({ name, description: '', triggerKeywords: [], useCount });
+
+test('forget_skill: max_use_count=0 selects only never-used self-learned skills, skips file-backed', () => {
+  const skills = [U('never-a', 0), U('used', 5), U('never-b', 0), U('never-file', 0)];
+  const got = names(selectSkillsToForget(skills, new Set(['never-file']), { maxUseCount: 0 }));
+  assert.deepEqual(got, ['never-a', 'never-b']); // used(5) filtered out, never-file protected
+});
+
+test('forget_skill: max_use_count=2 includes 0..2 uses, excludes higher', () => {
+  const skills = [U('a', 0), U('b', 2), U('c', 3)];
+  const got = names(selectSkillsToForget(skills, new Set(), { maxUseCount: 2 }));
+  assert.deepEqual(got, ['a', 'b']);
+});
+
+test('forget_skill: contains + max_use_count combine as AND', () => {
+  const skills = [
+    { name: 'mycox-a', description: '', triggerKeywords: ['mycox'], useCount: 0 },
+    { name: 'mycox-b', description: '', triggerKeywords: ['mycox'], useCount: 9 },
+    { name: 'other', description: '', triggerKeywords: [], useCount: 0 },
+  ];
+  const got = names(selectSkillsToForget(skills, new Set(), { contains: 'mycox', maxUseCount: 0 }));
+  assert.deepEqual(got, ['mycox-a']); // mycox AND useCount<=0
+});
+
+test('forget_skill: missing useCount treated as 0 (never used)', () => {
+  const got = names(selectSkillsToForget([{ name: 'no-count', description: '', triggerKeywords: [] }], new Set(), { maxUseCount: 0 }));
+  assert.deepEqual(got, ['no-count']);
+});
+
+test('forget_skill: empty query (no name/contains/maxUseCount) still selects nothing', () => {
+  assert.deepEqual(selectSkillsToForget([U('a', 0)], new Set(), {}), []);
+});

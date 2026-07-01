@@ -1358,21 +1358,29 @@ const forgetSkillTool: Tool = {
   name: 'forget_skill',
   description:
     'Delete one or more SELF-LEARNED skills (the reflection/plan-distilled skills stored in the DB — exactly the ones ' +
-    'uninstallSkill cannot reach). Match by exact `name`, OR by `contains` (case-insensitive substring of the skill ' +
-    "name / description / trigger keywords — e.g. contains=\"mycox\" deletes every self-learned skill mentioning mycox). " +
-    'File-backed skills (bundled, or installed via installSkill — they have a SKILL.md on disk) are NEVER touched here; ' +
-    'use uninstallSkill for those. Returns the names actually deleted. NOTE: if a recurring source is still active ' +
-    '(a scheduled task that keeps failing, or a repeated task pattern), the skill can be re-learned later — stop that ' +
-    'source too, or it will come back.',
+    'uninstallSkill cannot reach). Three selectors (combine contains + max_use_count as AND): exact `name`; ' +
+    "`contains` (case-insensitive substring of name / description / trigger keywords — e.g. contains=\"mycox\"); " +
+    'and `max_use_count` (delete every self-learned skill used ≤ N times — use max_use_count=0 for "删除使用次数为0的' +
+    '技能" / prune all never-used skills in ONE call — do NOT enumerate and delete one by one). File-backed skills ' +
+    '(bundled, or installed via installSkill — they have a SKILL.md on disk) are NEVER touched here and are reported ' +
+    'as skipped; use uninstallSkill for those. Returns the true count + names actually deleted — report THAT count, ' +
+    'do not invent one. NOTE: if a recurring source is still active (a failing scheduled task / repeated pattern), a ' +
+    'skill can be re-learned later — stop that source too.',
   schema: {
     type: 'object',
     properties: {
-      name: { type: 'string', description: 'Exact skill name (slug) to delete.' },
+      name: { type: 'string', description: 'Exact skill name (slug) to delete — a single target.' },
       contains: {
         type: 'string',
         description:
           'Case-insensitive substring. Deletes EVERY self-learned skill whose name / description / trigger keywords ' +
           'contain it. Use for bulk cleanup of a topic (e.g. "mycox").',
+      },
+      max_use_count: {
+        type: 'number',
+        description:
+          'Delete every self-learned skill whose use count is ≤ this. max_use_count=0 prunes all never-used skills ' +
+          'in ONE call (the "删除使用次数为0" case). Combines with `contains` (AND).',
       },
     },
   },
@@ -1382,8 +1390,16 @@ const forgetSkillTool: Tool = {
     try {
       const name = typeof params.name === 'string' ? params.name.trim() : '';
       const contains = typeof params.contains === 'string' ? params.contains.trim() : '';
-      if (!name && !contains) {
-        return { success: false, output: '', error: 'forget_skill: provide `name` (exact) or `contains` (substring).' };
+      const maxUseCount =
+        typeof params.max_use_count === 'number' && Number.isFinite(params.max_use_count)
+          ? params.max_use_count
+          : undefined;
+      if (!name && !contains && maxUseCount === undefined) {
+        return {
+          success: false,
+          output: '',
+          error: 'forget_skill: provide `name` (exact), `contains` (substring), or `max_use_count` (e.g. 0 for never-used).',
+        };
       }
 
       // On-disk skill names = file-backed (bundled / installed). Never delete these here.
@@ -1393,10 +1409,16 @@ const forgetSkillTool: Tool = {
         onDisk = new Set(parsed.map((p) => p.name));
       } catch {
         // Loader failure → conservatively fall through with an empty on-disk set; matching below is still
-        // bounded by name/contains, and the worst case is deleting a DB row that reload would re-import.
+        // bounded by the selectors, and the worst case is deleting a DB row that reload would re-import.
       }
 
-      const matches = selectSkillsToForget(memory.skills.listAll(1000), onDisk, { name, contains });
+      const query = { name, contains, maxUseCount };
+      const all = memory.skills.listAll(5000);
+      const matches = selectSkillsToForget(all, onDisk, query);
+      // Skills matching the criterion but protected because they are file-backed — reported so the true
+      // "matched N, deleted M, skipped K file-backed" is visible (K left for uninstallSkill), not surfaced
+      // as K separate tool failures like the per-name enumeration did.
+      const fileBackedSkipped = selectSkillsToForget(all, new Set<string>(), query).length - matches.length;
 
       if (matches.length === 0) {
         if (name && onDisk.has(name)) {
@@ -1406,24 +1428,30 @@ const forgetSkillTool: Tool = {
             error: `'${name}' is a file-backed skill (has a SKILL.md on disk) — use uninstallSkill instead of forget_skill.`,
           };
         }
-        return {
-          success: false,
-          output: '',
-          error: `No self-learned skill matched ${name ? `name='${name}'` : `contains='${contains}'`}.`,
-        };
+        const crit = name
+          ? `name='${name}'`
+          : [contains ? `contains='${contains}'` : '', maxUseCount !== undefined ? `max_use_count=${maxUseCount}` : '']
+              .filter(Boolean)
+              .join(' + ');
+        return { success: false, output: '', error: `No self-learned skill matched ${crit}.` };
       }
 
       const deleted: string[] = [];
       for (const s of matches) {
         if (memory.skills.deleteSkill(s.name)) deleted.push(s.name);
       }
+      // Cap the listed names so a 90-skill prune does not dump a wall of text.
+      const shown = deleted.slice(0, 20).join(', ');
+      const more = deleted.length > 20 ? `, …(+${deleted.length - 20} more)` : '';
+      const skippedNote = fileBackedSkipped > 0
+        ? ` Skipped ${fileBackedSkipped} file-backed skill(s) — use uninstallSkill for those.`
+        : '';
       return {
         success: true,
         output:
-          `🗑️ Forgot ${deleted.length} self-learned skill(s): ${deleted.join(', ')}\n` +
-          '(File-backed skills are untouched — use uninstallSkill for those. If a scheduled task or recurring ' +
-          'failure keeps re-learning a skill, stop that source too, or it will return.)',
-        data: { deleted },
+          `🗑️ Forgot ${deleted.length} self-learned skill(s): ${shown}${more}.${skippedNote}\n` +
+          '(If a scheduled task or recurring failure keeps re-learning a skill, stop that source too, or it will return.)',
+        data: { deleted, count: deleted.length, fileBackedSkipped },
       };
     } catch (e) {
       return { success: false, output: '', error: `forget_skill failed: ${(e as Error).message}` };
