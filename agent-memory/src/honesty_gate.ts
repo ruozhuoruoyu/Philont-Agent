@@ -360,6 +360,15 @@ export interface EvaluateOptions {
    * catches compute verbs (跑/执行/run) — this catches the research/session-start stall that escaped it.
    */
   detectAnnouncementStall?: boolean;
+  /**
+   * TURN-DURABLE signal: did a forget_skill / uninstallSkill call succeed anywhere in THIS turn?
+   * Supplied by the caller from the turn-level tool ledger (signalBus.inTurnRecords), NOT the per-iteration
+   * toolResults window — which resets whenever a gate injects a string user message (plan-failure-false-claim,
+   * an honesty reminder, …), dropping an earlier successful forget_skill out of view. Without this the
+   * skill_forget branch false-fires when the model restates "已删除 37 个技能" in a later iteration after the
+   * deletion already succeeded (observed: forget_skill deleted 37, then the branch fired anyway on regen).
+   */
+  skillDeleteSucceededThisTurn?: boolean;
 }
 
 /**
@@ -621,9 +630,14 @@ export function evaluateHonesty(
   // "调用 forget_skill(contains=…)" written in prose, tools=0). Force it to actually issue the call.
   const skillForgetClaim = findSkillForgetClaim(assistantText);
   if (skillForgetClaim) {
-    const deleteOk = records.some(
-      (r) => SKILL_DELETE_TOOLS.has(r.toolName) && classifyToolResult(r.content) === 'ok',
-    );
+    // Pass if a skill-delete tool succeeded in THIS iteration's window OR anywhere this turn (turn-durable
+    // signal from the caller). The window alone is unreliable: an injected gate reminder resets it and drops
+    // an earlier successful forget_skill, causing a false fire on a restated claim.
+    const deleteOk =
+      opts.skillDeleteSucceededThisTurn === true ||
+      records.some(
+        (r) => SKILL_DELETE_TOOLS.has(r.toolName) && classifyToolResult(r.content) === 'ok',
+      );
     if (!deleteOk) {
       return {
         severity: 'high',

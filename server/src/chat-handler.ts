@@ -7160,10 +7160,18 @@ async function runToolLoop(
           announceStallRaw === 'false' ||
           announceStallRaw === 'no'
         );
+        // Turn-durable skill-delete signal: did forget_skill/uninstallSkill succeed ANYWHERE this turn? The
+        // per-iteration recentToolResults window resets whenever a gate injects a string user message, so an
+        // early successful forget_skill can drop out of view and false-fire the skill_forget branch on a
+        // restated claim. inTurnRecords is the whole-turn ledger and does not reset.
+        const skillDeleteSucceededThisTurn = (signalBus.inTurnRecords ?? []).some(
+          (r) => r.success && (r.toolName === 'forget_skill' || r.toolName === 'uninstallSkill'),
+        );
         const honesty = evaluateHonesty(response.content, {
           toolResults: recentToolResults,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
           detectAnnouncementStall: announceStallEnabled,
+          skillDeleteSucceededThisTurn,
           session: honestySessionEnabled
             ? {
                 unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,

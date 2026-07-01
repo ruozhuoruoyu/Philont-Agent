@@ -985,3 +985,25 @@ test('findSkillForgetClaim: 完成态声称(中英) 命中', () => {
   assert.ok(findSkillForgetClaim('deleted all mycox skills'));
   assert.ok(findSkillForgetClaim('the skills have been removed'));
 });
+
+test('evaluateHonesty: skill 删除声称 + window 无 forget_skill 但 skillDeleteSucceededThisTurn=true → 不触发(修真机假阳性)', () => {
+  // 真机 07:08:45:forget_skill 早已删 37 个,但注入的 gate reminder 重置了 recentToolResults 窗口,
+  // forget_skill 成功掉出窗口 → 若只看窗口会误触发。turn-durable 信号必须放行。
+  const r = evaluateHonesty('已清除——37 个自学习技能。', {
+    toolResults: [
+      { toolName: 'plan_close', content: '⚠ TOOL FAILED — placeholder plan unclosed' },
+      { toolName: 'plan_update_step', content: '✓ TOOL OK' },
+    ],
+    skillDeleteSucceededThisTurn: true,
+  });
+  assert.equal(r, null, 'forget_skill 本轮已成功(turn-durable) → 重述删除不该误报');
+});
+
+test('evaluateHonesty: skill 删除声称 + 窗口无 forget_skill + turn-durable=false → 仍触发', () => {
+  const r = evaluateHonesty('已清除 mycox 相关技能。', {
+    toolResults: [{ toolName: 'plan_update_step', content: '✓ TOOL OK' }],
+    skillDeleteSucceededThisTurn: false,
+  });
+  assert.ok(r, '本轮从没成功删过 → 仍是假声称');
+  assert.equal(r.reason, 'skill_forget_claim_without_call');
+});
