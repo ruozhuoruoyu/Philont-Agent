@@ -131,6 +131,18 @@ const GUIDE_HINT_PATTERN =
 /** R2 URL */
 const URL_PATTERN = /https?:\/\/\S+/i;
 
+/**
+ * Per-task re-classification boundary (2026-07-01). taskModeStore is sticky-slow, and the classifier +
+ * auto-plan-on-slow historically ran ONLY on the first fast→slow transition — so a genuine multi-step task
+ * arriving later in an already-slow session got NO placeholder plan (prod: mycox "read guide then register"
+ * ran unguided). A slow session should re-classify (and possibly (re)create a placeholder, or demote to fast)
+ * only at a CLEAN task boundary: the last plan is terminal (completed/failed) or absent — i.e. the previous
+ * task is done and a new one is starting. Mid-task (last plan draft/reviewed/executing) it must NOT re-enter.
+ */
+export function slowSessionAtTaskBoundary(lastPlanStatus: string | null | undefined): boolean {
+  return !lastPlanStatus || lastPlanStatus === 'completed' || lastPlanStatus === 'failed';
+}
+
 export function autoClassify(input: ClassifyInput): ClassifyResult {
   const reasons: string[] = [];
   const text = input.userMessage;

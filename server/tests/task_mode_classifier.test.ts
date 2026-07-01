@@ -192,3 +192,31 @@ test('autoClassify: plans 查询抛错时降级跑其它规则', () => {
   assert.ok(r.reasons.includes('heavy-keyword'));
   assert.ok(r.reasons.includes('guide-hint'));
 });
+
+// ── slowSessionAtTaskBoundary (per-task re-classification, 2026-07-01) ──────────────────────
+import { slowSessionAtTaskBoundary } from '../src/task_mode_classifier.js';
+
+test('slowSessionAtTaskBoundary: terminal/absent plan → true (new task starting)', () => {
+  assert.equal(slowSessionAtTaskBoundary(undefined), true, 'no plan → boundary');
+  assert.equal(slowSessionAtTaskBoundary(null), true, 'no plan → boundary');
+  assert.equal(slowSessionAtTaskBoundary('completed'), true, 'prev task done → boundary');
+  assert.equal(slowSessionAtTaskBoundary('failed'), true, 'prev task failed → boundary');
+});
+
+test('slowSessionAtTaskBoundary: active plan → false (mid-task, do not re-enter)', () => {
+  assert.equal(slowSessionAtTaskBoundary('draft'), false);
+  assert.equal(slowSessionAtTaskBoundary('reviewed'), false);
+  assert.equal(slowSessionAtTaskBoundary('executing'), false);
+});
+
+test('autoClassify: mycox "read guide then register" is unambiguously slow (the prod under-classified task)', () => {
+  const r = autoClassify({
+    userMessage: 'Read https://mycox.ai/mycox/guide.md, then register with invite_code "inv_de9fbd"',
+    taskSignatureCandidate: 'sig',
+  });
+  assert.equal(r.isSlow, true);
+  // guide.md → guide-hint, register → heavy-keyword, "then" → multi-step-connector
+  assert.ok(r.reasons.includes('guide-hint'));
+  assert.ok(r.reasons.includes('heavy-keyword'));
+  assert.ok(r.reasons.includes('multi-step-connector'));
+});

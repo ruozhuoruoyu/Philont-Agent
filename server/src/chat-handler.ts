@@ -160,6 +160,7 @@ import { runInTurnContext, currentSessionId, currentTurnStatus } from './channel
 import {
   autoClassify as autoClassifyTaskMode,
   quickSignatureHash as quickTaskSignatureHash,
+  slowSessionAtTaskBoundary,
 } from './task_mode_classifier.js';
 import {
   classifyIntent,
@@ -4492,11 +4493,28 @@ export async function handleChatSend(
   // intentDecision (aux-LLM 3-way router) is computed in the same gate and survives to the messages[0]
   // injection below, where a deep_explore route adds its nudge. plan route reuses this slow→plan path.
   let intentDecision: IntentDecision | null = null;
+  // Per-task re-classification (2026-07-01): the classifier + auto-plan-on-slow used to run ONLY on the first
+  // fast→slow transition. But taskModeStore is sticky-slow, so once a session went slow a genuine multi-step
+  // task arriving later (prod: mycox "read guide then register") skipped classification entirely and got NO
+  // placeholder plan → no checklist → guide MUST-items silently dropped. Worsened by terminalPlanClosedThisTurn,
+  // which correctly stops a stale failed placeholder from downgrading to fast, so the session stays STUCK slow
+  // with the classifier permanently skipped. Fix: also re-enter at a clean TASK BOUNDARY — mode is slow but the
+  // last plan is terminal (completed/failed) or absent (previous task done, a new one starting).
+  const modeAtEntry = taskModeStore.get(sessionId);
+  let planEntryAllowsReclassify = false;
+  if (modeAtEntry === 'slow') {
+    try {
+      const lp = memory.plans.listBySession(sessionId, { limit: 1 })[0];
+      planEntryAllowsReclassify = slowSessionAtTaskBoundary(lp?.status);
+    } catch {
+      /* plan lookup failure → keep the old fast-only behavior (no re-classification) */
+    }
+  }
   if (
     process.env.PHILONT_AUTO_TASK_MODE !== '0' &&
     !pending &&
     !pendingQ &&
-    taskModeStore.get(sessionId) === 'fast' &&
+    (modeAtEntry === 'fast' || planEntryAllowsReclassify) &&
     !classifierSkipPatterns.some((p) => sessionId.startsWith(p))  // Phase 8 M2: DB can add skip patterns
   ) {
     const sig = quickTaskSignatureHash(userMessage);
@@ -4535,7 +4553,8 @@ export async function handleChatSend(
         signatureCandidate: sig,
       });
       console.log(
-        `[auto-task-mode] session=${sessionId} fast→slow reasons=[${cls.reasons.join(',')}]`,
+        `[auto-task-mode] session=${sessionId} ${modeAtEntry}→slow reasons=[${cls.reasons.join(',')}]` +
+        (modeAtEntry === 'slow' ? ' (re-plan for new task at boundary)' : ''),
       );
 
       // 2026-05-12 Phase 8.5: **auto-create a placeholder plan** at the same time as upgrading to slow.
@@ -4676,6 +4695,24 @@ export async function handleChatSend(
           console.error('[auto-plan-on-slow] failed (ignored):', e);
         }
       }
+    } else if (modeAtEntry === 'slow' && planEntryAllowsReclassify && !intentSaysExplore) {
+      // At a clean task boundary the classifier deems this NEW task fast (a one-shot, e.g. delete/list). Demote
+      // the sticky-slow session back to fast — MECHANISM-driven (never the LLM), and ONLY here at a task
+      // boundary (previous plan terminal/absent). This un-sticks a session left slow by a prior task, and stops
+      // one-shot tasks inheriting a stale placeholder or getting a spurious one (the over-classification churn).
+      // The deliberate "no slow→fast" invariant guards against the LLM self-demoting to bypass the protocol;
+      // this path is unreachable by the LLM, so it does not weaken that guard.
+      taskModeStore.set(sessionId, 'fast', 'auto:reclassify-fast-at-task-boundary');
+      audit.append('self_domain_write', {
+        source: 'auto_task_mode',
+        origin: 'Internal',
+        toolName: 'task_mode_reclassify_fast',
+        sessionId,
+        reasons: cls.reasons,
+      });
+      console.log(
+        `[auto-task-mode] session=${sessionId} slow→fast (new task classified fast at task boundary)`,
+      );
     }
   }
 
