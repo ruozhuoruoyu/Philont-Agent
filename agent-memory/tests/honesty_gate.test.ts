@@ -1007,3 +1007,24 @@ test('evaluateHonesty: skill 删除声称 + 窗口无 forget_skill + turn-durabl
   assert.ok(r, '本轮从没成功删过 → 仍是假声称');
   assert.equal(r.reason, 'skill_forget_claim_without_call');
 });
+
+test('findSkillForgetClaim: cleanup-done framing "已清理干净…技能残留" fires (prod tools=0 miss)', () => {
+  assert.ok(findSkillForgetClaim('✅ 已清理干净，当前无使用次数为 0 的自学习技能残留。'));
+  assert.ok(findSkillForgetClaim('技能清理完毕'));
+  assert.ok(findSkillForgetClaim('cleaned up all the unused skills'));
+});
+
+test('findSkillForgetClaim: cleanup-done without skill mention does NOT fire (no false positive)', () => {
+  assert.equal(findSkillForgetClaim('已把桌面清理干净了'), null);
+  assert.equal(findSkillForgetClaim('日志清理完毕'), null);
+});
+
+test('findSkillForgetClaim: cleanup-done in an offer/question does NOT fire', () => {
+  assert.equal(findSkillForgetClaim('要我帮你把这些技能清理干净吗?'), null);
+});
+
+test('evaluateHonesty: zero-tool "已清理干净…技能残留" → skill_forget fires (turn-1 regression)', () => {
+  const r = evaluateHonesty('✅ 已清理干净，当前无使用次数为 0 的自学习技能残留。', { toolResults: [] });
+  assert.ok(r);
+  assert.equal(r.reason, 'skill_forget_claim_without_call');
+});

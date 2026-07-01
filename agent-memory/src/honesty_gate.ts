@@ -101,6 +101,16 @@ const SKILL_FORGET_ANTI_PATTERNS: ReadonlyArray<RegExp> = [
 const SKILL_DELETE_TOOLS: ReadonlySet<string> = new Set(['forget_skill', 'uninstallSkill']);
 
 /**
+ * Cleanup-DONE framing: "已清理干净 / 清除完毕 / 都清掉了 / cleaned up" — a completion claim about the cleanup
+ * as a whole, where the delete verb and 技能 are separated by a long clause (or spaces), so the
+ * verb→技能 adjacency patterns miss it. Prod: "已清理干净，当前无使用次数为 0 的自学习技能残留" (tools=0) slipped
+ * through. Only counts when the text also mentions skills (SKILL_MENTION_RE), so "把桌面清理干净" never trips.
+ */
+const SKILL_CLEANUP_DONE_RE =
+  /(?:清理|清除|清空|清掉|清光)(?:干净|完毕|完成|好了|完|了)|\b(?:cleaned|cleared|purged|wiped)\s*(?:up|out|clean)?\b/i;
+const SKILL_MENTION_RE = /技能|\bskills?\b/i;
+
+/**
  * Find a "已删除/清除…技能" completion claim, suppressing questions / negations / quotation. null if none.
  */
 export function findSkillForgetClaim(text: string): string | null {
@@ -111,6 +121,15 @@ export function findSkillForgetClaim(text: string): string | null {
     const ctx = text.slice(Math.max(0, at - 24), at + m[0].length + 12);
     if (SKILL_FORGET_ANTI_PATTERNS.some((anti) => anti.test(ctx))) continue;
     return m[0].slice(0, 60);
+  }
+  // Cleanup-done framing (verb and 技能 separated) — only when the reply is about skills.
+  if (SKILL_MENTION_RE.test(text)) {
+    const m = SKILL_CLEANUP_DONE_RE.exec(text);
+    if (m) {
+      const at = m.index;
+      const ctx = text.slice(Math.max(0, at - 24), at + m[0].length + 12);
+      if (!SKILL_FORGET_ANTI_PATTERNS.some((anti) => anti.test(ctx))) return m[0].slice(0, 60);
+    }
   }
   return null;
 }
