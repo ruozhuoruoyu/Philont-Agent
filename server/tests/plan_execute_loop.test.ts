@@ -158,9 +158,30 @@ test('loop e2e: guide fetch hard-fail → aborted honestly, nothing executed', a
   assert.equal(r.outcomes.length, 0);
 });
 
-test('loop e2e: verify rounds exhausted → proceeds but REPORTS unresolved gaps (never silent)', async () => {
-  const deps = makeDeps({ drafts: [GAPPY_DRAFT, GAPPY_DRAFT, GAPPY_DRAFT] });
+test('loop e2e: verify exhausted + aux-only gaps → still REPORTED (never silent)', async () => {
+  // Mandatory det gaps get mechanically adopted; aux-judge extras cannot be adopted (no SpecItem)
+  // and must surface in the reply.
+  const deps = makeDeps({
+    drafts: [GAPPY_DRAFT, GAPPY_DRAFT, GAPPY_DRAFT],
+    auxJudge: async () => ['guide requires a weekly heartbeat check-in'],
+  });
   const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
   assert.ok(r.unresolvedGaps.length > 0);
   assert.match(r.reply, /未纳入本次计划/);
+});
+
+test('checkCoverage: step descriptions count as coverage (prod: vote/comment lived in steps only)', async () => {
+  const spec = extractSpecItems('You must vote on posts.\nYou must comment thoughtfully.');
+  const deliverables = [{ id: 'register', description: 'register the agent' }];
+  const without = checkCoverage(spec, deliverables);
+  assert.equal(without.covered, false);
+  const withSteps = checkCoverage(spec, deliverables, 0.3, ['vote on posts after reading', 'comment thoughtfully on a post']);
+  assert.equal(withSteps.covered, true);
+});
+
+test('loop e2e: verify exhausted → mechanism ADOPTS mandatory gaps as deliverables (not just reported)', async () => {
+  const deps = makeDeps({ drafts: [GAPPY_DRAFT, GAPPY_DRAFT, GAPPY_DRAFT] });
+  const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.ok(r.deliverables.length > 1, 'mandatory items mechanically added to the plan');
+  assert.ok(r.steps.some((s) => s.id.startsWith('fulfill-')), 'fulfilling steps added');
 });

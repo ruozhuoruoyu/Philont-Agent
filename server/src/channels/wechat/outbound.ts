@@ -145,6 +145,35 @@ function lastSentenceEnd(s: string, limit: number): number {
   return best;
 }
 
+/**
+ * WeChat's API rejects oversized payloads by BYTES (observed: a 1560-char mostly-CJK reply ≈
+ * 4.6KB UTF-8 → sendText ret=-2, message silently lost). TEXT_CHUNK_LIMIT counts JS chars, so a
+ * CJK-heavy chunk can pass the char limit yet exceed the byte limit. 3800 leaves headroom under 4KB.
+ */
+export const TEXT_CHUNK_BYTE_LIMIT = 3800;
+
+/**
+ * Byte-aware chunking: run the boundary-aware char chunker, then re-split any chunk whose UTF-8
+ * size still exceeds byteLimit. A UTF-16 code unit encodes to ≤3 UTF-8 bytes (astral chars are 2
+ * units / 4 bytes = 2 bytes per unit), so a char limit of byteLimit/3 is a safe guarantee while
+ * reusing the same paragraph/sentence boundary logic.
+ */
+export function chunkMarkdownBytes(
+  text: string,
+  byteLimit: number = TEXT_CHUNK_BYTE_LIMIT,
+  charLimit: number = TEXT_CHUNK_LIMIT,
+): string[] {
+  const out: string[] = [];
+  for (const chunk of chunkMarkdown(text, charLimit)) {
+    if (Buffer.byteLength(chunk, 'utf8') <= byteLimit) {
+      out.push(chunk);
+    } else {
+      out.push(...chunkMarkdown(chunk, Math.max(200, Math.floor(byteLimit / 3))));
+    }
+  }
+  return out;
+}
+
 /** Content hash for deduplication (short hash: first 16 hex chars of SHA-256) */
 export function fingerprint(to: string, text: string): string {
   return createHash('sha256').update(to).update('\0').update(text).digest('hex').slice(0, 16);
@@ -181,7 +210,7 @@ export class OutboundQueue {
     const trimmed = sanitizeForWechat(text ?? '');
     if (trimmed.length === 0) return { chunksSent: 0, chunksDeduped: 0, messageIds: [] };
 
-    const chunks = chunkMarkdown(trimmed, this.chunkLimit);
+    const chunks = chunkMarkdownBytes(trimmed, TEXT_CHUNK_BYTE_LIMIT, this.chunkLimit);
     const result: SendTextResult = { chunksSent: 0, chunksDeduped: 0, messageIds: [] };
 
     for (const chunk of chunks) {

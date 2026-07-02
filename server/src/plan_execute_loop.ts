@@ -122,8 +122,17 @@ export function checkCoverage(
   spec: readonly SpecItem[],
   deliverables: readonly LoopDeliverable[],
   threshold = 0.3,
+  /**
+   * Extra plan text (step descriptions) that also counts as coverage. Real run: the model put
+   * vote/comment/post in STEPS (7 steps) but only 4 deliverables — deliverable-only coverage
+   * reported 5 phantom gaps for 3 rounds straight. Work planned in a step addresses the item.
+   */
+  extraPlanTexts: readonly string[] = [],
 ): CoverageResult {
-  const delivTokens = deliverables.map((d) => tokenize(`${d.id} ${d.description}`));
+  const delivTokens = [
+    ...deliverables.map((d) => tokenize(`${d.id} ${d.description}`)),
+    ...extraPlanTexts.map((t) => tokenize(t)),
+  ];
   const gaps: SpecItem[] = [];
   for (const item of spec) {
     const itemTokens = tokenize(item.text);
@@ -291,6 +300,7 @@ export async function runPlanExecuteLoop(
   let plan: DraftPlan | null = null;
   let gapsNote = '';
   let unresolvedGaps: string[] = [];
+  let lastMandatoryGaps: SpecItem[] = [];
   for (let round = 0; round < maxVerifyRounds; round++) {
     if (deps.abortSignal?.aborted) return fail('任务被中止。');
     deps.onStatus?.(round === 0 ? 'drafting plan…' : `revising plan (round ${round + 1})…`);
@@ -305,11 +315,12 @@ export async function runPlanExecuteLoop(
       continue;
     }
     plan = draft;
-    // VERIFY: deterministic floor + optional aux judge.
-    const cov = checkCoverage(spec, draft.deliverables);
+    // VERIFY: deterministic floor + optional aux judge. Steps count as coverage too.
+    const cov = checkCoverage(spec, draft.deliverables, 0.3, draft.steps.map((s) => `${s.id} ${s.description}`));
     const auxGaps = deps.auxJudge ? await deps.auxJudge(guideText, draft.deliverables) : null;
+    lastMandatoryGaps = cov.gaps.filter((g) => g.mandatory);
     const gapTexts = [
-      ...cov.gaps.filter((g) => g.mandatory).map((g) => g.text),
+      ...lastMandatoryGaps.map((g) => g.text),
       ...(auxGaps ?? []),
     ];
     deps.log(
@@ -324,22 +335,44 @@ export async function runPlanExecuteLoop(
     return fail('规划阶段失败:模型多轮都未能产出结构化 plan。任务未执行。');
   }
   if (unresolvedGaps.length > 0) {
-    deps.log(`[plan-loop] VERIFY rounds exhausted with ${unresolvedGaps.length} gap(s) — proceeding, will report`);
+    // Mechanical adoption: the model would not add the uncovered MANDATORY guide items after
+    // N revisions — so the MECHANISM adds them (mechanism, not model discipline). Each becomes a
+    // deliverable + a fulfilling step; only aux-judge extras remain as reported gaps.
+    const adopt = lastMandatoryGaps.slice(0, 5);
+    if (adopt.length > 0) {
+      const existing = new Set(plan.deliverables.map((d) => d.id));
+      for (const item of adopt) {
+        if (existing.has(item.id)) continue;
+        plan.deliverables.push({ id: item.id, description: item.text });
+        plan.steps.push({ id: `fulfill-${item.id}`.slice(0, 48), description: `Fulfill guide requirement: ${item.text}`, covers: [item.id] });
+      }
+      const adopted = new Set(adopt.map((a) => a.text));
+      unresolvedGaps = unresolvedGaps.filter((g) => !adopted.has(g));
+      deps.log(`[plan-loop] VERIFY exhausted — mechanically adopted ${adopt.length} mandatory item(s) into the plan; ${unresolvedGaps.length} gap(s) remain reported`);
+    } else {
+      deps.log(`[plan-loop] VERIFY rounds exhausted with ${unresolvedGaps.length} gap(s) — proceeding, will report`);
+    }
   }
 
   // ── EXECUTE (per step; evidence = actual tool records, not prose) ─────────
   const outcomes = new Map<string, DeliverableOutcome>(
     plan.deliverables.map((d) => [d.id, { id: d.id, status: 'not-attempted' as const, evidence: '' }]),
   );
+  // Rolling context: each step's outcome is fed to the LATER steps. Without it the isolated
+  // mini-loops redo prior work (real run: later steps re-registered → 409 "Invite code already
+  // used", and soul.md was re-fetched 5×).
+  const stepNotes: string[] = [];
   for (const step of plan.steps) {
     if (deps.abortSignal?.aborted) break;
     deps.onStatus?.(`executing: ${step.id}`);
     const result = await runMiniAgentLoop({
       systemPrompt:
         'You are executing ONE step of a verified plan. Complete it with REAL tool calls and report ' +
-        'plainly what the tools returned. Do not claim success without a successful tool call.',
+        'plainly what the tools returned. Do not claim success without a successful tool call. ' +
+        'Do NOT redo work listed as already completed (e.g. do not re-register, re-fetch, or re-read).',
       userMessage:
         `# Step\n${step.description}\n\n# Overall task (context)\n${task}\n\n` +
+        (stepNotes.length > 0 ? `# Already completed steps (do NOT redo)\n${stepNotes.join('\n')}\n\n` : '') +
         `# Guide excerpt (authoritative)\n${guideText.slice(0, 12_000)}`,
       llm: deps.llm,
       toolDefs: deps.toolDefs,
@@ -356,6 +389,9 @@ export async function runPlanExecuteLoop(
     deps.log(
       `[plan-loop] EXECUTE ${step.id}: tools=${result.toolCallHistory.length} ok=${okCalls.length} ` +
       `iters=${result.itersUsed}${result.error ? ` error=${result.error}` : ''} → ${stepSucceeded ? 'done' : 'failed'}`,
+    );
+    stepNotes.push(
+      `- ${step.id}: ${stepSucceeded ? 'DONE' : 'FAILED'} (${evidence}). ${result.finalText.replace(/\s+/g, ' ').slice(0, 180)}`,
     );
     for (const dId of step.covers.length > 0 ? step.covers : []) {
       const cur = outcomes.get(dId);
@@ -378,14 +414,20 @@ export async function runPlanExecuteLoop(
     const desc = plan!.deliverables.find((d) => d.id === o.id)?.description ?? o.id;
     return `${mark} ${desc.slice(0, 80)}${o.status !== 'done' && o.evidence ? `(${o.evidence.slice(0, 60)})` : ''}`;
   });
+  // Cap the gap list (readability + channel size); the count is always honest.
+  const shownGaps = unresolvedGaps.slice(0, 5);
   const gapLines = unresolvedGaps.length > 0
-    ? `\n\n⚠️ 以下指引要求未纳入本次计划(多轮校验仍未覆盖,已如实报告):\n${unresolvedGaps.map((g) => `- ${g.slice(0, 80)}`).join('\n')}`
+    ? `\n\n⚠️ ${unresolvedGaps.length} 项指引要求未纳入本次计划(多轮校验仍未覆盖,已如实报告):\n` +
+      shownGaps.map((g) => `- ${g.slice(0, 80)}`).join('\n') +
+      (unresolvedGaps.length > shownGaps.length ? `\n- …另 ${unresolvedGaps.length - shownGaps.length} 项` : '')
     : '';
   const reply =
     (outcome === 'completed'
       ? `任务完成(${done}/${list.length} 项交付,均有工具执行证据):\n`
       : outcome === 'partial'
-        ? `任务部分完成(${done}/${list.length} 项):\n`
+        ? done === list.length
+          ? `${done}/${list.length} 项交付均完成(有工具证据),但部分指引要求未覆盖(见下):\n`
+          : `任务部分完成(${done}/${list.length} 项):\n`
         : '任务未能执行:\n') +
     lines.join('\n') +
     gapLines;
