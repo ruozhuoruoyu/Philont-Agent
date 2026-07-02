@@ -13,8 +13,8 @@
  * and tier 3 (model-drafted criteria) plug in later via the same SpecItem[] interface. Tier 4
  * (quality/exploration tasks) never enters — that is deep_explore's domain.
  *
- * Flag: PHILONT_PLAN_LOOP (default OFF — opt-in while dogfooding, same convention as other
- * risky new mechanisms).
+ * Flag: PHILONT_PLAN_LOOP (default ON; set 0/off/false/no to fall back to the legacy
+ * placeholder+gate path).
  */
 
 import {
@@ -28,7 +28,7 @@ import type { ToolDefinition } from '@agent/policy';
 
 export function planLoopEnabled(): boolean {
   const v = (process.env.PHILONT_PLAN_LOOP ?? '').trim().toLowerCase();
-  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
 // ── Spec extraction (tier 1: external guide text) ──────────────────────────

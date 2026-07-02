@@ -69,12 +69,14 @@ test('parseDraftJson: fenced JSON with prose; invalid covers filtered; bad shape
   assert.equal(parseDraftJson('{"deliverables":[],"steps":[]}'), null, 'empty deliverables → null');
 });
 
-test('planLoopEnabled: default OFF, opt-in via env', () => {
+test('planLoopEnabled: default ON, opt-out via env', () => {
   const prev = process.env.PHILONT_PLAN_LOOP;
   delete process.env.PHILONT_PLAN_LOOP;
-  assert.equal(planLoopEnabled(), false, 'default OFF');
-  process.env.PHILONT_PLAN_LOOP = '1';
-  assert.equal(planLoopEnabled(), true);
+  assert.equal(planLoopEnabled(), true, 'default ON');
+  process.env.PHILONT_PLAN_LOOP = '0';
+  assert.equal(planLoopEnabled(), false, 'kill-switch');
+  process.env.PHILONT_PLAN_LOOP = 'off';
+  assert.equal(planLoopEnabled(), false);
   if (prev === undefined) delete process.env.PHILONT_PLAN_LOOP;
   else process.env.PHILONT_PLAN_LOOP = prev;
 });

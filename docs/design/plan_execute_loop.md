@@ -84,8 +84,8 @@ complex/guide task:
   multi-step task (`guide-hint` ∥ `heavy-keyword` ∥ `multi-step-connector`), i.e. the
   same signals that today create a placeholder. (One-shot exempt tasks — delete/list —
   never enter; they stay direct, per the per-task reclassification fix already shipped.)
-- Gated by `PHILONT_PLAN_LOOP` (default OFF at first, dogfood → ON), falling back to
-  today's placeholder+gate path when off, so rollout is reversible.
+- Gated by `PHILONT_PLAN_LOOP` (default ON; 0/off/false/no falls back to today's
+  placeholder+gate path, so rollout is reversible).
 
 When entered, the orchestrator OWNS the turn: it runs the state machine to a terminal
 state and returns the final reply. The `plan_protocol_gate` / auto-placeholder /
@@ -212,6 +212,6 @@ tested without a live model.
 
 ## 11. Rollout
 
-- Behind `PHILONT_PLAN_LOOP` (default OFF). Pure transition unit-tested; then dogfood on
+- `PHILONT_PLAN_LOOP` default ON (user decision 2026-07-02; kill-switch retained). Pure transition unit-tested; dogfood on
   the mycox guide task with the flag on; then default ON once the register task
   completes end-to-end (real machine, since there's no LLM mock harness locally).
