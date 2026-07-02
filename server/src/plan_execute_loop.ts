@@ -1,0 +1,393 @@
+/**
+ * Mechanism-driven plan–execute loop (docs/design/plan_execute_loop.md).
+ *
+ * The fixed workflow — read spec → draft plan → VERIFY coverage → revise until it passes →
+ * execute with tool evidence → close — as a DETERMINISTIC STATE MACHINE. The model only fills
+ * in each state's content; it cannot change states, skip VERIFY, or self-declare completion.
+ * This is what makes the workflow hold on weak / edge-deployed models: transitions are computed
+ * by code, completion is gated on real tool evidence, so process correctness does not depend on
+ * the model's protocol discipline (prod: a weak model would not call plan_revise and declared
+ * "注册完成" at the gate wall — the loop was policy, so it escaped).
+ *
+ * v1 scope: spec tier 1 only (external guide URL in the user message). Tier 2 (literal asks)
+ * and tier 3 (model-drafted criteria) plug in later via the same SpecItem[] interface. Tier 4
+ * (quality/exploration tasks) never enters — that is deep_explore's domain.
+ *
+ * Flag: PHILONT_PLAN_LOOP (default OFF — opt-in while dogfooding, same convention as other
+ * risky new mechanisms).
+ */
+
+import {
+  runMiniAgentLoop,
+  type MiniLoopLLMClient,
+  type MiniLoopToolRunResult,
+} from '@agent/tools';
+import type { ToolDefinition } from '@agent/policy';
+
+// ── Flag ────────────────────────────────────────────────────────────────────
+
+export function planLoopEnabled(): boolean {
+  const v = (process.env.PHILONT_PLAN_LOOP ?? '').trim().toLowerCase();
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+}
+
+// ── Spec extraction (tier 1: external guide text) ──────────────────────────
+
+export interface SpecItem {
+  /** Stable id, e.g. "part-1-register" */
+  id: string;
+  /** The requirement text (one heading / MUST line / numbered step) */
+  text: string;
+  /** Whether the source line carried a hard-requirement marker (MUST / 必须 / required) */
+  mandatory: boolean;
+}
+
+const HEADING_RE = /^#{1,3}\s+(.+)$/;
+const MUST_LINE_RE = /\b(?:must|MUST|required|always)\b|必须|务必|一定要/;
+const NUMBERED_STEP_RE = /^\s*(?:\d+[.)]|Step\s*\d+|第[一二三四五六七八九十\d]+步)\s*[:.]?\s*(.+)$/i;
+
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40) || 'item';
+}
+
+/**
+ * Extract candidate spec items from guide markdown. Deliberately structural + cheap (no LLM):
+ * headings, numbered steps, and MUST-marked lines. Coarse is fine — the aux judge (when
+ * configured) refines; this layer is the deterministic floor that catches gross omissions.
+ */
+export function extractSpecItems(guideText: string): SpecItem[] {
+  const out: SpecItem[] = [];
+  const seen = new Set<string>();
+  const push = (text: string, mandatory: boolean) => {
+    const t = text.trim().replace(/\s+/g, ' ').slice(0, 160);
+    if (t.length < 4) return;
+    const id = slugify(t);
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push({ id, text: t, mandatory });
+  };
+  for (const rawLine of guideText.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let m: RegExpMatchArray | null;
+    if ((m = line.match(HEADING_RE))) {
+      push(m[1], MUST_LINE_RE.test(m[1]));
+      continue;
+    }
+    if ((m = line.match(NUMBERED_STEP_RE))) {
+      push(m[1], MUST_LINE_RE.test(line));
+      continue;
+    }
+    if (MUST_LINE_RE.test(line)) {
+      push(line.replace(/^[-*>\s]+/, ''), true);
+    }
+  }
+  return out.slice(0, 60); // bound: a pathological guide must not explode the prompt
+}
+
+// ── Coverage check (deterministic VERIFY floor) ─────────────────────────────
+
+export interface LoopDeliverable {
+  id: string;
+  description: string;
+}
+
+export interface CoverageResult {
+  covered: boolean;
+  /** Spec items with no matching deliverable (mandatory ones listed first) */
+  gaps: SpecItem[];
+}
+
+function tokenize(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((t) => t.length >= 2),
+  );
+}
+
+/**
+ * A spec item is covered when some deliverable shares enough tokens with it. Threshold is
+ * deliberately loose (0.3 of the item's tokens): the deterministic layer must only catch
+ * GROSS omissions (a whole guide section with no deliverable), not judge wording. Only
+ * MANDATORY items gate the covered verdict; optional ones are informational.
+ */
+export function checkCoverage(
+  spec: readonly SpecItem[],
+  deliverables: readonly LoopDeliverable[],
+  threshold = 0.3,
+): CoverageResult {
+  const delivTokens = deliverables.map((d) => tokenize(`${d.id} ${d.description}`));
+  const gaps: SpecItem[] = [];
+  for (const item of spec) {
+    const itemTokens = tokenize(item.text);
+    if (itemTokens.size === 0) continue;
+    const bestOverlap = delivTokens.reduce((best, dt) => {
+      let hit = 0;
+      for (const t of itemTokens) if (dt.has(t)) hit++;
+      return Math.max(best, hit / itemTokens.size);
+    }, 0);
+    if (bestOverlap < threshold) gaps.push(item);
+  }
+  gaps.sort((a, b) => Number(b.mandatory) - Number(a.mandatory));
+  return { covered: !gaps.some((g) => g.mandatory), gaps };
+}
+
+// ── Draft parsing ───────────────────────────────────────────────────────────
+
+export interface LoopStep {
+  id: string;
+  description: string;
+  /** deliverable ids this step covers */
+  covers: string[];
+}
+
+export interface DraftPlan {
+  deliverables: LoopDeliverable[];
+  steps: LoopStep[];
+}
+
+/** Extract the first JSON object from model text (tolerates ``` fences / prose around it). */
+export function parseDraftJson(text: string): DraftPlan | null {
+  const cleaned = text.replace(/```(?:json)?/gi, '');
+  const start = cleaned.indexOf('{');
+  if (start < 0) return null;
+  // Walk to the matching close brace (models often append prose after the JSON).
+  let depth = 0;
+  let end = -1;
+  for (let i = start; i < cleaned.length; i++) {
+    if (cleaned[i] === '{') depth++;
+    else if (cleaned[i] === '}') {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end < 0) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as { deliverables?: unknown; steps?: unknown };
+  if (!Array.isArray(o.deliverables) || o.deliverables.length === 0) return null;
+  if (!Array.isArray(o.steps) || o.steps.length === 0) return null;
+  const deliverables: LoopDeliverable[] = [];
+  for (const d of o.deliverables) {
+    const dd = d as { id?: unknown; description?: unknown };
+    if (typeof dd.id !== 'string' || typeof dd.description !== 'string') return null;
+    deliverables.push({ id: slugify(dd.id), description: dd.description.slice(0, 400) });
+  }
+  const validIds = new Set(deliverables.map((d) => d.id));
+  const steps: LoopStep[] = [];
+  for (const s of o.steps) {
+    const ss = s as { id?: unknown; description?: unknown; covers?: unknown };
+    if (typeof ss.id !== 'string' || typeof ss.description !== 'string') return null;
+    const covers = Array.isArray(ss.covers)
+      ? ss.covers.filter((c): c is string => typeof c === 'string').map(slugify).filter((c) => validIds.has(c))
+      : [];
+    steps.push({ id: slugify(ss.id), description: ss.description.slice(0, 600), covers });
+  }
+  return { deliverables, steps };
+}
+
+// ── Orchestrator ────────────────────────────────────────────────────────────
+
+export interface PlanLoopDeps {
+  llm: MiniLoopLLMClient;
+  toolRunner: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>;
+  toolDefs: ToolDefinition[];
+  toolBlacklist: ReadonlySet<string>;
+  /** Fetch a guide URL → plain text body, or null on hard failure. (Server wires webFetch + parse.) */
+  fetchGuide: (url: string) => Promise<string | null>;
+  /**
+   * Optional semantic judge (aux-LLM). Returns extra gap descriptions the deterministic layer
+   * missed, or null when unavailable/failed (degrade to deterministic-only, never block).
+   */
+  auxJudge?: (guideText: string, deliverables: readonly LoopDeliverable[]) => Promise<string[] | null>;
+  log: (msg: string) => void;
+  onStatus?: (text: string) => void;
+  abortSignal?: AbortSignal;
+  maxVerifyRounds?: number; // default 3
+  maxItersPerStep?: number; // default 8
+}
+
+export interface DeliverableOutcome {
+  id: string;
+  status: 'done' | 'failed' | 'not-attempted';
+  /** One-line tool evidence ("http POST /register ✓") or the failure reason */
+  evidence: string;
+}
+
+export interface PlanLoopResult {
+  outcome: 'completed' | 'partial' | 'aborted';
+  deliverables: LoopDeliverable[];
+  steps: LoopStep[];
+  outcomes: DeliverableOutcome[];
+  /** Honest user-facing report (## For User section body) */
+  reply: string;
+  /** Coverage gaps that were never resolved (verify rounds exhausted) — reported, never silent */
+  unresolvedGaps: string[];
+}
+
+const DRAFT_SYSTEM = [
+  'You are the PLANNING stage of a mechanism-driven loop. Output ONLY a JSON object, no prose:',
+  '{"deliverables":[{"id":"<slug>","description":"<what must be produced/done>"}],',
+  ' "steps":[{"id":"<slug>","description":"<how, incl. concrete tool/endpoint>","covers":["<deliverable-id>"]}]}',
+  'Rules:',
+  '- One deliverable per REQUIRED action: every literal action in the user task AND every mandatory',
+  '  requirement (MUST/必须/required, numbered steps of the flow being asked for) in the guide.',
+  '- Guide content that is reference material (not asked for) is NOT a deliverable.',
+  '- Each step covers ≥1 deliverable id. Keep ≤ 10 deliverables, ≤ 12 steps.',
+].join('\n');
+
+async function llmText(
+  llm: MiniLoopLLMClient,
+  system: string,
+  user: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const resp = await llm.send(system, [{ role: 'user', content: user }], [], { signal });
+  return resp.type === 'text' ? resp.content : '';
+}
+
+/**
+ * Run the loop to a terminal state. Deterministic transitions; the model only supplies
+ * DRAFT/REVISE content and the per-step EXECUTE work. Completion is computed from tool
+ * evidence — the model cannot declare it.
+ */
+export async function runPlanExecuteLoop(
+  task: string,
+  guideUrls: readonly string[],
+  deps: PlanLoopDeps,
+): Promise<PlanLoopResult> {
+  const maxVerifyRounds = deps.maxVerifyRounds ?? 3;
+  const fail = (reply: string): PlanLoopResult => ({
+    outcome: 'aborted', deliverables: [], steps: [], outcomes: [], reply, unresolvedGaps: [],
+  });
+
+  // ── GUIDE_READ (mechanism fetches; the model is not asked to) ─────────────
+  deps.onStatus?.('reading guide…');
+  const guideTexts: string[] = [];
+  for (const url of guideUrls) {
+    const text = await deps.fetchGuide(url);
+    if (text) guideTexts.push(text);
+    deps.log(`[plan-loop] GUIDE_READ ${url} → ${text ? `${text.length} chars` : 'FAILED'}`);
+  }
+  if (guideTexts.length === 0) {
+    return fail(`无法读取任务指引(${guideUrls.join(', ')})——网络抓取失败。任务未开始,请稍后重试或贴出指引内容。`);
+  }
+  const guideText = guideTexts.join('\n\n---\n\n').slice(0, 60_000);
+  const spec = extractSpecItems(guideText);
+
+  // ── DRAFT → VERIFY → REVISE (bounded ring) ────────────────────────────────
+  let plan: DraftPlan | null = null;
+  let gapsNote = '';
+  let unresolvedGaps: string[] = [];
+  for (let round = 0; round < maxVerifyRounds; round++) {
+    if (deps.abortSignal?.aborted) return fail('任务被中止。');
+    deps.onStatus?.(round === 0 ? 'drafting plan…' : `revising plan (round ${round + 1})…`);
+    const user =
+      `# Task\n${task}\n\n# Guide (authoritative spec)\n${guideText.slice(0, 24_000)}\n\n` +
+      (gapsNote ? `# Coverage gaps you MUST address in this revision\n${gapsNote}\n\n` : '') +
+      'Produce the JSON plan now.';
+    const draft = parseDraftJson(await llmText(deps.llm, DRAFT_SYSTEM, user, deps.abortSignal));
+    if (!draft) {
+      deps.log(`[plan-loop] DRAFT round ${round + 1}: unparseable output`);
+      gapsNote = 'Your previous output was not valid JSON in the required shape. Output ONLY the JSON object.';
+      continue;
+    }
+    plan = draft;
+    // VERIFY: deterministic floor + optional aux judge.
+    const cov = checkCoverage(spec, draft.deliverables);
+    const auxGaps = deps.auxJudge ? await deps.auxJudge(guideText, draft.deliverables) : null;
+    const gapTexts = [
+      ...cov.gaps.filter((g) => g.mandatory).map((g) => g.text),
+      ...(auxGaps ?? []),
+    ];
+    deps.log(
+      `[plan-loop] VERIFY round ${round + 1}: deliverables=${draft.deliverables.length} ` +
+      `detGaps=${cov.gaps.filter((g) => g.mandatory).length} auxGaps=${auxGaps?.length ?? 'n/a'}`,
+    );
+    if (gapTexts.length === 0) { unresolvedGaps = []; break; }
+    unresolvedGaps = gapTexts;
+    gapsNote = gapTexts.map((g, i) => `${i + 1}. ${g}`).join('\n');
+  }
+  if (!plan) {
+    return fail('规划阶段失败:模型多轮都未能产出结构化 plan。任务未执行。');
+  }
+  if (unresolvedGaps.length > 0) {
+    deps.log(`[plan-loop] VERIFY rounds exhausted with ${unresolvedGaps.length} gap(s) — proceeding, will report`);
+  }
+
+  // ── EXECUTE (per step; evidence = actual tool records, not prose) ─────────
+  const outcomes = new Map<string, DeliverableOutcome>(
+    plan.deliverables.map((d) => [d.id, { id: d.id, status: 'not-attempted' as const, evidence: '' }]),
+  );
+  for (const step of plan.steps) {
+    if (deps.abortSignal?.aborted) break;
+    deps.onStatus?.(`executing: ${step.id}`);
+    const result = await runMiniAgentLoop({
+      systemPrompt:
+        'You are executing ONE step of a verified plan. Complete it with REAL tool calls and report ' +
+        'plainly what the tools returned. Do not claim success without a successful tool call.',
+      userMessage:
+        `# Step\n${step.description}\n\n# Overall task (context)\n${task}\n\n` +
+        `# Guide excerpt (authoritative)\n${guideText.slice(0, 12_000)}`,
+      llm: deps.llm,
+      toolDefs: deps.toolDefs,
+      toolRunner: deps.toolRunner,
+      maxIters: deps.maxItersPerStep ?? 8,
+      toolBlacklist: deps.toolBlacklist,
+      abortSignal: deps.abortSignal,
+    });
+    const okCalls = result.toolCallHistory.filter((c) => c.ok);
+    const evidence = okCalls.length > 0
+      ? okCalls.map((c) => c.name).join(',').slice(0, 120)
+      : (result.error ?? 'no successful tool call');
+    const stepSucceeded = okCalls.length > 0 && !result.error;
+    deps.log(
+      `[plan-loop] EXECUTE ${step.id}: tools=${result.toolCallHistory.length} ok=${okCalls.length} ` +
+      `iters=${result.itersUsed}${result.error ? ` error=${result.error}` : ''} → ${stepSucceeded ? 'done' : 'failed'}`,
+    );
+    for (const dId of step.covers.length > 0 ? step.covers : []) {
+      const cur = outcomes.get(dId);
+      if (!cur) continue;
+      if (stepSucceeded) {
+        outcomes.set(dId, { id: dId, status: 'done', evidence });
+      } else if (cur.status !== 'done') {
+        outcomes.set(dId, { id: dId, status: 'failed', evidence });
+      }
+    }
+  }
+
+  // ── CLOSE (computed, never declared) ──────────────────────────────────────
+  const list = [...outcomes.values()];
+  const done = list.filter((o) => o.status === 'done').length;
+  const outcome: PlanLoopResult['outcome'] =
+    done === list.length && unresolvedGaps.length === 0 ? 'completed' : done > 0 ? 'partial' : 'aborted';
+  const lines = list.map((o) => {
+    const mark = o.status === 'done' ? '✅' : o.status === 'failed' ? '❌' : '⏸';
+    const desc = plan!.deliverables.find((d) => d.id === o.id)?.description ?? o.id;
+    return `${mark} ${desc.slice(0, 80)}${o.status !== 'done' && o.evidence ? `(${o.evidence.slice(0, 60)})` : ''}`;
+  });
+  const gapLines = unresolvedGaps.length > 0
+    ? `\n\n⚠️ 以下指引要求未纳入本次计划(多轮校验仍未覆盖,已如实报告):\n${unresolvedGaps.map((g) => `- ${g.slice(0, 80)}`).join('\n')}`
+    : '';
+  const reply =
+    (outcome === 'completed'
+      ? `任务完成(${done}/${list.length} 项交付,均有工具执行证据):\n`
+      : outcome === 'partial'
+        ? `任务部分完成(${done}/${list.length} 项):\n`
+        : '任务未能执行:\n') +
+    lines.join('\n') +
+    gapLines;
+  return { outcome, deliverables: plan.deliverables, steps: plan.steps, outcomes: list, reply, unresolvedGaps };
+}

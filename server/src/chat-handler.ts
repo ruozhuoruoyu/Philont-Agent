@@ -181,7 +181,8 @@ import { semanticToolPhrase, semanticToolFailPhrase, summarizingPhrase, type Phr
 import { wrapSkillToolWithReload } from './skill_install_wrapper.js';
 import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
 import { recentAttachments } from './channels/recent_attachments.js';
-import { persistToolResultIfFetched } from './fetched_resources_hook.js';
+import { persistToolResultIfFetched, parseWebFetchOutput } from './fetched_resources_hook.js';
+import { planLoopEnabled, runPlanExecuteLoop } from './plan_execute_loop.js';
 import {
   detectUnclosedQuestion,
   findLastAssistantText,
@@ -4568,10 +4569,18 @@ export async function handleChatSend(
         try {
           const existingPlans = memory.plans.listBySession(sessionId, { limit: 1 });
           const last = existingPlans[0];
+          // When the mechanism plan-loop will own this turn (flag on + route=plan + guide URL), do
+          // NOT also create a placeholder — the loop drives the plan store itself (double machinery
+          // would leave an orphan placeholder that auto-fails at turn end).
+          const planLoopWillOwn =
+            planLoopEnabled() &&
+            intentDecision?.route === 'plan' &&
+            /https?:\/\//.test(userMessage);
           const needsNewPlan =
-            !last ||
-            last.status === 'completed' ||
-            last.status === 'failed';
+            !planLoopWillOwn &&
+            (!last ||
+              last.status === 'completed' ||
+              last.status === 'failed');
           if (needsNewPlan) {
             // Extract URL: using \S+ greedily includes trailing punctuation (",。;:'""<>()`)
             // causing a mismatch with the URL actually requested by webFetch → fetched-store findByUrl fails.
@@ -5715,6 +5724,89 @@ async function handleChatSendInner(
   try {
     // Compaction check: summarize the middle section when the message count is too large
     await maybeCompact(messages, sessionId);
+
+    // ── Mechanism-driven plan–execute loop (docs/design/plan_execute_loop.md) ──────────────────
+    // v1 entry: flag ON + intent route=plan + a guide URL (spec tier 1). The orchestrator owns the
+    // turn: DRAFT → VERIFY(coverage vs guide) → REVISE(bounded) → EXECUTE(tool evidence per step)
+    // → computed CLOSE. The model cannot skip VERIFY or self-declare completion — this is what
+    // keeps the workflow intact on weak/edge models. Reaching this point = fresh turn (pending
+    // resume paths returned earlier).
+    if (planLoopEnabled() && signalBus.intentDecision?.route === 'plan') {
+      const loopGuideUrl = userMessage.match(/https?:\/\/[^\s,;:'"<>()`，。；：、]+/)?.[0]?.replace(/[.,;:!?]+$/, '');
+      if (loopGuideUrl) {
+        console.log(`[plan-loop] session=${sessionId} entering mechanism loop (guide=${loopGuideUrl})`);
+        const loopResult = await runPlanExecuteLoop(userMessage, [loopGuideUrl], {
+          llm: miniLoopLLM,
+          toolRunner: subTurnToolRunner,
+          toolDefs: tools.list()
+            .filter((t) => !PLAN_EXEC_BLACKLIST.has(t.name))
+            .map((t) => ({ name: t.name, description: t.description, parameters: JSON.stringify(t.schema) })),
+          toolBlacklist: PLAN_EXEC_BLACKLIST,
+          fetchGuide: async (url) => {
+            const r = await subTurnToolRunner('webFetch', { url });
+            if (!r.ok) return null;
+            const parsed = parseWebFetchOutput(r.output);
+            // Persist to the fetched-store like any webFetch (cache + "previously fetched" prefix).
+            persistToolResultIfFetched(fetchedStore, {
+              toolName: 'webFetch', params: { url }, success: true, output: r.output,
+            }, { sessionId, excludeDirs: [memory.planFiles.baseDir] });
+            return parsed?.body ?? null;
+          },
+          auxJudge: isAuxLLMConfigured()
+            ? async (guideText, deliverables) => {
+                try {
+                  const req: AuxLLMRequest = {
+                    system:
+                      'Compare a plan against its guide. List guide requirements (mandatory actions of the flow ' +
+                      'being asked for) NOT covered by any deliverable. Output ONLY JSON: {"gaps":["<one line each>"]} ' +
+                      '(empty array when fully covered). Reference-only guide content is not a gap.',
+                    user:
+                      `# Guide\n${guideText.slice(0, 16_000)}\n\n# Deliverables\n` +
+                      deliverables.map((d) => `- ${d.id}: ${d.description}`).join('\n'),
+                    maxTokens: 500,
+                  };
+                  const out = await callAuxLLM(req);
+                  const m = out.match(/\{[\s\S]*\}/);
+                  if (!m) return null;
+                  const parsed = JSON.parse(m[0]) as { gaps?: unknown };
+                  return Array.isArray(parsed.gaps)
+                    ? parsed.gaps.filter((g): g is string => typeof g === 'string').slice(0, 10)
+                    : null;
+                } catch {
+                  return null; // degrade to deterministic-only, never block
+                }
+              }
+            : undefined,
+          log: (m) => console.log(m),
+          onStatus: (t) => onStatus?.(t),
+        });
+        // Record into the plan store (history / playbook distillation), driven by the mechanism.
+        try {
+          const created = memory.plans.create({
+            sessionId,
+            taskSignature: `plan-loop-${quickTaskSignatureHash(userMessage)}`,
+            guideRef: loopGuideUrl,
+            isPlaceholder: false,
+            deliverables: loopResult.deliverables.map((d) => ({ id: d.id, description: d.description })),
+            steps: loopResult.steps.map((s) => ({ id: s.id, description: s.description, covers: s.covers })),
+          });
+          memory.plans.close(
+            created.id,
+            loopResult.outcome === 'completed' ? 'success' : 'failure',
+            `[plan-loop] ${loopResult.outcome}: ${loopResult.outcomes.filter((o) => o.status === 'done').length}/${loopResult.outcomes.length} deliverables with tool evidence`,
+            Object.fromEntries(loopResult.outcomes.map((o) => [o.id, o.status === 'done' ? 'done' as const : o.status === 'failed' ? 'failed' as const : 'not-attempted' as const])),
+          );
+          signalBus.planCloseCalled = true; // the loop closed its own plan — suppress auto-close fallback
+        } catch (e) {
+          console.warn('[plan-loop] plan store record failed (ignored):', e);
+        }
+        const finalText = `## For User\n${loopResult.reply}`;
+        messages.push({ role: 'assistant', content: finalText });
+        onDelta(finalText);
+        memory.raw.appendMessage({ sessionId: GLOBAL_TIMELINE_SESSION_ID, role: 'assistant', content: finalText });
+        return { outcome: { outcomeType: 'response', text: finalText }, auditEvents: audit.length };
+      }
+    }
 
     const response = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
 
