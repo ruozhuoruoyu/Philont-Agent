@@ -304,6 +304,13 @@ export async function runPlanExecuteLoop(
   const deadlineMs = deps.deadlineMs ?? 15 * 60_000;
   const startedAt = now();
   const timeLeft = () => deadlineMs - (now() - startedAt);
+  // Hard per-call ceiling. The adapter's own call timeout can reach 439s+ (formula-clamped up to
+  // 900s) and transient retries triple it — prod: ONE hung llm.send blocked 13+ min of silence and
+  // the turn deadline killed everything. Every loop LLM call gets min(cap, remaining budget).
+  const budgetSignal = (capMs: number): AbortSignal => {
+    const t = AbortSignal.timeout(Math.max(10_000, Math.min(capMs, timeLeft() - 10_000)));
+    return deps.abortSignal ? AbortSignal.any([deps.abortSignal, t]) : t;
+  };
   const fail = (reply: string): PlanLoopResult => ({
     outcome: 'aborted', deliverables: [], steps: [], outcomes: [], reply, unresolvedGaps: [],
   });
@@ -340,7 +347,15 @@ export async function runPlanExecuteLoop(
       `# Task\n${task}\n\n# Guide (authoritative spec)\n${guideText.slice(0, 24_000)}\n\n` +
       (gapsNote ? `# Coverage gaps you MUST address in this revision\n${gapsNote}\n\n` : '') +
       'Produce the JSON plan now.';
-    const draft = parseDraftJson(await llmText(deps.llm, DRAFT_SYSTEM, user, deps.abortSignal));
+    // 3-min ceiling per DRAFT/REVISE call (prod rounds take 55-75s; a hung call must not stall the
+    // loop). An abort/exception degrades to an unparseable draft → the round retries with a note.
+    let draftText = '';
+    try {
+      draftText = await llmText(deps.llm, DRAFT_SYSTEM, user, budgetSignal(180_000));
+    } catch (e) {
+      deps.log(`[plan-loop] DRAFT call aborted/failed (${(e as Error).message?.slice(0, 60)})`);
+    }
+    const draft = parseDraftJson(draftText);
     if (!draft) {
       deps.log(`[plan-loop] DRAFT round ${round + 1}: unparseable output`);
       gapsNote = 'Your previous output was not valid JSON in the required shape. Output ONLY the JSON object.';
@@ -436,9 +451,9 @@ export async function runPlanExecuteLoop(
       toolBlacklist: deps.toolBlacklist,
       // Per-step cutoff at the remaining budget (min 10s) so one hung step (e.g. a 503-retry storm)
       // cannot silently eat the whole loop budget; combined with the caller's signal when present.
-      abortSignal: deps.abortSignal
-        ? AbortSignal.any([deps.abortSignal, AbortSignal.timeout(Math.max(10_000, timeLeft() - 10_000))])
-        : AbortSignal.timeout(Math.max(10_000, timeLeft() - 10_000)),
+      // 4-min ceiling per step: one hung step (503-retry storm × 439s+ call timeouts) wastes at
+      // most 4 min, and the loop moves on to the next step / the honest report.
+      abortSignal: budgetSignal(4 * 60_000),
     });
     const okCalls = result.toolCallHistory.filter((c) => c.ok);
     // Evidence criterion (2026-07-02 hardened): a step that ATTEMPTED any ACTION call (write/execute
