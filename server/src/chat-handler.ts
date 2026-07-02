@@ -5778,7 +5778,14 @@ async function handleChatSendInner(
               }
             : undefined,
           log: (m) => console.log(m),
-          onStatus: (t) => onStatus?.(t),
+          // Cap forwarded progress messages at 2. WeChat limits how many bot messages one inbound
+          // message may earn; the loop's ~10 per-state statuses exhausted that quota and the FINAL
+          // report was rejected (sendText ret=-2 on a 59-char status and then on the report itself —
+          // fast ~220ms rejections, i.e. quota, not size). Progress still goes to the log/trace.
+          onStatus: (() => {
+            let sent = 0;
+            return (t: string) => { if (sent < 2) { sent++; onStatus?.(t); } };
+          })(),
         });
         // Record into the plan store (history / playbook distillation), driven by the mechanism.
         try {
