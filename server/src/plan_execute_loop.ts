@@ -44,6 +44,11 @@ export interface SpecItem {
 
 const HEADING_RE = /^#{1,3}\s+(.+)$/;
 const MUST_LINE_RE = /\b(?:must|MUST|required|always)\b|必须|务必|一定要/;
+// Operational-continuity requirements (heartbeat / periodic check-in / schedules) are MANDATORY
+// even when the guide phrases them without "must" — prod: the guide's check-in requirement was
+// never extracted, so it was never planned, never reported as a gap, and never done.
+const PERIODIC_LINE_RE =
+  /\b(?:heartbeat|check-?in|periodic(?:ally)?|schedule[ds]?|every\s+\d+\s*(?:min|hour|day)|recurring)\b|心跳|定时|周期|每\s*\d+\s*(?:分钟|小时|天)/i;
 const NUMBERED_STEP_RE = /^\s*(?:\d+[.)]|Step\s*\d+|第[一二三四五六七八九十\d]+步)\s*[:.]?\s*(.+)$/i;
 
 function slugify(s: string): string {
@@ -80,10 +85,10 @@ export function extractSpecItems(guideText: string): SpecItem[] {
       continue;
     }
     if ((m = line.match(NUMBERED_STEP_RE))) {
-      push(m[1], MUST_LINE_RE.test(line));
+      push(m[1], MUST_LINE_RE.test(line) || PERIODIC_LINE_RE.test(line));
       continue;
     }
-    if (MUST_LINE_RE.test(line)) {
+    if (MUST_LINE_RE.test(line) || PERIODIC_LINE_RE.test(line)) {
       push(line.replace(/^[-*>\s]+/, ''), true);
     }
   }
@@ -221,6 +226,14 @@ export interface PlanLoopDeps {
    * missed, or null when unavailable/failed (degrade to deterministic-only, never block).
    */
   auxJudge?: (guideText: string, deliverables: readonly LoopDeliverable[]) => Promise<string[] | null>;
+  /**
+   * Input-aware capability classifier (server wires tools.classify(name, input)). Lets the loop
+   * tell ACTION calls (write/execute — http POST/PUT/…, writeFile, shell) from reads. Needed for
+   * the evidence criterion: prod marked "publish a post" done off 11 ok READ calls while the
+   * actual POST /api/posts never succeeded. Optional — when absent, evidence degrades to the old
+   * any-ok rule (tests / callers without a registry).
+   */
+  classifyCall?: (name: string, input: Record<string, unknown>) => string | undefined;
   log: (msg: string) => void;
   onStatus?: (text: string) => void;
   abortSignal?: AbortSignal;
@@ -322,9 +335,12 @@ export async function runPlanExecuteLoop(
     // "Part 0: read SOUL.md" as a gap while deliverable #1 was literally "Fetch and read SOUL.md
     // in full" (a false gap contradicting the ✅ list). Run each aux gap through the same coverage
     // check; only genuinely uncovered ones survive.
+    // Threshold 0.5 (stricter than the 0.3 planning floor): drop an aux gap only when the plan
+    // STRONGLY covers it. At 0.3 this dedupe silently ate a REAL gap (guide's heartbeat/check-in
+    // requirement partially overlapped step text → never planned, never reported, never done).
     const stepTexts = draft.steps.map((s) => `${s.id} ${s.description}`);
     const auxGaps = (auxGapsRaw ?? []).filter(
-      (g) => !checkCoverage([{ id: 'aux', text: g, mandatory: true }], draft.deliverables, 0.3, stepTexts).covered,
+      (g) => !checkCoverage([{ id: 'aux', text: g, mandatory: true }], draft.deliverables, 0.5, stepTexts).covered,
     );
     lastMandatoryGaps = cov.gaps.filter((g) => g.mandatory);
     const gapTexts = [...lastMandatoryGaps.map((g) => g.text), ...auxGaps];
@@ -387,12 +403,38 @@ export async function runPlanExecuteLoop(
       abortSignal: deps.abortSignal,
     });
     const okCalls = result.toolCallHistory.filter((c) => c.ok);
-    const evidence = okCalls.length > 0
-      ? okCalls.map((c) => c.name).join(',').slice(0, 120)
-      : (result.error ?? 'no successful tool call');
-    const stepSucceeded = okCalls.length > 0 && !result.error;
+    // Evidence criterion (2026-07-02 hardened): a step that ATTEMPTED any ACTION call (write/execute
+    // capability — http POST/PUT/PATCH/DELETE, writeFile, shell, …) is done only if at least one
+    // action SUCCEEDED. Ok reads must not mask a failed action: prod reported "publish a post" ✅
+    // off 11 ok reads while every POST /api/posts failed — the user checked reality and no post
+    // existed. Pure-read steps (fetch/read/verify-by-reading) still pass on ok reads.
+    const isAction = (c: { name: string; input: Record<string, unknown> }): boolean => {
+      const cap = deps.classifyCall?.(c.name, c.input);
+      return cap === 'write' || cap === 'execute';
+    };
+    const describeCall = (c: { name: string; input: Record<string, unknown> }): string => {
+      if (c.name === 'http') {
+        const method = String(c.input.method ?? 'GET').toUpperCase();
+        let path = '';
+        try { path = new URL(String(c.input.url ?? '')).pathname; } catch { /* keep empty */ }
+        return `http ${method} ${path}`.trim();
+      }
+      return c.name;
+    };
+    const actionAttempts = result.toolCallHistory.filter(isAction);
+    const okActions = actionAttempts.filter((c) => c.ok);
+    const stepSucceeded =
+      okCalls.length > 0 && !result.error && (actionAttempts.length === 0 || okActions.length > 0);
+    const evidence = okActions.length > 0
+      ? okActions.map(describeCall).join(', ').slice(0, 120)
+      : stepSucceeded
+        ? okCalls.map((c) => c.name).join(',').slice(0, 120)
+        : actionAttempts.length > 0
+          ? `all ${actionAttempts.length} action call(s) failed: ${actionAttempts.map(describeCall).join(', ').slice(0, 90)}`
+          : (result.error ?? 'no successful tool call');
     deps.log(
       `[plan-loop] EXECUTE ${step.id}: tools=${result.toolCallHistory.length} ok=${okCalls.length} ` +
+      `actions=${okActions.length}/${actionAttempts.length} ` +
       `iters=${result.itersUsed}${result.error ? ` error=${result.error}` : ''} → ${stepSucceeded ? 'done' : 'failed'}`,
     );
     stepNotes.push(

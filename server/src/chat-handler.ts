@@ -5742,6 +5742,9 @@ async function handleChatSendInner(
             .filter((t) => !PLAN_EXEC_BLACKLIST.has(t.name))
             .map((t) => ({ name: t.name, description: t.description, parameters: JSON.stringify(t.schema) })),
           toolBlacklist: PLAN_EXEC_BLACKLIST,
+          // Input-aware capability (http POST → write) so the evidence criterion can require a
+          // successful ACTION call for action steps, not just any ok read.
+          classifyCall: (name, input) => tools.classify(name, input)?.capability,
           fetchGuide: async (url) => {
             const r = await subTurnToolRunner('webFetch', { url });
             if (!r.ok) return null;

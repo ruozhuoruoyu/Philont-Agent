@@ -185,3 +185,58 @@ test('loop e2e: verify exhausted → mechanism ADOPTS mandatory gaps as delivera
   assert.ok(r.deliverables.length > 1, 'mandatory items mechanically added to the plan');
   assert.ok(r.steps.some((s) => s.id.startsWith('fulfill-')), 'fulfilling steps added');
 });
+
+// ── Evidence criterion hardening (prod: "publish a post" ✅ off 11 ok reads, POST never succeeded) ──
+
+test('extractSpecItems: heartbeat/periodic lines are MANDATORY even without "must"', () => {
+  const items = extractSpecItems('Send a check-in heartbeat every 10 minutes to stay active.');
+  const hb = items.find((i) => /heartbeat/.test(i.text));
+  assert.ok(hb, 'periodic line extracted');
+  assert.equal(hb!.mandatory, true);
+});
+
+test('checkCoverage: mid-band overlap (~0.4) passes at 0.3 but is a gap at 0.5 (aux dedupe threshold)', () => {
+  const spec = [{ id: 'g', text: 'alpha beta gamma delta epsilon', mandatory: true }];
+  const deliv = [{ id: 'd', description: 'alpha beta zzz yyy xxx' }]; // 2/5 = 0.4
+  assert.equal(checkCoverage(spec, deliv, 0.3).covered, true);
+  assert.equal(checkCoverage(spec, deliv, 0.5).covered, false);
+});
+
+test('loop e2e: step with ok READS but every ACTION (POST) failed → deliverable FAILED, not masked', async () => {
+  const classifyCall = (name: string, input: Record<string, unknown>) =>
+    name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(input.method ?? 'GET').toUpperCase())
+      ? 'write'
+      : 'read';
+  const deps = makeDeps({
+    drafts: [GOOD_DRAFT],
+    classifyCall,
+    llm: {
+      async send(systemPrompt, messages, toolDefs) {
+        if (toolDefs.length === 0) return { type: 'text', content: GOOD_DRAFT };
+        const hasToolResult = messages.some((m) => Array.isArray(m.content));
+        if (!hasToolResult) {
+          return {
+            type: 'toolCalls',
+            calls: [
+              { id: 'r1', name: 'http', input: { url: 'https://x/api/feed', method: 'GET' } },
+              { id: 'w1', name: 'http', input: { url: 'https://x/api/posts', method: 'POST' } },
+            ],
+            assistantMessage: { role: 'assistant', content: [
+              { type: 'tool_use', id: 'r1', name: 'http', input: {} },
+              { type: 'tool_use', id: 'w1', name: 'http', input: {} },
+            ] as never },
+          };
+        }
+        return { type: 'text', content: 'published successfully!' }; // prose lie — must not count
+      },
+    },
+    toolRunner: async (_name: string, input: Record<string, unknown>) =>
+      String(input.method ?? 'GET') === 'POST'
+        ? { ok: false, output: '', error: 'HTTP 429 post cap' }
+        : { ok: true, output: 'HTTP 200 feed' },
+  });
+  const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.ok(r.outcomes.every((o) => o.status !== 'done'), 'ok reads must not mask the failed POST');
+  assert.notEqual(r.outcome, 'completed');
+  assert.match(r.reply, /❌/);
+});
