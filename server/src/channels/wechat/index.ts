@@ -279,10 +279,17 @@ function makeDispatcher(opts: {
     // and flooding the user.
     const STATUS_MIN_INTERVAL_MS = 4_000;
     const STATUS_DEDUP_WINDOW_MS = 30_000;
+    // Hard per-turn cap. WeChat limits how many bot messages ONE inbound message may earn; a long
+    // turn (59 tools + gate regens) sent 10 throttled statuses and the FINAL REPLY was rejected
+    // with ret=-2 (quota) — the user saw progress then silence. The final reply must always have
+    // quota left, so statuses stop after the cap regardless of throttle windows.
+    const STATUS_MAX_PER_TURN = 4;
     const recentStatus = new Map<string, number>(); // text → last send timestamp
     let lastStatusAt = 0;
+    let statusSentCount = 0;
     const onStatus = (text: string) => {
       if (!text || text.trim().length === 0) return;
+      if (statusSentCount >= STATUS_MAX_PER_TURN) return;
       const now = Date.now();
       // Global throttle (prevent burst)
       if (now - lastStatusAt < STATUS_MIN_INTERVAL_MS) return;
@@ -291,6 +298,7 @@ function makeDispatcher(opts: {
       if (lastSeen !== undefined && now - lastSeen < STATUS_DEDUP_WINDOW_MS) return;
       lastStatusAt = now;
       recentStatus.set(text, now);
+      statusSentCount++;
       void outbound.sendText(replyTo, text).catch((e) => {
         logger.error(`onStatus relay failed: ${String(e)}`, { replyTo, text });
       });

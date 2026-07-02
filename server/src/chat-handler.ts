@@ -1438,7 +1438,15 @@ const forgetSkillTool: Tool = {
           : [contains ? `contains='${contains}'` : '', maxUseCount !== undefined ? `max_use_count=${maxUseCount}` : '']
               .filter(Boolean)
               .join(' + ');
-        return { success: false, output: '', error: `No self-learned skill matched ${crit}.` };
+        // Idempotent delete: zero matches = SUCCESS (nothing to delete), not an error. Prod: on an
+        // already-clean store this returned fail → the honesty gate saw "cleanup claimed but no
+        // successful forget_skill" → forced re-calls → same-sig failures → in-turn-reflection locked
+        // the tool → a 59-tool churn. "Already clean" must be indistinguishable from a clean delete.
+        return {
+          success: true,
+          output: `No self-learned skill matched ${crit} — nothing to delete (already clean).`,
+          data: { deleted: [], count: 0, fileBackedSkipped },
+        };
       }
 
       const deleted: string[] = [];
