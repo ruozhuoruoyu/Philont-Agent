@@ -240,3 +240,28 @@ test('loop e2e: step with ok READS but every ACTION (POST) failed → deliverabl
   assert.notEqual(r.outcome, 'completed');
   assert.match(r.reply, /❌/);
 });
+
+test('loop e2e: wall-clock budget exhausted mid-EXECUTE → stops, marks rest not-attempted, reports honestly', async () => {
+  // Fake clock: each LLM call costs 100s. deadline=150s → DRAFT eats 100s; step 1 runs (50s left ≥ 45s
+  // headroom); before step 2 the budget is gone → stop + honest ⏱ note (prod: a 503-throttled 10-step
+  // run blew the turn's 20-min hard deadline and the whole turn was killed, report never sent).
+  let tick = 0;
+  const base = makeDeps({ drafts: [GOOD_DRAFT] });
+  const deps: PlanLoopDeps = {
+    ...base,
+    llm: {
+      async send(systemPrompt, messages, toolDefs) {
+        tick += 100_000;
+        return base.llm.send(systemPrompt, messages, toolDefs);
+      },
+    },
+    now: () => tick,
+    deadlineMs: 150_000,
+  };
+  const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.match(r.reply, /时间预算耗尽/);
+  const notAttempted = r.outcomes.filter((o) => o.status === 'not-attempted');
+  assert.ok(notAttempted.length > 0, 'remaining deliverables honestly not-attempted');
+  assert.ok(notAttempted.some((o) => /time budget/.test(o.evidence)));
+  assert.notEqual(r.outcome, 'completed');
+});

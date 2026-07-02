@@ -239,6 +239,15 @@ export interface PlanLoopDeps {
   abortSignal?: AbortSignal;
   maxVerifyRounds?: number; // default 3
   maxItersPerStep?: number; // default 8
+  /**
+   * Wall-clock budget for the WHOLE loop (default 15 min — below the turn's 20-min hard deadline,
+   * mirroring the deep_explore round<turn clamp). Prod: a 10-step run on a 503-throttled provider
+   * exceeded the turn deadline and the turn was KILLED — work done, report never sent, plan never
+   * recorded. An honest partial report beats a silent timeout death, so the loop stops itself.
+   */
+  deadlineMs?: number;
+  /** Injectable clock for tests. */
+  now?: () => number;
 }
 
 export interface DeliverableOutcome {
@@ -291,6 +300,10 @@ export async function runPlanExecuteLoop(
   deps: PlanLoopDeps,
 ): Promise<PlanLoopResult> {
   const maxVerifyRounds = deps.maxVerifyRounds ?? 3;
+  const now = deps.now ?? (() => Date.now());
+  const deadlineMs = deps.deadlineMs ?? 15 * 60_000;
+  const startedAt = now();
+  const timeLeft = () => deadlineMs - (now() - startedAt);
   const fail = (reply: string): PlanLoopResult => ({
     outcome: 'aborted', deliverables: [], steps: [], outcomes: [], reply, unresolvedGaps: [],
   });
@@ -316,6 +329,12 @@ export async function runPlanExecuteLoop(
   let lastMandatoryGaps: SpecItem[] = [];
   for (let round = 0; round < maxVerifyRounds; round++) {
     if (deps.abortSignal?.aborted) return fail('任务被中止。');
+    // Budget check: with < 5 min left there is no room for verify churn AND execution — take the
+    // current plan (or the mechanically-adopted one) straight to EXECUTE.
+    if (plan && timeLeft() < 5 * 60_000) {
+      deps.log(`[plan-loop] VERIFY budget check: ${Math.round(timeLeft() / 1000)}s left — proceeding with current plan`);
+      break;
+    }
     deps.onStatus?.(round === 0 ? 'drafting plan…' : `revising plan (round ${round + 1})…`);
     const user =
       `# Task\n${task}\n\n# Guide (authoritative spec)\n${guideText.slice(0, 24_000)}\n\n` +
@@ -383,8 +402,23 @@ export async function runPlanExecuteLoop(
   // mini-loops redo prior work (real run: later steps re-registered → 409 "Invite code already
   // used", and soul.md was re-fetched 5×).
   const stepNotes: string[] = [];
+  let budgetExhausted = false;
   for (const step of plan.steps) {
     if (deps.abortSignal?.aborted) break;
+    // Budget check: leave ≥ 45s headroom for the CLOSE + report. Stopping here (with the remaining
+    // deliverables honestly not-attempted) beats the turn hard-deadline killing the whole turn —
+    // in which case the work already done is never reported and the plan is never recorded.
+    if (timeLeft() < 45_000) {
+      budgetExhausted = true;
+      deps.log(`[plan-loop] EXECUTE budget exhausted (${Math.round(timeLeft() / 1000)}s left) — stopping; remaining steps not attempted`);
+      for (const dId of step.covers) {
+        const cur = outcomes.get(dId);
+        if (cur && cur.status === 'not-attempted') {
+          outcomes.set(dId, { id: dId, status: 'not-attempted', evidence: 'time budget exhausted' });
+        }
+      }
+      break;
+    }
     deps.onStatus?.(`executing: ${step.id}`);
     const result = await runMiniAgentLoop({
       systemPrompt:
@@ -400,7 +434,11 @@ export async function runPlanExecuteLoop(
       toolRunner: deps.toolRunner,
       maxIters: deps.maxItersPerStep ?? 8,
       toolBlacklist: deps.toolBlacklist,
-      abortSignal: deps.abortSignal,
+      // Per-step cutoff at the remaining budget (min 10s) so one hung step (e.g. a 503-retry storm)
+      // cannot silently eat the whole loop budget; combined with the caller's signal when present.
+      abortSignal: deps.abortSignal
+        ? AbortSignal.any([deps.abortSignal, AbortSignal.timeout(Math.max(10_000, timeLeft() - 10_000))])
+        : AbortSignal.timeout(Math.max(10_000, timeLeft() - 10_000)),
     });
     const okCalls = result.toolCallHistory.filter((c) => c.ok);
     // Evidence criterion (2026-07-02 hardened): a step that ATTEMPTED any ACTION call (write/execute
@@ -468,6 +506,9 @@ export async function runPlanExecuteLoop(
       shownGaps.map((g) => `- ${g.slice(0, 80)}`).join('\n') +
       (unresolvedGaps.length > shownGaps.length ? `\n- …另 ${unresolvedGaps.length - shownGaps.length} 项` : '')
     : '';
+  const budgetNote = budgetExhausted
+    ? '\n\n⏱ 时间预算耗尽,余下步骤未执行(已如实标注 ⏸)。需要的话回复"继续",我接着做剩下的。'
+    : '';
   const reply =
     (outcome === 'completed'
       ? `任务完成(${done}/${list.length} 项交付,均有工具执行证据):\n`
@@ -477,6 +518,7 @@ export async function runPlanExecuteLoop(
           : `任务部分完成(${done}/${list.length} 项):\n`
         : '任务未能执行:\n') +
     lines.join('\n') +
-    gapLines;
+    gapLines +
+    budgetNote;
   return { outcome, deliverables: plan.deliverables, steps: plan.steps, outcomes: list, reply, unresolvedGaps };
 }
