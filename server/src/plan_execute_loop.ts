@@ -317,15 +317,20 @@ export async function runPlanExecuteLoop(
     plan = draft;
     // VERIFY: deterministic floor + optional aux judge. Steps count as coverage too.
     const cov = checkCoverage(spec, draft.deliverables, 0.3, draft.steps.map((s) => `${s.id} ${s.description}`));
-    const auxGaps = deps.auxJudge ? await deps.auxJudge(guideText, draft.deliverables) : null;
+    const auxGapsRaw = deps.auxJudge ? await deps.auxJudge(guideText, draft.deliverables) : null;
+    // The aux judge returns free-text gaps with no dedup against the plan — prod: it reported
+    // "Part 0: read SOUL.md" as a gap while deliverable #1 was literally "Fetch and read SOUL.md
+    // in full" (a false gap contradicting the ✅ list). Run each aux gap through the same coverage
+    // check; only genuinely uncovered ones survive.
+    const stepTexts = draft.steps.map((s) => `${s.id} ${s.description}`);
+    const auxGaps = (auxGapsRaw ?? []).filter(
+      (g) => !checkCoverage([{ id: 'aux', text: g, mandatory: true }], draft.deliverables, 0.3, stepTexts).covered,
+    );
     lastMandatoryGaps = cov.gaps.filter((g) => g.mandatory);
-    const gapTexts = [
-      ...lastMandatoryGaps.map((g) => g.text),
-      ...(auxGaps ?? []),
-    ];
+    const gapTexts = [...lastMandatoryGaps.map((g) => g.text), ...auxGaps];
     deps.log(
       `[plan-loop] VERIFY round ${round + 1}: deliverables=${draft.deliverables.length} ` +
-      `detGaps=${cov.gaps.filter((g) => g.mandatory).length} auxGaps=${auxGaps?.length ?? 'n/a'}`,
+      `detGaps=${cov.gaps.filter((g) => g.mandatory).length} auxGaps=${auxGapsRaw ? auxGaps.length : 'n/a'}`,
     );
     if (gapTexts.length === 0) { unresolvedGaps = []; break; }
     unresolvedGaps = gapTexts;
