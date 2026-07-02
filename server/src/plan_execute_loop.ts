@@ -51,6 +51,18 @@ const PERIODIC_LINE_RE =
   /\b(?:heartbeat|check-?in|periodic(?:ally)?|schedule[ds]?|every\s+\d+\s*(?:min|hour|day)|recurring)\b|心跳|定时|周期|每\s*\d+\s*(?:分钟|小时|天)/i;
 const NUMBERED_STEP_RE = /^\s*(?:\d+[.)]|Step\s*\d+|第[一二三四五六七八九十\d]+步)\s*[:.]?\s*(.+)$/i;
 
+// ── Deliverable evidence requirements (v1.2 evidence matching) ──────────────
+// What KIND of proof a deliverable's text implies. Deterministic keyword floors — coarse on
+// purpose; a wrong 'action' classification fails honest (reports ❌ with the reason), never lies ✅.
+/** Deliverables that require a SCHEDULE to actually exist (heartbeat / periodic check-in / 定时). */
+export const SCHEDULE_REQ_RE =
+  /\b(?:heartbeat|check-?in|periodic(?:ally)?|recurring|every\s+\d+\s*(?:min|hour|day))\b|schedule[\s_-]?(?:reminder|a|the|it)|set\s+up\s+a\s+schedule|心跳|定时|周期|每\s*\d+\s*(?:分钟|小时|天)/i;
+/** Deliverables that require an EXTERNAL action (post/register/vote/… — an http write, not a read). */
+export const ACTION_REQ_RE =
+  /\b(?:post|publish|register|sign\s*up|vote|comment|reply|submit|send|create|upload|delete)\b|发帖|发布|注册|投票|评论|回复|提交|发送|创建|上传|删除/i;
+/** Tools whose success proves a schedule-type deliverable. */
+export const SCHEDULE_TOOLS: ReadonlySet<string> = new Set(['schedule_reminder', 'create_calendar_event']);
+
 function slugify(s: string): string {
   return s
     .toLowerCase()
@@ -233,7 +245,10 @@ export interface PlanLoopDeps {
    * actual POST /api/posts never succeeded. Optional — when absent, evidence degrades to the old
    * any-ok rule (tests / callers without a registry).
    */
-  classifyCall?: (name: string, input: Record<string, unknown>) => string | undefined;
+  classifyCall?: (
+    name: string,
+    input: Record<string, unknown>,
+  ) => { capability?: string; domain?: string } | undefined;
   log: (msg: string) => void;
   onStatus?: (text: string) => void;
   abortSignal?: AbortSignal;
@@ -461,9 +476,16 @@ export async function runPlanExecuteLoop(
     // action SUCCEEDED. Ok reads must not mask a failed action: prod reported "publish a post" ✅
     // off 11 ok reads while every POST /api/posts failed — the user checked reality and no post
     // existed. Pure-read steps (fetch/read/verify-by-reading) still pass on ok reads.
+    // EXTERNAL action = write/execute capability OUTSIDE the self/memory domain. Prod: a heartbeat
+    // step passed with actions=1/1 where the one "action" was a memory write (store_fact) — the
+    // schedule was never created. Memory writes are bookkeeping, not task actions.
     const isAction = (c: { name: string; input: Record<string, unknown> }): boolean => {
-      const cap = deps.classifyCall?.(c.name, c.input);
-      return cap === 'write' || cap === 'execute';
+      const cls = deps.classifyCall?.(c.name, c.input);
+      if (cls?.capability !== undefined) {
+        return (cls.capability === 'write' || cls.capability === 'execute') && cls.domain !== 'self';
+      }
+      // No classifier (tests / bare callers): http with a write method is the reliable fallback.
+      return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
     };
     const describeCall = (c: { name: string; input: Record<string, unknown> }): string => {
       if (c.name === 'http') {
@@ -493,13 +515,36 @@ export async function runPlanExecuteLoop(
     stepNotes.push(
       `- ${step.id}: ${stepSucceeded ? 'DONE' : 'FAILED'} (${evidence}). ${result.finalText.replace(/\s+/g, ' ').slice(0, 180)}`,
     );
+    // Per-deliverable evidence MATCHING (2026-07-02 v1.2). "Some action succeeded" is not enough:
+    // prod reported 9/9 ✅ while NO post existed and NO schedule was set — the posting step made
+    // ZERO action attempts (dodged into the pure-read pass) and the heartbeat step's one "action"
+    // was a memory write. Each deliverable now requires the KIND of evidence its text implies:
+    //   schedule-type  → a successful schedule tool call (schedule_reminder / create_calendar_event);
+    //   action-type    → ≥1 successful EXTERNAL action (e.g. http POST) — zero attempts = FAILED;
+    //   read-type      → the step's read rule (unchanged).
     for (const dId of step.covers.length > 0 ? step.covers : []) {
       const cur = outcomes.get(dId);
       if (!cur) continue;
-      if (stepSucceeded) {
-        outcomes.set(dId, { id: dId, status: 'done', evidence });
+      const dText = `${plan.deliverables.find((x) => x.id === dId)?.description ?? ''} ${step.description}`;
+      let dOk: boolean;
+      let dEvidence: string;
+      if (SCHEDULE_REQ_RE.test(dText)) {
+        const hit = result.toolCallHistory.find((c) => c.ok && SCHEDULE_TOOLS.has(c.name));
+        dOk = !!hit && !result.error;
+        dEvidence = hit ? hit.name : 'requires a schedule tool (schedule_reminder) — no successful call';
+      } else if (ACTION_REQ_RE.test(dText)) {
+        dOk = okActions.length > 0 && !result.error;
+        dEvidence = dOk
+          ? okActions.map(describeCall).join(', ').slice(0, 120)
+          : `requires an external action (e.g. http POST) — attempted ${actionAttempts.length}, succeeded 0`;
+      } else {
+        dOk = stepSucceeded;
+        dEvidence = evidence;
+      }
+      if (dOk) {
+        outcomes.set(dId, { id: dId, status: 'done', evidence: dEvidence });
       } else if (cur.status !== 'done') {
-        outcomes.set(dId, { id: dId, status: 'failed', evidence });
+        outcomes.set(dId, { id: dId, status: 'failed', evidence: dEvidence });
       }
     }
   }

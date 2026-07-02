@@ -101,7 +101,7 @@ function makeDeps(overrides: Partial<PlanLoopDeps> & { drafts: string[]; execToo
         if (!hasToolResult) {
           return {
             type: 'toolCalls',
-            calls: [{ id: 't1', name: 'http', input: { url: 'https://x/api' } }],
+            calls: [{ id: 't1', name: 'http', input: { url: 'https://x/api', method: 'POST' } }],
             assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'http', input: {} }] as never },
           };
         }
@@ -205,8 +205,8 @@ test('checkCoverage: mid-band overlap (~0.4) passes at 0.3 but is a gap at 0.5 (
 test('loop e2e: step with ok READS but every ACTION (POST) failed → deliverable FAILED, not masked', async () => {
   const classifyCall = (name: string, input: Record<string, unknown>) =>
     name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(input.method ?? 'GET').toUpperCase())
-      ? 'write'
-      : 'read';
+      ? { capability: 'write', domain: 'network' }
+      : { capability: 'read', domain: 'network' };
   const deps = makeDeps({
     drafts: [GOOD_DRAFT],
     classifyCall,
@@ -264,4 +264,73 @@ test('loop e2e: wall-clock budget exhausted mid-EXECUTE → stops, marks rest no
   assert.ok(notAttempted.length > 0, 'remaining deliverables honestly not-attempted');
   assert.ok(notAttempted.some((o) => /time budget/.test(o.evidence)));
   assert.notEqual(r.outcome, 'completed');
+});
+
+// ── v1.2 evidence matching (prod: 9/9 ✅ while NO post existed and NO schedule was set) ──
+
+const POST_HEARTBEAT_DRAFT = JSON.stringify({
+  deliverables: [
+    { id: 'publish-post', description: 'publish at least one substantive post' },
+    { id: 'heartbeat', description: 'set up the periodic heartbeat check-in schedule' },
+  ],
+  steps: [
+    { id: 's-post', description: 'publish the post via the API', covers: ['publish-post'] },
+    { id: 's-hb', description: 'set up the heartbeat schedule', covers: ['heartbeat'] },
+  ],
+});
+
+test('loop e2e: action deliverable with ZERO action attempts → FAILED (the dodge into the pure-read pass)', async () => {
+  // Mini-loop only ever GETs (reads) — prod: the posting step made 0 action attempts and passed.
+  const deps = makeDeps({
+    drafts: [POST_HEARTBEAT_DRAFT],
+    llm: {
+      async send(systemPrompt, messages, toolDefs) {
+        if (toolDefs.length === 0) return { type: 'text', content: POST_HEARTBEAT_DRAFT };
+        const hasToolResult = messages.some((m) => Array.isArray(m.content));
+        if (!hasToolResult) {
+          return {
+            type: 'toolCalls',
+            calls: [{ id: 'r1', name: 'http', input: { url: 'https://x/api/feed', method: 'GET' } }],
+            assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: 'r1', name: 'http', input: {} }] as never },
+          };
+        }
+        return { type: 'text', content: 'done (no action needed).' };
+      },
+    },
+  });
+  const r = await runPlanExecuteLoop('register then post and set heartbeat', ['https://g/guide.md'], deps);
+  const post = r.outcomes.find((o) => o.id === 'publish-post');
+  assert.equal(post?.status, 'failed', 'zero action attempts must not pass an action deliverable');
+  assert.match(post!.evidence, /requires an external action/);
+});
+
+test('loop e2e: heartbeat deliverable — memory write does NOT count; schedule_reminder ok DOES', async () => {
+  const mkLlm = (toolName: string, input: Record<string, unknown>) => ({
+    async send(systemPrompt: string, messages: Array<{ content: unknown }>, toolDefs: unknown[]) {
+      if (toolDefs.length === 0) return { type: 'text' as const, content: POST_HEARTBEAT_DRAFT };
+      const hasToolResult = messages.some((m) => Array.isArray(m.content));
+      if (!hasToolResult) {
+        return {
+          type: 'toolCalls' as const,
+          calls: [{ id: 't1', name: toolName, input }],
+          assistantMessage: { role: 'assistant' as const, content: [{ type: 'tool_use', id: 't1', name: toolName, input }] as never },
+        };
+      }
+      return { type: 'text' as const, content: 'ok.' };
+    },
+  });
+  const classify = (name: string) =>
+    name === 'store_fact' ? { capability: 'write', domain: 'self' }
+    : name === 'schedule_reminder' ? { capability: 'write', domain: 'self' }
+    : { capability: 'read', domain: 'network' };
+  // store_fact only (the prod actions=1/1 false pass) → heartbeat FAILED
+  const r1 = await runPlanExecuteLoop('post and heartbeat', ['https://g/guide.md'], makeDeps({
+    drafts: [POST_HEARTBEAT_DRAFT], llm: mkLlm('store_fact', { namespace: 'x', key: 'y', value: 1 }) as never, classifyCall: classify,
+  }));
+  assert.equal(r1.outcomes.find((o) => o.id === 'heartbeat')?.status, 'failed', 'memory write must not prove a schedule');
+  // schedule_reminder ok → heartbeat DONE
+  const r2 = await runPlanExecuteLoop('post and heartbeat', ['https://g/guide.md'], makeDeps({
+    drafts: [POST_HEARTBEAT_DRAFT], llm: mkLlm('schedule_reminder', { when: 'every 10 min' }) as never, classifyCall: classify,
+  }));
+  assert.equal(r2.outcomes.find((o) => o.id === 'heartbeat')?.status, 'done', 'schedule_reminder success proves it');
 });
