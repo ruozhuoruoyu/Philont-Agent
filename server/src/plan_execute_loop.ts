@@ -75,11 +75,15 @@ export const ACTION_REQ_RE =
 /** Deliverable-keyword → endpoint-path fragment the successful action must match (prod: the
  * comment deliverable passed off 2 ok actions that were NOT the comment POST — nothing on the site). */
 export const ENDPOINT_HINTS: ReadonlyArray<[RegExp, RegExp]> = [
-  // register/comment/vote before post; the post keyword must not match the bare HTTP verb ("POST /api/…").
+  // verify/register/comment/vote before post; the post KEYWORD must not match the HTTP verb (all-caps
+  // "POST" — prod: "Verify … via POST /api/auth/verify" got typed as a posting deliverable → false ❌).
+  [/\bverif(?:y|ication)\b|验证|校验/i, /verify/i],
   [/\bregister\b|sign\s*up|注册/i, /register|signup/i],
   [/\bcomment\b|评论|\breply\b|回复/i, /comment|reply/i],
   [/\bvote\b|投票/i, /vote/i],
-  [/\bpublish\b|发帖|发布|\bpost\b(?!\s*\/)/i, /post/i],
+  [/\bpublish\b|发帖|发布/i, /post/i],
+  // lowercase-only "post" (the noun); an all-caps POST token is the HTTP verb, stripped before testing.
+  [{ test: (t: string) => /\bpost\b/i.test(t.replace(/\bPOST\b/g, ' ')) } as RegExp, /post/i],
 ];
 /** Tools whose success proves a schedule-type deliverable. */
 export const SCHEDULE_TOOLS: ReadonlySet<string> = new Set(['schedule_reminder', 'create_calendar_event']);
