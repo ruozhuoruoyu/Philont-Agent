@@ -577,6 +577,7 @@ export async function runPlanExecuteLoop(
     //   schedule-type  → a successful schedule tool call (schedule_reminder / create_calendar_event);
     //   action-type    → ≥1 successful EXTERNAL action (e.g. http POST) — zero attempts = FAILED;
     //   read-type      → the step's read rule (unchanged).
+    const stepVerdicts: string[] = [];
     for (const dId of step.covers.length > 0 ? step.covers : []) {
       const cur = outcomes.get(dId);
       if (!cur) continue;
@@ -603,11 +604,18 @@ export async function runPlanExecuteLoop(
         dOk = stepSucceeded;
         dEvidence = evidence;
       }
+      stepVerdicts.push(`${dId}=${dOk ? 'done' : 'FAILED'}`);
       if (dOk) {
         outcomes.set(dId, { id: dId, status: 'done', evidence: dEvidence });
       } else if (cur.status !== 'done') {
         outcomes.set(dId, { id: dId, status: 'failed', evidence: dEvidence });
       }
+    }
+    // The step log above reports STEP-level success (had ok tool calls); this reports the
+    // DELIVERABLE-level verdict, which can differ (prod: a "vote" step logged → done off ok reads
+    // while its vote deliverable was ❌ because no upvote POST landed). Log both to avoid misreading.
+    if (stepVerdicts.length > 0) {
+      deps.log(`[plan-loop] EXECUTE ${step.id}: deliverables ${stepVerdicts.join(', ')}`);
     }
   }
 
@@ -616,16 +624,20 @@ export async function runPlanExecuteLoop(
   const done = list.filter((o) => o.status === 'done').length;
   const outcome: PlanLoopResult['outcome'] =
     done === list.length && unresolvedGaps.length === 0 ? 'completed' : done > 0 ? 'partial' : 'aborted';
+  // Truncate with an explicit ellipsis so a cut reads as a cut, not as the whole requirement. Wider
+  // than the old 80 chars (prod: reports read as "信息总结不全" — deliverables cut mid-sentence). The
+  // outbound layer chunks by byte size, so fuller lines are safe.
+  const trunc = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
   const lines = list.map((o) => {
     const mark = o.status === 'done' ? '✅' : o.status === 'failed' ? '❌' : '⏸';
     const desc = plan!.deliverables.find((d) => d.id === o.id)?.description ?? o.id;
-    return `${mark} ${desc.slice(0, 80)}${o.status !== 'done' && o.evidence ? `(${o.evidence.slice(0, 60)})` : ''}`;
+    return `${mark} ${trunc(desc, 160)}${o.status !== 'done' && o.evidence ? ` (${trunc(o.evidence, 100)})` : ''}`;
   });
   // Cap the gap list (readability + channel size); the count is always honest.
-  const shownGaps = unresolvedGaps.slice(0, 5);
+  const shownGaps = unresolvedGaps.slice(0, 8);
   const gapLines = unresolvedGaps.length > 0
     ? `\n\n⚠️ ${unresolvedGaps.length} 项指引要求未纳入本次计划(多轮校验仍未覆盖,已如实报告):\n` +
-      shownGaps.map((g) => `- ${g.slice(0, 80)}`).join('\n') +
+      shownGaps.map((g) => `- ${trunc(g, 120)}`).join('\n') +
       (unresolvedGaps.length > shownGaps.length ? `\n- …另 ${unresolvedGaps.length - shownGaps.length} 项` : '')
     : '';
   const budgetNote = budgetExhausted
