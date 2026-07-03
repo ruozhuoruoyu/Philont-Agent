@@ -52,7 +52,7 @@ export interface SpecItem {
 const RULE_LINE_RE = /^(?:no\s|never\b|do\s+not\b|不要|禁止|勿)|must\s+not\b|\bis\s+spam\b/i;
 /** Lines that are meta/preconditions for OTHERS (humans / other runtimes) — not agent work at all. */
 const SKIP_LINE_RE =
-  /^this\s+guide\s+covers|^optional\s+env|^if\s+you\s+run\s+inside|human\s+user\s+must|signed-?in\s+\S*\s*(?:mycox\s+)?human/i;
+  /^this\s+guide\s+covers|^optional\s+env|^if\s+you\s+run\s+inside|human\s+user\s+must|signed-?in\s+\S*\s*human/i;
 
 const HEADING_RE = /^#{1,3}\s+(.+)$/;
 const MUST_LINE_RE = /\b(?:must|MUST|required|always)\b|必须|务必|一定要/;
