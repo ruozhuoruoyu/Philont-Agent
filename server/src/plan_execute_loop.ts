@@ -40,7 +40,19 @@ export interface SpecItem {
   text: string;
   /** Whether the source line carried a hard-requirement marker (MUST / 必须 / required) */
   mandatory: boolean;
+  /**
+   * actionable = a requirement the agent can DO (coverage + adoption). rule = a constraint
+   * ("No content-free comments") — injected into EXECUTE prompts, never a deliverable (prod: rules
+   * adopted as deliverables produced false ❌ while the real posting requirement sat unadopted).
+   */
+  kind?: 'actionable' | 'rule';
 }
+
+/** Constraint lines ("No X" / "must not") — obey, not do. */
+const RULE_LINE_RE = /^(?:no\s|never\b|do\s+not\b|不要|禁止|勿)|must\s+not\b|\bis\s+spam\b/i;
+/** Lines that are meta/preconditions for OTHERS (humans / other runtimes) — not agent work at all. */
+const SKIP_LINE_RE =
+  /^this\s+guide\s+covers|^optional\s+env|^if\s+you\s+run\s+inside|human\s+user\s+must|signed-?in\s+\S*\s*(?:mycox\s+)?human/i;
 
 const HEADING_RE = /^#{1,3}\s+(.+)$/;
 const MUST_LINE_RE = /\b(?:must|MUST|required|always)\b|必须|务必|一定要/;
@@ -83,10 +95,11 @@ export function extractSpecItems(guideText: string): SpecItem[] {
   const push = (text: string, mandatory: boolean) => {
     const t = text.trim().replace(/\s+/g, ' ').slice(0, 160);
     if (t.length < 4) return;
+    if (SKIP_LINE_RE.test(t)) return; // others' preconditions / meta — not agent work
     const id = slugify(t);
     if (seen.has(id)) return;
     seen.add(id);
-    out.push({ id, text: t, mandatory });
+    out.push({ id, text: t, mandatory, kind: RULE_LINE_RE.test(t) ? 'rule' : 'actionable' });
   };
   for (const rawLine of guideText.split('\n')) {
     const line = rawLine.trim();
@@ -100,7 +113,7 @@ export function extractSpecItems(guideText: string): SpecItem[] {
       push(m[1], MUST_LINE_RE.test(line) || PERIODIC_LINE_RE.test(line));
       continue;
     }
-    if (MUST_LINE_RE.test(line) || PERIODIC_LINE_RE.test(line)) {
+    if (MUST_LINE_RE.test(line) || PERIODIC_LINE_RE.test(line) || RULE_LINE_RE.test(line)) {
       push(line.replace(/^[-*>\s]+/, ''), true);
     }
   }
@@ -342,7 +355,12 @@ export async function runPlanExecuteLoop(
     return fail(`无法读取任务指引(${guideUrls.join(', ')})——网络抓取失败。任务未开始,请稍后重试或贴出指引内容。`);
   }
   const guideText = guideTexts.join('\n\n---\n\n').slice(0, 60_000);
-  const spec = extractSpecItems(guideText);
+  const specAll = extractSpecItems(guideText);
+  // Rules are constraints, not work: they never enter coverage/adoption; they ARE injected into
+  // every EXECUTE step prompt so the model obeys them while acting.
+  const spec = specAll.filter((i) => i.kind !== 'rule');
+  const specRules = specAll.filter((i) => i.kind === 'rule');
+  const rulesBlock = specRules.slice(0, 8).map((r) => `- ${r.text}`).join('\n');
 
   // ── DRAFT → VERIFY → REVISE (bounded ring) ────────────────────────────────
   let plan: DraftPlan | null = null;
@@ -408,13 +426,19 @@ export async function runPlanExecuteLoop(
     // Mechanical adoption: the model would not add the uncovered MANDATORY guide items after
     // N revisions — so the MECHANISM adds them (mechanism, not model discipline). Each becomes a
     // deliverable + a fulfilling step; only aux-judge extras remain as reported gaps.
-    const adopt = lastMandatoryGaps.slice(0, 5);
+    // Adopt ACTIONABLE work first (post/schedule/register…) — prod: the cap filled up with rule
+    // items while the real posting requirement stayed unadopted.
+    const adopt = [...lastMandatoryGaps]
+      .sort((a, b) =>
+        Number(ACTION_REQ_RE.test(b.text) || SCHEDULE_REQ_RE.test(b.text)) -
+        Number(ACTION_REQ_RE.test(a.text) || SCHEDULE_REQ_RE.test(a.text)))
+      .slice(0, 5);
     if (adopt.length > 0) {
       const existing = new Set(plan.deliverables.map((d) => d.id));
       for (const item of adopt) {
         if (existing.has(item.id)) continue;
         plan.deliverables.push({ id: item.id, description: item.text });
-        plan.steps.push({ id: `fulfill-${item.id}`.slice(0, 48), description: `Fulfill guide requirement: ${item.text}`, covers: [item.id] });
+        plan.steps.push({ id: `fulfill-${item.id}`.slice(0, 48), description: `DO IT NOW — this is an action to PERFORM, not text to read: ${item.text}. Use the concrete tool (http POST / schedule_reminder) and report what it returned.`, covers: [item.id] });
       }
       const adopted = new Set(adopt.map((a) => a.text));
       unresolvedGaps = unresolvedGaps.filter((g) => !adopted.has(g));
@@ -458,6 +482,7 @@ export async function runPlanExecuteLoop(
       userMessage:
         `# Step\n${step.description}\n\n# Overall task (context)\n${task}\n\n` +
         (stepNotes.length > 0 ? `# Already completed steps (do NOT redo)\n${stepNotes.join('\n')}\n\n` : '') +
+        (rulesBlock ? `# Guide constraints (OBEY these; they are NOT tasks)\n${rulesBlock}\n\n` : '') +
         `# Guide excerpt (authoritative)\n${guideText.slice(0, 12_000)}`,
       llm: deps.llm,
       toolDefs: deps.toolDefs,

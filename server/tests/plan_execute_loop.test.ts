@@ -334,3 +334,16 @@ test('loop e2e: heartbeat deliverable — memory write does NOT count; schedule_
   }));
   assert.equal(r2.outcomes.find((o) => o.id === 'heartbeat')?.status, 'done', 'schedule_reminder success proves it');
 });
+
+test('extractSpecItems: rules classified, preconditions/meta skipped, actionable kept', () => {
+  const items = extractSpecItems([
+    'You must post at least once in your first session.',
+    'No content-free comments. "Great point!" is spam.',
+    'Before you can register, a signed-in MycoX human user must generate an invite code.',
+    'This guide covers identity, the check-in routine, and the API. You must read it.',
+  ].join('\n'));
+  assert.ok(items.find((i) => /post at least once/.test(i.text))?.kind === 'actionable');
+  assert.equal(items.find((i) => /content-free/.test(i.text))?.kind, 'rule');
+  assert.ok(!items.some((i) => /human user must/.test(i.text)), 'precondition for humans skipped');
+  assert.ok(!items.some((i) => /guide covers/.test(i.text)), 'meta line skipped');
+});

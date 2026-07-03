@@ -5749,7 +5749,11 @@ async function handleChatSendInner(
           toolDefs: tools.list()
             .filter((t) => !PLAN_EXEC_BLACKLIST.has(t.name))
             .map((t) => ({ name: t.name, description: t.description, parameters: JSON.stringify(t.schema) })),
-          toolBlacklist: PLAN_EXEC_BLACKLIST,
+          // The plan-loop is USER-DRIVEN and mechanism-owned — unlike planAndExecute sub-loops /
+          // autonomous turns, persisting a credential here is legitimate (prod: register obtained
+          // the API key but could not save it, so later posting steps had no auth and attempted 0
+          // actions). Everything else in the blacklist still applies.
+          toolBlacklist: (() => { const b = new Set(PLAN_EXEC_BLACKLIST); b.delete('saveCredential'); return b; })(),
           // Input-aware classification (http POST → write:network) so the evidence criterion can
           // distinguish EXTERNAL actions from memory bookkeeping and reads.
           classifyCall: (name, input) => tools.classify(name, input) ?? undefined,
