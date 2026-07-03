@@ -202,6 +202,7 @@ import {
   buildMechanicalFixReminder,
   type InTurnToolRecord,
 } from './in_turn_reflection.js';
+import { scheduledTurnMadeProgress } from './schedule_progress.js';
 import { maybeRunReflection } from './reflection_runner.js';
 import {
   buildAutonomousProgressInjection,
@@ -996,6 +997,15 @@ const idleConsolidator = startIdleConsolidator({
     }
   },
 });
+
+// 2026-07-03: scheduled-turn progress verdict bridge. The scheduler's failure circuit breaker
+// (recordFailure → 1h auto-pause after N consecutive failures) only fired when the autonomous turn
+// THREW (chat-handler.ts ~2680). But a scheduled turn that returns an HONEST "partial (0/N)" report
+// — every business http 401'd — does NOT throw, so recordSuccess reset the counter and the schedule
+// never paused (prod: two mycox heartbeats avalanched, ~30s apart, all 401, each recorded outcome=ok).
+// The turn-finalization block writes a "did this turn make real external progress?" verdict here,
+// keyed by scheduled sessionId; the fire handler reads it to choose recordFailure vs recordSuccess.
+const scheduledTurnProgress = new Map<string, { madeProgress: boolean; at: number }>();
 
 // 2026-05-12 Phase 8 M4: bug report dedup state (maintained across idle ticks).
 // Reset every 24h to prevent unbounded growth. Can also be manually cleared by admin (reportedBugKeys.clear()).
@@ -2656,9 +2666,39 @@ const scheduler = startScheduler(
             replyTextLen: finalText.length,
             replyChannel,
           });
-          // v16: one success resets failure count + clears pause
-          try { memory.schedules.recordSuccess(s.id); } catch (e) {
-            console.warn(`${label} recordSuccess failed (ignored):`, (e as Error)?.message ?? e);
+          // v16: one success resets failure count + clears pause. BUT a non-throwing turn is not
+          // automatically progress — an honest "partial (0/N), every http 401'd" report returns
+          // normally yet made no real progress. The turn-finalization block records that verdict in
+          // scheduledTurnProgress; a no-progress turn is routed to recordFailure so the 1h auto-pause
+          // can arm (otherwise recordSuccess resets the counter every fire → the schedule never dies).
+          const progress = scheduledTurnProgress.get(turnSessionId);
+          scheduledTurnProgress.delete(turnSessionId);
+          if (progress && !progress.madeProgress) {
+            try {
+              const before = s.pausedUntil ?? 0;
+              const updated = memory.schedules.recordFailure(s.id, Date.now());
+              const after = updated?.pausedUntil ?? 0;
+              console.warn(
+                `${label} turn made NO real external progress → recordFailure ` +
+                  `(consecutiveFailures=${updated?.consecutiveFailures ?? '?'})`,
+              );
+              if (updated && after > before && after > Date.now()) {
+                const remainMin = Math.round((after - Date.now()) / 60000);
+                console.warn(`${label} 🛑 auto-paused for ${remainMin} minutes after repeated no-progress fires`);
+                internalAudit.append('schedule_auto_paused', {
+                  scheduleName: s.name, scheduleId: s.id,
+                  consecutiveFailures: updated.consecutiveFailures,
+                  pausedUntil: after, pauseDurationMs: after - Date.now(),
+                  reason: 'no_external_progress',
+                });
+              }
+            } catch (e) {
+              console.warn(`${label} recordFailure (no-progress) failed (ignored):`, (e as Error)?.message ?? e);
+            }
+          } else {
+            try { memory.schedules.recordSuccess(s.id); } catch (e) {
+              console.warn(`${label} recordSuccess failed (ignored):`, (e as Error)?.message ?? e);
+            }
           }
           // when replyChannel='summary', push to user via reminderEmitter (reuses the prompt channel)
           if (replyChannel === 'summary' && finalText.trim()) {
@@ -4840,6 +4880,18 @@ export async function handleChatSend(
             `outcome=${summary.outcome} httpOk=${summary.httpOkCount} ` +
             `httpFail=${summary.httpFailCount} sigs=[${summary.failureSignatures.join(',')}]`,
         );
+        // Progress verdict for the scheduler's circuit breaker (see scheduledTurnProgress + the pure
+        // rule in schedule_progress.ts). No real external progress (writes attempted, all failed —
+        // the all-401 avalanche shape) must count as a failure so the 1h auto-pause can arm, even
+        // though the turn returned an honest report rather than throwing.
+        const madeProgress = scheduledTurnMadeProgress(records);
+        scheduledTurnProgress.set(sessionId, { madeProgress, at: Date.now() });
+        if (!madeProgress) {
+          console.warn(
+            `[schedule-progress] session=${sessionId} NO real external progress ` +
+              `(writes attempted, all failed) → counts as a failure for auto-pause`,
+          );
+        }
       }
     } catch (e) {
       console.warn(
@@ -5739,7 +5791,13 @@ async function handleChatSendInner(
     // → computed CLOSE. The model cannot skip VERIFY or self-declare completion — this is what
     // keeps the workflow intact on weak/edge models. Reaching this point = fresh turn (pending
     // resume paths returned earlier).
-    if (planLoopEnabled() && signalBus.intentDecision?.route === 'plan') {
+    // Scheduled/autonomous turns must NOT enter the mechanism loop: it owns the whole turn and returns
+    // early, bypassing the legacy pipeline's schedule safety net (cross-turn-reflection, the credential/
+    // heartbeat deliverable teaching, plan_knowledge cookbook, in-turn failure throttles). The loop is
+    // for the USER-DRIVEN registration-style task; recurring heartbeats belong to the legacy path that
+    // already handles them (prod: the loop hijacked scheduled turns and defanged the auto-pause breaker).
+    const isScheduledTurn = sessionId.startsWith('system:scheduled:');
+    if (!isScheduledTurn && planLoopEnabled() && signalBus.intentDecision?.route === 'plan') {
       const loopGuideUrl = userMessage.match(/https?:\/\/[^\s,;:'"<>()`，。；：、]+/)?.[0]?.replace(/[.,;:!?]+$/, '');
       if (loopGuideUrl) {
         console.log(`[plan-loop] session=${sessionId} entering mechanism loop (guide=${loopGuideUrl})`);
