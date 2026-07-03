@@ -225,3 +225,42 @@ test('messageIsSelfContainedGoal: long enough to stand alone vs short context-de
   assert.equal(messageIsSelfContainedGoal('调研深度不够，重做'), false, 'references prior topic, not a goal');
   assert.equal(messageIsSelfContainedGoal('深入点'), false);
 });
+
+// ── Cleanup/cancel deterministic override (prod: "清除mycox记忆定时技能" mis-routed to plan/deep_explore) ──
+import {
+  looksLikeCleanupIntent,
+  directRouteWantsFast,
+  classifyIntent as _classifyIntent,
+} from '../src/intent_router.js';
+
+test('looksLikeCleanupIntent: pure delete/cancel commands → true', () => {
+  assert.equal(looksLikeCleanupIntent('清除mycox记忆、定时和技能'), true);
+  assert.equal(looksLikeCleanupIntent('清除mycox相关的记忆和技能'), true);
+  assert.equal(looksLikeCleanupIntent('清除所有定时'), true);
+  assert.equal(looksLikeCleanupIntent('取消 mycox 的定时任务'), true);
+  assert.equal(looksLikeCleanupIntent('delete all mycox skills and schedules'), true);
+});
+
+test('looksLikeCleanupIntent: real tasks that mention cleanup → false', () => {
+  assert.equal(looksLikeCleanupIntent('清除旧配置然后重新部署服务'), false); // has 部署/deploy
+  assert.equal(looksLikeCleanupIntent('注册 mycox 并设置定时心跳'), false); // 注册/register
+  assert.equal(looksLikeCleanupIntent('研究一下哥德巴赫猜想'), false); // no cleanup verb/target
+  assert.equal(looksLikeCleanupIntent(''), false);
+});
+
+test('cleanup override routes direct with confidence 1 (no aux call)', async () => {
+  let auxCalled = false;
+  const dec = await _classifyIntent('清除mycox记忆、定时和技能', {
+    call: async () => { auxCalled = true; return '{"route":"plan","confidence":0.9}'; },
+  });
+  assert.equal(dec?.route, 'direct');
+  assert.equal(dec?.confidence, 1);
+  assert.equal(auxCalled, false, 'aux must be skipped for a cleanup command');
+});
+
+test('directRouteWantsFast: confident direct only', () => {
+  assert.equal(directRouteWantsFast({ route: 'direct', confidence: 1 } as never), true);
+  assert.equal(directRouteWantsFast({ route: 'direct', confidence: 0.5 } as never), false);
+  assert.equal(directRouteWantsFast({ route: 'plan', confidence: 1 } as never), false);
+  assert.equal(directRouteWantsFast(null), false);
+});

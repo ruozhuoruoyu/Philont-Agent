@@ -115,6 +115,32 @@ export function parseIntentDecision(raw: string): IntentDecision | null {
   return { route, domain, confidence, reason };
 }
 
+// ── Deterministic cleanup/cancel override (mechanism, not aux) ─────────────────────────────────────
+//
+// "清除/删除/取消/停止 X" is a direct execution instruction, not a task to PLAN or a question to
+// EXPLORE. Field evidence: the aux model routed the SAME cleanup phrasing three different ways
+// ("清除所有定时"→direct, "清除mycox记忆、定时和技能"→plan, "清除mycox相关的记忆和技能"→deep_explore),
+// and the plan/deep_explore routes dragged a trivial deletion through placeholder-plan → gate →
+// auth_pending / deep_explore, so the user could not cleanly cancel anything. A cleanup command must
+// deterministically route to `direct` regardless of the aux model.
+const CLEANUP_VERB_RE =
+  /清除|清空|清理|删除|删掉|移除|取消|停止|关闭|注销|禁用|卸载|\bforget\b|\bdelete\b|\bclear\b|\bcancel\b|\bstop\b|\bremove\b|\bdisable\b|\buninstall\b|\bpurge\b|\bwipe\b/i;
+const CLEANUP_TARGET_RE =
+  /记忆|技能|定时|任务|提醒|计划|凭证|密钥|事实|笔记|schedul|reminder|memor|skill|credential|secret|fact|note|task|cron|plan/i;
+// A message that also asks to BUILD/REGISTER/… is a real task that happens to mention cleanup — not a
+// pure cleanup command; let the normal router handle it.
+const BUILD_VERB_RE =
+  /注册|部署|实现|搭建|构建|集成|配置|迁移|重构|设计|开发|\bregister\b|\bdeploy\b|\bimplement\b|\bbuild\b|\bintegrate\b|\bconfigure\b|\bmigrate\b|\brefactor\b|\bdesign\b|\bdevelop\b/i;
+
+/** A pure, direct-execution cleanup/cancel command (delete/clear/cancel/stop a memory/skill/schedule/…). */
+export function looksLikeCleanupIntent(userMessage: string): boolean {
+  const s = (userMessage ?? '').trim();
+  if (!s || s.length > 120) return false; // a long message is likely a real task, not a bare cleanup
+  if (!CLEANUP_VERB_RE.test(s) || !CLEANUP_TARGET_RE.test(s)) return false;
+  if (BUILD_VERB_RE.test(s)) return false; // "clear X then build Y" → real task
+  return true;
+}
+
 export interface ClassifyIntentDeps {
   /** Injectable aux caller (defaults to callAuxLLM) — lets tests run without a live model. */
   call?: (req: AuxLLMRequest) => Promise<string>;
@@ -131,6 +157,11 @@ export async function classifyIntent(
   deps: ClassifyIntentDeps = {},
 ): Promise<IntentDecision | null> {
   if (!intentRouterEnabled()) return null;
+  // Deterministic short-circuit: a pure cleanup/cancel command is direct execution — skip the aux
+  // call and never let it route to plan/deep_explore (which stall a trivial deletion).
+  if (looksLikeCleanupIntent(userMessage)) {
+    return { route: 'direct', confidence: 1, reason: 'cleanup/cancel — direct execution' };
+  }
   if (!shouldClassifyIntent(userMessage)) return null;
   const call = deps.call ?? callAuxLLM;
   if (deps.call === undefined && !isAuxLLMConfigured()) return null;
@@ -165,6 +196,16 @@ export function userSignaledDepth(msg: string): boolean {
 /** plan route with enough confidence → drive the existing slow→plan protocol (reuse, don't reinvent). */
 export function planRouteWantsSlow(dec: IntentDecision | null): boolean {
   return !!dec && dec.route === 'plan' && dec.confidence >= 0.6;
+}
+
+/**
+ * A confident `direct` route → stay fast, overriding the legacy keyword classifier's slow verdict.
+ * The keyword heuristic flags heavy words (记忆/技能/定时/…) as slow even for a bare "清除定时和技能"
+ * deletion; the router's explicit direct decision (esp. the confidence-1 cleanup short-circuit) is the
+ * authority and must not be dragged into the placeholder-plan protocol.
+ */
+export function directRouteWantsFast(dec: IntentDecision | null): boolean {
+  return !!dec && dec.route === 'direct' && dec.confidence >= 0.6;
 }
 
 // ── Force-START (mechanism, not prompt) ──────────────────────────────────────────────────────────

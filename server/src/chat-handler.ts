@@ -165,6 +165,7 @@ import {
 import {
   classifyIntent,
   planRouteWantsSlow,
+  directRouteWantsFast,
   buildDeepExploreNudge,
   userSignaledDepth,
   deepExploreForceStartEnabled,
@@ -4585,7 +4586,10 @@ export async function handleChatSend(
     // keywords forced slow→plan_draft, hijacking the reasoning task into the build pipeline). Reasoning tasks
     // go to deep_explore (via the nudge below); only plan/direct routes (or no router) keep the heuristic.
     const intentSaysExplore = intentDecision?.route === 'deep_explore';
-    if (!intentSaysExplore && (cls.isSlow || planRouteWantsSlow(intentDecision))) {
+    // A confident `direct` route (esp. the cleanup/cancel short-circuit) overrides the keyword
+    // classifier's slow verdict — a bare deletion must not be dragged into the placeholder-plan path.
+    const intentSaysDirect = directRouteWantsFast(intentDecision);
+    if (!intentSaysExplore && !intentSaysDirect && (cls.isSlow || planRouteWantsSlow(intentDecision))) {
       taskModeStore.set(
         sessionId,
         'slow',
