@@ -41,3 +41,17 @@ export function intentSimilarity(a: string, b: string): number {
 export function isDuplicateRoutine(newText: string, existingText: string, threshold = 0.7): boolean {
   return intentSimilarity(newText, existingText) >= threshold;
 }
+
+/**
+ * Per-project cap on recurring routines. Intent dedup only catches paraphrases; prod spawned ~8
+ * mycox heartbeats under genuinely different names/prompts — a horizontal swarm that per-schedule
+ * auto-pause cannot stop. Given the existing enabled routines for a project, return the OLDEST ones
+ * to disable so that, once ONE new schedule is added, the project holds at most `cap` (i.e. keep the
+ * cap-1 newest existing + the new one).
+ */
+export function schedulesOverCap<T extends { createdAt: number }>(live: readonly T[], cap: number): T[] {
+  const keep = Math.max(1, cap) - 1;
+  const sorted = [...live].sort((a, b) => a.createdAt - b.createdAt);
+  const excess = sorted.length - keep;
+  return excess > 0 ? sorted.slice(0, excess) : [];
+}

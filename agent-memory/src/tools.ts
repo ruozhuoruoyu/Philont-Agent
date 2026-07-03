@@ -15,7 +15,7 @@ import type { ScheduleStore } from './schedules.js';
 import type { RawStore } from './raw.js';
 import type { Fact, FactKind, ScheduleActionType } from './types.js';
 import { CONVENTIONAL_NAMESPACES } from './types.js';
-import { isDuplicateRoutine, scheduleIntentText } from './schedule_dedup.js';
+import { isDuplicateRoutine, scheduleIntentText, schedulesOverCap } from './schedule_dedup.js';
 
 // ── 2026-05-14: auth prefix mis-storage detector (common weak LLM mistake) ──────────────
 // LLM stores "Bearer xxx" / "Authorization: ..." as the value; when later referenced it concatenates to
@@ -761,11 +761,13 @@ export function createMemoryTools(
           // heartbeats under different names both fired and overlapped). Replace it too. Only for
           // recurring autonomous_turn schedules with a project — one-time prompts are never deduped.
           const dedupedByIntent: string[] = [];
+          const cappedOut: string[] = [];
           if (projectClean && actionType === 'autonomous_turn' && cronExpr) {
-            const replacedIds = new Set(replaced.map((r) => r.id));
+            const disabledIds = new Set(replaced.map((r) => r.id));
+            // Intent dedup: replace a paraphrase of the same routine.
             const candidates = schedules.list({ enabledOnly: true }).filter(
               (s) =>
-                !replacedIds.has(s.id) &&
+                !disabledIds.has(s.id) &&
                 s.project === projectClean &&
                 s.actionType === 'autonomous_turn' &&
                 isDuplicateRoutine(message, scheduleIntentText(s.payload)),
@@ -773,6 +775,26 @@ export function createMemoryTools(
             for (const old of candidates) {
               schedules.setEnabled(old.id, false);
               dedupedByIntent.push(old.name);
+              disabledIds.add(old.id);
+            }
+            // Per-project cap: intent dedup only catches paraphrases, but prod spawned ~8 mycox
+            // heartbeats under genuinely different names/prompts — a horizontal swarm that
+            // per-schedule auto-pause cannot stop. Bound the count of enabled recurring routines
+            // per project: keep the newest (this new one + the cap-1 most recent), disable the
+            // oldest. PHILONT_SCHEDULE_PROJECT_CAP (default 3).
+            const cap = Math.max(1, Number(process.env.PHILONT_SCHEDULE_PROJECT_CAP) || 3);
+            const live = schedules
+              .list({ enabledOnly: true })
+              .filter(
+                (s) =>
+                  !disabledIds.has(s.id) &&
+                  s.project === projectClean &&
+                  s.actionType === 'autonomous_turn' &&
+                  !!s.cronExpr,
+              );
+            for (const old of schedulesOverCap(live, cap)) {
+              schedules.setEnabled(old.id, false);
+              cappedOut.push(old.name);
             }
           }
           // payload 形态依 action_type:
@@ -796,6 +818,9 @@ export function createMemoryTools(
             (replaced.length ? ` (replaced ${replaced.length} old task(s) with the same name)` : '') +
             (dedupedByIntent.length
               ? ` (replaced ${dedupedByIntent.length} same-project routine(s): ${dedupedByIntent.join(', ')})`
+              : '') +
+            (cappedOut.length
+              ? ` (disabled ${cappedOut.length} oldest routine(s) over the per-project cap: ${cappedOut.join(', ')})`
               : '');
 
           // 启发式警告:若 LLM 传了近期一次性 at 且 message 含"每/每隔",

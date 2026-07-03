@@ -9,6 +9,7 @@ import {
   intentSimilarity,
   isDuplicateRoutine,
   scheduleIntentText,
+  schedulesOverCap,
 } from '../src/schedule_dedup.js';
 
 const RUN = 'Run the MycoX check-in routine: 1) Read the feed via GET /api/posts?sort=hot&limit=15 2) vote 3) comment';
@@ -35,4 +36,17 @@ test('scheduleIntentText: autonomous_turn prompt vs prompt message', () => {
 test('empty intent never matches', () => {
   assert.equal(intentSimilarity('', RUN), 0);
   assert.equal(isDuplicateRoutine('', ''), false);
+});
+
+test('schedulesOverCap: keeps cap-1 newest, disables the oldest (the prod 8-swarm)', () => {
+  const mk = (name: string, createdAt: number) => ({ name, createdAt });
+  const swarm = [mk('a', 1), mk('b', 2), mk('c', 3), mk('d', 4), mk('e', 5)]; // 5 existing, adding 1 → 6
+  const disable = schedulesOverCap(swarm, 3).map((s) => s.name);
+  assert.deepEqual(disable, ['a', 'b', 'c']); // keep the 2 newest existing (d,e) + the new one = 3
+});
+
+test('schedulesOverCap: under cap disables nothing; cap=1 disables all existing', () => {
+  const mk = (name: string, createdAt: number) => ({ name, createdAt });
+  assert.deepEqual(schedulesOverCap([mk('a', 1), mk('b', 2)], 3), []); // 2 existing + new = 3 = cap
+  assert.deepEqual(schedulesOverCap([mk('a', 1), mk('b', 2)], 1).map((s) => s.name), ['a', 'b']);
 });
