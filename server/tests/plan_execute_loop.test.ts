@@ -101,7 +101,7 @@ function makeDeps(overrides: Partial<PlanLoopDeps> & { drafts: string[]; execToo
         if (!hasToolResult) {
           return {
             type: 'toolCalls',
-            calls: [{ id: 't1', name: 'http', input: { url: 'https://x/api', method: 'POST' } }],
+            calls: [{ id: 't1', name: 'http', input: { url: 'https://x/api/register', method: 'POST' } }],
             assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'http', input: {} }] as never },
           };
         }
@@ -301,7 +301,7 @@ test('loop e2e: action deliverable with ZERO action attempts → FAILED (the dod
   const r = await runPlanExecuteLoop('register then post and set heartbeat', ['https://g/guide.md'], deps);
   const post = r.outcomes.find((o) => o.id === 'publish-post');
   assert.equal(post?.status, 'failed', 'zero action attempts must not pass an action deliverable');
-  assert.match(post!.evidence, /requires an external action/);
+  assert.match(post!.evidence, /requires (an external action|a successful action matching)/);
 });
 
 test('loop e2e: heartbeat deliverable — memory write does NOT count; schedule_reminder ok DOES', async () => {

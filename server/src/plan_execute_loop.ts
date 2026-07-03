@@ -72,6 +72,15 @@ export const SCHEDULE_REQ_RE =
 /** Deliverables that require an EXTERNAL action (post/register/vote/… — an http write, not a read). */
 export const ACTION_REQ_RE =
   /\b(?:post|publish|register|sign\s*up|vote|comment|reply|submit|send|create|upload|delete)\b|发帖|发布|注册|投票|评论|回复|提交|发送|创建|上传|删除/i;
+/** Deliverable-keyword → endpoint-path fragment the successful action must match (prod: the
+ * comment deliverable passed off 2 ok actions that were NOT the comment POST — nothing on the site). */
+export const ENDPOINT_HINTS: ReadonlyArray<[RegExp, RegExp]> = [
+  // register/comment/vote before post; the post keyword must not match the bare HTTP verb ("POST /api/…").
+  [/\bregister\b|sign\s*up|注册/i, /register|signup/i],
+  [/\bcomment\b|评论|\breply\b|回复/i, /comment|reply/i],
+  [/\bvote\b|投票/i, /vote/i],
+  [/\bpublish\b|发帖|发布|\bpost\b(?!\s*\/)/i, /post/i],
+];
 /** Tools whose success proves a schedule-type deliverable. */
 export const SCHEDULE_TOOLS: ReadonlySet<string> = new Set(['schedule_reminder', 'create_calendar_event']);
 
@@ -474,7 +483,7 @@ export async function runPlanExecuteLoop(
       break;
     }
     deps.onStatus?.(`executing: ${step.id}`);
-    const result = await runMiniAgentLoop({
+    const runStep = (extraDirective: string) => runMiniAgentLoop({
       systemPrompt:
         'You are executing ONE step of a verified plan. Complete it with REAL tool calls and report ' +
         'plainly what the tools returned. Do not claim success without a successful tool call. ' +
@@ -483,7 +492,8 @@ export async function runPlanExecuteLoop(
         `# Step\n${step.description}\n\n# Overall task (context)\n${task}\n\n` +
         (stepNotes.length > 0 ? `# Already completed steps (do NOT redo)\n${stepNotes.join('\n')}\n\n` : '') +
         (rulesBlock ? `# Guide constraints (OBEY these; they are NOT tasks)\n${rulesBlock}\n\n` : '') +
-        `# Guide excerpt (authoritative)\n${guideText.slice(0, 12_000)}`,
+        `# Guide excerpt (authoritative)\n${guideText.slice(0, 12_000)}` +
+        extraDirective,
       llm: deps.llm,
       toolDefs: deps.toolDefs,
       toolRunner: deps.toolRunner,
@@ -495,23 +505,39 @@ export async function runPlanExecuteLoop(
       // most 4 min, and the loop moves on to the next step / the honest report.
       abortSignal: budgetSignal(4 * 60_000),
     });
+    const isActionCall = (c: { name: string; input: Record<string, unknown> }): boolean => {
+      const cls = deps.classifyCall?.(c.name, c.input);
+      if (cls?.capability !== undefined) {
+        return (cls.capability === 'write' || cls.capability === 'execute') && cls.domain !== 'self';
+      }
+      return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
+    };
+    let result = await runStep('');
+    // Forced retry (mechanism, not model discipline): the step covers an action/schedule deliverable
+    // yet made ZERO relevant attempts ("read and hand in") — re-run ONCE with a hard directive. Prod:
+    // publish-post and heartbeat ended with attempted 0 even after imperative wording + credentials.
+    const coverTexts = step.covers.map(
+      (id) => `${plan!.deliverables.find((x) => x.id === id)?.description ?? ''} ${step.description}`,
+    );
+    const needsSched = coverTexts.some((t) => SCHEDULE_REQ_RE.test(t));
+    const needsAct = coverTexts.some((t) => ACTION_REQ_RE.test(t));
+    const attemptedSched = () => result.toolCallHistory.some((c) => SCHEDULE_TOOLS.has(c.name));
+    const attemptedAct = () => result.toolCallHistory.some(isActionCall);
+    if (((needsSched && !attemptedSched()) || (needsAct && !needsSched && !attemptedAct())) && timeLeft() > 90_000) {
+      deps.log(`[plan-loop] EXECUTE ${step.id}: zero relevant attempts for an action/schedule deliverable — forced retry`);
+      result = await runStep(
+        `\n\n# MANDATORY — your previous run made ZERO attempts at the required ${needsSched ? 'schedule call' : 'action'}.` +
+        `\nIn THIS run you MUST call the concrete tool (${needsSched ? 'schedule_reminder' : 'http POST with the real endpoint and body'}) BEFORE finishing.` +
+        `\nReading or explaining is NOT completing. If the call fails, report the failure — do not skip it.`,
+      );
+    }
     const okCalls = result.toolCallHistory.filter((c) => c.ok);
     // Evidence criterion (2026-07-02 hardened): a step that ATTEMPTED any ACTION call (write/execute
     // capability — http POST/PUT/PATCH/DELETE, writeFile, shell, …) is done only if at least one
     // action SUCCEEDED. Ok reads must not mask a failed action: prod reported "publish a post" ✅
     // off 11 ok reads while every POST /api/posts failed — the user checked reality and no post
     // existed. Pure-read steps (fetch/read/verify-by-reading) still pass on ok reads.
-    // EXTERNAL action = write/execute capability OUTSIDE the self/memory domain. Prod: a heartbeat
-    // step passed with actions=1/1 where the one "action" was a memory write (store_fact) — the
-    // schedule was never created. Memory writes are bookkeeping, not task actions.
-    const isAction = (c: { name: string; input: Record<string, unknown> }): boolean => {
-      const cls = deps.classifyCall?.(c.name, c.input);
-      if (cls?.capability !== undefined) {
-        return (cls.capability === 'write' || cls.capability === 'execute') && cls.domain !== 'self';
-      }
-      // No classifier (tests / bare callers): http with a write method is the reliable fallback.
-      return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
-    };
+    const isAction = isActionCall;
     const describeCall = (c: { name: string; input: Record<string, unknown> }): string => {
       if (c.name === 'http') {
         const method = String(c.input.method ?? 'GET').toUpperCase();
@@ -558,10 +584,17 @@ export async function runPlanExecuteLoop(
         dOk = !!hit && !result.error;
         dEvidence = hit ? hit.name : 'requires a schedule tool (schedule_reminder) — no successful call';
       } else if (ACTION_REQ_RE.test(dText)) {
-        dOk = okActions.length > 0 && !result.error;
+        // Endpoint matching: the successful action must be THE one the deliverable names, not any write.
+        const hint = ENDPOINT_HINTS.find(([k]) => k.test(dText))?.[1];
+        const matched = hint
+          ? okActions.filter((c) => hint.test(`${String((c.input as Record<string, unknown>).url ?? '')} ${c.name}`))
+          : okActions;
+        dOk = matched.length > 0 && !result.error;
         dEvidence = dOk
-          ? okActions.map(describeCall).join(', ').slice(0, 120)
-          : `requires an external action (e.g. http POST) — attempted ${actionAttempts.length}, succeeded 0`;
+          ? matched.map(describeCall).join(', ').slice(0, 120)
+          : hint
+            ? `requires a successful action matching ${String(hint)} (e.g. http POST to that endpoint) — none did`
+            : `requires an external action (e.g. http POST) — attempted ${actionAttempts.length}, succeeded 0`;
       } else {
         dOk = stepSucceeded;
         dEvidence = evidence;
