@@ -451,7 +451,15 @@ export async function runPlanExecuteLoop(
       for (const item of adopt) {
         if (existing.has(item.id)) continue;
         plan.deliverables.push({ id: item.id, description: item.text });
-        plan.steps.push({ id: `fulfill-${item.id}`.slice(0, 48), description: `DO IT NOW — this is an action to PERFORM, not text to read: ${item.text}. Use the concrete tool (http POST / schedule_reminder) and report what it returned.`, covers: [item.id] });
+        // Only give the aggressive "DO IT NOW — http POST" imperative to items that genuinely name
+        // an external action or schedule. Prod: a guide SECTION HEADING ("MycoX Agent Guide — Start
+        // at Part 0: read SOUL.md…") got adopted and the imperative made the model re-POST register,
+        // burning the invite code (409 "already used"). Structural/read items get a neutral step.
+        const actionable = ACTION_REQ_RE.test(item.text) || SCHEDULE_REQ_RE.test(item.text);
+        const desc = actionable
+          ? `DO IT NOW — this is an action to PERFORM, not text to read: ${item.text}. Use the concrete tool (http POST / schedule_reminder) and report what it returned.`
+          : `Address this guide requirement: ${item.text}. Only call a tool if it genuinely requires one — do NOT register/post/vote unless this item explicitly says so.`;
+        plan.steps.push({ id: `fulfill-${item.id}`.slice(0, 48), description: desc, covers: [item.id] });
       }
       const adopted = new Set(adopt.map((a) => a.text));
       unresolvedGaps = unresolvedGaps.filter((g) => !adopted.has(g));
