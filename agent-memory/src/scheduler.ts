@@ -41,11 +41,23 @@ export function startScheduler(
   });
 
   let stopped = false;
+  // Inflight guard: ticks fire every intervalMs via `void tick()` with no await between them, and
+  // markRun only advances next_run_at AFTER onFire resolves. A slow onFire (prod: a 6-10 min mycox
+  // heartbeat turn) therefore stays "due" and gets re-fired by every subsequent tick → overlapping
+  // concurrent runs of the SAME schedule (the avalanche). Skip a schedule whose previous run has not
+  // finished; it will be reconsidered once its finally-block clears the flag and advances next_run_at.
+  const inflight = new Set<string>();
 
   async function tick(): Promise<number> {
     if (stopped) return 0;
     const due = store.dueBefore(now());
+    let fired = 0;
     for (const schedule of due) {
+      if (inflight.has(schedule.id)) {
+        console.warn(`[scheduler] task '${schedule.name}' still running — skipping this fire (no overlap)`);
+        continue;
+      }
+      inflight.add(schedule.id);
       try {
         await onFire(schedule);
       } catch (err) {
@@ -53,9 +65,11 @@ export function startScheduler(
       } finally {
         // markRun regardless of success/failure: prevent the same task from repeatedly failing and blocking the schedule
         store.markRun(schedule.id, now());
+        inflight.delete(schedule.id);
       }
+      fired++;
     }
-    return due.length;
+    return fired;
   }
 
   const timer = setInterval(() => {

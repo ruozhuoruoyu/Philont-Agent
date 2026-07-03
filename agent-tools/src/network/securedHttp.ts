@@ -18,6 +18,7 @@
 
 import type { Tool, SecretStore } from '@agent/policy';
 import { createInjectingFetch, redactOutput } from '@agent/policy';
+import { credentialCaptureEnabled, extractCapturableCredential } from './credential_capture.js';
 
 export interface SecuredHttpOptions {
   /** Whitelist of secret IDs allowed for injection; if not provided, all secrets in the store are allowed */
@@ -173,6 +174,7 @@ export function createSecuredHttpTool(
       try {
         const response = await injectingFetch(url, { method, headers, body });
         let text = await response.text();
+        const rawText = text; // pre-redaction copy (mechanism-layer credential capture reads this)
 
         if (redactResponse) {
           text = redactOutput(text);
@@ -197,6 +199,31 @@ export function createSecuredHttpTool(
             output: text,
             error: richError,
           };
+        }
+
+        // Mechanism-layer credential capture: a successful auth/register response's credential is
+        // persisted to the SecretStore under a service-derived id ({<service>-api-key}) so later
+        // authenticated calls resolve it — critical on autonomous/scheduled turns where the model
+        // cannot call saveCredential (blacklisted). Never breaks the http call.
+        if (credentialCaptureEnabled()) {
+          try {
+            const cap = extractCapturableCredential(url, method, rawText);
+            if (cap) {
+              const stored: string[] = [];
+              for (const id of cap.ids) {
+                if (store.get(id) !== cap.value) store.set(id, cap.value);
+                stored.push(id);
+              }
+              let where = '';
+              try { const u = new URL(url); where = `${u.host}${u.pathname}`; } catch { where = '(url)'; }
+              console.warn(
+                `[http-cred-capture] ${method} ${where} → stored credential as ` +
+                  `{${stored.join('}, {')}} (field=${cap.field}); value not logged`,
+              );
+            }
+          } catch {
+            /* capture must never break the request */
+          }
         }
 
         return {
