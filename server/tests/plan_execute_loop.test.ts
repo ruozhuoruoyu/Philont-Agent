@@ -395,3 +395,20 @@ test('buildEndpointRegistry: authoritative block names the host + endpoints; emp
   assert.match(reg, /do NOT invent/i);
   assert.equal(buildEndpointRegistry({ hosts: [], endpoints: [] }), '');
 });
+
+test('describeAuthCall: secret-free summary of register/verify calls; ignores non-auth', async () => {
+  const { describeAuthCall } = await import('../src/plan_execute_loop.js');
+  const reg = describeAuthCall(
+    { url: 'https://mycox.ai/api/auth/register-agent', method: 'POST' },
+    { ok: true, output: '{"actor_id":"a","api_key":"mycox_secret_value_never_logged"}' },
+  );
+  assert.match(reg!, /POST \/api\/auth\/register-agent → ok=true/);
+  assert.match(reg!, /credInResp=true/);
+  assert.ok(!/mycox_secret_value/.test(reg!), 'must not leak the secret value');
+  const conflict = describeAuthCall(
+    { url: 'https://mycox.ai/api/auth/register-agent', method: 'POST' },
+    { ok: false, error: 'HTTP 409 ... {"error":{"code":"CONFLICT","message":"Invite code already used"}}' },
+  );
+  assert.match(conflict!, /ok=false code=CONFLICT credInResp=false/);
+  assert.equal(describeAuthCall({ url: 'https://mycox.ai/api/posts', method: 'GET' }, { ok: true, output: '[]' }), null);
+});

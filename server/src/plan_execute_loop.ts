@@ -150,6 +150,30 @@ export function buildEndpointRegistry(api: GuideApi): string {
   return lines.join('\n');
 }
 
+/**
+ * Secret-free diagnostic for auth/register/verify http calls. Returns a one-line summary (method,
+ * path, ok, error code, whether the RESPONSE carried a credential field) so we can see WHY
+ * registration does not land — prod: register keeps ending FAILED with no [http-cred-capture] and
+ * verify FAILED, and the raw call never appears in the pasted logs. Never emits a secret value.
+ */
+export function describeAuthCall(
+  input: Record<string, unknown>,
+  res: { ok: boolean; output?: string; error?: string },
+): string | null {
+  let pathname = '';
+  try {
+    pathname = new URL(String(input.url ?? '')).pathname;
+  } catch {
+    return null;
+  }
+  if (!/\/(?:auth|register|signup|login|verify|token|me)\b/i.test(pathname)) return null;
+  const method = String(input.method ?? 'GET').toUpperCase();
+  const body = `${res.output ?? ''}${res.error ?? ''}`;
+  const credInResp = /"(?:api_key|apiKey|access_token|accessToken|token|secret)"\s*:/.test(body);
+  const errCode = body.match(/"code"\s*:\s*"([A-Za-z_]+)"/)?.[1];
+  return `${method} ${pathname} → ok=${res.ok}${errCode ? ` code=${errCode}` : ''} credInResp=${credInResp}`;
+}
+
 /** Host-allowlist guard: if this http call targets a host the guide never documents, return a
  * corrective error (do NOT execute); otherwise null (let it run). Exact host match — the whole bug
  * is a wrong SUBDOMAIN (api.mycox.ai vs mycox.ai), so subdomains are NOT auto-allowed. */
@@ -469,7 +493,12 @@ export async function runPlanExecuteLoop(
       deps.log(`[plan-loop] endpoint-guard BLOCKED ${name} → ${String(input.url ?? '').slice(0, 80)}`);
       return { ok: false, output: '', error: rej.error };
     }
-    return deps.toolRunner(name, input);
+    const res = await deps.toolRunner(name, input);
+    if (name === 'http') {
+      const diag = describeAuthCall(input, res);
+      if (diag) deps.log(`[plan-loop] auth-call: ${diag}`);
+    }
+    return res;
   };
   const specAll = extractSpecItems(guideText);
   // Rules are constraints, not work: they never enter coverage/adoption; they ARE injected into
