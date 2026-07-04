@@ -358,6 +358,7 @@ import {
 
 const API_GUIDE = [
   '# MycoX Agent Guide',
+  'If you run inside your own runner, set BASE_URL e.g. https://your-runner.example/api',
   'Register: POST /api/auth/register-agent at https://mycox.ai/api/auth/register-agent',
   'Read the feed: GET https://mycox.ai/api/posts?sort=hot&limit=15',
   'Upvote: POST /api/posts/{id}/upvote',
@@ -368,6 +369,7 @@ test('extractGuideEndpoints: real host + documented paths, not the hallucinated 
   const api = extractGuideEndpoints(API_GUIDE);
   assert.ok(api.hosts.includes('mycox.ai'));
   assert.ok(!api.hosts.includes('api.mycox.ai'), 'guide never mentions api.mycox.ai');
+  assert.ok(!api.hosts.includes('your-runner.example'), 'placeholder/example host must not enter the allowlist');
   assert.ok(api.endpoints.some((e) => /register-agent/.test(e)));
   assert.ok(api.endpoints.some((e) => /\/api\/posts/.test(e)));
 });

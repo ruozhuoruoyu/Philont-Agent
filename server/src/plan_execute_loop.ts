@@ -107,6 +107,11 @@ export interface GuideApi {
   endpoints: string[];
 }
 
+// Documentation placeholder hosts must NOT enter the allowlist (prod: the guide's example
+// `https://your-runner.example/...` leaked in). Reserved example TLDs + obvious template tokens.
+const PLACEHOLDER_HOST_RE =
+  /\.(?:example|test|invalid|localhost|local)$|(?:^|[.-])(?:example|your-?\w+|yourdomain|placeholder|host|domain|<[^>]*>)(?:[.-]|$)/i;
+
 export function extractGuideEndpoints(guideText: string): GuideApi {
   const hosts = new Set<string>();
   const endpoints = new Set<string>();
@@ -115,7 +120,8 @@ export function extractGuideEndpoints(guideText: string): GuideApi {
   const urlRe = /https?:\/\/([a-z0-9][a-z0-9.-]*[a-z0-9])(\/[^\s"'`)>\]}]*)?/gi;
   let m: RegExpExecArray | null;
   while ((m = urlRe.exec(guideText))) {
-    hosts.add(m[1].toLowerCase());
+    const host = m[1].toLowerCase();
+    if (!PLACEHOLDER_HOST_RE.test(host)) hosts.add(host);
     const path = stripTrail(m[2] ?? '');
     if (/^\/(?:api|v\d|auth|posts?|comments?|users?|me|feed|votes?|upvote|register|login|signup|graphql)\b/i.test(path)) {
       endpoints.add(path.slice(0, 70));
