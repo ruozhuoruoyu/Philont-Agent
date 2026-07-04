@@ -347,3 +347,49 @@ test('extractSpecItems: rules classified, preconditions/meta skipped, actionable
   assert.ok(!items.some((i) => /human user must/.test(i.text)), 'precondition for humans skipped');
   assert.ok(!items.some((i) => /guide covers/.test(i.text)), 'meta line skipped');
 });
+
+// ── Endpoint anchor (weak-model guarantee): prod 46× GET https://api.mycox.ai/v1/me while the guide
+//    documents mycox.ai/api/... The mechanism must surface the real endpoints and block wrong hosts. ──
+import {
+  extractGuideEndpoints,
+  buildEndpointRegistry,
+  endpointGuardReject,
+} from '../src/plan_execute_loop.js';
+
+const API_GUIDE = [
+  '# MycoX Agent Guide',
+  'Register: POST /api/auth/register-agent at https://mycox.ai/api/auth/register-agent',
+  'Read the feed: GET https://mycox.ai/api/posts?sort=hot&limit=15',
+  'Upvote: POST /api/posts/{id}/upvote',
+  'Read SOUL.md at https://mycox.ai/mycox/soul.md first.',
+].join('\n');
+
+test('extractGuideEndpoints: real host + documented paths, not the hallucinated one', () => {
+  const api = extractGuideEndpoints(API_GUIDE);
+  assert.ok(api.hosts.includes('mycox.ai'));
+  assert.ok(!api.hosts.includes('api.mycox.ai'), 'guide never mentions api.mycox.ai');
+  assert.ok(api.endpoints.some((e) => /register-agent/.test(e)));
+  assert.ok(api.endpoints.some((e) => /\/api\/posts/.test(e)));
+});
+
+test('endpointGuardReject: blocks the hallucinated host, allows the documented one', () => {
+  const api = extractGuideEndpoints(API_GUIDE);
+  const blocked = endpointGuardReject('http', { url: 'https://api.mycox.ai/v1/me', method: 'GET' }, api);
+  assert.ok(blocked, 'api.mycox.ai must be refused');
+  assert.match(blocked!.error, /not documented|Allowed host/i);
+  assert.equal(endpointGuardReject('http', { url: 'https://mycox.ai/api/posts', method: 'GET' }, api), null);
+  assert.equal(endpointGuardReject('http', { url: 'https://mycox.ai/api/auth/register-agent', method: 'POST' }, api), null);
+});
+
+test('endpointGuardReject: no hosts extracted → never blocks (permissive fallback)', () => {
+  assert.equal(endpointGuardReject('http', { url: 'https://anything.com/x' }, { hosts: [], endpoints: [] }), null);
+  // non-http tools are never guarded
+  assert.equal(endpointGuardReject('writeFile', { path: 'x' }, { hosts: ['mycox.ai'], endpoints: [] }), null);
+});
+
+test('buildEndpointRegistry: authoritative block names the host + endpoints; empty when nothing found', () => {
+  const reg = buildEndpointRegistry(extractGuideEndpoints(API_GUIDE));
+  assert.match(reg, /Allowed host\(s\): mycox\.ai/);
+  assert.match(reg, /do NOT invent/i);
+  assert.equal(buildEndpointRegistry({ hosts: [], endpoints: [] }), '');
+});

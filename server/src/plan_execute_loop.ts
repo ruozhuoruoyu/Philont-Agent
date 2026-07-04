@@ -88,6 +88,87 @@ export const ENDPOINT_HINTS: ReadonlyArray<[RegExp, RegExp]> = [
 /** Tools whose success proves a schedule-type deliverable. */
 export const SCHEDULE_TOOLS: ReadonlySet<string> = new Set(['schedule_reminder', 'create_calendar_event']);
 
+// ── Guide endpoint anchor (weak-model guarantee, universal) ─────────────────
+// philont runs WEAK models. A weak model executing a step invents plausible-looking endpoints
+// instead of using the guide's — prod: 46× `GET https://api.mycox.ai/v1/me` while the guide only
+// documents `mycox.ai/api/...`. The model's own knowledge lacks the real endpoint, so no prompt
+// alone fixes it. The mechanism (a) surfaces the documented API surface in every EXECUTE step and
+// (b) HARD-BLOCKS http to any host the guide never mentions, with a corrective message. Derived
+// purely from whatever URLs/paths the spec itself contains — nothing is hard-coded per service.
+export function planEndpointGuardEnabled(): boolean {
+  const v = (process.env.PHILONT_PLAN_ENDPOINT_GUARD ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+export interface GuideApi {
+  /** Hostnames the guide references (the ONLY hosts an http call may target). */
+  hosts: string[];
+  /** Documented endpoint paths / "METHOD /path" strings, for the registry + corrective message. */
+  endpoints: string[];
+}
+
+export function extractGuideEndpoints(guideText: string): GuideApi {
+  const hosts = new Set<string>();
+  const endpoints = new Set<string>();
+  const stripTrail = (s: string) => s.replace(/[.,;:)\]}'"`]+$/, '');
+  // Full URLs → host (+ path when it looks like an API path).
+  const urlRe = /https?:\/\/([a-z0-9][a-z0-9.-]*[a-z0-9])(\/[^\s"'`)>\]}]*)?/gi;
+  let m: RegExpExecArray | null;
+  while ((m = urlRe.exec(guideText))) {
+    hosts.add(m[1].toLowerCase());
+    const path = stripTrail(m[2] ?? '');
+    if (/^\/(?:api|v\d|auth|posts?|comments?|users?|me|feed|votes?|upvote|register|login|signup|graphql)\b/i.test(path)) {
+      endpoints.add(path.slice(0, 70));
+    }
+  }
+  // "METHOD /path" documented calls (e.g. "POST /api/auth/register-agent").
+  const mp = /\b(GET|POST|PUT|PATCH|DELETE)\s+(\/[A-Za-z0-9_\-/{}:.?=&]+)/g;
+  while ((m = mp.exec(guideText))) endpoints.add(`${m[1].toUpperCase()} ${stripTrail(m[2]).slice(0, 70)}`);
+  // Bare /api/... paths mentioned inline.
+  const bare = /(?<![\w/])(\/api\/[A-Za-z0-9_\-/{}:.?=&]+)/g;
+  while ((m = bare.exec(guideText))) endpoints.add(stripTrail(m[1]).slice(0, 70));
+  return { hosts: [...hosts], endpoints: [...endpoints].slice(0, 30) };
+}
+
+/** The authoritative endpoint block injected into every EXECUTE step. '' when nothing was extracted. */
+export function buildEndpointRegistry(api: GuideApi): string {
+  if (api.hosts.length === 0 && api.endpoints.length === 0) return '';
+  const lines = ['# API ENDPOINTS (authoritative — use ONLY these; do NOT invent hosts or paths)'];
+  if (api.hosts.length) {
+    lines.push(
+      `Allowed host(s): ${api.hosts.join(', ')} — never target another host ` +
+        `(no api.* subdomain, no /v1/* unless it is listed below).`,
+    );
+  }
+  if (api.endpoints.length) lines.push('Documented endpoints:\n' + api.endpoints.map((e) => `- ${e}`).join('\n'));
+  return lines.join('\n');
+}
+
+/** Host-allowlist guard: if this http call targets a host the guide never documents, return a
+ * corrective error (do NOT execute); otherwise null (let it run). Exact host match — the whole bug
+ * is a wrong SUBDOMAIN (api.mycox.ai vs mycox.ai), so subdomains are NOT auto-allowed. */
+export function endpointGuardReject(
+  name: string,
+  input: Record<string, unknown>,
+  api: GuideApi,
+): { error: string } | null {
+  if (name !== 'http' || api.hosts.length === 0) return null;
+  let host = '';
+  try {
+    host = new URL(String(input.url ?? '')).host.toLowerCase();
+  } catch {
+    return null; // unparseable / relative URL → let the base runner surface its own error
+  }
+  if (!host || api.hosts.includes(host)) return null;
+  return {
+    error:
+      `Refusing http to host "${host}" — it is NOT documented by the guide. ` +
+      `Allowed host(s): ${api.hosts.join(', ')}. Do NOT invent a host or a /v1/* path; ` +
+      `use a documented endpoint` +
+      (api.endpoints.length ? ` (e.g. ${api.endpoints.slice(0, 6).join(' · ')}).` : '.'),
+  };
+}
+
 function slugify(s: string): string {
   return s
     .toLowerCase()
@@ -368,6 +449,22 @@ export async function runPlanExecuteLoop(
     return fail(`无法读取任务指引(${guideUrls.join(', ')})——网络抓取失败。任务未开始,请稍后重试或贴出指引内容。`);
   }
   const guideText = guideTexts.join('\n\n---\n\n').slice(0, 60_000);
+  // Endpoint anchor (weak-model guarantee): the documented API surface + a host allowlist guard.
+  const guideApi = planEndpointGuardEnabled() ? extractGuideEndpoints(guideText) : { hosts: [], endpoints: [] };
+  const endpointRegistry = buildEndpointRegistry(guideApi);
+  if (guideApi.hosts.length) {
+    deps.log(`[plan-loop] endpoint anchor: hosts=[${guideApi.hosts.join(',')}] endpoints=${guideApi.endpoints.length}`);
+  }
+  // Wrap the tool runner so a step's http call to an UNDOCUMENTED host is blocked with a correction
+  // instead of silently 404'ing on a hallucinated endpoint.
+  const stepToolRunner: PlanLoopDeps['toolRunner'] = async (name, input) => {
+    const rej = endpointGuardReject(name, input, guideApi);
+    if (rej) {
+      deps.log(`[plan-loop] endpoint-guard BLOCKED ${name} → ${String(input.url ?? '').slice(0, 80)}`);
+      return { ok: false, output: '', error: rej.error };
+    }
+    return deps.toolRunner(name, input);
+  };
   const specAll = extractSpecItems(guideText);
   // Rules are constraints, not work: they never enter coverage/adoption; they ARE injected into
   // every EXECUTE step prompt so the model obeys them while acting.
@@ -504,11 +601,12 @@ export async function runPlanExecuteLoop(
         `# Step\n${step.description}\n\n# Overall task (context)\n${task}\n\n` +
         (stepNotes.length > 0 ? `# Already completed steps (do NOT redo)\n${stepNotes.join('\n')}\n\n` : '') +
         (rulesBlock ? `# Guide constraints (OBEY these; they are NOT tasks)\n${rulesBlock}\n\n` : '') +
+        (endpointRegistry ? `${endpointRegistry}\n\n` : '') +
         `# Guide excerpt (authoritative)\n${guideText.slice(0, 12_000)}` +
         extraDirective,
       llm: deps.llm,
       toolDefs: deps.toolDefs,
-      toolRunner: deps.toolRunner,
+      toolRunner: stepToolRunner,
       maxIters: deps.maxItersPerStep ?? 8,
       toolBlacklist: deps.toolBlacklist,
       // Per-step cutoff at the remaining budget (min 10s) so one hung step (e.g. a 503-retry storm)
