@@ -2352,6 +2352,15 @@ interface PendingAuth {
    * and tool_result pairing can become misaligned due to timeline recall fluctuations → LLM 400.
    */
   inflightMessages: NativeMessage[];
+  /**
+   * Snapshot of this turn's tool ledger at suspend time. The resume ("ok") arrives as a NEW message
+   * → a fresh signalBus with an empty inTurnRecords, so same-turn honesty checks (e.g.
+   * skillDeleteSucceededThisTurn) would no longer see a forget_skill/write that already succeeded
+   * pre-pause and fire a FALSE "claim without call" (prod: forget_skill deleted, then deleteFile
+   * needed approval → resume → skill_forget_claim_without_call fired though the delete happened).
+   * Seeded back on resume so the continuation remembers what the pre-pause segment did.
+   */
+  priorInTurnRecords: InTurnToolRecord[];
   /** Suspend timestamp; used to expire a stale pending so a later natural-language message is not trapped in the auth flow. */
   ts: number;
 }
@@ -5267,6 +5276,13 @@ async function handleChatSendInner(
         { id: pending.toolCallId, name: pending.toolName, input: pending.input },
         ...pending.remainingCalls,
       ];
+      // Carry the pre-pause tool ledger into this resumed segment so same-turn honesty/verdict checks
+      // see what already succeeded before the auth pause (prevents a false skill_forget_claim_without_call
+      // after a real forget_skill that happened before the approval gate).
+      signalBus.inTurnRecords = [
+        ...(pending.priorInTurnRecords ?? []),
+        ...(signalBus.inTurnRecords ?? []),
+      ];
       return runToolLoop(
         sessionId, messages, grants, audit,
         resumeCalls,
@@ -6865,6 +6881,7 @@ async function runToolLoop(
         // K0: save the current messages array in full; on authorization resume use it directly without rebuilding,
         // to avoid tool_use / tool_result pairing mismatches.
         inflightMessages: [...messages],
+        priorInTurnRecords: [...(signalBus.inTurnRecords ?? [])],
         ts: Date.now(),
       });
 
@@ -8444,6 +8461,7 @@ async function runToolLoop(
           collectedResults: nextResults,
           iteration: i,
           inflightMessages: [...messages],
+          priorInTurnRecords: [...(signalBus.inTurnRecords ?? [])],
           ts: Date.now(),
         });
 
