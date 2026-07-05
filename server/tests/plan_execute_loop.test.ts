@@ -634,3 +634,46 @@ test('aux gap noise filter: rules/conditionals/optionals dropped, real gaps kept
     'real heartbeat gap survives (reported or adopted)',
   );
 });
+
+// ── ⑤ convergence: the loop drives the real plan object LIVE ──
+test('planTracker: create before EXECUTE, doing/done per step, close with statuses', async () => {
+  const calls: string[] = [];
+  let closedStatuses: Record<string, string> | null = null;
+  const deps = makeDeps({
+    drafts: [GOOD_DRAFT],
+    planTracker: {
+      create: (deliverables, steps) => {
+        calls.push(`create:${deliverables.length}d/${steps.length}s`);
+        return 'plan-live-1';
+      },
+      markStep: (planId, stepId, status) => { calls.push(`${stepId}=${status}`); },
+      close: (planId, success, summary, statuses) => {
+        calls.push(`close:${success}`);
+        closedStatuses = statuses;
+      },
+    },
+  });
+  const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.equal(r.outcome, 'completed');
+  assert.ok(calls[0].startsWith('create:'), 'plan created before any step');
+  assert.ok(calls.includes('s1=doing') && calls.includes('s1=done'), 'step lifecycle tracked');
+  assert.equal(calls[calls.length - 1], 'close:true', 'closed last with success');
+  assert.equal((closedStatuses as never as Record<string, string>)['register'], 'done');
+});
+
+test('planTracker: failed step marked blocked; close success=false on aborted outcome', async () => {
+  const marks: string[] = [];
+  const deps = makeDeps({
+    drafts: [GOOD_DRAFT],
+    execToolOk: false,
+    planTracker: {
+      create: () => 'plan-live-2',
+      markStep: (planId, stepId, status) => { marks.push(`${stepId}=${status}`); },
+      close: (planId, success) => { marks.push(`close:${success}`); },
+    },
+  });
+  const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.notEqual(r.outcome, 'completed');
+  assert.ok(marks.some((m) => m.endsWith('=blocked')), 'failed step marked blocked');
+  assert.equal(marks[marks.length - 1], 'close:false');
+});

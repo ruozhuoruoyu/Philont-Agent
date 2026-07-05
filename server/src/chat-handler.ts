@@ -5847,6 +5847,37 @@ async function handleChatSendInner(
           // the model volunteering). Project name derived from the guide host (mycox.ai → mycox) —
           // matches the project scheduled sessions inherit, so their memory-prefix serves real
           // endpoints instead of letting a fresh session hunt (prod: 404/401 wall-loops).
+          // ⑤ convergence: the loop drives the REAL plan store live. A mid-loop crash leaves an
+          // `executing` plan → turn-end auto-close / cross-turn-reflection catch it like any other.
+          planTracker: {
+            create: (deliverables, steps, guideRef) => {
+              try {
+                const p = memory.plans.create({
+                  sessionId,
+                  taskSignature: `plan-loop-${quickTaskSignatureHash(userMessage)}`,
+                  guideRef,
+                  isPlaceholder: false,
+                  deliverables: deliverables.map((d) => ({ id: d.id, description: d.description })),
+                  steps: steps.map((st) => ({ id: st.id, description: st.description, covers: st.covers })),
+                });
+                return p.id;
+              } catch (e) {
+                console.warn('[plan-loop] live plan create failed (ignored):', (e as Error)?.message ?? e);
+                return null;
+              }
+            },
+            markStep: (planId, stepId, status, evidence) => {
+              try { memory.plans.updateStep(planId, stepId, status, evidence ?? null); } catch { /* best-effort */ }
+            },
+            close: (planId, success, summary, statuses) => {
+              try {
+                memory.plans.close(planId, success ? 'success' : 'failure', summary, statuses);
+                signalBus.planCloseCalled = true; // the loop closed its own plan — suppress auto-close fallback
+              } catch (e) {
+                console.warn('[plan-loop] live plan close failed — pipeline auto-close will catch it:', (e as Error)?.message ?? e);
+              }
+            },
+          },
           recordOperationalKnowledge: (entries) => {
             try {
               const labels = new URL(loopGuideUrl).host.split('.').filter(Boolean);
@@ -5904,26 +5935,9 @@ async function handleChatSendInner(
             return (t: string) => { if (sent < 2) { sent++; onStatus?.(t); } };
           })(),
         });
-        // Record into the plan store (history / playbook distillation), driven by the mechanism.
-        try {
-          const created = memory.plans.create({
-            sessionId,
-            taskSignature: `plan-loop-${quickTaskSignatureHash(userMessage)}`,
-            guideRef: loopGuideUrl,
-            isPlaceholder: false,
-            deliverables: loopResult.deliverables.map((d) => ({ id: d.id, description: d.description })),
-            steps: loopResult.steps.map((s) => ({ id: s.id, description: s.description, covers: s.covers })),
-          });
-          memory.plans.close(
-            created.id,
-            loopResult.outcome === 'completed' ? 'success' : 'failure',
-            `[plan-loop] ${loopResult.outcome}: ${loopResult.outcomes.filter((o) => o.status === 'done').length}/${loopResult.outcomes.length} deliverables with tool evidence`,
-            Object.fromEntries(loopResult.outcomes.map((o) => [o.id, o.status === 'done' ? 'done' as const : o.status === 'failed' ? 'failed' as const : 'not-attempted' as const])),
-          );
-          signalBus.planCloseCalled = true; // the loop closed its own plan — suppress auto-close fallback
-        } catch (e) {
-          console.warn('[plan-loop] plan store record failed (ignored):', e);
-        }
+        // ⑤: the plan record is now driven LIVE by the loop via planTracker (create at plan-final,
+        // markStep during EXECUTE, close at CLOSE). Nothing retroactive to record here; if the
+        // tracker close failed, the plan stays `executing` and the pipeline auto-close catches it.
         const finalText = `## For User\n${loopResult.reply}`;
         messages.push({ role: 'assistant', content: finalText });
         onDelta(finalText);

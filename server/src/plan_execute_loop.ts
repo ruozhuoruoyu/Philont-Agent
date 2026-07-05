@@ -504,6 +504,28 @@ export interface PlanLoopDeps {
    * endpoints. Optional; failures must be swallowed by the implementation.
    */
   recordOperationalKnowledge?: (entries: string[]) => void;
+  /**
+   * ⑤ convergence: the loop drives the REAL plan object LIVE instead of retroactively recording a
+   * plan at CLOSE. Create fires once the plan is finalized (post-adoption), markStep as EXECUTE
+   * progresses, close with the computed outcome. Payoff: a crash mid-loop leaves an `executing`
+   * plan behind, so the pipeline's existing safety nets (turn-end auto-close, cross-turn-reflection)
+   * catch it — the island joins the pipeline instead of being invisible until it finishes.
+   * All calls are best-effort; implementations must swallow their own failures.
+   */
+  planTracker?: {
+    create(
+      deliverables: LoopDeliverable[],
+      steps: Array<{ id: string; description: string; covers: string[] }>,
+      guideRef: string,
+    ): string | null;
+    markStep(planId: string, stepId: string, status: 'doing' | 'done' | 'blocked', evidence?: string): void;
+    close(
+      planId: string,
+      success: boolean,
+      summary: string,
+      statuses: Record<string, 'done' | 'failed' | 'not-attempted'>,
+    ): void;
+  };
   onStatus?: (text: string) => void;
   abortSignal?: AbortSignal;
   maxVerifyRounds?: number; // default 3
@@ -762,6 +784,17 @@ export async function runPlanExecuteLoop(
   // already succeeded two steps before, so its own fulfill step had nothing left to do.
   const turnOkActions: Array<{ name: string; input: Record<string, unknown> }> = [];
   const turnOkSchedules: string[] = [];
+  // ⑤: live plan record — created before EXECUTE so mechanisms outside the loop see the in-flight
+  // plan, and a mid-loop crash leaves an `executing` plan for the pipeline safety nets.
+  let livePlanId: string | null = null;
+  try {
+    livePlanId = deps.planTracker?.create(plan.deliverables, plan.steps, guideUrls[0] ?? '') ?? null;
+  } catch { livePlanId = null; }
+  if (livePlanId) deps.log(`[plan-loop] live plan ${livePlanId} created`);
+  const trackStep = (stepId: string, status: 'doing' | 'done' | 'blocked', evidence?: string) => {
+    if (!livePlanId) return;
+    try { deps.planTracker?.markStep(livePlanId, stepId, status, evidence); } catch { /* best-effort */ }
+  };
   let budgetExhausted = false;
   for (const step of plan.steps) {
     if (deps.abortSignal?.aborted) break;
@@ -784,6 +817,7 @@ export async function runPlanExecuteLoop(
     if (step.covers.length > 0 && step.covers.every((id) => outcomes.get(id)?.status === 'done')) {
       deps.log(`[plan-loop] EXECUTE ${step.id}: skipped — all covered deliverables already done`);
       stepNotes.push(`- ${step.id}: SKIPPED (already satisfied by earlier steps)`);
+      trackStep(step.id, 'done', 'skipped — already satisfied by earlier steps');
       continue;
     }
     deps.onStatus?.(`executing: ${step.id}`);
@@ -828,6 +862,7 @@ export async function runPlanExecuteLoop(
       }
       return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
     };
+    trackStep(step.id, 'doing');
     let result = await runStep('');
     // Forced retry (mechanism, not model discipline): the step covers an action/schedule deliverable
     // yet made ZERO relevant attempts ("read and hand in") — re-run ONCE with a hard directive. Prod:
@@ -900,6 +935,7 @@ export async function runPlanExecuteLoop(
     stepNotes.push(
       `- ${step.id}: ${stepSucceeded ? 'DONE' : 'FAILED'} (${evidence}). ${result.finalText.replace(/\s+/g, ' ').slice(0, 180)}`,
     );
+    trackStep(step.id, stepSucceeded ? 'done' : 'blocked', evidence.slice(0, 200));
     // Per-deliverable evidence MATCHING (2026-07-02 v1.2). "Some action succeeded" is not enough:
     // prod reported 9/9 ✅ while NO post existed and NO schedule was set — the posting step made
     // ZERO action attempts (dodged into the pure-read pass) and the heartbeat step's one "action"
@@ -999,6 +1035,16 @@ export async function runPlanExecuteLoop(
   const done = list.filter((o) => o.status === 'done').length;
   const outcome: PlanLoopResult['outcome'] =
     done === list.length && unresolvedGaps.length === 0 ? 'completed' : done > 0 ? 'partial' : 'aborted';
+  if (livePlanId) {
+    try {
+      deps.planTracker?.close(
+        livePlanId,
+        outcome === 'completed',
+        `[plan-loop] ${outcome}: ${done}/${list.length} deliverables with tool evidence`,
+        Object.fromEntries(list.map((o) => [o.id, o.status === 'done' ? 'done' as const : o.status === 'failed' ? 'failed' as const : 'not-attempted' as const])),
+      );
+    } catch { /* an unclosed executing plan is caught by the pipeline auto-close */ }
+  }
   // Truncate with an explicit ellipsis so a cut reads as a cut, not as the whole requirement. Wider
   // than the old 80 chars (prod: reports read as "信息总结不全" — deliverables cut mid-sentence). The
   // outbound layer chunks by byte size, so fuller lines are safe.
