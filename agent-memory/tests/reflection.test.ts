@@ -364,7 +364,8 @@ test('apply: routing_rule 写入', () => {
   assert.equal(r.stats.routingRulesCreated, 1);
   const list = routingRules.listAll();
   assert.equal(list.length, 1);
-  assert.equal(list[0].confidence, 'tentative');
+  // Confidence is EARNED, never self-rated (prod: 451 rules born 'tentative' with 0 successes).
+  assert.equal(list[0].confidence, 'provisional');
   assert.equal(list[0].preferSkill, 'camscanner');
   assert.equal(list[0].reflectionId, 'refl-001');
 });

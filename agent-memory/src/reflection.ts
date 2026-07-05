@@ -701,7 +701,10 @@ export function applyReflection(
             avoidSkills: learning.avoidSkills ?? [],
             carveout: learning.carveout,
             evidence: learning.evidence,
-            confidence: learning.selfConfidence ?? 'provisional',
+            // Confidence is EARNED via recorded outcomes, never self-rated: prod had 451 rules
+            // born 'tentative' off the LLM's self_confidence with zero recorded successes,
+            // outranking everything in injection while validated stayed 0.
+            confidence: 'provisional',
             reflectionId: ctx.reflectionId ?? null,
           });
           result.stats.routingRulesCreated++;

@@ -63,7 +63,7 @@ test('decay: validated 30+ 天 → tentative', () => {
     confidence: 'validated',
   });
   setUpdatedAt(h, r.id, NOW - 35 * 86_400_000);
-  const result = h.routingRules.decayStale(NOW);
+  const result = h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(result.demoted, 1);
   assert.equal(result.retired, 0);
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'tentative');
@@ -77,7 +77,7 @@ test('decay: tentative 30+ 天 → provisional', () => {
     confidence: 'tentative',
   });
   setUpdatedAt(h, r.id, NOW - 40 * 86_400_000);
-  h.routingRules.decayStale(NOW);
+  h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'provisional');
   h.close();
 });
@@ -89,7 +89,7 @@ test('decay: provisional 30+ 天 → retired(没爬过 validated 视为废)', ()
     confidence: 'provisional',
   });
   setUpdatedAt(h, r.id, NOW - 31 * 86_400_000);
-  const result = h.routingRules.decayStale(NOW);
+  const result = h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(result.retired, 1);
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'retired');
   h.close();
@@ -102,7 +102,7 @@ test('decay: disputed 30+ 天 → retired(失败回路 + 长闲 = 弃)', () => {
     confidence: 'disputed',
   });
   setUpdatedAt(h, r.id, NOW - 31 * 86_400_000);
-  h.routingRules.decayStale(NOW);
+  h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'retired');
   h.close();
 });
@@ -116,7 +116,7 @@ test('decay: validated 90+ 天 → retired(直接强 retire,不走 tier-down 链
     confidence: 'validated',
   });
   setUpdatedAt(h, r.id, NOW - 95 * 86_400_000);
-  const result = h.routingRules.decayStale(NOW);
+  const result = h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(result.retired, 1);
   assert.equal(result.demoted, 0);
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'retired');
@@ -130,7 +130,7 @@ test('decay: tentative 90+ 天 → retired', () => {
     confidence: 'tentative',
   });
   setUpdatedAt(h, r.id, NOW - 120 * 86_400_000);
-  h.routingRules.decayStale(NOW);
+  h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'retired');
   h.close();
 });
@@ -144,7 +144,7 @@ test('decay: < 30 天 → 不动', () => {
     confidence: 'validated',
   });
   setUpdatedAt(h, r.id, NOW - 20 * 86_400_000);
-  const result = h.routingRules.decayStale(NOW);
+  const result = h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(result.demoted, 0);
   assert.equal(result.retired, 0);
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'validated');
@@ -159,7 +159,7 @@ test('decay: 已 retired → 不动', () => {
   });
   h.routingRules.setConfidence(r.id, 'retired');
   setUpdatedAt(h, r.id, NOW - 200 * 86_400_000);
-  const result = h.routingRules.decayStale(NOW);
+  const result = h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(result.demoted, 0);
   assert.equal(result.retired, 0);
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'retired');
@@ -176,12 +176,12 @@ test('decay: 调用后 updated_at 刷为 now → 同 NOW 第二次调不重复�
   });
   setUpdatedAt(h, r.id, NOW - 35 * 86_400_000);
 
-  const r1 = h.routingRules.decayStale(NOW);
+  const r1 = h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(r1.demoted, 1);
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'tentative');
 
   // 第二次同 NOW → updated_at 已是 NOW,30 天阈值不命中
-  const r2 = h.routingRules.decayStale(NOW);
+  const r2 = h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(r2.demoted, 0);
   assert.equal(r2.retired, 0);
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'tentative');
@@ -197,12 +197,12 @@ test('decay: 30 天后再调,衰减再走一档(validated→tentative→provisio
   setUpdatedAt(h, r.id, NOW - 35 * 86_400_000);
 
   // 第一次:validated → tentative,updated_at = NOW
-  h.routingRules.decayStale(NOW);
+  h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'tentative');
 
   // 模拟 35 天后再 idle:第二次 decayStale
   const later = NOW + 35 * 86_400_000;
-  h.routingRules.decayStale(later);
+  h.routingRules.decayStale(later, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'provisional');
   h.close();
 });
@@ -227,7 +227,7 @@ test('decay: 多条规则同时存在时各自走自己的轨迹', () => {
   // tentativeFresh 不动,刚创建即 NOW
   setUpdatedAt(h, provisionalAncient.id, NOW - 95 * 86_400_000);
 
-  const result = h.routingRules.decayStale(NOW);
+  const result = h.routingRules.decayStale(NOW, { unprovenTierDownDays: 30, unprovenRetireDays: 90 });
   // validatedOld → tentative (demoted)
   // tentativeFresh → 不动
   // provisionalAncient → retired (90+ 天直接 retire)
@@ -249,16 +249,42 @@ test('decay: 自定义 tierDownDays / retireDays', () => {
   });
   setUpdatedAt(h, r.id, NOW - 8 * 86_400_000);
   // tierDownDays=7 → 8 天命中
-  h.routingRules.decayStale(NOW, { tierDownDays: 7, retireDays: 30 });
+  h.routingRules.decayStale(NOW, { unprovenTierDownDays: 7, unprovenRetireDays: 30, tierDownDays: 7, retireDays: 30 });
   assert.equal(h.routingRules.getById(r.id)!.confidence, 'tentative');
   h.close();
 });
 
 test('decay: 非法阈值抛错', () => {
   const h = setup();
-  assert.throws(() => h.routingRules.decayStale(NOW, { tierDownDays: 0 }));
+  assert.throws(() => h.routingRules.decayStale(NOW, { unprovenTierDownDays: 999, unprovenRetireDays: 999, tierDownDays: 0 }));
   assert.throws(
-    () => h.routingRules.decayStale(NOW, { tierDownDays: 60, retireDays: 30 }),
+    () => h.routingRules.decayStale(NOW, { unprovenTierDownDays: 999, unprovenRetireDays: 999, tierDownDays: 60, retireDays: 30 }),
   );
+  h.close();
+});
+
+// ── New contract: unproven rules (zero successes) decay on the fast track ──
+test('decay: unproven rule (0 successes) retires at 30d even though proven threshold is 90d', () => {
+  const h = setup();
+  const r = h.routingRules.createRule({
+    taskSignature: 'a', triggerCondition: 'never earned a success', carveout: 'cv', evidence: 'ev',
+  });
+  setUpdatedAt(h, r.id, NOW - 35 * 86_400_000);
+  const result = h.routingRules.decayStale(NOW);
+  assert.equal(result.retired, 1);
+  assert.equal(h.routingRules.getById(r.id)!.confidence, 'retired');
+  h.close();
+});
+
+test('decay: proven rule (has a success) keeps the slow 30/90 track', () => {
+  const h = setup();
+  const r = h.routingRules.createRule({
+    taskSignature: 'a', triggerCondition: 'earned one', carveout: 'cv', evidence: 'ev',
+  });
+  h.routingRules.recordRuleOutcome(r.id, true); // success_count=1 → proven
+  setUpdatedAt(h, r.id, NOW - 35 * 86_400_000);
+  const result = h.routingRules.decayStale(NOW);
+  assert.equal(result.retired, 0, 'proven rule at 35d only demotes');
+  assert.notEqual(h.routingRules.getById(r.id)!.confidence, 'retired');
   h.close();
 });

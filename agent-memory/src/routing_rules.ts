@@ -300,11 +300,53 @@ export class RoutingRuleStore extends EventEmitter {
     const now = Date.now();
     const confidence = parseConfidence(input.confidence, 'provisional');
     const avoidSkills = JSON.stringify(input.avoidSkills ?? []);
-    const contextKeywords = JSON.stringify(
+    const keywords =
       input.contextKeywords && input.contextKeywords.length > 0
         ? input.contextKeywords
-        : extractKeywords(input.triggerCondition),
+        : extractKeywords(input.triggerCondition);
+    const contextKeywords = JSON.stringify(keywords);
+
+    // Rule-spam guards (prod: ~206 rules from ~209 reflections, 903 stored / 0 validated —
+    // reflection relearns the same lesson every turn-close and every copy was stored):
+    // 1. DEDUP: an ACTIVE rule with the same task_signature whose trigger keywords strongly
+    //    overlap (>=0.7 Jaccard) is the same lesson — refresh its evidence/updated_at instead of
+    //    inserting a near-duplicate.
+    // 2. CAP: at most N active rules per task_signature (PHILONT_ROUTING_RULES_PER_SIG_CAP,
+    //    default 5); over cap, the oldest lowest-confidence sibling is retired to make room.
+    const siblings = (
+      this.db
+        .prepare<[string]>(
+          `SELECT * FROM routing_rules WHERE task_signature = ? AND confidence != 'retired'`,
+        )
+        .all(input.taskSignature) as RoutingRuleRow[]
+    ).map(rowToRule);
+    // Same trigger but a DIFFERENT preferSkill is contradictory advice, not a duplicate — merging
+    // would silently keep the stale recommendation. Dedup requires the same preferSkill too.
+    const dup = siblings.find(
+      (s) =>
+        s.preferSkill === (input.preferSkill ?? null) &&
+        keywordOverlap(keywords, s.contextKeywords) >= 0.7,
     );
+    if (dup) {
+      this.db
+        .prepare<[string, number, number]>(
+          `UPDATE routing_rules SET evidence = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(input.evidence, now, dup.id);
+      this.emit('changed', { type: 'updated', id: dup.id } satisfies RoutingRuleChangeEvent);
+      return this.getById(dup.id)!;
+    }
+    const cap = Math.max(1, Number(process.env.PHILONT_ROUTING_RULES_PER_SIG_CAP) || 5);
+    if (siblings.length >= cap) {
+      const weakest = [...siblings].sort(
+        (a, b) => confidenceRank(a.confidence) - confidenceRank(b.confidence) || a.updatedAt - b.updatedAt,
+      )[0];
+      this.db
+        .prepare<[number, number]>(
+          `UPDATE routing_rules SET confidence = 'retired', updated_at = ? WHERE id = ?`,
+        )
+        .run(now, weakest.id);
+    }
 
     const result = this.db
       .prepare<[
@@ -557,27 +599,42 @@ export class RoutingRuleStore extends EventEmitter {
    */
   decayStale(
     now: number = Date.now(),
-    opts: { tierDownDays?: number; retireDays?: number } = {},
+    opts: {
+      tierDownDays?: number;
+      retireDays?: number;
+      unprovenTierDownDays?: number;
+      unprovenRetireDays?: number;
+    } = {},
   ): { demoted: number; retired: number } {
     const tierDownDays = opts.tierDownDays ?? 30;
     const retireDays = opts.retireDays ?? 90;
+    // UNPROVEN rules (zero recorded successes) expire much faster: prod accumulated ~840 active
+    // rules with 0 validations — a rule that never earned a success within days is speculation,
+    // and letting it linger 30-90 days keeps the injection pool full of noise.
+    const unprovenTierDownDays = opts.unprovenTierDownDays ?? 10;
+    const unprovenRetireDays = opts.unprovenRetireDays ?? 30;
     if (tierDownDays <= 0 || retireDays < tierDownDays) {
       throw new Error(
         `decayStale: invalid thresholds tierDownDays=${tierDownDays} retireDays=${retireDays}`,
       );
     }
-    const tierDownCutoff = now - tierDownDays * 86_400_000;
-    const retireCutoff = now - retireDays * 86_400_000;
+    if (unprovenTierDownDays <= 0 || unprovenRetireDays < unprovenTierDownDays) {
+      throw new Error(
+        `decayStale: invalid unproven thresholds ${unprovenTierDownDays}/${unprovenRetireDays}`,
+      );
+    }
+    const scanCutoff = now - Math.min(tierDownDays, unprovenTierDownDays) * 86_400_000;
 
     const stale = this.db
       .prepare<[number]>(
-        `SELECT id, confidence, updated_at FROM routing_rules
+        `SELECT id, confidence, updated_at, success_count FROM routing_rules
          WHERE confidence != 'retired' AND updated_at < ?`,
       )
-      .all(tierDownCutoff) as Array<{
+      .all(scanCutoff) as Array<{
       id: number;
       confidence: string;
       updated_at: number;
+      success_count: number;
     }>;
 
     let demoted = 0;
@@ -586,9 +643,13 @@ export class RoutingRuleStore extends EventEmitter {
       `UPDATE routing_rules SET confidence = ?, updated_at = ? WHERE id = ?`,
     );
     for (const row of stale) {
+      const unproven = (row.success_count ?? 0) === 0;
+      const td = unproven ? unprovenTierDownDays : tierDownDays;
+      const rd = unproven ? unprovenRetireDays : retireDays;
+      if (row.updated_at >= now - td * 86_400_000) continue;
       const current = parseConfidence(row.confidence, 'provisional');
       const next: RoutingConfidence =
-        row.updated_at < retireCutoff ? 'retired' : demoteOneStep(current);
+        row.updated_at < now - rd * 86_400_000 ? 'retired' : demoteOneStep(current);
       if (next === current) continue;
       setConfidenceStmt.run(next, now, row.id);
       if (next === 'retired') retired++;

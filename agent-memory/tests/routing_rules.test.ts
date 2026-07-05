@@ -506,3 +506,43 @@ test('delete: 物理删除', () => {
   assert.equal(routingRules.getById(r.id), null);
   assert.equal(routingRules.delete(99999), false);
 });
+
+// ── Rule-spam guards: dedup (same signature+trigger+preferSkill) and per-signature cap ──
+test('createRule: near-duplicate (same signature/trigger/preferSkill) refreshes instead of inserting', () => {
+  const { routingRules } = openMemoryDb(':memory:');
+  const a = routingRules.createRule({
+    taskSignature: 'mycox-checkin', triggerCondition: 'upvote endpoint returns 401 authentication required',
+    preferSkill: null, carveout: 'x', evidence: 'run 1',
+  });
+  const b = routingRules.createRule({
+    taskSignature: 'mycox-checkin', triggerCondition: 'upvote endpoint returns 401 authentication required',
+    preferSkill: null, carveout: 'x2', evidence: 'run 2 same lesson',
+  });
+  assert.equal(b.id, a.id, 'same lesson must not create a second rule');
+  assert.equal(routingRules.listAll().length, 1);
+  assert.equal(routingRules.getById(a.id)!.evidence, 'run 2 same lesson');
+});
+
+test('createRule: same trigger but DIFFERENT preferSkill is not a duplicate (contradictory advice)', () => {
+  const { routingRules } = openMemoryDb(':memory:');
+  routingRules.createRule({ taskSignature: 's', triggerCondition: 'pdf has no text layer at all', preferSkill: 'a', carveout: 'x', evidence: 'e' });
+  routingRules.createRule({ taskSignature: 's', triggerCondition: 'pdf has no text layer at all', preferSkill: 'b', carveout: 'x', evidence: 'e' });
+  assert.equal(routingRules.listAll().length, 2);
+});
+
+test('createRule: per-signature cap retires the weakest sibling to make room', () => {
+  const prev = process.env.PHILONT_ROUTING_RULES_PER_SIG_CAP;
+  process.env.PHILONT_ROUTING_RULES_PER_SIG_CAP = '2';
+  try {
+    const { routingRules } = openMemoryDb(':memory:');
+    const r1 = routingRules.createRule({ taskSignature: 's', triggerCondition: 'first distinct lesson entirely', carveout: 'x', evidence: 'e' });
+    routingRules.createRule({ taskSignature: 's', triggerCondition: 'second unrelated topic keywords here', carveout: 'x', evidence: 'e' });
+    routingRules.createRule({ taskSignature: 's', triggerCondition: 'third completely different subject matter', carveout: 'x', evidence: 'e' });
+    const active = routingRules.listAll().filter((r) => r.confidence !== 'retired');
+    assert.equal(active.length, 2, 'cap holds');
+    assert.equal(routingRules.getById(r1.id)!.confidence, 'retired', 'oldest weakest retired');
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_ROUTING_RULES_PER_SIG_CAP;
+    else process.env.PHILONT_ROUTING_RULES_PER_SIG_CAP = prev;
+  }
+});

@@ -4977,16 +4977,24 @@ export async function handleChatSend(
           (signalBus.interruptDrainedCount ?? 0) > 0 ||
           signalBus.emptyConclusionFired === true;
         const outcome = !strongFailure;
+        // 2026-07-05 attribution fix: a hard turn is NOT evidence against the injected rules — the
+        // gate signals (honesty / same-root-cause / interrupt / empty-conclusion) fire for reasons
+        // unrelated to routing, yet EVERY injected rule was blame-marked failure (prod stream:
+        // success=1 / failure=48 → no rule could ever collect the 2 consecutive successes that
+        // promotion to 'validated' requires; the confidence machine only ever demoted). We cannot
+        // attribute a turn-level failure to a specific rule, so: record SUCCESS when the turn closed
+        // clean (positive evidence the recommendation did not derail it), record NOTHING when it
+        // failed (ambiguous — noise, not signal). Bad rules still die via unproven-decay.
         memory.metrics.increment(
-          outcome ? 'routing.outcome.success' : 'routing.outcome.failure',
+          outcome ? 'routing.outcome.success' : 'routing.outcome.ambiguous_skipped',
           signalBus.activeRuleIds.length,
         ); // instrumentation: does the confidence machine actually get fed?
-        for (const ruleId of signalBus.activeRuleIds) {
+        for (const ruleId of outcome ? signalBus.activeRuleIds : []) {
           try {
-            memory.routingRules.recordRuleOutcome(ruleId, outcome);
+            memory.routingRules.recordRuleOutcome(ruleId, true);
           } catch (e) {
             console.warn(
-              `[routing-outcome] recordRuleOutcome(${ruleId}, ${outcome}) failed, ignored:`,
+              `[routing-outcome] recordRuleOutcome(${ruleId}, true) failed, ignored:`,
               (e as Error)?.message,
             );
           }
@@ -5003,7 +5011,7 @@ export async function handleChatSend(
           emptyConclusionFired: signalBus.emptyConclusionFired === true,
         });
         console.log(
-          `[routing-outcome] session=${sessionId} ruleIds=[${signalBus.activeRuleIds.join(',')}] outcome=${outcome ? 'success' : 'failure'}`,
+          `[routing-outcome] session=${sessionId} ruleIds=[${signalBus.activeRuleIds.join(',')}] outcome=${outcome ? 'success' : 'ambiguous (not attributed)'}`,
         );
       }
 
