@@ -51,8 +51,12 @@ export interface SpecItem {
 /** Constraint lines ("No X" / "must not") — obey, not do. */
 const RULE_LINE_RE = /^(?:no\s|never\b|do\s+not\b|不要|禁止|勿)|must\s+not\b|\bis\s+spam\b/i;
 /** Lines that are meta/preconditions for OTHERS (humans / other runtimes) — not agent work at all. */
+// Environment/arrival conditionals ("If you arrived via a ?code= URL…", "If you run inside X…")
+// describe a situation that may not hold — prod: the ?code= onboarding note got adopted as a
+// deliverable and false-❌'d because the user explicitly did NOT use a code URL. Genuine behavior
+// rules like "if you have something worth saying, post" don't match these verbs.
 const SKIP_LINE_RE =
-  /^this\s+guide\s+covers|^optional\s+env|^if\s+you\s+run\s+inside|human\s+user\s+must|signed-?in\s+\S*\s*human/i;
+  /^this\s+guide\s+covers|^optional\s+env|^if\s+you\s+(?:run|arrived?|are|were|came|opened|use[d]?)\b|human\s+user\s+must|signed-?in\s+\S*\s*human|如果你(?:通过|经由|运行在|使用)/i;
 
 const HEADING_RE = /^#{1,3}\s+(.+)$/;
 const MUST_LINE_RE = /\b(?:must|MUST|required|always)\b|必须|务必|一定要/;
@@ -684,8 +688,18 @@ export async function runPlanExecuteLoop(
     // STRONGLY covers it. At 0.3 this dedupe silently ate a REAL gap (guide's heartbeat/check-in
     // requirement partially overlapped step text → never planned, never reported, never done).
     const stepTexts = draft.steps.map((s) => `${s.id} ${s.description}`);
+    // The aux judge does not know the rule/skip classification, so it reports constraints ("Do not
+    // post 'hello'"), environment conditionals and optional refinements as "uncovered requirements"
+    // — prod: 12 reported gaps were mostly this noise. Strip its "No deliverable covers…" phrasing
+    // first (a raw ^No test would kill REAL gaps), then drop rule/skip/optional content.
+    const auxGapIsNoise = (g: string): boolean => {
+      const core = g.replace(/^no\s+deliverable\s+(?:covers|enforces|validates|respects|triggers|handles)\b[:\s]*/i, '');
+      return RULE_LINE_RE.test(core) || SKIP_LINE_RE.test(core) || /\boptional\b|可选/i.test(core);
+    };
     const auxGaps = (auxGapsRaw ?? []).filter(
-      (g) => !checkCoverage([{ id: 'aux', text: g, mandatory: true }], draft.deliverables, 0.5, stepTexts).covered,
+      (g) =>
+        !auxGapIsNoise(g) &&
+        !checkCoverage([{ id: 'aux', text: g, mandatory: true }], draft.deliverables, 0.5, stepTexts).covered,
     );
     lastMandatoryGaps = cov.gaps.filter((g) => g.mandatory);
     const gapTexts = [...lastMandatoryGaps.map((g) => g.text), ...auxGaps];
@@ -742,6 +756,12 @@ export async function runPlanExecuteLoop(
   // mini-loops redo prior work (real run: later steps re-registered → 409 "Invite code already
   // used", and soul.md was re-fetched 5×).
   const stepNotes: string[] = [];
+  // Turn-global evidence ledger: successful action/schedule calls from ALL prior steps. Per-step
+  // evidence alone false-❌'s a deliverable whose work happened EARLIER — prod: the adopted
+  // "response returns api_key … save it" item required a /register/ action, but register had
+  // already succeeded two steps before, so its own fulfill step had nothing left to do.
+  const turnOkActions: Array<{ name: string; input: Record<string, unknown> }> = [];
+  const turnOkSchedules: string[] = [];
   let budgetExhausted = false;
   for (const step of plan.steps) {
     if (deps.abortSignal?.aborted) break;
@@ -833,6 +853,8 @@ export async function runPlanExecuteLoop(
     };
     const actionAttempts = result.toolCallHistory.filter(isAction);
     const okActions = actionAttempts.filter((c) => c.ok);
+    turnOkActions.push(...okActions.map((c) => ({ name: c.name, input: c.input })));
+    turnOkSchedules.push(...result.toolCallHistory.filter((c) => c.ok && SCHEDULE_TOOLS.has(c.name)).map((c) => c.name));
     const stepSucceeded =
       okCalls.length > 0 && !result.error && (actionAttempts.length === 0 || okActions.length > 0);
     const evidence = okActions.length > 0
@@ -866,8 +888,17 @@ export async function runPlanExecuteLoop(
       let dEvidence: string;
       if (SCHEDULE_REQ_RE.test(dText)) {
         const hit = result.toolCallHistory.find((c) => c.ok && SCHEDULE_TOOLS.has(c.name));
-        dOk = !!hit && !result.error;
-        dEvidence = hit ? hit.name : 'requires a schedule tool (schedule_reminder) — no successful call';
+        if (hit && !result.error) {
+          dOk = true;
+          dEvidence = hit.name;
+        } else if (turnOkSchedules.length > 0) {
+          // Turn-global fallback: the schedule already landed in an earlier step this turn.
+          dOk = true;
+          dEvidence = `${turnOkSchedules[0]} (satisfied by an earlier step)`;
+        } else {
+          dOk = false;
+          dEvidence = 'requires a schedule tool (schedule_reminder) — no successful call';
+        }
       } else if (ACTION_REQ_RE.test(dText)) {
         // Endpoint matching: the successful action must be THE one the deliverable names, not any write.
         const hint = ENDPOINT_HINTS.find(([k]) => k.test(dText))?.[1];
@@ -884,7 +915,15 @@ export async function runPlanExecuteLoop(
         // was in fact already registered). For NON-register actions a 409 stays an actionable failure.
         const isRegister = /\bregister\b|\bsign\s*up\b|注册/i.test(dText);
         dOk = matched.length > 0 && !result.error;
-        if (!dOk && conflict && isRegister) {
+        // Turn-global fallback: the required action already succeeded in an EARLIER step this turn
+        // (adopted duplicates land in late fulfill-steps with nothing left to do).
+        const globalMatched = !dOk
+          ? (hint ? turnOkActions.filter((c) => hint.test(`${String(c.input.url ?? '')} ${c.name}`)) : turnOkActions)
+          : [];
+        if (!dOk && globalMatched.length > 0) {
+          dOk = true;
+          dEvidence = `${describeCall(globalMatched[0])} (satisfied by an earlier step)`;
+        } else if (!dOk && conflict && isRegister) {
           dOk = true;
           dEvidence = `already registered (409 "${conflict.outputPreview.replace(/\s+/g, ' ').slice(0, 70)}" — single-use invite consumed by a prior successful registration; reuse the stored credential)`;
         } else {

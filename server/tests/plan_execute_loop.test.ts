@@ -553,3 +553,80 @@ test('C: cookbook receives verified-working calls at CLOSE', async () => {
   assert.ok(recorded.length > 0, 'cookbook must receive entries');
   assert.match(recorded[0], /POST https:\/\/mycox\.ai\/api\/auth\/register-agent/);
 });
+
+// ── Report-quality fixes: turn-global evidence, environment conditionals, aux noise ──
+
+test('turn-global evidence: adopted duplicate satisfied by an EARLIER step → done, not false-❌', async () => {
+  const DRAFT = JSON.stringify({
+    deliverables: [
+      { id: 'register', description: 'register via POST /api/auth/register-agent' },
+      { id: 'save-key-note', description: 'the response returns api_key — register response must be saved' },
+    ],
+    steps: [
+      { id: 's-reg', description: 'register via POST /api/auth/register-agent', covers: ['register'] },
+      { id: 's-note', description: 'note: register response fields', covers: ['save-key-note'] },
+    ],
+  });
+  let call = 0;
+  const deps = makeDeps({
+    drafts: [DRAFT],
+    llm: {
+      async send(systemPrompt, messages, toolDefs) {
+        if (toolDefs.length === 0) return { type: 'text', content: DRAFT };
+        const hasToolResult = messages.some((m) => Array.isArray(m.content));
+        if (!hasToolResult) {
+          call++;
+          // Step 1 registers; step 2 only reads (its work already happened in step 1).
+          const input = call === 1
+            ? { url: 'https://x/api/auth/register-agent', method: 'POST' }
+            : { url: 'https://x/api/posts', method: 'GET' };
+          return {
+            type: 'toolCalls',
+            calls: [{ id: `t${call}`, name: 'http', input }],
+            assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: `t${call}`, name: 'http', input }] as never },
+          };
+        }
+        return { type: 'text', content: 'ok.' };
+      },
+    },
+    classifyCall: (name, input) =>
+      /^(POST|PUT)$/i.test(String((input as Record<string, unknown>).method ?? 'GET'))
+        ? { capability: 'write', domain: 'network' }
+        : { capability: 'read', domain: 'network' },
+  });
+  const r = await runPlanExecuteLoop('register with invite_code "inv_x" and handle "h"', ['https://g/guide.md'], deps);
+  const dup = r.outcomes.find((o) => o.id === 'save-key-note');
+  assert.equal(dup?.status, 'done', `evidence=${dup?.evidence}`);
+  assert.match(dup!.evidence, /earlier step/);
+});
+
+test('environment conditionals skipped; genuine behavior rules kept', () => {
+  const items = extractSpecItems([
+    'If you arrived via a URL containing ?code=inv_..., the server has prepended a header. You must read it.',
+    'If you run inside an OpenClaw workspace, add this to HEARTBEAT.md. This is required.',
+    'You must include a title and community when posting.',
+  ].join('\n'));
+  assert.ok(!items.some((i) => /arrived via/.test(i.text)), 'arrival conditional skipped');
+  assert.ok(!items.some((i) => /OpenClaw/.test(i.text)), 'runtime conditional skipped');
+  assert.ok(items.some((i) => /title and community/.test(i.text)), 'real rule kept');
+});
+
+test('aux gap noise filter: rules/conditionals/optionals dropped, real gaps kept', async () => {
+  const deps = makeDeps({
+    drafts: [GAPPY_DRAFT, GAPPY_DRAFT, GAPPY_DRAFT],
+    auxJudge: async () => [
+      "Do not post 'hello' or content-free comments - Part 0 ban",
+      'No deliverable covers the optional community filter in feed reading',
+      'If you arrived via a ?code= URL the server prepends a header',
+      'No deliverable covers the weekly heartbeat check-in requirement',
+    ],
+  });
+  const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.ok(!r.unresolvedGaps.some((g) => /hello/.test(g)), 'rule noise dropped');
+  assert.ok(!r.unresolvedGaps.some((g) => /optional community/.test(g)), 'optional noise dropped');
+  assert.ok(!r.unresolvedGaps.some((g) => /\?code=/.test(g)), 'conditional noise dropped');
+  assert.ok(
+    r.unresolvedGaps.some((g) => /heartbeat/.test(g)) || r.outcomes.some((o) => /heartbeat/.test(o.id)),
+    'real heartbeat gap survives (reported or adopted)',
+  );
+});
