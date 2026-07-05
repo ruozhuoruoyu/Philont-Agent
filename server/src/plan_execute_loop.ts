@@ -779,6 +779,13 @@ export async function runPlanExecuteLoop(
       }
       break;
     }
+    // Skip the whole mini-loop when every covered deliverable is already done (an earlier step
+    // covered the same ids) — each skipped step saves a 2-8 iteration weak-model loop.
+    if (step.covers.length > 0 && step.covers.every((id) => outcomes.get(id)?.status === 'done')) {
+      deps.log(`[plan-loop] EXECUTE ${step.id}: skipped — all covered deliverables already done`);
+      stepNotes.push(`- ${step.id}: SKIPPED (already satisfied by earlier steps)`);
+      continue;
+    }
     deps.onStatus?.(`executing: ${step.id}`);
     const coverTexts = step.covers.map(
       (id) => `${plan!.deliverables.find((x) => x.id === id)?.description ?? ''} ${step.description}`,
@@ -827,7 +834,28 @@ export async function runPlanExecuteLoop(
     // publish-post and heartbeat ended with attempted 0 even after imperative wording + credentials.
     const attemptedSched = () => result.toolCallHistory.some((c) => SCHEDULE_TOOLS.has(c.name));
     const attemptedAct = () => result.toolCallHistory.some(isActionCall);
-    if (((needsSched && !attemptedSched()) || (needsAct && !needsSched && !attemptedAct())) && timeLeft() > 90_000) {
+    // No forced retry when the turn ledger ALREADY satisfies every covered deliverable's required
+    // evidence — the retry exists to force an attempt, but the work happened in an earlier step
+    // (prod: adopted duplicates ate a full extra mini-loop each, 30-50s of weak-model time apiece).
+    const ledgerSatisfies = step.covers.every((id) => {
+      const d = plan!.deliverables.find((x) => x.id === id);
+      if (!d) return true;
+      const t = `${d.description} ${step.description}`;
+      if (SCHEDULE_REQ_RE.test(t)) return turnOkSchedules.length > 0;
+      if (ACTION_REQ_RE.test(t)) {
+        const hint = ENDPOINT_HINTS.find(([k]) => k.test(t))?.[1];
+        return (hint
+          ? turnOkActions.filter((c) => hint.test(`${String(c.input.url ?? '')} ${c.name}`))
+          : turnOkActions
+        ).length > 0;
+      }
+      return true;
+    });
+    if (
+      ((needsSched && !attemptedSched()) || (needsAct && !needsSched && !attemptedAct())) &&
+      !ledgerSatisfies &&
+      timeLeft() > 90_000
+    ) {
       deps.log(`[plan-loop] EXECUTE ${step.id}: zero relevant attempts for an action/schedule deliverable — forced retry`);
       result = await runStep(
         `\n\n# MANDATORY — your previous run made ZERO attempts at the required ${needsSched ? 'schedule call' : 'action'}.` +

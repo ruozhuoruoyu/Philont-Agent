@@ -594,10 +594,14 @@ test('turn-global evidence: adopted duplicate satisfied by an EARLIER step → d
         ? { capability: 'write', domain: 'network' }
         : { capability: 'read', domain: 'network' },
   });
+  const logs: string[] = [];
+  deps.log = (m) => logs.push(m);
   const r = await runPlanExecuteLoop('register with invite_code "inv_x" and handle "h"', ['https://g/guide.md'], deps);
   const dup = r.outcomes.find((o) => o.id === 'save-key-note');
   assert.equal(dup?.status, 'done', `evidence=${dup?.evidence}`);
   assert.match(dup!.evidence, /earlier step/);
+  // Perf: the ledger already satisfies the duplicate — no forced retry may burn an extra mini-loop.
+  assert.ok(!logs.some((l) => l.includes('s-note: zero relevant attempts')), 'no forced retry for ledger-satisfied step');
 });
 
 test('environment conditionals skipped; genuine behavior rules kept', () => {
