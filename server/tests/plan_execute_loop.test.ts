@@ -439,6 +439,37 @@ test('loop e2e: register 409 CONFLICT → actionable evidence (fresh invite), no
   });
   const r = await runPlanExecuteLoop('register with invite_code', ['https://g/guide.md'], deps);
   const reg = r.outcomes.find((o) => o.id === 'register');
-  assert.equal(reg?.status, 'failed');
-  assert.match(reg!.evidence, /409 conflict|FRESH unused invite/i);
+  // Single-use invite: 409 "already used" PROVES a prior registration succeeded → done, not FAILED.
+  assert.equal(reg?.status, 'done');
+  assert.match(reg!.evidence, /already registered/i);
+});
+
+test('loop e2e: non-register action 409 stays an actionable FAILED (do not retry)', async () => {
+  const DRAFT = JSON.stringify({
+    deliverables: [{ id: 'first-post', description: 'publish a post via POST /api/posts' }],
+    steps: [{ id: 's-post', description: 'publish the first post via POST /api/posts', covers: ['first-post'] }],
+  });
+  const deps = makeDeps({
+    drafts: [DRAFT],
+    llm: {
+      async send(systemPrompt, messages, toolDefs) {
+        if (toolDefs.length === 0) return { type: 'text', content: DRAFT };
+        const hasToolResult = messages.some((m) => Array.isArray(m.content));
+        if (!hasToolResult) {
+          return {
+            type: 'toolCalls',
+            calls: [{ id: 't1', name: 'http', input: { url: 'https://x/api/posts', method: 'POST' } }],
+            assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'http', input: {} }] as never },
+          };
+        }
+        return { type: 'text', content: 'done.' };
+      },
+    },
+    toolRunner: async () => ({ ok: false, output: '', error: 'HTTP 409 {"code":"CONFLICT","message":"duplicate post"}' }),
+    classifyCall: () => ({ capability: 'write', domain: 'network' }),
+  });
+  const r = await runPlanExecuteLoop('post', ['https://g/guide.md'], deps);
+  const post = r.outcomes.find((o) => o.id === 'first-post');
+  assert.equal(post?.status, 'failed', 'a non-register 409 is not auto-done');
+  assert.match(post!.evidence, /409 conflict|already exists/i);
 });
