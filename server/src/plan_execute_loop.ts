@@ -61,6 +61,10 @@ const MUST_LINE_RE = /\b(?:must|MUST|required|always)\b|必须|务必|一定要/
 // never extracted, so it was never planned, never reported as a gap, and never done.
 const PERIODIC_LINE_RE =
   /\b(?:heartbeat|check-?in|periodic(?:ally)?|schedule[ds]?|every\s+\d+\s*(?:min|hour|day)|recurring)\b|心跳|定时|周期|每\s*\d+\s*(?:分钟|小时|天)/i;
+// Credential-persistence requirements are MANDATORY like periodic ones (legacy teaching, now
+// deterministic): a guide line about the returned api_key/token not being saved = every later
+// authenticated call 401s.
+const CREDENTIAL_LINE_RE = /\bapi[_-]?key\b|\baccess[_-]?token\b|\bcredentials?\b|密钥|凭证/i;
 const NUMBERED_STEP_RE = /^\s*(?:\d+[.)]|Step\s*\d+|第[一二三四五六七八九十\d]+步)\s*[:.]?\s*(.+)$/i;
 
 // ── Deliverable evidence requirements (v1.2 evidence matching) ──────────────
@@ -150,6 +154,102 @@ export function buildEndpointRegistry(api: GuideApi): string {
   return lines.join('\n');
 }
 
+/** Quoted key-value pairs in the task text (`invite_code "inv_x" and handle "agent-y"` → fields). */
+export function extractTaskFields(task: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  const re = /\b([a-z][a-z0-9_]{2,})\s*[:=]?\s*"([^"\s]{2,})"/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(task))) out.push([m[1].toLowerCase(), m[2]]);
+  return out.slice(0, 6);
+}
+
+/**
+ * "Copy this request EXACTLY" block for a register-type step — the strongest weak-model rail: the
+ * documented method+path plus a JSON body pre-filled with the task's own quoted fields. Prod: the
+ * register step made 9 POST attempts, none clean (actions=3/9, no 2xx on the register path). ''
+ * when the guide documents no register endpoint or no host.
+ */
+export function buildRegisterTemplate(task: string, api: GuideApi): string {
+  if (api.hosts.length === 0) return '';
+  const ep = api.endpoints.find((e) => /register|signup/i.test(e));
+  const pm = ep?.match(/^(GET|POST|PUT|PATCH|DELETE)?\s*(\/\S+)/i);
+  const path = pm?.[2]?.split('?')[0];
+  if (!path) return '';
+  const method = pm?.[1]?.toUpperCase() ?? 'POST';
+  const fields = extractTaskFields(task);
+  const body = fields.length
+    ? `{ ${fields.map(([k, v]) => `"${k}": "${v}"`).join(', ')} }`
+    : '{ /* the fields named in the task */ }';
+  return [
+    '# REGISTER REQUEST — copy this call EXACTLY (one call; JSON body; no $VAR placeholders):',
+    `http({ "method": "${method}", "url": "https://${api.hosts[0]}${path}",`,
+    '       "headers": { "Content-Type": "application/json" },',
+    `       "body": ${body} })`,
+  ].join('\n');
+}
+
+/**
+ * Auth-path guard (path-level anchor): a mutating http call to an auth-shaped path on a documented
+ * host must use a DOCUMENTED auth path. The host guard cannot catch a wrong path on the right host
+ * (e.g. POST mycox.ai/api/register when the guide documents /api/auth/register-agent).
+ */
+export function authPathGuardReject(
+  name: string,
+  input: Record<string, unknown>,
+  api: GuideApi,
+): { error: string } | null {
+  if (name !== 'http') return null;
+  let u: URL;
+  try {
+    u = new URL(String(input.url ?? ''));
+  } catch {
+    return null;
+  }
+  if (!api.hosts.includes(u.host.toLowerCase())) return null; // host guard owns other hosts
+  if (!/^(POST|PUT)$/i.test(String(input.method ?? 'GET'))) return null;
+  if (!/\/(?:auth|register|signup|login|token)\b/i.test(u.pathname)) return null;
+  const docPaths = api.endpoints
+    .map((e) => e.match(/(\/\S+)/)?.[1]?.split('?')[0] ?? '')
+    .filter((p) => /\/(?:auth|register|signup|login|token)\b/i.test(p));
+  if (docPaths.length === 0) return null;
+  if (docPaths.some((p) => u.pathname === p || u.pathname.startsWith(`${p}/`))) return null;
+  return {
+    error:
+      `Refusing ${String(input.method).toUpperCase()} ${u.pathname} — not a documented auth endpoint. ` +
+      `Documented auth endpoint(s): ${docPaths.join(' · ')}. Copy the exact path.`,
+  };
+}
+
+/**
+ * schedule_reminder instruction validation: a scheduled fire is a FRESH session running the message
+ * verbatim, so $VAR-style placeholders (never expanded by the http tool) or bare /api/ paths without
+ * a documented host make every future fire fail. Prod: a schedule carried
+ * "$BASE_URL/posts... Bearer $MYCOX_API_KEY" — guaranteed dead. Reject with a correction.
+ */
+export function scheduleInstructionReject(
+  input: Record<string, unknown>,
+  api: GuideApi,
+): { error: string } | null {
+  const msg = String(input.message ?? '');
+  if (/\$\{?[A-Z][A-Z0-9_]{2,}\}?/.test(msg)) {
+    return {
+      error:
+        'schedule_reminder message contains $VAR-style placeholders — the http tool does NOT expand ' +
+        'them, so every scheduled fire would fail. Rewrite the instructions with full documented URLs ' +
+        `(e.g. https://${api.hosts[0] ?? '<host>'}/api/...) and {credential-id} placeholders for auth ` +
+        '(e.g. Authorization: Bearer {<service>-api-key}), then call schedule_reminder again.',
+    };
+  }
+  if (api.hosts.length > 0 && /\/api\//.test(msg) && !api.hosts.some((h) => msg.includes(h))) {
+    return {
+      error:
+        'schedule_reminder message references /api/ paths without a full documented URL. A scheduled ' +
+        `fire is a fresh session — write complete URLs (https://${api.hosts[0]}/api/...), then retry.`,
+    };
+  }
+  return null;
+}
+
 /**
  * Secret-free diagnostic for auth/register/verify http calls. Returns a one-line summary (method,
  * path, ok, error code, whether the RESPONSE carried a credential field) so we can see WHY
@@ -237,7 +337,12 @@ export function extractSpecItems(guideText: string): SpecItem[] {
       push(m[1], MUST_LINE_RE.test(line) || PERIODIC_LINE_RE.test(line));
       continue;
     }
-    if (MUST_LINE_RE.test(line) || PERIODIC_LINE_RE.test(line) || RULE_LINE_RE.test(line)) {
+    if (
+      MUST_LINE_RE.test(line) ||
+      PERIODIC_LINE_RE.test(line) ||
+      RULE_LINE_RE.test(line) ||
+      CREDENTIAL_LINE_RE.test(line)
+    ) {
       push(line.replace(/^[-*>\s]+/, ''), true);
     }
   }
@@ -387,6 +492,14 @@ export interface PlanLoopDeps {
     input: Record<string, unknown>,
   ) => { capability?: string; domain?: string } | undefined;
   log: (msg: string) => void;
+  /**
+   * C (legacy plan_knowledge, mechanized): called at CLOSE with the verified-working business calls
+   * ("METHOD https://host/path") observed during EXECUTE, so the project cookbook gets written by
+   * the MECHANISM from evidence — the legacy path relied on the model voluntarily calling
+   * plan_knowledge, which weak models skip; scheduled fresh sessions then 401/404-loop hunting for
+   * endpoints. Optional; failures must be swallowed by the implementation.
+   */
+  recordOperationalKnowledge?: (entries: string[]) => void;
   onStatus?: (text: string) => void;
   abortSignal?: AbortSignal;
   maxVerifyRounds?: number; // default 3
@@ -429,6 +542,14 @@ const DRAFT_SYSTEM = [
   '  requirement (MUST/必须/required, numbered steps of the flow being asked for) in the guide.',
   '- Guide content that is reference material (not asked for) is NOT a deliverable.',
   '- Each step covers ≥1 deliverable id. Keep ≤ 10 deliverables, ≤ 12 steps.',
+  // Ported from the legacy plan-protocol teaching (chat-handler buildMemoryPrefix): the two
+  // deliverable types weak models systematically miss. Missing them = later 401s / the routine
+  // stops when the turn ends.
+  'Two deliverable types are COMMONLY MISSED — add them when the trigger appears:',
+  '- Guide says register/auth returns a token/api_key/secret → add a deliverable to SAVE the',
+  '  credential (SecretStore via saveCredential; later http uses a {credential-id} placeholder).',
+  '- Guide has a routine/check-in/periodic/every-N-minutes/heartbeat requirement → add a deliverable',
+  '  to REGISTER it via schedule_reminder (otherwise the commitment dies with this turn).',
 ].join('\n');
 
 async function llmText(
@@ -487,16 +608,28 @@ export async function runPlanExecuteLoop(
   }
   // Wrap the tool runner so a step's http call to an UNDOCUMENTED host is blocked with a correction
   // instead of silently 404'ing on a hallucinated endpoint.
+  const okBusinessCalls: string[] = []; // C: mechanism cookbook — verified-working calls
   const stepToolRunner: PlanLoopDeps['toolRunner'] = async (name, input) => {
-    const rej = endpointGuardReject(name, input, guideApi);
+    const rej =
+      endpointGuardReject(name, input, guideApi) ??
+      authPathGuardReject(name, input, guideApi) ??
+      (name === 'schedule_reminder' ? scheduleInstructionReject(input, guideApi) : null);
     if (rej) {
-      deps.log(`[plan-loop] endpoint-guard BLOCKED ${name} → ${String(input.url ?? '').slice(0, 80)}`);
+      deps.log(`[plan-loop] endpoint-guard BLOCKED ${name} → ${String(input.url ?? input.message ?? '').slice(0, 80)}`);
       return { ok: false, output: '', error: rej.error };
     }
     const res = await deps.toolRunner(name, input);
     if (name === 'http') {
       const diag = describeAuthCall(input, res);
       if (diag) deps.log(`[plan-loop] auth-call: ${diag}`);
+      if (res.ok) {
+        try {
+          const u = new URL(String(input.url ?? ''));
+          if (guideApi.hosts.includes(u.host.toLowerCase())) {
+            okBusinessCalls.push(`${String(input.method ?? 'GET').toUpperCase()} https://${u.host}${u.pathname}`);
+          }
+        } catch { /* relative URL — skip cookbook */ }
+      }
     }
     return res;
   };
@@ -627,6 +760,16 @@ export async function runPlanExecuteLoop(
       break;
     }
     deps.onStatus?.(`executing: ${step.id}`);
+    const coverTexts = step.covers.map(
+      (id) => `${plan!.deliverables.find((x) => x.id === id)?.description ?? ''} ${step.description}`,
+    );
+    const needsSched = coverTexts.some((t) => SCHEDULE_REQ_RE.test(t));
+    const needsAct = coverTexts.some((t) => ACTION_REQ_RE.test(t));
+    // B: a register-type step gets a copy-this-request template (documented method+path + the
+    // task's own quoted fields) — the strongest rail for a weak model.
+    const registerBlock = coverTexts.some((t) => /\bregister\b|\bsign\s*up\b|注册/i.test(t))
+      ? buildRegisterTemplate(task, guideApi)
+      : '';
     const runStep = (extraDirective: string) => runMiniAgentLoop({
       systemPrompt:
         'You are executing ONE step of a verified plan. Complete it with REAL tool calls and report ' +
@@ -636,6 +779,7 @@ export async function runPlanExecuteLoop(
         `# Step\n${step.description}\n\n# Overall task (context)\n${task}\n\n` +
         (stepNotes.length > 0 ? `# Already completed steps (do NOT redo)\n${stepNotes.join('\n')}\n\n` : '') +
         (rulesBlock ? `# Guide constraints (OBEY these; they are NOT tasks)\n${rulesBlock}\n\n` : '') +
+        (registerBlock ? `${registerBlock}\n\n` : '') +
         (endpointRegistry ? `${endpointRegistry}\n\n` : '') +
         `# Guide excerpt (authoritative)\n${guideText.slice(0, 12_000)}` +
         extraDirective,
@@ -661,11 +805,6 @@ export async function runPlanExecuteLoop(
     // Forced retry (mechanism, not model discipline): the step covers an action/schedule deliverable
     // yet made ZERO relevant attempts ("read and hand in") — re-run ONCE with a hard directive. Prod:
     // publish-post and heartbeat ended with attempted 0 even after imperative wording + credentials.
-    const coverTexts = step.covers.map(
-      (id) => `${plan!.deliverables.find((x) => x.id === id)?.description ?? ''} ${step.description}`,
-    );
-    const needsSched = coverTexts.some((t) => SCHEDULE_REQ_RE.test(t));
-    const needsAct = coverTexts.some((t) => ACTION_REQ_RE.test(t));
     const attemptedSched = () => result.toolCallHistory.some((c) => SCHEDULE_TOOLS.has(c.name));
     const attemptedAct = () => result.toolCallHistory.some(isActionCall);
     if (((needsSched && !attemptedSched()) || (needsAct && !needsSched && !attemptedAct())) && timeLeft() > 90_000) {
@@ -773,6 +912,18 @@ export async function runPlanExecuteLoop(
     // while its vote deliverable was ❌ because no upvote POST landed). Log both to avoid misreading.
     if (stepVerdicts.length > 0) {
       deps.log(`[plan-loop] EXECUTE ${step.id}: deliverables ${stepVerdicts.join(', ')}`);
+    }
+  }
+
+  // C: mechanism cookbook — record what verifiably worked so later sessions (esp. scheduled fresh
+  // ones) reuse real endpoints instead of rediscovering them.
+  if (deps.recordOperationalKnowledge) {
+    const uniq = [...new Set(okBusinessCalls)].slice(0, 12);
+    if (uniq.length > 0) {
+      try {
+        deps.recordOperationalKnowledge(uniq.map((l) => `${l} — verified working this run (use {credential-id} placeholder for auth)`));
+        deps.log(`[plan-loop] cookbook: ${uniq.length} verified call(s) recorded`);
+      } catch { /* cookbook is best-effort */ }
     }
   }
 

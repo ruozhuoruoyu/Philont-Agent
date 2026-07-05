@@ -473,3 +473,83 @@ test('loop e2e: non-register action 409 stays an actionable FAILED (do not retry
   assert.equal(post?.status, 'failed', 'a non-register 409 is not auto-done');
   assert.match(post!.evidence, /409 conflict|already exists/i);
 });
+
+// ── A-D: legacy-adaptation absorption (register template, auth-path guard, schedule validation, cookbook) ──
+import {
+  extractTaskFields,
+  buildRegisterTemplate,
+  authPathGuardReject,
+  scheduleInstructionReject,
+  extractGuideEndpoints as _ege,
+} from '../src/plan_execute_loop.js';
+
+const REG_TASK = 'Read https://mycox.ai/mycox/guide.md, then register with invite_code "inv_abc123def" and handle "agent-xyz". Do not put the invite_code in any URL.';
+
+test('B: buildRegisterTemplate — documented method+path + task fields, copy-ready', () => {
+  const api = _ege(API_GUIDE);
+  const tpl = buildRegisterTemplate(REG_TASK, api);
+  assert.match(tpl, /POST/);
+  assert.match(tpl, /https:\/\/mycox\.ai\/api\/auth\/register-agent/);
+  assert.match(tpl, /"invite_code": "inv_abc123def"/);
+  assert.match(tpl, /"handle": "agent-xyz"/);
+  assert.deepEqual(extractTaskFields('no quoted fields here'), []);
+  assert.equal(buildRegisterTemplate(REG_TASK, { hosts: [], endpoints: [] }), '');
+});
+
+test('B: authPathGuardReject — wrong auth path on the right host blocked; documented path allowed', () => {
+  const api = _ege(API_GUIDE);
+  const wrong = authPathGuardReject('http', { url: 'https://mycox.ai/api/register', method: 'POST' }, api);
+  assert.ok(wrong, 'undocumented auth path must be refused');
+  assert.match(wrong!.error, /register-agent/);
+  assert.equal(authPathGuardReject('http', { url: 'https://mycox.ai/api/auth/register-agent', method: 'POST' }, api), null);
+  // GETs and non-auth paths are not this guard's business
+  assert.equal(authPathGuardReject('http', { url: 'https://mycox.ai/api/register', method: 'GET' }, api), null);
+  assert.equal(authPathGuardReject('http', { url: 'https://mycox.ai/api/posts', method: 'POST' }, api), null);
+});
+
+test('D: scheduleInstructionReject — $VAR placeholders and bare /api/ paths rejected with correction', () => {
+  const api = _ege(API_GUIDE);
+  const bad = scheduleInstructionReject({ message: 'Read $BASE_URL/posts with Bearer $MYCOX_API_KEY' }, api);
+  assert.ok(bad);
+  assert.match(bad!.error, /\{credential-id\}|does NOT expand/i);
+  const bare = scheduleInstructionReject({ message: 'GET /api/posts?sort=hot then vote' }, api);
+  assert.ok(bare);
+  assert.match(bare!.error, /full|complete URLs/i);
+  assert.equal(
+    scheduleInstructionReject({ message: 'GET https://mycox.ai/api/posts with Authorization Bearer {mycox-api-key}' }, api),
+    null,
+  );
+});
+
+test('A: guide api_key line becomes a MANDATORY spec item', () => {
+  const items = extractSpecItems('Registration returns an api_key — keep it safe, all later calls need it.');
+  const cred = items.find((i) => /api_key/i.test(i.text));
+  assert.ok(cred, 'credential line extracted');
+  assert.equal(cred!.mandatory, true);
+});
+
+test('C: cookbook receives verified-working calls at CLOSE', async () => {
+  const recorded: string[] = [];
+  const deps = makeDeps({
+    drafts: [GOOD_DRAFT],
+    fetchGuide: async () => API_GUIDE, // guide with mycox.ai host so ok calls count as business calls
+    recordOperationalKnowledge: (entries) => recorded.push(...entries),
+    llm: {
+      async send(systemPrompt, messages, toolDefs) {
+        if (toolDefs.length === 0) return { type: 'text', content: GOOD_DRAFT };
+        const hasToolResult = messages.some((m) => Array.isArray(m.content));
+        if (!hasToolResult) {
+          return {
+            type: 'toolCalls',
+            calls: [{ id: 't1', name: 'http', input: { url: 'https://mycox.ai/api/auth/register-agent', method: 'POST' } }],
+            assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'http', input: {} }] as never },
+          };
+        }
+        return { type: 'text', content: 'ok.' };
+      },
+    },
+  });
+  await runPlanExecuteLoop('register', ['https://g/guide.md'], deps);
+  assert.ok(recorded.length > 0, 'cookbook must receive entries');
+  assert.match(recorded[0], /POST https:\/\/mycox\.ai\/api\/auth\/register-agent/);
+});

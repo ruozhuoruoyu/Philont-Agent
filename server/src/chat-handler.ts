@@ -5835,6 +5835,22 @@ async function handleChatSendInner(
           // Input-aware classification (http POST → write:network) so the evidence criterion can
           // distinguish EXTERNAL actions from memory bookkeeping and reads.
           classifyCall: (name, input) => tools.classify(name, input) ?? undefined,
+          // C: mechanism-written operational cookbook (legacy plan_knowledge, no longer dependent on
+          // the model volunteering). Project name derived from the guide host (mycox.ai → mycox) —
+          // matches the project scheduled sessions inherit, so their memory-prefix serves real
+          // endpoints instead of letting a fresh session hunt (prod: 404/401 wall-loops).
+          recordOperationalKnowledge: (entries) => {
+            try {
+              const labels = new URL(loopGuideUrl).host.split('.').filter(Boolean);
+              let i = 0;
+              while (i < labels.length - 1 && /^(api|www|app)$/i.test(labels[i])) i++;
+              const project = labels[i]?.toLowerCase().replace(/[^a-z0-9-]/g, '');
+              if (!project || project.length < 2) return;
+              for (const e of entries) memory.planFiles.appendKnowledge(project, e, 'endpoints');
+            } catch (e) {
+              console.warn('[plan-loop] cookbook write failed (ignored):', (e as Error)?.message ?? e);
+            }
+          },
           fetchGuide: async (url) => {
             const r = await subTurnToolRunner('webFetch', { url });
             if (!r.ok) return null;
