@@ -412,3 +412,33 @@ test('describeAuthCall: secret-free summary of register/verify calls; ignores no
   assert.match(conflict!, /ok=false code=CONFLICT credInResp=false/);
   assert.equal(describeAuthCall({ url: 'https://mycox.ai/api/posts', method: 'GET' }, { ok: true, output: '[]' }), null);
 });
+
+test('loop e2e: register 409 CONFLICT → actionable evidence (fresh invite), not opaque "none matched"', async () => {
+  const DRAFT = JSON.stringify({
+    deliverables: [{ id: 'register', description: 'register via POST /api/auth/register-agent and save the api_key' }],
+    steps: [{ id: 's-reg', description: 'register the agent via POST /api/auth/register-agent', covers: ['register'] }],
+  });
+  const deps = makeDeps({
+    drafts: [DRAFT],
+    llm: {
+      async send(systemPrompt, messages, toolDefs) {
+        if (toolDefs.length === 0) return { type: 'text', content: DRAFT };
+        const hasToolResult = messages.some((m) => Array.isArray(m.content));
+        if (!hasToolResult) {
+          return {
+            type: 'toolCalls',
+            calls: [{ id: 't1', name: 'http', input: { url: 'https://x/api/auth/register-agent', method: 'POST' } }],
+            assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'http', input: {} }] as never },
+          };
+        }
+        return { type: 'text', content: 'done.' };
+      },
+    },
+    toolRunner: async () => ({ ok: false, output: '', error: 'HTTP 409 POST … {"error":{"code":"CONFLICT","message":"Invite code already used"}}' }),
+    classifyCall: () => ({ capability: 'write', domain: 'network' }),
+  });
+  const r = await runPlanExecuteLoop('register with invite_code', ['https://g/guide.md'], deps);
+  const reg = r.outcomes.find((o) => o.id === 'register');
+  assert.equal(reg?.status, 'failed');
+  assert.match(reg!.evidence, /409 conflict|FRESH unused invite/i);
+});

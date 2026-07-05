@@ -736,11 +736,19 @@ export async function runPlanExecuteLoop(
           ? okActions.filter((c) => hint.test(`${String((c.input as Record<string, unknown>).url ?? '')} ${c.name}`))
           : okActions;
         dOk = matched.length > 0 && !result.error;
+        // 409/conflict → actionable message. Prod: the register deliverable kept reporting the opaque
+        // "none matched" while the real cause was `409 CONFLICT "Invite code already used"` — the
+        // invite was consumed before this call. Tell the user what to do instead of a generic FAILED.
+        const conflict = result.toolCallHistory.find(
+          (c) => !c.ok && /\b409\b|conflict|already\s+(?:used|exist|exists|registered|taken)/i.test(c.outputPreview),
+        );
         dEvidence = dOk
           ? matched.map(describeCall).join(', ').slice(0, 120)
-          : hint
-            ? `requires a successful action matching ${String(hint)} (e.g. http POST to that endpoint) — none did`
-            : `requires an external action (e.g. http POST) — attempted ${actionAttempts.length}, succeeded 0`;
+          : conflict
+            ? `409 conflict — "${conflict.outputPreview.replace(/\s+/g, ' ').slice(0, 90)}". The resource is already used/registered: provide a FRESH unused invite code, or (if already registered) reuse the existing credential.`
+            : hint
+              ? `requires a successful action matching ${String(hint)} (e.g. http POST to that endpoint) — none did`
+              : `requires an external action (e.g. http POST) — attempted ${actionAttempts.length}, succeeded 0`;
       } else {
         dOk = stepSucceeded;
         dEvidence = evidence;
