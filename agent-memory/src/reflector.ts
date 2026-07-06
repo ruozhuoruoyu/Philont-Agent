@@ -26,6 +26,9 @@ import type { Action, RawMessage, ReflectResult, Skill } from './types.js';
 import type { MemoryAuditHook } from './audit.js';
 import type { MetricsStore } from './metrics.js';
 import { countSameRootCauseFailures } from './failure_signatures.js';
+import { recipeReuseMaturityMove } from './skill_recipes.js';
+import { recordRecipeDecayObservation } from './self_observation.js';
+import type { MemoryStore } from './store.js';
 
 // ── LLM-returned skill spec ─────────────────────────────────────────────────
 
@@ -194,11 +197,15 @@ export interface SessionReflectorOptions {
   auditHook?: MemoryAuditHook;
   /** 2026-06-22: optional instrumentation counters (idle skill extraction ran vs doom-loop suppressed). */
   metrics?: MetricsStore;
+  /** WS5 (selfhood_closure): facts store; enables obs.recipe-decay observations on recipe demotion. */
+  facts?: MemoryStore;
 }
 
 export class SessionReflector {
   private readonly auditHook: MemoryAuditHook | undefined;
   private readonly metrics: MetricsStore | undefined;
+  /** WS5: facts store for recipe-decay self-observations (optional; reuse verification still demotes without it). */
+  private readonly factsForRecipes: MemoryStore | undefined;
 
   constructor(
     private readonly llm: ExtractorLlmClient,
@@ -209,6 +216,7 @@ export class SessionReflector {
   ) {
     this.auditHook = options.auditHook;
     this.metrics = options.metrics;
+    this.factsForRecipes = options.facts;
   }
 
   /**
@@ -358,8 +366,10 @@ export class SessionReflector {
       }
     }
 
-    // Feedback loop: scan linked_skill actions in this range, feed success/failure back to SkillStore
-    recordLinkedSkillOutcomes(actions, this.skills);
+    // Feedback loop: scan linked_skill actions in this range, feed success/failure back to SkillStore.
+    // WS5: with a facts store present, callable recipes additionally run reuse verification
+    // (fail in scope -> demoted to advisory + obs.recipe-decay observation).
+    recordLinkedSkillOutcomes(actions, this.skills, { facts: this.factsForRecipes });
 
     // 2026-06-08: cap draft skills so the reflector can't grow the store unboundedly (it mints new
     // drafts every idle cycle). Evicts the lowest-scored unused drafts; curated/promoted skills
@@ -394,8 +404,17 @@ const MAX_DRAFT_SKILLS = (() => {
  */
 export function recordLinkedSkillOutcomes(
   actions: Action[],
-  skills: SkillStore
-): { successes: number; failures: number } {
+  skills: SkillStore,
+  opts: {
+    /**
+     * WS5 (selfhood_closure): when provided, a CALLABLE recipe (verification + tool policy) that
+     * fails its own scope on reuse is demoted straight to 'playbook' (advisory, no use_skill) and
+     * an obs.recipe-decay self-observation is written — "a recipe that stops working is caught by
+     * its own verification, not a human".
+     */
+    facts?: MemoryStore;
+  } = {},
+): { successes: number; failures: number; recipesDemoted: number } {
   const bySkill = new Map<string, Action[]>();
   for (const a of actions) {
     if (!a.linkedSkill) continue;
@@ -406,12 +425,44 @@ export function recordLinkedSkillOutcomes(
 
   let successes = 0;
   let failures = 0;
+  let recipesDemoted = 0;
+  const reuseVerifyEnabled = (() => {
+    const v = (process.env.PHILONT_RECIPE_REUSE_VERIFY ?? '').trim().toLowerCase();
+    return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+  })();
+
   for (const [skillName, acts] of bySkill) {
-    const anyFail = acts.some((a) => !a.success);
+    const skill = skills.getByName(skillName);
+    const isRecipe =
+      reuseVerifyEnabled &&
+      skill != null &&
+      skill.verification != null &&
+      (skill.toolPolicy?.length ?? 0) > 0;
+
+    // For a recipe, verification scope = the actions using its declared tool policy; a stray
+    // unrelated failure in the same turn must not kill the recipe. No in-scope actions → the
+    // reuse never exercised the recipe; fall back to the legacy all-actions strategy.
+    const scoped = isRecipe
+      ? acts.filter((a) => (skill!.toolPolicy as string[]).includes(a.toolName))
+      : acts;
+    const judged = scoped.length > 0 ? scoped : acts;
+    const anyFail = judged.some((a) => !a.success);
+
     if (anyFail) {
-      const failAction = acts.find((a) => !a.success)!;
+      const failAction = judged.find((a) => !a.success)!;
       skills.recordSkillOutcome(skillName, false, failAction.timestamp);
       failures++;
+      if (isRecipe && recipeReuseMaturityMove(false) === 'demote_revise') {
+        skills.setMaturity(skillName, 'playbook');
+        recipesDemoted++;
+        if (opts.facts) {
+          try {
+            recordRecipeDecayObservation(opts.facts, skillName, skill!.id);
+          } catch {
+            // Observation is best-effort; the demotion itself already happened.
+          }
+        }
+      }
     } else {
       // Record each successful action separately, preserving the "high-frequency use" signal
       for (const a of acts) {
@@ -420,5 +471,5 @@ export function recordLinkedSkillOutcomes(
       }
     }
   }
-  return { successes, failures };
+  return { successes, failures, recipesDemoted };
 }

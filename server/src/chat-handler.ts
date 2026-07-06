@@ -544,7 +544,8 @@ const reflector = new SessionReflector(
   memory.skills,
   memory.actions,
   memory.raw,
-  { auditHook: internalAudit, metrics: memory.metrics },
+  // facts (WS5): recipe reuse-verification failures write obs.recipe-decay self-observations
+  { auditHook: internalAudit, metrics: memory.metrics, facts: memory.facts },
 );
 
 // v7: pursuit proposer (shadow state) — at session end, identify unclosed inquiry topics from the conversation
@@ -6601,6 +6602,12 @@ interface TurnSignalBus {
     toolResults: Array<{ toolName: string; content: string; toolInput?: Record<string, unknown> }>;
     assistantText: string;
   };
+  /**
+   * WS5 (selfhood_closure): the skill most recently retrieved via use_skill this turn. Subsequent
+   * tool actions are logged with linkedSkill=this name, which is what lets the reflector attribute
+   * their success/failure to the recipe and run reuse verification (recordLinkedSkillOutcomes).
+   */
+  activeSkillName?: string;
   /** Aux-LLM intent route for this turn (computed in handleChatSend, read in handleChatSendInner for the deep_explore nudge). */
   intentDecision?: IntentDecision | null;
   /** Set once when the forced-continue mechanism has injected a real deep_explore(continue) this turn (anti-reentry). */
@@ -7236,6 +7243,14 @@ async function runToolLoop(
       resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
       toolInput: call.name === 'http' ? (call.input as Record<string, unknown>) : undefined,
     });
+    // WS5: a successful use_skill makes that skill the turn's active linked skill, so the
+    // actions that follow are attributed to it (reuse verification input for the reflector).
+    if (call.name === 'use_skill' && result.success) {
+      const skillName = (sanitized.input as { name?: unknown } | null)?.name;
+      if (typeof skillName === 'string' && skillName.trim()) {
+        signalBus.activeSkillName = skillName.trim();
+      }
+    }
     // Layer 0.5: action persisted to global timeline; selected by time window during reflection
     memory.actions.log({
       sessionId: GLOBAL_TIMELINE_SESSION_ID,
@@ -7243,6 +7258,11 @@ async function runToolLoop(
       params: call.input,
       result: (result.success ? result.output : result.error)?.slice(0, 500) ?? null,
       success: result.success,
+      // Attribute post-use_skill actions to the active recipe (never use_skill itself).
+      linkedSkill:
+        call.name !== 'use_skill' && signalBus.activeSkillName
+          ? signalBus.activeSkillName
+          : undefined,
     });
   }
 

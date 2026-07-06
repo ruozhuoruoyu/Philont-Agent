@@ -224,7 +224,7 @@ export { inferOriginFromCreatedBy } from './types.js';
 export { startScheduler } from './scheduler.js';
 export type { SchedulerHandle, SchedulerOptions } from './scheduler.js';
 export { SessionExtractor } from './extractor.js';
-export { SessionReflector } from './reflector.js';
+export { SessionReflector, recordLinkedSkillOutcomes } from './reflector.js';
 export { SelfReflector } from './self_reflector.js';
 export type {
   SelfReflectResult,
