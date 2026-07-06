@@ -780,10 +780,43 @@ async function fetchArxivAtom(id: string, input: WebFetchInput): Promise<FetchRe
 }
 
 /**
+ * URLs whose path names a raw text document (spec/guide/config files served verbatim). Both the
+ * native tier and the scraper tier run such content through an HTML→markdown extraction pipeline
+ * (tavily `extract_depth: 'advanced'` re-processes even a raw .md file), which reformats tables and
+ * code fences — prod: the mycox guide's endpoint table came back mangled, so the plan-loop endpoint
+ * anchor saw 3 endpoints instead of 26. For these URLs byte fidelity beats IP diversity: go direct
+ * first, and only fall back to the lossy tiers when the direct GET itself fails (e.g. our-IP 403).
+ */
+export function isRawTextResource(url: string): boolean {
+  try {
+    return /\.(?:md|markdown|txt|rst|adoc|json|jsonc|ya?ml|toml|csv|tsv|xml|ini|cfg|conf|env|proto|graphql|openapi)$/i.test(
+      new URL(url).pathname,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * One URL, tried through three tiers in order, each running off a different IP so an our-IP 403 never ends
  * the chain: (1) provider server-side web_fetch, (2) third-party scraper backend, (3) direct HTTP.
+ * Raw text documents (.md/.txt/…) invert the order — direct verbatim GET first, lossy tiers as fallback.
  */
 async function fetchOne(input: WebFetchInput): Promise<FetchResultPayload> {
+  // Tier 0: raw text documents — verbatim direct GET first (fidelity over IP diversity).
+  if (isRawTextResource(input.url)) {
+    try {
+      const r = await withRetry(() => runWebFetch(input), {
+        isRetryable: (e) => e instanceof IngestError && (e.kind === 'timeout' || e.kind === 'aborted'),
+      });
+      console.log(`[webFetch] backend=direct-raw url=${input.url}`);
+      return r;
+    } catch (e) {
+      console.log(
+        `[webFetch] backend=direct-raw failed (${(e as Error)?.message ?? String(e)}) url=${input.url} — falling back to native/scraper tiers`,
+      );
+    }
+  }
   // Tier 1: provider server-side web_fetch (fetches from the LLM provider's infra).
   try {
     const r = await fetchNative(input);

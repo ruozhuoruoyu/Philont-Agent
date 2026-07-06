@@ -1,6 +1,6 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { webFetchTool, clearWebFetchCache } from '../src/network/webFetch.js';
+import { webFetchTool, clearWebFetchCache, isRawTextResource } from '../src/network/webFetch.js';
 import {
   registerMainLLM,
   clearMainLLMRegistration,
@@ -429,5 +429,76 @@ describe('webFetchTool', () => {
         fakeFetch.restore();
       }
     });
+  });
+});
+
+describe('raw text resources (tier 0 — fidelity over IP diversity)', () => {
+  const RAW_MD = [
+    '# Guide',
+    '| Endpoint | Method |',
+    '| `/comments` | POST |',
+    'curl -s -X POST "$BASE_URL/posts/$PUBLIC_ID/upvote"',
+  ].join('\n');
+  const mdResponse = (body: string, status = 200) =>
+    new Response(body, { status, headers: { 'Content-Type': 'text/markdown; charset=utf-8' } });
+
+  let savedTavily: string | undefined;
+  let savedBackend: string | undefined;
+  beforeEach(() => {
+    clearWebFetchCache();
+    savedTavily = process.env.TAVILY_API_KEY;
+    savedBackend = process.env.PHILONT_WEB_FETCH_BACKEND;
+  });
+  afterEach(() => {
+    if (savedTavily === undefined) delete process.env.TAVILY_API_KEY;
+    else process.env.TAVILY_API_KEY = savedTavily;
+    if (savedBackend === undefined) delete process.env.PHILONT_WEB_FETCH_BACKEND;
+    else process.env.PHILONT_WEB_FETCH_BACKEND = savedBackend;
+  });
+
+  it('isRawTextResource: spec/doc extensions yes, pages no', () => {
+    assert.ok(isRawTextResource('https://mycox.ai/mycox/guide.md'));
+    assert.ok(isRawTextResource('https://x.dev/openapi.yaml?v=2'));
+    assert.ok(isRawTextResource('https://x.dev/notes.txt'));
+    assert.ok(!isRawTextResource('https://x.dev/guide'));
+    assert.ok(!isRawTextResource('https://x.dev/index.html'));
+    assert.ok(!isRawTextResource('not a url'));
+  });
+
+  it('.md URL goes direct and returns the body verbatim, even with a scraper configured', async () => {
+    process.env.TAVILY_API_KEY = 'test-key-should-not-be-used';
+    const fakeFetch = mockFetch(({ url }) => {
+      if (url.includes('tavily')) throw new Error('scraper must not be called for raw text');
+      return mdResponse(RAW_MD);
+    });
+    try {
+      const r = await webFetchTool.execute({ url: 'https://mycox.ai/mycox/guide.md' });
+      assert.equal(r.success, true);
+      assert.ok(r.output!.includes('| `/comments` | POST |'), 'table pipes must survive verbatim');
+      assert.ok(r.output!.includes('$BASE_URL/posts/$PUBLIC_ID/upvote'), '$VAR curl must survive verbatim');
+    } finally {
+      fakeFetch.restore();
+    }
+  });
+
+  it('.md direct failure falls back to the scraper tier', async () => {
+    process.env.TAVILY_API_KEY = 'tk';
+    process.env.PHILONT_WEB_FETCH_BACKEND = 'tavily';
+    const fakeFetch = mockFetch(({ url }) => {
+      if (url.includes('api.tavily.com')) {
+        return new Response(JSON.stringify({ results: [{ raw_content: 'scraped fallback content' }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return mdResponse('forbidden', 403);
+    });
+    try {
+      const r = await webFetchTool.execute({ url: 'https://blocked.example.org/guide.md' });
+      assert.equal(r.success, true);
+      assert.ok(r.output!.includes('scraped fallback content'));
+    } finally {
+      fakeFetch.restore();
+    }
   });
 });
