@@ -141,6 +141,31 @@ export function extractGuideEndpoints(guideText: string): GuideApi {
   const hosts = new Set<string>();
   const endpoints = new Set<string>();
   const stripTrail = (s: string) => s.replace(/[.,;:)\]}'"`]+$/, '');
+  // Base-URL resolution: guides define a variable base (`export BASE_URL="https://host/api"`) and
+  // then document endpoints RELATIVE to it (table rows `| /comments | POST |`, curls
+  // `$BASE_URL/comments`). Anchoring the relative form is actively harmful: the auth-path guard
+  // then REJECTS the correct full path (/api/auth/verify) as undocumented and steers the model to
+  // the base-less path, which 404s (prod: verify blocked 5×, model fell back to /auth/verify →
+  // HTML 404, while /api/auth/verify existed all along). Resolve every relative endpoint against
+  // the defined base so registry + guards speak in real paths.
+  const varBases = new Map<string, string>();
+  const varDefRe = /\b([A-Z][A-Z0-9_]*)\s*=\s*["']?(https?:\/\/[^\s"'`]+)/g;
+  let vd: RegExpExecArray | null;
+  while ((vd = varDefRe.exec(guideText))) {
+    try {
+      const u = new URL(stripTrail(vd[2]));
+      if (PLACEHOLDER_HOST_RE.test(u.hostname)) continue;
+      varBases.set(vd[1], u.pathname.replace(/\/+$/, ''));
+    } catch {
+      /* not a real URL — skip */
+    }
+  }
+  const defaultBase =
+    [...varBases.entries()].find(([k, v]) => /BASE|API/.test(k) && v && v !== '/')?.[1] ??
+    [...varBases.values()].find((v) => v && v !== '/') ??
+    '';
+  const withBase = (p: string, base = defaultBase): string =>
+    base && p !== base && !p.startsWith(`${base}/`) ? `${base}${p}` : p;
   // Full URLs → host (+ path when it looks like an API path).
   const urlRe = /https?:\/\/([a-z0-9][a-z0-9.-]*[a-z0-9])(\/[^\s"'`)>\]}]*)?/gi;
   let m: RegExpExecArray | null;
@@ -154,7 +179,7 @@ export function extractGuideEndpoints(guideText: string): GuideApi {
   }
   // "METHOD /path" documented calls (e.g. "POST /api/auth/register-agent").
   const mp = /\b(GET|POST|PUT|PATCH|DELETE)\s+(\/[A-Za-z0-9_\-/{}:.?=&]+)/g;
-  while ((m = mp.exec(guideText))) endpoints.add(`${m[1].toUpperCase()} ${stripTrail(m[2]).slice(0, 70)}`);
+  while ((m = mp.exec(guideText))) endpoints.add(`${m[1].toUpperCase()} ${withBase(stripTrail(m[2])).slice(0, 70)}`);
   // Bare /api/... paths mentioned inline.
   const bare = /(?<![\w/])(\/api\/[A-Za-z0-9_\-/{}:.?=&]+)/g;
   while ((m = bare.exec(guideText))) endpoints.add(stripTrail(m[1]).slice(0, 70));
@@ -166,17 +191,19 @@ export function extractGuideEndpoints(guideText: string): GuideApi {
     /^\s*\|\s*`?(\/[A-Za-z0-9_\-/{}:.?=&]+)`?\s*\|\s*`?(GET|POST|PUT|PATCH|DELETE)`?\s*\||^\s*\|\s*`?(GET|POST|PUT|PATCH|DELETE)`?\s*\|\s*`?(\/[A-Za-z0-9_\-/{}:.?=&]+)`?\s*\|/gim;
   while ((m = tableRow.exec(guideText))) {
     const method = (m[2] ?? m[3]).toUpperCase();
-    const path = stripTrail(m[1] ?? m[4]);
+    const path = withBase(stripTrail(m[1] ?? m[4]));
     endpoints.add(`${method} ${path.slice(0, 70)}`);
   }
   // Shell-example paths behind a variable base (e.g. `curl -X POST "$BASE_URL/comments"`,
   // `${API_URL}/posts/$PUBLIC_ID/upvote`). The variable hides the host from urlRe, so these
   // examples anchored nothing. Method comes from a preceding -X flag when present, else GET.
-  const varPath = /(?:-X\s+(GET|POST|PUT|PATCH|DELETE)\s+)?["'`]?\$\{?[A-Z][A-Z0-9_]*\}?(\/[A-Za-z0-9_\-/{}:.?=&$]+)/g;
+  // The referenced variable's own defined base wins over the default (multi-base guides).
+  const varPath = /(?:-X\s+(GET|POST|PUT|PATCH|DELETE)\s+)?["'`]?\$\{?([A-Z][A-Z0-9_]*)\}?(\/[A-Za-z0-9_\-/{}:.?=&$]+)/g;
   while ((m = varPath.exec(guideText))) {
-    const path = stripTrail(m[2]).replace(/\?.*$/, '');
+    const path = stripTrail(m[3]).replace(/\?.*$/, '');
     if (path.length < 2) continue;
-    endpoints.add(`${(m[1] ?? 'GET').toUpperCase()} ${path.slice(0, 70)}`);
+    const resolved = withBase(path, varBases.get(m[2]) ?? defaultBase);
+    endpoints.add(`${(m[1] ?? 'GET').toUpperCase()} ${resolved.slice(0, 70)}`);
   }
   return { hosts: [...hosts], endpoints: [...endpoints].slice(0, 40) };
 }

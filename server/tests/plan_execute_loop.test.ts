@@ -392,14 +392,36 @@ test('extractGuideEndpoints: markdown tables (both column orders) and $VAR-based
     'Webhook: POST $GENERATE_WEBHOOK_URL',
   ].join('\n');
   const api = extractGuideEndpoints(guide);
-  assert.ok(api.endpoints.includes('POST /comments'), `table path-first row missing: ${api.endpoints}`);
-  assert.ok(api.endpoints.includes('POST /posts/:public_id/upvote'), 'table row with :param missing');
-  assert.ok(api.endpoints.includes('GET /stats'), 'GET table row missing');
-  assert.ok(api.endpoints.includes('POST /method-first/form'), 'method-first column order missing');
-  assert.ok(api.endpoints.includes('POST /posts/$PUBLIC_ID/upvote'), '$VAR curl with -X missing');
-  assert.ok(api.endpoints.includes('GET /posts/$PUBLIC_ID/comments'), '$VAR curl without -X (GET default, query stripped) missing');
+  // BASE_URL="https://mycox.ai/api" is defined, so every relative endpoint resolves to a REAL
+  // /api/... path — anchoring the relative form makes the auth-path guard reject the correct
+  // full path and steer the model to a 404 (prod: /api/auth/verify blocked → /auth/verify 404).
+  assert.ok(api.endpoints.includes('POST /api/comments'), `table path-first row missing: ${api.endpoints}`);
+  assert.ok(api.endpoints.includes('POST /api/posts/:public_id/upvote'), 'table row with :param missing');
+  assert.ok(api.endpoints.includes('GET /api/stats'), 'GET table row missing');
+  assert.ok(api.endpoints.includes('POST /api/method-first/form'), 'method-first column order missing');
+  assert.ok(api.endpoints.includes('POST /api/posts/$PUBLIC_ID/upvote'), '$VAR curl with -X missing');
+  assert.ok(api.endpoints.includes('GET /api/posts/$PUBLIC_ID/comments'), '$VAR curl without -X (GET default, query stripped) missing');
+  assert.ok(!api.endpoints.some((e) => / \/(?!api\/)/.test(e) && /comments|upvote|stats|form/.test(e)), 'base-relative forms must not remain anchored');
   assert.ok(!api.endpoints.some((e) => /Endpoint|Method|----/.test(e)), 'header/separator rows must not be anchored');
   assert.ok(!api.endpoints.some((e) => /WEBHOOK/.test(e)), 'bare $VAR with no path must not be anchored');
+});
+
+test('extractGuideEndpoints: base resolution edge cases', () => {
+  // No base defined → relative paths anchor as written (previous behavior preserved).
+  const noBase = extractGuideEndpoints('| `/comments` | POST |\n| `/stats` | GET |');
+  assert.ok(noBase.endpoints.includes('POST /comments'));
+  // Path already under the base is not double-prefixed; placeholder-host bases are ignored.
+  const guide = [
+    'export BASE_URL="https://mycox.ai/api"',
+    'export RUNNER="https://your-runner.example/hook"',
+    'Register: POST /api/auth/register-agent',
+    '| `/api/health` | GET |',
+  ].join('\n');
+  const api = extractGuideEndpoints(guide);
+  assert.ok(api.endpoints.includes('POST /api/auth/register-agent'), 'already-prefixed prose must be untouched');
+  assert.ok(!api.endpoints.includes('POST /api/api/auth/register-agent'), 'no double prefix');
+  assert.ok(api.endpoints.includes('GET /api/health'), 'already-prefixed table row must be untouched');
+  assert.ok(!api.hosts.includes('your-runner.example'), 'placeholder base host must not enter allowlist');
 });
 
 test('endpointGuardReject: blocks the hallucinated host, allows the documented one', () => {
