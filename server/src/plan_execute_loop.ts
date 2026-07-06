@@ -95,11 +95,14 @@ export const ENDPOINT_HINTS: ReadonlyArray<[RegExp, RegExp]> = [
   // "POST" — prod: "Verify … via POST /api/auth/verify" got typed as a posting deliverable → false ❌).
   [/\bverif(?:y|ication)\b|验证|校验/i, /verify/i],
   [/\bregister\b|sign\s*up|注册/i, /register|signup/i],
-  [/\bcomment\b|评论|\breply\b|回复/i, /comment|reply/i],
+  [/\bcomment\b|评论|\breply\b|回复/i, /\/comments?\b|\/reply\b/i],
   [/\bvote\b|投票/i, /vote/i],
-  [/\bpublish\b|发帖|发布/i, /post/i],
+  // Creating a post = POST to the posts COLLECTION (`/posts` or `/posts?…`) — NOT a sub-resource
+  // like `/posts/{id}/upvote` or `/posts/{id}/comment` (prod: a successful upvote/GET to a /posts/*
+  // path false-satisfied "publish a post" while every real POST /api/posts returned 500).
+  [/\bpublish\b|发帖|发布/i, /\/posts\/?(?:\?|$)/i],
   // lowercase-only "post" (the noun); an all-caps POST token is the HTTP verb, stripped before testing.
-  [{ test: (t: string) => /\bpost\b/i.test(t.replace(/\bPOST\b/g, ' ')) } as RegExp, /post/i],
+  [{ test: (t: string) => /\bpost\b/i.test(t.replace(/\bPOST\b/g, ' ')) } as RegExp, /\/posts\/?(?:\?|$)/i],
 ];
 /** Tools whose success proves a schedule-type deliverable. */
 export const SCHEDULE_TOOLS: ReadonlySet<string> = new Set(['schedule_reminder', 'create_calendar_event']);

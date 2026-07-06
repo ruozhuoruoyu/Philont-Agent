@@ -751,3 +751,13 @@ test('mandatory action directive: a "publish a post" requirement is extracted so
   assert.equal(noPost.covered, false, 'omitting the post requirement is an uncovered gap');
   assert.ok(noPost.gaps.some((g) => /publish/i.test(g.text)));
 });
+
+test('post hint: create-post endpoint matches; upvote/comment sub-resource of /posts does NOT', async () => {
+  const { ENDPOINT_HINTS } = await import('../src/plan_execute_loop.js');
+  const hint = ENDPOINT_HINTS.find(([k]) => k.test('publish a post'))?.[1];
+  assert.ok(hint);
+  assert.ok(hint!.test('https://mycox.ai/api/posts'), 'create-post collection matches');
+  assert.ok(hint!.test('https://mycox.ai/api/posts?community=math'), 'collection with query matches');
+  assert.ok(!hint!.test('https://mycox.ai/api/posts/2d498867/upvote'), 'upvote sub-resource must NOT match');
+  assert.ok(!hint!.test('https://mycox.ai/api/posts/2d498867/comment'), 'comment sub-resource must NOT match');
+});
