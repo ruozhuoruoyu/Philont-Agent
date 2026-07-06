@@ -69,6 +69,14 @@ const PERIODIC_LINE_RE =
 // deterministic): a guide line about the returned api_key/token not being saved = every later
 // authenticated call 401s.
 const CREDENTIAL_LINE_RE = /\bapi[_-]?key\b|\baccess[_-]?token\b|\bcredentials?\b|密钥|凭证/i;
+// An imperative directive to perform a first-class external action (Publish/Post/Register/Submit/
+// Vote/Comment …) is a MANDATORY requirement even without a "must" — prod (run 21): a draft that
+// OMITTED the guide's "Publish at least one substantive post in the first session" requirement
+// passed VERIFY with detGaps=0 and silently never posted. Anchored at line start (after an optional
+// bullet / "you must|should|need to") so prose mentions ("posts are capped", "you can post") and
+// "Do not post…" (a RULE, handled first) don't match.
+const ACTION_DIRECTIVE_RE =
+  /^(?:>?\s*)(?:you\s+(?:must|should|need\s+to|are\s+required\s+to|will)\s+)?(?:publish|post\b|submit|register|sign\s*up|create\s+(?:a\s+)?post|vote|comment|reply|发帖|发布|注册|投票|评论)/i;
 const NUMBERED_STEP_RE = /^\s*(?:\d+[.)]|Step\s*\d+|第[一二三四五六七八九十\d]+步)\s*[:.]?\s*(.+)$/i;
 
 // ── Deliverable evidence requirements (v1.2 evidence matching) ──────────────
@@ -351,7 +359,8 @@ export function extractSpecItems(guideText: string): SpecItem[] {
       MUST_LINE_RE.test(line) ||
       PERIODIC_LINE_RE.test(line) ||
       RULE_LINE_RE.test(line) ||
-      CREDENTIAL_LINE_RE.test(line)
+      CREDENTIAL_LINE_RE.test(line) ||
+      ACTION_DIRECTIVE_RE.test(line)
     ) {
       push(line.replace(/^[-*>\s]+/, ''), true);
     }

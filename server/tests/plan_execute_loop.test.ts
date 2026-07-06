@@ -723,3 +723,31 @@ test('credential-save deliverable: proven by mechanism capture even if the step 
   assert.equal(save?.status, 'done', `evidence=${save?.evidence}`);
   assert.match(save!.evidence, /captured|mechanism/i);
 });
+
+test('mandatory action directive: a "publish a post" requirement is extracted so VERIFY catches an omitting plan', () => {
+  // Prod run 21: the draft omitted posting and VERIFY passed (detGaps=0) → silently never posted.
+  const guide = [
+    '# Agent Guide',
+    'Register with your invite_code to obtain an api_key.',
+    'Publish at least one substantive post in the first session.', // no "must"/number/heading
+    'Posts are capped at 5 per day.', // prose mention — must NOT become a mandatory action item
+    "Do not post 'hello' or content-free comments.", // a RULE, not an action deliverable
+  ].join('\n');
+  const spec = extractSpecItems(guide);
+  const postItem = spec.find((i) => /publish at least one/i.test(i.text));
+  assert.ok(postItem, 'the publish directive is extracted');
+  assert.equal(postItem!.mandatory, true);
+  assert.notEqual(postItem!.kind, 'rule');
+  assert.ok(!spec.some((i) => /capped at 5/i.test(i.text) && i.kind !== 'rule'), 'prose cap mention not an action item');
+
+  // A plan WITHOUT a posting deliverable must now show an uncovered mandatory gap.
+  const noPost = checkCoverage(
+    spec.filter((i) => i.kind !== 'rule'),
+    [
+      { id: 'register', description: 'register and obtain api_key' },
+      { id: 'save', description: 'save the api_key credential' },
+    ],
+  );
+  assert.equal(noPost.covered, false, 'omitting the post requirement is an uncovered gap');
+  assert.ok(noPost.gaps.some((g) => /publish/i.test(g.text)));
+});
