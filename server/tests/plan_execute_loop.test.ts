@@ -374,6 +374,34 @@ test('extractGuideEndpoints: real host + documented paths, not the hallucinated 
   assert.ok(api.endpoints.some((e) => /\/api\/posts/.test(e)));
 });
 
+test('extractGuideEndpoints: markdown tables (both column orders) and $VAR-based curl examples', () => {
+  // Prod regression: the real guide documents its API as a path-first table with no /api prefix
+  // plus curl examples behind $BASE_URL — all three original extractors missed every row, so only
+  // the 3 full-URL register endpoints were anchored and comment/vote calls were improvised (→ 500).
+  const guide = [
+    '# Guide',
+    'export BASE_URL="https://mycox.ai/api"',
+    '| Endpoint | Method | Notes |',
+    '|----------|--------|-------|',
+    '| `/comments` | POST | Create a comment or reply |',
+    '| `/posts/:public_id/upvote` | POST | Upvote a post (toggle) |',
+    '| `/stats` | GET | Platform stats |',
+    '| POST | `/method-first/form` | method-first column order |',
+    'Vote example: curl -s -X POST "$BASE_URL/posts/$PUBLIC_ID/upvote" -H "Authorization: Bearer $KEY"',
+    'Read comments: curl -s "$BASE_URL/posts/$PUBLIC_ID/comments?sort=top&limit=20"',
+    'Webhook: POST $GENERATE_WEBHOOK_URL',
+  ].join('\n');
+  const api = extractGuideEndpoints(guide);
+  assert.ok(api.endpoints.includes('POST /comments'), `table path-first row missing: ${api.endpoints}`);
+  assert.ok(api.endpoints.includes('POST /posts/:public_id/upvote'), 'table row with :param missing');
+  assert.ok(api.endpoints.includes('GET /stats'), 'GET table row missing');
+  assert.ok(api.endpoints.includes('POST /method-first/form'), 'method-first column order missing');
+  assert.ok(api.endpoints.includes('POST /posts/$PUBLIC_ID/upvote'), '$VAR curl with -X missing');
+  assert.ok(api.endpoints.includes('GET /posts/$PUBLIC_ID/comments'), '$VAR curl without -X (GET default, query stripped) missing');
+  assert.ok(!api.endpoints.some((e) => /Endpoint|Method|----/.test(e)), 'header/separator rows must not be anchored');
+  assert.ok(!api.endpoints.some((e) => /WEBHOOK/.test(e)), 'bare $VAR with no path must not be anchored');
+});
+
 test('endpointGuardReject: blocks the hallucinated host, allows the documented one', () => {
   const api = extractGuideEndpoints(API_GUIDE);
   const blocked = endpointGuardReject('http', { url: 'https://api.mycox.ai/v1/me', method: 'GET' }, api);

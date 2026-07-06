@@ -158,7 +158,27 @@ export function extractGuideEndpoints(guideText: string): GuideApi {
   // Bare /api/... paths mentioned inline.
   const bare = /(?<![\w/])(\/api\/[A-Za-z0-9_\-/{}:.?=&]+)/g;
   while ((m = bare.exec(guideText))) endpoints.add(stripTrail(m[1]).slice(0, 70));
-  return { hosts: [...hosts], endpoints: [...endpoints].slice(0, 30) };
+  // Markdown endpoint tables — BOTH column orders: `| /path | METHOD |` and `| METHOD | /path |`.
+  // Prod: the mycox guide documents its full API as a path-first table with no /api prefix; all
+  // three extractors above missed it, so only 3 of 13 endpoints were anchored and the weak model
+  // improvised comment/vote calls (→ 500 every cycle). Backticks around cells are optional.
+  const tableRow =
+    /^\s*\|\s*`?(\/[A-Za-z0-9_\-/{}:.?=&]+)`?\s*\|\s*`?(GET|POST|PUT|PATCH|DELETE)`?\s*\||^\s*\|\s*`?(GET|POST|PUT|PATCH|DELETE)`?\s*\|\s*`?(\/[A-Za-z0-9_\-/{}:.?=&]+)`?\s*\|/gim;
+  while ((m = tableRow.exec(guideText))) {
+    const method = (m[2] ?? m[3]).toUpperCase();
+    const path = stripTrail(m[1] ?? m[4]);
+    endpoints.add(`${method} ${path.slice(0, 70)}`);
+  }
+  // Shell-example paths behind a variable base (e.g. `curl -X POST "$BASE_URL/comments"`,
+  // `${API_URL}/posts/$PUBLIC_ID/upvote`). The variable hides the host from urlRe, so these
+  // examples anchored nothing. Method comes from a preceding -X flag when present, else GET.
+  const varPath = /(?:-X\s+(GET|POST|PUT|PATCH|DELETE)\s+)?["'`]?\$\{?[A-Z][A-Z0-9_]*\}?(\/[A-Za-z0-9_\-/{}:.?=&$]+)/g;
+  while ((m = varPath.exec(guideText))) {
+    const path = stripTrail(m[2]).replace(/\?.*$/, '');
+    if (path.length < 2) continue;
+    endpoints.add(`${(m[1] ?? 'GET').toUpperCase()} ${path.slice(0, 70)}`);
+  }
+  return { hosts: [...hosts], endpoints: [...endpoints].slice(0, 40) };
 }
 
 /** The authoritative endpoint block injected into every EXECUTE step. '' when nothing was extracted. */
