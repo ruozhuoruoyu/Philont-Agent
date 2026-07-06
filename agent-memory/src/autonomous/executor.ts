@@ -258,6 +258,7 @@ export class StandardExecutor implements InitiativeExecutor {
       outcomeSummary: truncate(out.summary, 500),
       outcomeRefs: { facts: factIds, notes: noteIds, pursuits: [] },
       questionAnswered: out.questionAnswered === true,
+      escalate: out.shouldEscalate === true,
       llmTokensSpent: llmTokens,
       toolCallsSpent: toolCalls,
     };
@@ -308,7 +309,7 @@ function renderExecutorPrompt(
     '      "importance": 0..1, default 0.4',
     '    }',
     '  ],',
-    '  "shouldEscalate": true|false,  // true if results are significant enough for the user to see at the next turn',
+    '  "shouldEscalate": true|false,  // true ONLY if the finding is urgent/important enough to NOTIFY the user immediately (it triggers a push); routine findings must be false',
     '  "questionAnswered": true|false,  // true only if you were researching a specific open question and your findings sufficiently answer it; otherwise false / omit',
     '  "requestedTool": { "tool": "<tool name>", "why": "<why it is strictly necessary>" }  // Only fill when: you cannot continue answering this question with existing read-only tools and must use a tool you don\'t currently have (e.g. run Lean/Z3/Python for verification/computation); otherwise **omit the entire field**',
     '}',

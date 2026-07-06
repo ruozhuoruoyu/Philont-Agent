@@ -322,3 +322,30 @@ test('executor: 无 plan → 直接走 LLM(零工具调用)', async () => {
   assert.equal(result.toolCallsSpent, 0);
   handle.close();
 });
+
+test('executor WS6: shouldEscalate is threaded into InitiativeRunResult.escalate', async () => {
+  const handle = openMemoryDb(':memory:');
+  const mk = (shouldEscalate: boolean) =>
+    new StandardExecutor({
+      facts: handle.facts,
+      notes: handle.notes,
+      llm: fixedLlm(
+        JSON.stringify({
+          summary: 'finding',
+          facts: [],
+          notes: [{ title: 'n', body: 'evidence body', importance: 0.5 }],
+          shouldEscalate,
+        }),
+      ),
+      tools: tools({}),
+    });
+
+  const up = await mk(true).run(newInit({ plan: [] }));
+  assert.equal(up.status, 'done');
+  assert.equal(up.escalate, true);
+
+  const down = await mk(false).run(newInit({ id: 'init-test-2', plan: [] }));
+  assert.equal(down.status, 'done');
+  assert.equal(down.escalate, false);
+  handle.close();
+});

@@ -5,9 +5,11 @@
  * invalid values (non-numeric / < 0) are ignored:
  *   PHILONT_AUTONOMOUS_DAILY_TOKENS         (default 0 = unlimited)
  *   PHILONT_AUTONOMOUS_DAILY_TOOL_CALLS     (default 50)
- *   PHILONT_AUTONOMOUS_PER_TICK_TOKENS      (default 7_000)
- *   PHILONT_AUTONOMOUS_PER_TICK_INITIATIVES (default 4)
+ *   PHILONT_AUTONOMOUS_PER_TICK_TOKENS      (default 16_000)
+ *   PHILONT_AUTONOMOUS_PER_TICK_INITIATIVES (default 8)
  *   PHILONT_AUTONOMOUS_PER_INITIATIVE_TOKENS(default 2_000)
+ * Defaults live in DEFAULT_BUDGET_CAPS (agent-memory/src/autonomous/budget.ts) — that is the
+ * single source of truth; the numbers above are a mirror for readability only.
  *
  * Global kill switch: PHILONT_AUTONOMOUS=0 (implemented in loop.ts, independent of caps).
  */

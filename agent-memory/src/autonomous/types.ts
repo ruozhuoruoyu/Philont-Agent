@@ -159,6 +159,13 @@ export interface InitiativeRunResult {
   needsGrant?: boolean;
   requestedTool?: { tool: string; why: string };
   error?: string;
+  /**
+   * WS6 (selfhood_closure): the executor LLM judged this finding significant enough to surface
+   * at DISCOVERY time (high-severity interrupt → web-ui finding + urgent push), not just via
+   * next-turn injection. Mapped 1:1 from ExecutorLlmOutput.shouldEscalate on the success path;
+   * the loop additionally requires non-empty outcomeRefs before firing 'high' (no evidence → no page).
+   */
+  escalate?: boolean;
   /** Actual LLM tokens spent (used to calibrate estimates) */
   llmTokensSpent: number;
   /** Actual number of tool calls made */

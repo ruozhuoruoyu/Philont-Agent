@@ -218,10 +218,15 @@ export function startAutonomousLoop(
       // Commit budget even if markDone fails (double safety)
       budget.commit(userId, spent);
       if (updated && opts.interrupt) {
+        // WS6 (selfhood_closure): escalate to 'high' only when the executor LLM flagged the finding
+        // AND it actually wrote evidence (facts/notes) — an escalation with nothing written would be
+        // an unevidenced page. 'high' reaches the user at discovery time (web-ui finding + urgent
+        // push via the sink); 'normal' stays next-turn injection as before.
+        const hasEvidence =
+          result.outcomeRefs != null &&
+          result.outcomeRefs.facts.length + result.outcomeRefs.notes.length > 0;
         opts.interrupt.fire(
-          result.outcomeRefs && result.outcomeRefs.facts.length + result.outcomeRefs.notes.length > 0
-            ? 'normal'
-            : 'normal',
+          result.escalate === true && hasEvidence ? 'high' : 'normal',
           {
             kind: 'discovery_made',
             initiativeId: initiative.id,

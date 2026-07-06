@@ -222,6 +222,10 @@ import {
 } from './research_grant.js';
 import { PushDispatcher } from './push/dispatcher.js';
 import { serviceDriverTick } from './push/service_driver.js';
+import { maybeAutoSubscribe } from './push/auto_subscribe.js';
+
+/** WS6: sessions already checked for first-contact push auto-subscribe (one store read per session). */
+const autoSubscribeCheckedSessions = new Set<string>();
 import {
   resolveAutonomousBudgetCaps,
   describeBudgetCapsOverrides,
@@ -4515,6 +4519,20 @@ export async function handleChatSend(
     await scanOrphanSessions();
     activeSessions.add(sessionId);
     sessionSkillsRevision.set(sessionId, skillsRevision);
+  }
+
+  // WS6 (selfhood_closure): first-contact auto-subscribe for push-capable DM channels. Without a
+  // subscription row the PushDispatcher drops every digest/urgent push, so the proactive layer was
+  // silent by default. One store SELECT per session (in-memory guard); notice delivered via
+  // onStatus in the same turn, so we only act when the channel can show it.
+  if (onStatus && !autoSubscribeCheckedSessions.has(sessionId)) {
+    autoSubscribeCheckedSessions.add(sessionId);
+    try {
+      const notice = maybeAutoSubscribe(memory.pushSubscriptions, sessionId);
+      if (notice) onStatus(notice);
+    } catch (e) {
+      console.warn('[push] first-contact auto-subscribe failed', e);
+    }
   }
   const grants = globalGrants;
 

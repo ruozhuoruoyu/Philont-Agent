@@ -555,3 +555,103 @@ test('loop + pursuitProgressWriter: PursuitDriver done → pursuit lastTouchedAt
   await loop.stop();
   handle.close();
 });
+
+test('loop WS6: escalate + written evidence fires HIGH severity; escalate without evidence stays normal', async () => {
+  // Case 1: shouldEscalate=true and a fact with sourceRefs is written -> 'high'
+  {
+    const handle = openMemoryDb(':memory:');
+    handle.facts.storeFact({
+      namespace: 'project',
+      key: 'urgent-topic',
+      value: { text: 'unclear' },
+      confidence: 0.2,
+    });
+    const llmOut = JSON.stringify({
+      summary: 'critical: dependency has an actively exploited CVE',
+      facts: [
+        {
+          namespace: 'project',
+          key: 'urgent-topic-verified',
+          value: { text: 'CVE-2026-0001 exploited in the wild' },
+          confidence: 0.9,
+          sourceRefs: ['https://example.com/advisory'],
+        },
+      ],
+      notes: [],
+      shouldEscalate: true,
+    });
+    const exe = new StandardExecutor({
+      facts: handle.facts,
+      notes: handle.notes,
+      llm: llmReturning(llmOut, 300),
+      tools: tools({ webSearch: { ok: true, output: 'advisory...' } }),
+    });
+    const severities: Array<'normal' | 'high'> = [];
+    const loop = startAutonomousLoop({
+      db: handle.db,
+      facts: handle.facts,
+      notes: handle.notes,
+      raw: handle.raw,
+      skills: handle.skills,
+      routingRules: handle.routingRules,
+      pursuits: handle.pursuits,
+      drivers: [new GapDriver()],
+      executor: exe,
+      interrupt: { fire: (sev) => severities.push(sev) },
+    });
+    const ev = await loop.tickOnce();
+    assert.equal(ev.initiativesRun, 1);
+    assert.deepEqual(severities, ['high'], 'escalate + evidence must fire high');
+    await loop.stop();
+    handle.close();
+  }
+
+  // Case 2: shouldEscalate=true but the only fact lacks sourceRefs (dropped by the
+  // anti-fabrication filter) and no notes -> no evidence -> 'normal'
+  {
+    const handle = openMemoryDb(':memory:');
+    handle.facts.storeFact({
+      namespace: 'project',
+      key: 'urgent-topic',
+      value: { text: 'unclear' },
+      confidence: 0.2,
+    });
+    const llmOut = JSON.stringify({
+      summary: 'claims something big with no sources',
+      facts: [
+        {
+          namespace: 'project',
+          key: 'unsourced-claim',
+          value: { text: 'trust me' },
+          confidence: 0.9,
+        },
+      ],
+      notes: [],
+      shouldEscalate: true,
+    });
+    const exe = new StandardExecutor({
+      facts: handle.facts,
+      notes: handle.notes,
+      llm: llmReturning(llmOut, 300),
+      tools: tools({ webSearch: { ok: true, output: '...' } }),
+    });
+    const severities: Array<'normal' | 'high'> = [];
+    const loop = startAutonomousLoop({
+      db: handle.db,
+      facts: handle.facts,
+      notes: handle.notes,
+      raw: handle.raw,
+      skills: handle.skills,
+      routingRules: handle.routingRules,
+      pursuits: handle.pursuits,
+      drivers: [new GapDriver()],
+      executor: exe,
+      interrupt: { fire: (sev) => severities.push(sev) },
+    });
+    const ev = await loop.tickOnce();
+    assert.equal(ev.initiativesRun, 1);
+    assert.deepEqual(severities, ['normal'], 'escalate without evidence must stay normal');
+    await loop.stop();
+    handle.close();
+  }
+});
