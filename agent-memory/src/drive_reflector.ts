@@ -29,6 +29,7 @@
  */
 
 import type { DriveConfigStore } from './drive_config.js';
+import type { ConstitutionProposalStore } from './constitution_proposals.js';
 import type { DriveOutcomeStore } from './drive_outcome.js';
 import type { PursuitStore } from './pursuit.js';
 import type {
@@ -91,12 +92,19 @@ export interface SessionDriveReflectorOptions {
   rootPursuitId?: string;
   /** Maximum batch size per run, to avoid a large backlog after N rounds */
   batchLimit?: number;
+  /**
+   * WS3 (selfhood_closure): when present, an out-of-bounds tuning attempt additionally files a
+   * constitution proposal (kind 'drive_bounds') so the owner can ratify widening the bound —
+   * the audit-only dead end becomes the identity-evolution channel.
+   */
+  proposals?: ConstitutionProposalStore;
 }
 
 export class SessionDriveReflector {
   private readonly auditHook: MemoryAuditHook | undefined;
   private readonly rootId: string;
   private readonly batchLimit: number;
+  private readonly proposals: ConstitutionProposalStore | undefined;
 
   constructor(
     private readonly outcomes: DriveOutcomeStore,
@@ -107,6 +115,7 @@ export class SessionDriveReflector {
     this.auditHook = options.auditHook;
     this.rootId = options.rootPursuitId ?? BOOTSTRAP_ROOT_PURSUIT_ID;
     this.batchLimit = options.batchLimit ?? 100;
+    this.proposals = options.proposals;
   }
 
   /**
@@ -215,6 +224,22 @@ export class SessionDriveReflector {
           boundsMin: min,
           boundsMax: max,
           ewma: cfg.effectiveness.ewma,
+        });
+        // WS3: turn the dead-end audit into a ratifiable constitution proposal.
+        this.proposals?.propose({
+          rootPursuitId: this.rootId,
+          kind: 'drive_bounds',
+          payload: {
+            driveId: cfg.id,
+            param: 'cooldownMs',
+            currentRange: [min, max],
+            proposedValue: proposed,
+          },
+          rationale:
+            `effectiveness EWMA ${cfg.effectiveness.ewma.toFixed(2)} over ` +
+            `${cfg.effectiveness.samples} samples suggests cooldownMs ${proposed}, ` +
+            `outside the constitution bound [${min}, ${max}]`,
+          evidenceRefs: [`drive-config:${cfg.id}`],
         });
         return 'out_of_bounds';
       }

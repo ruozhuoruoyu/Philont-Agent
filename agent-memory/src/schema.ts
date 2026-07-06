@@ -344,6 +344,25 @@ CREATE INDEX IF NOT EXISTS idx_drive_configs_root ON memory_drive_configs(root_p
 CREATE INDEX IF NOT EXISTS idx_drive_configs_kind ON memory_drive_configs(kind);
 CREATE INDEX IF NOT EXISTS idx_drive_configs_status ON memory_drive_configs(status);
 
+-- ── Constitution proposals (WS3, selfhood_closure): propose + owner-ratify identity amendments ──
+-- Brand-new standalone table: DDL_BASE runs idempotently on every open, so no version migration
+-- is needed (same precedent as memory_metrics below).
+CREATE TABLE IF NOT EXISTS constitution_proposals (
+  id                 TEXT PRIMARY KEY,
+  root_pursuit_id    TEXT NOT NULL,
+  kind               TEXT NOT NULL,             -- 'drive_bounds' | 'value_annotation'
+  payload_json       TEXT NOT NULL,
+  rationale          TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+  status             TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'approved' | 'rejected'
+  created_at         INTEGER NOT NULL,
+  decided_at         INTEGER,
+  surfaced_at        INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_constitution_proposals_status
+  ON constitution_proposals(root_pursuit_id, status, created_at);
+
 -- ── Drive trigger persistence (v7, append-only): landing point for feedback loop ──
 CREATE TABLE IF NOT EXISTS memory_drive_outcomes (
   id                          TEXT PRIMARY KEY,

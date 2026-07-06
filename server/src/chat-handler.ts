@@ -78,6 +78,9 @@ import {
   k8DriveOutcomeInput,
   runSelfObservations,
   listSelfObservations,
+  ConstitutionProposalStore,
+  approveAndApply,
+  renderProposalCard,
   parsePursuitTargetRef,
   DEFAULT_RESEARCH_GRANT_TTL_MS,
   FetchedResourceStore,
@@ -556,12 +559,27 @@ const pursuitExtractor = new SessionPursuitExtractor(
   { auditHook: internalAudit, rootPursuitId: BOOTSTRAP_ROOT_PURSUIT_ID },
 );
 
+// WS3 (selfhood_closure): constitution proposals — the agent proposes identity amendments with
+// evidence; the OWNER ratifies via decide_constitution_proposal. Red lines are not amendable.
+const constitutionProposals = new ConstitutionProposalStore(memory.db);
+
+/** WS3 kill switch (gates the producer + surfacing; the decision tool always works on existing rows). */
+function constitutionProposalsEnabled(): boolean {
+  const v = (process.env.PHILONT_CONSTITUTION_PROPOSALS ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
 // v7: drive reflector — scan drive_outcomes to back-fill utility + tune parameters within constitution.driveBounds
 const driveReflector = new SessionDriveReflector(
   memory.driveOutcomes,
   memory.driveConfigs,
   memory.pursuits,
-  { auditHook: internalAudit, rootPursuitId: BOOTSTRAP_ROOT_PURSUIT_ID },
+  {
+    auditHook: internalAudit,
+    rootPursuitId: BOOTSTRAP_ROOT_PURSUIT_ID,
+    // WS3: out-of-bounds tuning attempts become ratifiable proposals instead of audit-only dead ends.
+    proposals: constitutionProposalsEnabled() ? constitutionProposals : undefined,
+  },
 );
 
 // K3: emergent identity reflector — at session end, synthesize skills/pursuits to produce first-person self-description,
@@ -1392,6 +1410,57 @@ const uninstallSkillSync = wrapSkillToolWithReload(
 // installed skill is usable the same turn (same rationale as installSkill).
 const installFromRegistrySync = wrapSkillToolWithReload(installSkillFromRegistryTool, reloadSkillsFromDisk);
 
+// WS3 (selfhood_closure): owner-ratified constitution amendment. The agent may only call this
+// AFTER the owner has explicitly approved/rejected a surfaced proposal in conversation — the tool
+// applies the decision (approve: append-only amend + hash audit; reject: 30d re-proposal
+// suppression). Red lines are not amendable through this channel (enforced in approveAndApply).
+// Blacklisted for autonomous turns: self-ratification is not ratification.
+const decideConstitutionProposalTool: Tool = {
+  name: 'decide_constitution_proposal',
+  description:
+    'Apply the OWNER\'s explicit decision on a pending constitution amendment proposal. Call ONLY ' +
+    'after the owner has clearly approved ("同意/批准/approve") or rejected ("不要/拒绝/reject") the ' +
+    'specific proposal you relayed to them — never decide for them, never call this unprompted. ' +
+    'approve applies an append-only amendment (red lines can never be changed); reject suppresses ' +
+    'the same proposal for 30 days.',
+  schema: {
+    type: 'object',
+    required: ['id', 'decision'],
+    properties: {
+      id: { type: 'string', description: 'Proposal id (full id from the pending-proposal card).' },
+      decision: { type: 'string', enum: ['approve', 'reject'], description: "Owner's decision." },
+    },
+  },
+  capability: 'write',
+  domain: 'self',
+  async execute(params: Record<string, unknown>) {
+    try {
+      const id = typeof params.id === 'string' ? params.id.trim() : '';
+      const decision = params.decision === 'approve' ? 'approve' : params.decision === 'reject' ? 'reject' : null;
+      if (!id || !decision) {
+        return { success: false, output: '', error: 'decide_constitution_proposal: id and decision (approve|reject) are required' };
+      }
+      if (decision === 'approve') {
+        const applied = approveAndApply(constitutionProposals, memory.pursuits, id, internalAudit);
+        return {
+          success: true,
+          output: `Constitution amended per proposal ${applied.id.slice(0, 8)} (${applied.kind}). The amendment is append-only and hash-audited.`,
+        };
+      }
+      const rejected = constitutionProposals.decide(id, 'rejected');
+      if (!rejected) {
+        return { success: false, output: '', error: `proposal ${id} not found or already decided` };
+      }
+      return {
+        success: true,
+        output: `Proposal ${rejected.id.slice(0, 8)} rejected; identical content will not be re-proposed for 30 days.`,
+      };
+    } catch (e) {
+      return { success: false, output: '', error: `decide_constitution_proposal failed: ${(e as Error).message}` };
+    }
+  },
+};
+
 // forget_skill: delete SELF-LEARNED skills (reflection/plan-distilled, stored DB-only — the ones
 // uninstallSkill cannot reach because they have no SKILL.md on disk). This closes a real gap: the
 // model could `search_skills` and SEE these, and `uninstallSkill` only removes file-backed dirs, so a
@@ -1543,6 +1612,7 @@ const tools = createToolset({
     uninstallSkillSync,
     installFromRegistrySync,
     forgetSkillTool,
+    decideConstitutionProposalTool,
   ],
   // 2026-05-07: hook up SecretStore so the http tool uses the secured variant, supporting {SECRET_NAME}
   // placeholders. Credentials written by saveCredential can be referenced directly in http headers / body.
@@ -1566,6 +1636,8 @@ const PLAN_EXEC_BLACKLIST: ReadonlySet<string> = new Set([
   'uninstallSkill',
   'installSkillFromRegistry',
   'forget_skill',
+  // WS3: constitution decisions require the owner in the loop — never inside a sub-loop.
+  'decide_constitution_proposal',
   // Credential recording is only allowed in user-driven turns; sub-loop inside planAndExecute / autonomous turns
   // cannot modify secrets.
   'saveCredential',
@@ -1597,6 +1669,8 @@ const AUTONOMOUS_TURN_BLACKLIST_HARDCODED: ReadonlySet<string> = new Set([
   'uninstallSkill',
   'installSkillFromRegistry',
   'forget_skill',
+  // WS3: an autonomous turn ratifying its own constitution proposal is self-ratification.
+  'decide_constitution_proposal',
   'forgetFact',
   'shell',
   'writeFile',
@@ -3800,6 +3874,28 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
       }
     } catch (e) {
       console.error('[prefix] self-observations render failed', e);
+    }
+  }
+
+  // WS3 (selfhood_closure): surface at most ONE pending constitution proposal per 24h. The agent
+  // relays it to the owner in its reply; only an explicit owner approval/rejection may be followed
+  // by decide_constitution_proposal. Never decide on the owner's behalf.
+  if (constitutionProposalsEnabled()) {
+    try {
+      const proposal = constitutionProposals.nextToSurface(BOOTSTRAP_ROOT_PURSUIT_ID);
+      if (proposal) {
+        constitutionProposals.markSurfaced(proposal.id);
+        lines.push('## Constitution amendment proposal (awaiting the OWNER\'s decision)');
+        lines.push(renderProposalCard(proposal));
+        lines.push(
+          'Relay this proposal to the owner in your reply (their language), with the id. ' +
+            `If — and only if — the owner explicitly approves or rejects it, call ` +
+            `decide_constitution_proposal(id="${proposal.id}", decision="approve"|"reject"). ` +
+            'If they ignore it, drop the subject; it must not be re-raised this turn.',
+        );
+      }
+    } catch (e) {
+      console.error('[prefix] constitution proposal render failed', e);
     }
   }
 
