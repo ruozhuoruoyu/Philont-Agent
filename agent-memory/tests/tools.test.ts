@@ -247,3 +247,34 @@ test('list_facts output shows time label per fact', async () => {
     assert.ok(/\[.*recorded .*\]/.test(line), `line missing time tag: ${line}`);
   }
 });
+
+test('store_fact rejects secret-shaped values (credential hygiene gate)', async () => {
+  const { facts, notes } = openMemoryDb(':memory:');
+  const [storeFact] = createMemoryTools(facts, notes);
+
+  // Prod leak shape: service-prefixed long hex under a credential-named key.
+  const r1 = await storeFact.execute({
+    namespace: 'project',
+    key: 'mycox.api_key',
+    value: 'exampleservice_a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1',
+  });
+  assert.equal(r1.success, false);
+  assert.match(r1.error ?? '', /saveCredential/);
+  assert.equal(facts.getFact('project', 'mycox.api_key'), null);
+
+  // Known token prefixes are rejected regardless of key name.
+  const r2 = await storeFact.execute({ namespace: 'project', key: 'notes', value: 'ghp_abcdef1234567890abcdef1234567890abcd' });
+  assert.equal(r2.success, false);
+
+  // Bare token-like value under a credential-named key.
+  const r3 = await storeFact.execute({ namespace: 'user', key: 'service_token', value: 'AbCdEfGh1234567890.xyz_-AbCd' });
+  assert.equal(r3.success, false);
+
+  // Legit values pass: tombstone JSON, prose, short ids, hex under a non-credential key.
+  const ok1 = await storeFact.execute({ namespace: 'project', key: 'mycox.auth', value: '{"status":"cleared","reason":"user requested deletion"}' });
+  assert.equal(ok1.success, true);
+  const ok2 = await storeFact.execute({ namespace: 'project', key: 'commit', value: 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0' });
+  assert.equal(ok2.success, true, ok2.error);
+  const ok3 = await storeFact.execute({ namespace: 'user', key: 'name', value: 'alice' });
+  assert.equal(ok3.success, true);
+});

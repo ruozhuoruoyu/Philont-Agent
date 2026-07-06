@@ -182,6 +182,12 @@ import {
   messageIsSelfContainedGoal,
   type IntentDecision,
 } from './intent_router.js';
+import { looksLikeCleanupIntent } from './intent_router.js';
+import {
+  extractCleanupTargets,
+  matchesCleanupTarget,
+  cleanupHttpWriteReject,
+} from './cleanup_scope.js';
 import { replyWithMediaTool } from './tools/reply_with_media.js';
 import { setConscienceLlm } from './conscience_gate.js';
 import { createAutoAdvanceLoop } from './deep_explore_autoadvance.js';
@@ -2045,6 +2051,11 @@ function effectiveMaxIter(sessionId: string): number {
 
 // same_root_cause count at which the system is treated as "stuck" (the ViabilityGate's "high" tier).
 const CURIOSITY_STUCK_SUPPRESS_THRESHOLD = 6;
+
+// Cleanup-turn scoping: how long schedules matching the cleanup target stay soft-paused so a
+// scheduled fire cannot race the deletion mid-turn. Comfortably above the turn hard deadline's
+// practical clear-turn duration (observed ≤3min; worst 20min turn cap does not apply to direct).
+const CLEANUP_SCHEDULE_PAUSE_MS = 15 * 60_000;
 
 // Autonomous driver registry — single source of truth; dashboard / tests / loop all reference it.
 // PursuitDriver injects an isGranted callback: used to query GrantStore when replaying proactive research "request permission".
@@ -4790,6 +4801,40 @@ export async function handleChatSend(
     if (intentDecision) {
       console.log(`[intent-router] session=${sessionId} route=${intentDecision.route}${intentDecision.domain ? `:${intentDecision.domain}` : ''} conf=${intentDecision.confidence}`);
     }
+    // Cleanup-turn scoping: (1) flag the turn so runToolLoop rejects external write http (clear
+    // turns drifted into re-registering the service being cleared); (2) soft-pause schedules that
+    // mention the cleanup target so a scheduled check-in can't fire mid-clear and resurrect the
+    // half-deleted state (prod: check-in raced the clear three runs in a row).
+    if (looksLikeCleanupIntent(userMessage)) {
+      const targets = extractCleanupTargets(userMessage);
+      signalBus.cleanupIntent = { targets };
+      if (targets.length > 0) {
+        try {
+          const until = Date.now() + CLEANUP_SCHEDULE_PAUSE_MS;
+          const paused: string[] = [];
+          for (const s of memory.schedules.list({ enabledOnly: true })) {
+            if (!matchesCleanupTarget(s, targets)) continue;
+            if (memory.schedules.pauseUntil(s.id, until)) paused.push(s.name);
+          }
+          if (paused.length > 0) {
+            console.log(
+              `[cleanup-scope] session=${sessionId} paused ${paused.length} schedule(s) matching [${targets.join(',')}] ` +
+                `for ${Math.round(CLEANUP_SCHEDULE_PAUSE_MS / 60000)}min: ${paused.join(', ')}`,
+            );
+            internalAudit.append('self_domain_write', {
+              source: 'cleanup_scope',
+              origin: 'Internal',
+              toolName: 'schedules_paused',
+              targets,
+              paused,
+              pauseMs: CLEANUP_SCHEDULE_PAUSE_MS,
+            });
+          }
+        } catch (e) {
+          console.warn('[cleanup-scope] schedule pause failed (ignored)', e);
+        }
+      }
+    }
     // A deep_explore route is AUTHORITATIVE: do NOT let the legacy slow heuristic upgrade it to the plan
     // protocol (observed: "深度探索…技术栈和解决方案" routed deep_explore:0.95 but the heuristic's 建设/生产
     // keywords forced slow→plan_draft, hijacking the reasoning task into the build pipeline). Reasoning tasks
@@ -6706,6 +6751,13 @@ interface TurnSignalBus {
   activeSkillName?: string;
   /** Aux-LLM intent route for this turn (computed in handleChatSend, read in handleChatSendInner for the deep_explore nudge). */
   intentDecision?: IntentDecision | null;
+  /**
+   * Cleanup-turn scoping (2026-07-06): set when the user message is a pure cleanup command
+   * (looksLikeCleanupIntent). runToolLoop then mechanism-rejects external write http for the whole
+   * turn (prod: clear turns drifted into re-registering the service being cleared), and matching
+   * schedules were soft-paused at turn start so they can't race the deletion.
+   */
+  cleanupIntent?: { targets: string[] } | null;
   /** Set once when the forced-continue mechanism has injected a real deep_explore(continue) this turn (anti-reentry). */
   forcedDeepExploreContinue?: boolean;
   /** Set once when the forced-START mechanism has injected a real deep_explore(start) this turn (anti-reentry). */
@@ -8575,6 +8627,34 @@ async function runToolLoop(
           blockedTool: call.name,
         });
         continue;
+      }
+
+      // Cleanup-turn scoping: a pure cleanup command must never perform external writes (prod:
+      // clear turns fetched the guide and re-registered the service being cleared, burning invite
+      // codes). Local tools and http GET stay available.
+      if (signalBus.cleanupIntent) {
+        const rejected = cleanupHttpWriteReject(call.name, call.input);
+        if (rejected) {
+          console.warn(`[cleanup-scope] session=${sessionId} rejected external write ${call.name} (cleanup turn)`);
+          nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: rejected.error });
+          totalToolCallsThisTurn++;
+          inTurnRecords.push({ toolName: call.name, success: false, resultText: rejected.error });
+          memory.actions.log({
+            sessionId: GLOBAL_TIMELINE_SESSION_ID,
+            toolName: call.name,
+            params: call.input,
+            result: 'rejected_by_cleanup_scope',
+            success: false,
+          });
+          audit.append('self_domain_write', {
+            source: 'cleanup_scope',
+            origin: 'Internal',
+            toolName: 'cleanup_http_write_blocked',
+            sessionId,
+            blockedTool: call.name,
+          });
+          continue;
+        }
       }
 
       // 2026-05-11: plan_protocol_gate — slow mode + plan not reviewed → only allow plan_* /

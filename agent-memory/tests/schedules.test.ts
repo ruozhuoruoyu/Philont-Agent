@@ -320,3 +320,30 @@ test('recordFailure/recordSuccess: 不存在的 id → 返回 null', () => {
   assert.equal(schedules.recordFailure('no-such-id', 0), null);
   assert.equal(schedules.recordSuccess('no-such-id'), null);
 });
+
+test('ScheduleStore.pauseUntil extends but never shortens a pause', () => {
+  const { schedules } = openMemoryDb(':memory:');
+  const s = schedules.create({
+    name: 'mycox-checkin',
+    nextRunAt: 1000,
+    actionType: 'autonomous_turn',
+    payload: { message: 'check in' },
+  });
+
+  const t1 = Date.now() + 5 * 60_000;
+  const p1 = schedules.pauseUntil(s.id, t1);
+  assert.equal(p1?.pausedUntil, t1);
+
+  // Extending works.
+  const t2 = t1 + 10 * 60_000;
+  assert.equal(schedules.pauseUntil(s.id, t2)?.pausedUntil, t2);
+
+  // Shortening is a no-op (an existing longer pause wins).
+  assert.equal(schedules.pauseUntil(s.id, t1)?.pausedUntil, t2);
+
+  // Paused schedule is excluded from dueBefore.
+  assert.equal(schedules.dueBefore(Date.now() + 1).some((x) => x.id === s.id), false);
+
+  // Unknown id → null.
+  assert.equal(schedules.pauseUntil('nope', t2), null);
+});

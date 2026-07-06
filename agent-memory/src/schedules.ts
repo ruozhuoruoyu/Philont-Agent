@@ -156,6 +156,22 @@ export class ScheduleStore {
     return row ? rowToSchedule(row) : null;
   }
 
+  /**
+   * Soft-pause a schedule until the given time (epoch ms). Only ever EXTENDS an existing pause —
+   * never shortens one (a failure-triggered pause must not be cut short by a scope pause).
+   * Used by cleanup scoping: while the user is clearing project X, X's schedules must not fire
+   * mid-clear and resurrect what is being deleted.
+   */
+  pauseUntil(id: string, until: number): Schedule | null {
+    const current = this.get(id);
+    if (!current) return null;
+    if ((current.pausedUntil ?? 0) >= until) return current;
+    this.db
+      .prepare<[number, string]>(`UPDATE memory_schedules SET paused_until = ? WHERE id = ?`)
+      .run(until, id);
+    return this.get(id);
+  }
+
   list(opts: { enabledOnly?: boolean } = {}): Schedule[] {
     const sql = opts.enabledOnly
       ? `SELECT * FROM memory_schedules WHERE enabled = 1 ORDER BY next_run_at ASC`

@@ -44,6 +44,45 @@ function detectStringValueAuthPrefix(value: string): string | null {
   return null;
 }
 
+// ── Credential hygiene gate (2026-07-06) ─────────────────────────────────────
+// Prod leak path: register captured an api key into the SecretStore, but the model ALSO wrote the
+// raw value into a plain fact (project.mycox.api_key = "mycox_dd71…"). Facts bypass SecretStore
+// redaction, survive credential cleanup, and let later scheduled turns "find" stale keys. Refuse
+// secret-shaped bare-string values and point to saveCredential — facts store references, not keys.
+const KNOWN_TOKEN_PREFIX =
+  /^(?:sk-|ghp_|gho_|ghs_|github_pat_|xox[bpsar]-|glpat-|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})/;
+const JWT_SHAPE = /^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/;
+const SERVICE_KEY_SHAPE = /^[A-Za-z][A-Za-z0-9]{1,24}[_-][A-Fa-f0-9]{32,}$/; // e.g. mycox_<64 hex>
+const KEYNAME_IMPLIES_CREDENTIAL = /api[_-]?key|apikey|token|secret|credential|passwd|password|bearer/i;
+
+export function detectSecretShapedValue(
+  namespace: string,
+  key: string,
+  value: string,
+): string | null {
+  const v = value.trim();
+  // JSON blobs / prose / short values are never treated as secrets.
+  if (v.length < 16 || /\s/.test(v) || /^[{[]/.test(v)) return null;
+  const strongShape = KNOWN_TOKEN_PREFIX.test(v) || JWT_SHAPE.test(v) || SERVICE_KEY_SHAPE.test(v);
+  const keyImplies = KEYNAME_IMPLIES_CREDENTIAL.test(`${namespace}.${key}`);
+  const tokenLike = /^[A-Za-z0-9._-]{24,}$/.test(v);
+  // Flag an unmistakable secret shape anywhere, or a bare token-like value under a credential-named key.
+  if (!(strongShape || (keyImplies && tokenLike))) return null;
+  const suggestedId = `${namespace}.${key}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40);
+  return (
+    `value looks like a raw credential/API key — facts must NOT store secrets.` +
+    `\nFacts bypass SecretStore redaction, survive credential cleanup, and leak into every later turn.` +
+    `\nStore it properly instead: saveCredential({name:"${suggestedId}", value:"<the key>"}),` +
+    ` then reference it in http calls as {${suggestedId}}.` +
+    `\n(If you only need to REMEMBER that a key exists, store a status fact without the value,` +
+    ` e.g. value: {"status":"saved-in-credential-store","credential":"${suggestedId}"}.)`
+  );
+}
+
 // ── Time field utilities ───────────────────────────────────────────────────────
 
 /** Normalise ISO8601 string or epoch ms to epoch ms; returns null for invalid input */
@@ -478,6 +517,10 @@ export function createMemoryTools(
                 success: false,
                 error: prefixErr,
               };
+            }
+            const secretErr = detectSecretShapedValue(p.namespace, p.key, p.value);
+            if (secretErr) {
+              return { success: false, error: secretErr };
             }
           }
           const factKind: FactKind = p.fact_kind === 'event' ? 'event' : 'state';
