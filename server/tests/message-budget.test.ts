@@ -62,7 +62,7 @@ test('truncate: 超阈值尾部截断 + 提示', () => {
   const big = 'x'.repeat(5_000);
   const out = truncateToolResultContent(big, 1_000);
   assert.ok(out.startsWith('x'.repeat(1_000)));
-  assert.ok(out.includes('已截断'));
+  assert.ok(out.includes('truncated tail of'));
   assert.ok(out.includes('4000')); // 4000 字节被截
   assert.ok(out.length < 1_500); // 截断后长度受控
 });
@@ -218,7 +218,7 @@ test('emergency: Pass3 兜底 — 连最近的巨型 tool_result 也会被硬截
   // 两条 tool_result 的 content 都被截到 emergencyMaxToolResultBytes 附近
   const tr1 = msgs[1].content as Array<{ content: string }>;
   assert.ok(tr1[0].content.length < 20_000, `期望被截断, 实际 ${tr1[0].content.length}`);
-  assert.ok(tr1[0].content.includes('紧急末路'));
+  assert.ok(tr1[0].content.includes('philont emergency last-resort'));
 
   const tr2 = msgs[3].content as Array<{ content: string }>;
   assert.ok(tr2[0].content.length < 20_000);
@@ -240,7 +240,7 @@ test('emergency: Pass2 截断早期巨型 user/assistant 文本(不依赖 tool_r
   // 最早那条 user 被截断
   const m0 = msgs[0].content as string;
   assert.ok(m0.length < 100_000, `期望被截断,实际长度 ${m0.length}`);
-  assert.ok(m0.includes('紧急截断'));
+  assert.ok(m0.includes('philont emergency truncation'));
   // 最后 2 条(keepRecent=2)原样
   assert.equal(msgs[3].content, '好的');
   assert.equal(msgs[4].content, '继续?');
@@ -261,7 +261,7 @@ test('emergency: Pass2 也能处理 text block 数组', () => {
   assert.ok(r.didEvict);
   const blocks = msgs[0].content as Array<{ type: string; text: string }>;
   assert.ok(blocks[0].text.length < 50_000);
-  assert.ok(blocks[0].text.includes('紧急截断'));
+  assert.ok(blocks[0].text.includes('philont emergency truncation'));
 });
 
 // ── 默认值 sanity ─────────────────────────────────────────────────────────

@@ -190,7 +190,7 @@ test('e2e:planAndExecute 接 mock LLMAdapter,2 sub-tasks 全跑成功', async ()
   assert.equal(result.success, true);
   assert.match(result.output ?? '', /st-1/);
   assert.match(result.output ?? '', /st-2/);
-  assert.match(result.output ?? '', /2 成功/);
+  assert.match(result.output ?? '', /2 succeeded/);
   // 应该恰好 3 次 LLM 调用:1 plan + 2 sub-task
   assert.equal(mock.sentRequests.length, 3);
 });
@@ -250,5 +250,5 @@ test('e2e:子 loop 调 planAndExecute → blacklist 拦截,sub-task 仍能完成
   assert.equal(r.success, true);
   assert.equal(runnerCalls, 0, 'blacklist 拦截 → toolRunner 不应被调');
   // 两个 sub-task 都该 success
-  assert.match(r.output ?? '', /2 成功/);
+  assert.match(r.output ?? '', /2 succeeded/);
 });

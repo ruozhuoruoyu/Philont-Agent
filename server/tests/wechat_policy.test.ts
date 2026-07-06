@@ -63,8 +63,9 @@ test('DM 缺 fromUserId 拒绝', () => {
 
 // ── Group 路径 ────────────────────────────────────────────
 
-test('Group/disabled: 全拒(默认配置)', () => {
-  const r = checkInboundPolicy({ fromUserId: 'alice', groupId: 'g1' }, DEFAULT_POLICY);
+test('Group/disabled: 全拒', () => {
+  const cfg: PolicyConfig = { ...DEFAULT_POLICY, groupPolicy: 'disabled' };
+  const r = checkInboundPolicy({ fromUserId: 'alice', groupId: 'g1' }, cfg);
   assert.equal(r.allowed, false);
   assert.equal(r.reason, 'group_disabled');
 });
@@ -105,10 +106,10 @@ test('Group/allowlist + groupOverrides.allowFrom 覆盖 allowedUsers', () => {
 
 // ── policyFromEnv ────────────────────────────────────────────
 
-test('policyFromEnv: 缺省值 = allowlist + disabled', () => {
+test('policyFromEnv: 缺省值 = open + open', () => {
   const cfg = policyFromEnv({});
-  assert.equal(cfg.dmPolicy, 'allowlist');
-  assert.equal(cfg.groupPolicy, 'disabled');
+  assert.equal(cfg.dmPolicy, 'open');
+  assert.equal(cfg.groupPolicy, 'open');
   assert.deepEqual(cfg.allowedUsers, []);
   assert.deepEqual(cfg.allowedGroups, []);
 });

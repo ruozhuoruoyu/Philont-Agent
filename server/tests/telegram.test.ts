@@ -29,11 +29,11 @@ describe('readTelegramConfig', () => {
   it('启用但缺 token → null', () => {
     assert.equal(readTelegramConfig({ TELEGRAM_ENABLED: '1' }), null);
   });
-  it('启用 + token → 配置;默认 dm=allowlist/group=disabled', () => {
+  it('启用 + token → 配置;默认 dm=open/group=open', () => {
     const c = readTelegramConfig({ TELEGRAM_ENABLED: '1', TELEGRAM_BOT_TOKEN: 'abc' });
     assert.equal(c?.token, 'abc');
-    assert.equal(c?.policy.dmPolicy, 'allowlist');
-    assert.equal(c?.policy.groupPolicy, 'disabled');
+    assert.equal(c?.policy.dmPolicy, 'open');
+    assert.equal(c?.policy.groupPolicy, 'open');
   });
   it('解析 allowlist + 自定义 policy', () => {
     const c = readTelegramConfig({

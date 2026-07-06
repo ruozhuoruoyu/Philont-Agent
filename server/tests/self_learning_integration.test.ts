@@ -91,7 +91,7 @@ test('E2E: PDF 10 轮 — 第 1 次反思写出 routing rule', () => {
   // 验证 routing rule 落地
   const rules = memory.routingRules.listAll();
   assert.equal(rules.length, 1);
-  assert.equal(rules[0].confidence, 'tentative');
+  assert.equal(rules[0].confidence, 'provisional');
   assert.equal(rules[0].preferSkill, 'camscanner-pdf2office');
   assert.deepEqual(rules[0].avoidSkills, ['pdf2docx']);
   assert.match(rules[0].carveout, /不适用于含可选文本层/);
