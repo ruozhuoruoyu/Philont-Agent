@@ -870,3 +870,4 @@ function tightenPermissions(dbPath: string): void {
 export * from './goal_loop.js';
 export * from './drives_to_goals.js';
 export * from './trait_signals.js';
+export * from './self_observation.js';

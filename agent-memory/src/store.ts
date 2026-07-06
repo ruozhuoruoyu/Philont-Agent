@@ -416,10 +416,18 @@ export class MemoryStore {
     key: string,
     content: string | string[],
     sourceRefs: string[],
-    caller: 'self-reflector',
+    caller: 'self-reflector' | 'self-observation',
   ): Fact {
-    if (caller !== 'self-reflector') {
+    if (caller !== 'self-reflector' && caller !== 'self-observation') {
       throw new SelfDescriptionWriteForbiddenError(key, String(caller));
+    }
+    // WS4 (selfhood_closure): the observation writer is pure aggregation over the ledger — its
+    // writes are namespaced under obs.* and MUST carry evidence refs (no evidence, no self-claim).
+    if (caller === 'self-observation' && (!key.startsWith('obs.') || sourceRefs.length === 0)) {
+      throw new SelfDescriptionWriteForbiddenError(
+        key,
+        'self-observation (requires obs.* key and non-empty sourceRefs)',
+      );
     }
     const value: SelfFactValue = {
       content,

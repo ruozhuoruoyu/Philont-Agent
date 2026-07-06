@@ -76,6 +76,8 @@ import {
   ensureK8DriveConfigs,
   readK8DriverCooldowns,
   k8DriveOutcomeInput,
+  runSelfObservations,
+  listSelfObservations,
   parsePursuitTargetRef,
   DEFAULT_RESEARCH_GRANT_TTL_MS,
   FetchedResourceStore,
@@ -227,6 +229,12 @@ import { PushDispatcher } from './push/dispatcher.js';
 import { serviceDriverTick } from './push/service_driver.js';
 import { maybeAutoSubscribe } from './push/auto_subscribe.js';
 import { currentTraitProfile } from './trait_profile.js';
+
+/** WS4 (selfhood_closure) kill switch: PHILONT_SELF_OBSERVATIONS=0/off/false/no disables. */
+function selfObservationsEnabled(): boolean {
+  const v = (process.env.PHILONT_SELF_OBSERVATIONS ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
 
 /** WS6: sessions already checked for first-contact push auto-subscribe (one store read per session). */
 const autoSubscribeCheckedSessions = new Set<string>();
@@ -742,6 +750,24 @@ const idleConsolidator = startIdleConsolidator({
       }
     } catch (e) {
       console.error('[idle-consolidator] drive-reflect failed', e);
+    }
+    // WS4 (selfhood_closure): self-observations — pure aggregation over the action/drive ledger
+    // into obs.* self facts (evidence refs mandatory). Kill switch PHILONT_SELF_OBSERVATIONS=0.
+    if (selfObservationsEnabled()) {
+      try {
+        const r = runSelfObservations({
+          facts: memory.facts,
+          actions: memory.actions,
+          driveOutcomes: memory.driveOutcomes,
+        });
+        if (r.written.length > 0 || r.cleared.length > 0) {
+          console.log(
+            `[idle-consolidator] self-observations: written=[${r.written.join(',')}] cleared=[${r.cleared.join(',')}]`,
+          );
+        }
+      } catch (e) {
+        console.error('[idle-consolidator] self-observations failed', e);
+      }
     }
     // Tier 2 signal: recompute commitment_pressure during idle period and record audit event
     // making "how many open items the agent has accumulated this week" an observable trace.
@@ -3758,6 +3784,21 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
           lines.push('Still learning: ' + e.content.join(', '));
         }
       }
+    }
+  }
+
+  // WS4 (selfhood_closure): behavioral tendencies aggregated from the ledger (obs.* self facts).
+  // Unlike the K3 self-description above (LLM-phrased identity), these are pure counters with
+  // evidence refs — the agent reads how it ACTUALLY behaves and corrects course mid-turn.
+  if (selfObservationsEnabled()) {
+    try {
+      const observations = listSelfObservations(memory.facts, 5);
+      if (observations.length > 0) {
+        lines.push('## What I know about my own tendencies (evidence-backed, auto-aggregated)');
+        for (const o of observations) lines.push(`- ${o.content}`);
+      }
+    } catch (e) {
+      console.error('[prefix] self-observations render failed', e);
     }
   }
 
