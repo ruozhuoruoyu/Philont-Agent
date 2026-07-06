@@ -19,7 +19,7 @@ import {
   type ToolCheckInput,
 } from '@agent/policy';
 import type { ToolDefinition, ToolResult } from '@agent/policy';
-import type { ReasoningSession } from '@agent/memory';
+import type { ReasoningSession, InitiativeStore } from '@agent/memory';
 import {
   createToolset,
   loadSkills,
@@ -223,6 +223,7 @@ import {
 import { PushDispatcher } from './push/dispatcher.js';
 import { serviceDriverTick } from './push/service_driver.js';
 import { maybeAutoSubscribe } from './push/auto_subscribe.js';
+import { currentTraitProfile } from './trait_profile.js';
 
 /** WS6: sessions already checked for first-contact push auto-subscribe (one store read per session). */
 const autoSubscribeCheckedSessions = new Set<string>();
@@ -1950,6 +1951,21 @@ const AUTONOMOUS_DRIVERS = [
   // topics while the main thread is walled (prod: "素数 R…/RDC…/DSML" tokens).
   new CuriosityDriver({
     ...DEFAULT_CURIOSITY_CONFIG,
+    // WS1 (selfhood_closure): live traits — a provider callback so each tick sees a profile
+    // derived from CURRENT history (autonomousLoop.initiatives is undefined until the loop is
+    // constructed below; the callback resolves it lazily, and curiosity just stays neutral
+    // on the very first reads).
+    traits: () => {
+      // autonomousLoop is a const declared later in this module; guard the TDZ window
+      // (a propose() before the loop finishes constructing just gets neutral curiosity).
+      let initiatives: InitiativeStore | undefined;
+      try {
+        initiatives = autonomousLoop.initiatives;
+      } catch {
+        initiatives = undefined;
+      }
+      return currentTraitProfile({ driveOutcomes: memory.driveOutcomes, initiatives });
+    },
     isSystemStuck: () => {
       // Same "high" tier as the ViabilityGate's same_root_cause weighting — a constant, no env knob.
       try {
@@ -2264,6 +2280,13 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
       ? deepExploreAdvanceSession(s)
       : Promise.resolve({ success: false, output: '', error: 'deep_explore disabled' }),
   runInContext: runInTurnContext,
+  // WS1 (selfhood_closure): trait-tuned stuck threshold — competitiveness earned from lived
+  // history buys more no-progress rounds before the loop declares stuck.
+  traits: () =>
+    currentTraitProfile({
+      driveOutcomes: memory.driveOutcomes,
+      initiatives: autonomousLoop.initiatives,
+    }),
   notify: (text, opts) => {
     for (const [, send] of webuiClients) send({ type: 'milestone', text });
     if (opts?.important) {

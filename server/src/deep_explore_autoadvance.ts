@@ -15,7 +15,14 @@
  */
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 import type { ToolResult } from '@agent/policy';
-import { scoreTrajectory, DEFAULT_LOOP_CONTRACT, type TickOutcome } from '@agent/memory';
+import {
+  scoreTrajectory,
+  traitTunedContract,
+  DEFAULT_LOOP_CONTRACT,
+  type LoopContract,
+  type TickOutcome,
+  type TraitProfile,
+} from '@agent/memory';
 
 /**
  * Per-loop ROUNDS budget (S2 consent model): pause + ask after this many advanced rounds — a cost
@@ -31,6 +38,12 @@ const MAX_ROUNDS = (() => {
 const STUCK_STOP = (() => {
   const n = Number(process.env.PHILONT_DEEP_EXPLORE_AUTO_STUCK_STOP);
   return Number.isInteger(n) && n >= 1 ? n : DEFAULT_LOOP_CONTRACT.stuckAfter;
+})();
+
+/** Whether the operator explicitly set the stuck threshold — an explicit env beats trait tuning (WS1). */
+const STUCK_STOP_EXPLICIT = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_AUTO_STUCK_STOP);
+  return Number.isInteger(n) && n >= 1;
 })();
 
 /**
@@ -54,6 +67,12 @@ export interface AutoAdvanceDeps {
   notify: (text: string, opts?: { important?: boolean }) => void;
   /** ms between ticks. Rounds run sequentially regardless; this is the idle poll cadence. Default 30s. */
   intervalMs?: number;
+  /**
+   * WS1 (selfhood_closure): live trait provider. When present, the loop contract is trait-tuned
+   * per tick (competitiveness raises stuckAfter — a competitive agent tries longer before declaring
+   * stuck). An explicitly-set PHILONT_DEEP_EXPLORE_AUTO_STUCK_STOP still wins.
+   */
+  traits?: () => TraitProfile;
 }
 
 export interface AutoAdvanceLoop {
@@ -70,8 +89,20 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
   let running = false;
   /** Rounds this driver has advanced per session (in-memory budget counter; resets on restart). */
   const roundsAdvanced = new Map<string, number>();
-  /** S3 contract — DEFAULT_LOOP_CONTRACT with stuckAfter overridden by the env STUCK_STOP. */
-  const contract = { ...DEFAULT_LOOP_CONTRACT, stuckAfter: STUCK_STOP };
+  /** S3 contract base — DEFAULT_LOOP_CONTRACT with stuckAfter overridden by the env STUCK_STOP. */
+  const baseContract: LoopContract = { ...DEFAULT_LOOP_CONTRACT, stuckAfter: STUCK_STOP };
+
+  /** WS1: trait-tune the contract per tick; an explicitly-set env stuck threshold stays authoritative. */
+  function currentContract(): LoopContract {
+    if (!deps.traits) return baseContract;
+    try {
+      const tuned = traitTunedContract(deps.traits(), baseContract);
+      return STUCK_STOP_EXPLICIT ? { ...tuned, stuckAfter: STUCK_STOP } : tuned;
+    } catch (e) {
+      console.warn('[auto-advance] trait tuning failed, using base contract', e);
+      return baseContract;
+    }
+  }
 
   async function tickOnce(): Promise<void> {
     if (stopped || running) return;
@@ -100,7 +131,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           progress: 0,
           bodyKind: 'deep_explore' as const,
         }));
-        const decision = scoreTrajectory(flatHist, contract).decision;
+        const decision = scoreTrajectory(flatHist, currentContract()).decision;
         if (decision === 'escalate' || decision === 'switch_engine') {
           deps.reasoning.setAutoAdvance(s.id, false);
           roundsAdvanced.delete(s.id);

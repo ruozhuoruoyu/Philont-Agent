@@ -277,6 +277,30 @@ export class InitiativeStore {
   }
 
   /**
+   * WS1 (selfhood_closure): settled done/failed counts for one driver since a timestamp —
+   * the raw material for the curiosity trait signal (ratioWithShrinkage).
+   */
+  countSettledByDriverSince(
+    driver: string,
+    sinceTs: number,
+  ): { done: number; failed: number } {
+    const rows = this.db
+      .prepare<[string, number]>(
+        `SELECT status, COUNT(*) as n FROM memory_initiatives
+         WHERE driver = ? AND status IN ('done', 'failed') AND created_at >= ?
+         GROUP BY status`,
+      )
+      .all(driver, sinceTs) as Array<{ status: string; n: number }>;
+    let done = 0;
+    let failed = 0;
+    for (const r of rows) {
+      if (r.status === 'done') done = r.n;
+      else if (r.status === 'failed') failed = r.n;
+    }
+    return { done, failed };
+  }
+
+  /**
    * General recent list — for dashboard / debugging; can filter by status / driver.
    * Ordered by created_at DESC; default limit 30.
    */

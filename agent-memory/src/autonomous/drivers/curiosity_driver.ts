@@ -139,8 +139,13 @@ export interface CuriosityDriverConfig {
    * Set false to keep the legacy one-shot dormant lookup.
    */
   promoteToGoalLoop?: boolean;
-  /** S4: trait profile (server-derived from drive_config via deriveTraitProfile); tunes the promotion bar. */
-  traits?: TraitProfile;
+  /**
+   * S4/WS1: trait profile — tunes the goal-loop promotion bar. Accepts a provider callback so a
+   * driver constructed at module load still sees FRESH trait values each tick (the server derives
+   * them from lived history via currentTraitProfile; a static object would freeze the personality
+   * at boot, which is exactly the defect WS1 removes).
+   */
+  traits?: TraitProfile | (() => TraitProfile);
 }
 
 export const DEFAULT_CURIOSITY_CONFIG: CuriosityDriverConfig = {
@@ -222,6 +227,11 @@ export class CuriosityDriver implements Driver {
     // (B) Dormant high-stake pursuit: commitment made but never touched
     const agingMs = this.cfg.pursuitAgingDays * 86_400_000;
     const cutoff = snap.now - agingMs;
+    // Resolve traits once per propose() — the provider may hit the DB.
+    const traits =
+      typeof this.cfg.traits === 'function'
+        ? this.cfg.traits()
+        : this.cfg.traits ?? DEFAULT_TRAITS;
     for (const p of snap.activePursuits) {
       if (p.stakeWeight < this.cfg.pursuitMinStakeWeight) continue;
       const lastTouched = p.lastTouchedAt ?? p.updatedAt;
@@ -239,7 +249,7 @@ export class CuriosityDriver implements Driver {
         this.cfg.promoteToGoalLoop !== false &&
         shouldPromoteToGoal(
           { stake: p.stakeWeight / 10, recurrence: p.stakeWeight, openEnded: true },
-          this.cfg.traits ?? DEFAULT_TRAITS,
+          traits,
         );
       if (promote) {
         proposals.push({

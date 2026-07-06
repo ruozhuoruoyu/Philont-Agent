@@ -862,3 +862,4 @@ function tightenPermissions(dbPath: string): void {
 // lives in the shared lower layer (server can depend on agent-memory, not vice versa).
 export * from './goal_loop.js';
 export * from './drives_to_goals.js';
+export * from './trait_signals.js';
