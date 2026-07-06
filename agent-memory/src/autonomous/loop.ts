@@ -113,6 +113,13 @@ export interface AutonomousLoopOptions {
    * they do not affect the main flow.
    */
   onOutcome?: OutcomeHook;
+  /**
+   * WS2 (selfhood_closure): per-driver propose cooldowns, read fresh each tick (the values live in
+   * memory_drive_configs and are tuned by SessionDriveReflector). A driver whose most recent
+   * initiative is younger than its cooldown is skipped this tick. Missing/invalid entry = no
+   * throttle (legacy behavior).
+   */
+  driverCooldowns?: () => Record<string, number | undefined>;
   logger?: { log: (m: string) => void; error: (m: string, e?: unknown) => void };
 }
 
@@ -332,8 +339,29 @@ export function startAutonomousLoop(
 
       const snap = snapshot(now);
 
+      // WS2: reflector-tuned per-driver cooldowns (memory_drive_configs.params.cooldownMs).
+      let cooldowns: Record<string, number | undefined> = {};
+      if (opts.driverCooldowns) {
+        try {
+          cooldowns = opts.driverCooldowns() ?? {};
+        } catch (e) {
+          log.error('[autonomous] driverCooldowns read failed; no throttle this tick', e);
+        }
+      }
+
       const allProposals: InitiativeProposal[] = [];
       for (const driver of opts.drivers) {
+        const cooldownMs = cooldowns[driver.name];
+        if (typeof cooldownMs === 'number' && Number.isFinite(cooldownMs) && cooldownMs > 0) {
+          const last = initiatives.lastCreatedAtByDriver(driver.name);
+          if (last !== null && now - last < cooldownMs) {
+            log.log(
+              `[autonomous] driver ${driver.name} cooling down ` +
+                `(${Math.round((now - last) / 1000)}s/${Math.round(cooldownMs / 1000)}s)`,
+            );
+            continue;
+          }
+        }
         try {
           const ps = driver.propose(snap);
           allProposals.push(...ps);

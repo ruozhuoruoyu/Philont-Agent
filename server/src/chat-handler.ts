@@ -73,6 +73,9 @@ import {
   DEFAULT_PURSUIT_CONFIG,
   collectK7BridgeInitiatives,
   pursuitProgressWriter,
+  ensureK8DriveConfigs,
+  readK8DriverCooldowns,
+  k8DriveOutcomeInput,
   parsePursuitTargetRef,
   DEFAULT_RESEARCH_GRANT_TTL_MS,
   FetchedResourceStore,
@@ -2217,6 +2220,14 @@ const autonomousExecutor = new StandardExecutor({
 const _autonomousBudgetCaps = resolveAutonomousBudgetCaps();
 console.log(`[autonomous] ${describeBudgetCapsOverrides(_autonomousBudgetCaps)}`);
 
+// WS2 (selfhood_closure): seed the k8-* drive-config rows so SessionDriveReflector's cooldown
+// tuning has somewhere to land — and the loop below reads it back per tick (driverCooldowns).
+try {
+  ensureK8DriveConfigs(memory.driveConfigs, BOOTSTRAP_ROOT_PURSUIT_ID);
+} catch (e) {
+  console.warn('[autonomous] ensureK8DriveConfigs failed (cooldown tuning inert)', e);
+}
+
 export const autonomousLoop: AutonomousLoopHandle = startAutonomousLoop({
   db: memory.db,
   facts: memory.facts,
@@ -2243,7 +2254,17 @@ export const autonomousLoop: AutonomousLoopHandle = startAutonomousLoop({
         console.warn('[research-grant] enqueue failed', e);
       }
     }
+    // WS2: emit a drive_outcomes row per settled K8 initiative so the reflector can score the
+    // driver's effectiveness and tune its cooldown. Failure only logged; main flow unaffected.
+    try {
+      const outcome = k8DriveOutcomeInput(init, result, BOOTSTRAP_ROOT_PURSUIT_ID);
+      if (outcome) memory.driveOutcomes.append(outcome);
+    } catch (e) {
+      console.warn('[autonomous] k8 drive outcome append failed', e);
+    }
   },
+  // WS2: reflector-tuned per-driver propose cooldowns, read fresh each tick.
+  driverCooldowns: () => readK8DriverCooldowns(memory.driveConfigs),
   audit: {
     onTick(e) {
       if (e.proposalsCollected === 0 && e.initiativesRun === 0) return;

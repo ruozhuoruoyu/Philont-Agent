@@ -378,6 +378,13 @@ export {
   runMetaConfigObserver,
   // BugDetector(2026-05-12 Phase 8 M4)
   runBugDetector,
+  // K8 drive-config bridge (WS2, selfhood_closure)
+  K8_DRIVER_NAMES,
+  k8DriveConfigId,
+  DEFAULT_K8_COOLDOWN_MS,
+  ensureK8DriveConfigs,
+  readK8DriverCooldowns,
+  k8DriveOutcomeInput,
 } from './autonomous/index.js';
 export type {
   AutonomousAuditHook,

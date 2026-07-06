@@ -126,3 +126,14 @@ export {
   MAX_RESEARCH_ITERATIONS,
 } from './pursuit_progress_writer.js';
 export type { ApplyResult as PursuitApplyResult } from './pursuit_progress_writer.js';
+
+// K8 drive-config bridge (WS2, selfhood_closure): seed rows, read tuned cooldowns, emit outcomes
+export {
+  K8_DRIVER_NAMES,
+  k8DriveConfigId,
+  DEFAULT_K8_COOLDOWN_MS,
+  ensureK8DriveConfigs,
+  readK8DriverCooldowns,
+  k8DriveOutcomeInput,
+} from './k8_drive_configs.js';
+export type { K8DriverName } from './k8_drive_configs.js';

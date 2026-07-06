@@ -277,6 +277,19 @@ export class InitiativeStore {
   }
 
   /**
+   * WS2 (selfhood_closure): when this driver last created an initiative — the reference point
+   * for the reflector-tuned per-driver propose cooldown.
+   */
+  lastCreatedAtByDriver(driver: string): number | null {
+    const row = this.db
+      .prepare<[string]>(
+        `SELECT MAX(created_at) as t FROM memory_initiatives WHERE driver = ?`,
+      )
+      .get(driver) as { t: number | null };
+    return row.t ?? null;
+  }
+
+  /**
    * WS1 (selfhood_closure): settled done/failed counts for one driver since a timestamp —
    * the raw material for the curiosity trait signal (ratioWithShrinkage).
    */
