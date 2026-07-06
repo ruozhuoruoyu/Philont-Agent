@@ -194,6 +194,21 @@ export function createSecuredHttpTool(
           if (bodyPreview) {
             console.warn(`[http] body preview: ${bodyPreview.slice(0, 200)}`);
           }
+          // 5xx shape diagnostic: a server INTERNAL_ERROR usually means OUR body shape tripped it
+          // (missing required field / string where an object is specced), but the value-bearing
+          // request must never be logged. Log field NAMES + JS types only — enough to compare
+          // against the spec (prod: memories PUT 500 ×3, request shape invisible, undiagnosable).
+          if (response.status >= 500 && body) {
+            try {
+              const parsed = JSON.parse(body) as Record<string, unknown>;
+              const shape = Object.entries(parsed)
+                .map(([k, v]) => `${k}:${v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v}`)
+                .join(', ');
+              console.warn(`[http] request shape (names/types only): {${shape}}`);
+            } catch {
+              console.warn(`[http] request shape: non-JSON body (${body.length} chars)`);
+            }
+          }
           return {
             success: false,
             output: text,

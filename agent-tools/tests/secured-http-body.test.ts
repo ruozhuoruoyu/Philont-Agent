@@ -232,3 +232,33 @@ test('url 含 { } 占位符(SECRET_ID) → 不 reject', async () => {
     assert.equal(typeof cap.url, 'string');
   });
 });
+
+test('5xx logs request shape (field names/types only, never values); 4xx does not', async () => {
+  const tool = makeTool();
+  const warns: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+  try {
+    await withMockFetch({ status: 500, body: '{"status":"error","error":{"code":"INTERNAL_ERROR"}}' }, async () => {
+      await tool.execute({
+        url: 'https://api.example.com/agents/x/memories/k',
+        method: 'PUT',
+        body: { contextActorId: 'ctx-1', value: 'super-secret-payload', memory_type: 'note', importance: 80 },
+      });
+    });
+    const shapeLine = warns.find((w) => w.includes('request shape'));
+    assert.ok(shapeLine, `expected a request-shape warn, got: ${warns.join(' | ')}`);
+    assert.match(shapeLine!, /contextActorId:string/);
+    assert.match(shapeLine!, /value:string/);
+    assert.match(shapeLine!, /importance:number/);
+    assert.ok(!warns.some((w) => w.includes('super-secret-payload')), 'body values must never be logged');
+
+    warns.length = 0;
+    await withMockFetch({ status: 404, body: '{"status":"error"}' }, async () => {
+      await tool.execute({ url: 'https://api.example.com/x', method: 'POST', body: { a: 1 } });
+    });
+    assert.ok(!warns.some((w) => w.includes('request shape')), '4xx must not log request shape');
+  } finally {
+    console.warn = origWarn;
+  }
+});
