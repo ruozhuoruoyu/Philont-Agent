@@ -677,3 +677,49 @@ test('planTracker: failed step marked blocked; close success=false on aborted ou
   assert.ok(marks.some((m) => m.endsWith('=blocked')), 'failed step marked blocked');
   assert.equal(marks[marks.length - 1], 'close:false');
 });
+
+test('credential-save deliverable: proven by mechanism capture even if the step later fails', async () => {
+  const DRAFT = JSON.stringify({
+    deliverables: [
+      { id: 'register', description: 'register via POST /api/auth/register-agent' },
+      { id: 'save-credential', description: 'save the returned api_key to the credential store' },
+    ],
+    steps: [
+      { id: 's-reg', description: 'register via POST /api/auth/register-agent', covers: ['register'] },
+      { id: 's-save', description: 'save the api_key credential', covers: ['save-credential'] },
+    ],
+  });
+  let call = 0;
+  const deps = makeDeps({
+    drafts: [DRAFT],
+    llm: {
+      async send(systemPrompt, messages, toolDefs) {
+        if (toolDefs.length === 0) return { type: 'text', content: DRAFT };
+        const hasToolResult = messages.some((m) => Array.isArray(m.content));
+        if (!hasToolResult) {
+          call++;
+          const input = call === 1
+            ? { url: 'https://x/api/auth/register-agent', method: 'POST' }
+            : { url: 'https://x/api/auth/verify', method: 'POST' }; // save-step flails on a verify call
+          return {
+            type: 'toolCalls',
+            calls: [{ id: `t${call}`, name: 'http', input }],
+            assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: `t${call}`, name: 'http', input }] as never },
+          };
+        }
+        return { type: 'text', content: 'ok.' };
+      },
+    },
+    // register returns a credential (→ diag credInResp=true), the verify call fails
+    toolRunner: async (name, input) => {
+      const url = String((input as Record<string, unknown>).url ?? '');
+      if (/register-agent/.test(url)) return { ok: true, output: '{"actor_id":"a","api_key":"mycox_abc123def456"}' };
+      return { ok: false, output: '', error: 'HTTP 404 endpoint not found' };
+    },
+    classifyCall: () => ({ capability: 'write', domain: 'network' }),
+  });
+  const r = await runPlanExecuteLoop('register and save api_key', ['https://g/guide.md'], deps);
+  const save = r.outcomes.find((o) => o.id === 'save-credential');
+  assert.equal(save?.status, 'done', `evidence=${save?.evidence}`);
+  assert.match(save!.evidence, /captured|mechanism/i);
+});

@@ -95,6 +95,12 @@ export const ENDPOINT_HINTS: ReadonlyArray<[RegExp, RegExp]> = [
 ];
 /** Tools whose success proves a schedule-type deliverable. */
 export const SCHEDULE_TOOLS: ReadonlySet<string> = new Set(['schedule_reminder', 'create_calendar_event']);
+/** Deliverables about PERSISTING a credential — proven by the mechanism's own capture, not by the
+ * step's calls (prod: http-cred-capture stored {mycox-api-key} during the register step, but the
+ * save-credential step later attempted a guard-blocked verify call → step failed → false ❌ on a
+ * deliverable whose work the MECHANISM had already done). */
+export const CREDENTIAL_SAVE_RE =
+  /(?:\bsave\b|\bstore\b|\bpersist\b|保存|存储).{0,50}(?:api[_-]?key|token|credentials?|secret|密钥|凭证)|(?:api[_-]?key|token|credentials?|secret|密钥|凭证).{0,50}(?:\bsave\b|\bstore\b|\bpersist\b|\bsaved\b|保存|存储)/i;
 
 // ── Guide endpoint anchor (weak-model guarantee, universal) ─────────────────
 // philont runs WEAK models. A weak model executing a step invents plausible-looking endpoints
@@ -635,6 +641,9 @@ export async function runPlanExecuteLoop(
   // Wrap the tool runner so a step's http call to an UNDOCUMENTED host is blocked with a correction
   // instead of silently 404'ing on a hallucinated endpoint.
   const okBusinessCalls: string[] = []; // C: mechanism cookbook — verified-working calls
+  // A successful auth call whose response carried a credential ⇒ the securedHttp capture layer
+  // stored it (see agent-tools credential_capture). Proof for credential-save deliverables.
+  let credentialCaptured = false;
   const stepToolRunner: PlanLoopDeps['toolRunner'] = async (name, input) => {
     const rej =
       endpointGuardReject(name, input, guideApi) ??
@@ -648,6 +657,7 @@ export async function runPlanExecuteLoop(
     if (name === 'http') {
       const diag = describeAuthCall(input, res);
       if (diag) deps.log(`[plan-loop] auth-call: ${diag}`);
+      if (diag && res.ok && diag.includes('credInResp=true')) credentialCaptured = true;
       if (res.ok) {
         try {
           const u = new URL(String(input.url ?? ''));
@@ -950,7 +960,10 @@ export async function runPlanExecuteLoop(
       const dText = `${plan.deliverables.find((x) => x.id === dId)?.description ?? ''} ${step.description}`;
       let dOk: boolean;
       let dEvidence: string;
-      if (SCHEDULE_REQ_RE.test(dText)) {
+      if (CREDENTIAL_SAVE_RE.test(dText) && credentialCaptured) {
+        dOk = true;
+        dEvidence = 'credential captured and stored by the mechanism (http-cred-capture) during registration';
+      } else if (SCHEDULE_REQ_RE.test(dText)) {
         const hit = result.toolCallHistory.find((c) => c.ok && SCHEDULE_TOOLS.has(c.name));
         if (hit && !result.error) {
           dOk = true;
