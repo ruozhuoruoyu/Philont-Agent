@@ -354,6 +354,7 @@ import {
   extractGuideEndpoints,
   buildEndpointRegistry,
   endpointGuardReject,
+  anchorSelfCheck,
 } from '../src/plan_execute_loop.js';
 
 const API_GUIDE = [
@@ -422,6 +423,31 @@ test('extractGuideEndpoints: base resolution edge cases', () => {
   assert.ok(!api.endpoints.includes('POST /api/api/auth/register-agent'), 'no double prefix');
   assert.ok(api.endpoints.includes('GET /api/health'), 'already-prefixed table row must be untouched');
   assert.ok(!api.hosts.includes('your-runner.example'), 'placeholder base host must not enter allowlist');
+});
+
+test('anchorSelfCheck: warns when anchored coverage falls far below the guide\'s own evidence', () => {
+  const guide = [
+    '| `/comments` | POST | create |',
+    '| `/posts/:id/upvote` | POST | vote |',
+    '| `/stats` | GET | stats |',
+    '| `/health` | GET | health |',
+    'curl -s -X POST "$BASE_URL/comments"',
+    'curl -s "$BASE_URL/posts?sort=hot"',
+    'Register: POST /api/auth/register-agent',
+  ].join('\n');
+  // Old-extractor situation: 7 evidence lines, 3 anchored → suspicious.
+  const bad = anchorSelfCheck(guide, { hosts: ['x.ai'], endpoints: ['/api', '/api/a', '/api/b'] });
+  assert.equal(bad.suspicious, true);
+  assert.ok(bad.evidenceLines >= 7, `evidence undercounted: ${bad.evidenceLines}`);
+  // Healthy anchor: coverage matches evidence → quiet.
+  const good = anchorSelfCheck(guide, {
+    hosts: ['x.ai'],
+    endpoints: ['POST /api/comments', 'POST /api/posts/:id/upvote', 'GET /api/stats', 'GET /api/health', 'GET /api/posts', 'POST /api/auth/register-agent'],
+  });
+  assert.equal(good.suspicious, false);
+  // Tiny guides never warn (floor of 3 evidence lines).
+  assert.equal(anchorSelfCheck('just prose, no calls', { hosts: [], endpoints: [] }).suspicious, false);
+  assert.equal(anchorSelfCheck('| `/x` | GET |', { hosts: ['x.ai'], endpoints: [] }).suspicious, false);
 });
 
 test('endpointGuardReject: blocks the hallucinated host, allows the documented one', () => {

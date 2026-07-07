@@ -208,6 +208,45 @@ export function extractGuideEndpoints(guideText: string): GuideApi {
   return { hosts: [...hosts], endpoints: [...endpoints].slice(0, 40) };
 }
 
+/**
+ * Anchor self-check (spec_regime.md increment 2): reconcile the anchored endpoint count against
+ * the guide's own documented-call evidence, AT ANCHOR TIME. Prod: the extractor missed the entire
+ * endpoint table and anchored 3 of 13 endpoints; nothing noticed until a production cycle ran into
+ * the gap. A cheap deterministic count comparison at fetch time turns "user burns a cycle" into
+ * "the fetch itself warns". Purely offline — no probing here (that belongs to spec validation).
+ */
+export interface AnchorSelfCheck {
+  /** Documented-call evidence lines found in the guide (table rows with a path+method, curl invocations, METHOD-path prose). */
+  evidenceLines: number;
+  /** Endpoints actually anchored. */
+  anchored: number;
+  /** true when anchored coverage is suspiciously below the guide's own evidence. */
+  suspicious: boolean;
+}
+
+export function anchorSelfCheck(guideText: string, api: GuideApi): AnchorSelfCheck {
+  let evidence = 0;
+  for (const line of guideText.split('\n')) {
+    if (
+      // table row carrying both a /path cell and a METHOD cell (either order)
+      /^\s*\|.*\/[A-Za-z0-9_{}:$-].*\|.*\b(GET|POST|PUT|PATCH|DELETE)\b.*\|/.test(line) ||
+      /^\s*\|.*\b(GET|POST|PUT|PATCH|DELETE)\b.*\|.*\/[A-Za-z0-9_{}:$-].*\|/.test(line) ||
+      // a curl invocation naming a URL or a $VAR path
+      /\bcurl\b.*(?:https?:\/\/|\$\{?[A-Z][A-Z0-9_]*\}?\/)/.test(line) ||
+      // "METHOD /path" prose
+      /\b(GET|POST|PUT|PATCH|DELETE)\s+\//.test(line)
+    ) {
+      evidence++;
+    }
+  }
+  const anchored = api.endpoints.length;
+  // Suspicious = the guide documents calls but we anchored under 60% of the evidence lines (with a
+  // floor of 3 so tiny guides never warn). Evidence lines over-count (a curl spans one line each
+  // for URL/headers is not counted; duplicates count twice), so 60% is deliberately loose.
+  const suspicious = evidence >= 3 && anchored < Math.ceil(evidence * 0.6);
+  return { evidenceLines: evidence, anchored, suspicious };
+}
+
 /** The authoritative endpoint block injected into every EXECUTE step. '' when nothing was extracted. */
 export function buildEndpointRegistry(api: GuideApi): string {
   if (api.hosts.length === 0 && api.endpoints.length === 0) return '';
@@ -696,6 +735,14 @@ export async function runPlanExecuteLoop(
   const endpointRegistry = buildEndpointRegistry(guideApi);
   if (guideApi.hosts.length) {
     deps.log(`[plan-loop] endpoint anchor: hosts=[${guideApi.hosts.join(',')}] endpoints=${guideApi.endpoints.length}`);
+    const check = anchorSelfCheck(guideText, guideApi);
+    if (check.suspicious) {
+      deps.log(
+        `[plan-loop] ⚠ anchor self-check: guide shows ~${check.evidenceLines} documented-call lines ` +
+          `but only ${check.anchored} endpoints anchored — extractor blind spot likely; ` +
+          `the model may improvise calls the guard cannot vet`,
+      );
+    }
   }
   // Wrap the tool runner so a step's http call to an UNDOCUMENTED host is blocked with a correction
   // instead of silently 404'ing on a hallucinated endpoint.
