@@ -191,6 +191,8 @@ import {
 import { replyWithMediaTool } from './tools/reply_with_media.js';
 import { setConscienceLlm } from './conscience_gate.js';
 import { writeServiceSkill } from './service_skill.js';
+import { findSpecForHost, findServiceSkillForText } from './service_spec_registry.js';
+import { specBodyGuardReject } from './spec_compile.js';
 import { createAutoAdvanceLoop } from './deep_explore_autoadvance.js';
 import { createFollowUpLoop } from './deep_explore_followup.js';
 import { semanticToolPhrase, semanticToolFailPhrase, summarizingPhrase, type PhraseLang } from './channel_phrases.js';
@@ -3185,11 +3187,13 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
         let project: string | null = null;
         let isScheduled = false;
         const schedId = extractScheduleIdFromSession(sidForPlan);
+        let schedPayloadText = '';
         if (schedId) {
           isScheduled = true;
           // Phase 13.5: scheduled session → find schedule by name, get schedule.project
           const sched = memory.schedules.findByName(schedId);
           if (sched?.project) project = sched.project;
+          try { schedPayloadText = JSON.stringify(sched?.payload ?? ''); } catch { /* payload noise only */ }
         }
         if (!project) {
           // Non-scheduled, or schedule has no project binding → use old path (session's active plan)
@@ -3234,6 +3238,38 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
                 ` Use \`readFile\` when needed. Details are not repeated in the prefix to save tokens / preserve cache hit.`,
             );
             lines.push('');
+          }
+        }
+        // Spec regime: ANY scheduled routine that names an installed service (by slug/host in its
+        // schedule name, project, or payload) gets the COMPILED contract injected — endpoints,
+        // auth placeholder, required body fields, verified calls — so it stops re-fetching the
+        // guide every fire and stops improvising request shapes (prod: memories PUT went out as
+        // {content:string} while the documented shape sat unread in the skill). Independent of
+        // project binding: a schedule without one still matches via its payload text.
+        if (isScheduled) {
+          try {
+            const svc = findServiceSkillForText(
+              `${schedId ?? ''} ${project ?? ''} ${schedPayloadText}`,
+              join(process.cwd(), '.philont', 'skills'),
+            );
+            if (svc) {
+              const SKILL_INJECT_CAP = 6000;
+              const body = svc.markdown.length > SKILL_INJECT_CAP
+                ? svc.markdown.slice(0, SKILL_INJECT_CAP) + '\n[... truncated — readFile the SKILL.md for the rest]'
+                : svc.markdown;
+              lines.push(`## Service contract (compiled): ${svc.skillName} (auto-inject)`);
+              lines.push('');
+              lines.push(body);
+              lines.push('');
+              lines.push(
+                '↑ Use these endpoints, auth placeholder, and body fields VERBATIM. Do NOT re-fetch the guide,' +
+                  ' invent paths, or send bodies missing the documented fields.',
+              );
+              lines.push('');
+              console.log(`[service-skill-inject] session=${sidForPlan} injected ${svc.skillName} (${body.length} chars)`);
+            }
+          } catch (e) {
+            console.warn('[service-skill-inject] failed (ignored)', e);
           }
         }
       } catch (e) {
@@ -8665,6 +8701,33 @@ async function runToolLoop(
           });
           continue;
         }
+      }
+
+      // Spec body guard for ALL turns (plan-loop steps have their own copy): when an installed
+      // service skill documents the target host, a write with a non-JSON body or missing
+      // documented required fields is corrected BEFORE sending. Prod: the scheduled check-in PUT
+      // {content:string} at the memories endpoint every fire → server 500; the plan-loop guard
+      // never saw it because scheduled turns run the legacy pipeline.
+      if (call.name === 'http') {
+        try {
+          const specHost = new URL(String(call.input.url ?? '')).host.toLowerCase();
+          const installedSpec = findSpecForHost(specHost, join(process.cwd(), '.philont', 'skills'));
+          const bodyRej = installedSpec ? specBodyGuardReject(call.name, call.input, installedSpec) : null;
+          if (bodyRej) {
+            console.warn(`[spec-body-guard] session=${sessionId} corrected ${String(call.input.method ?? 'GET').toUpperCase()} ${specHost} (installed service spec)`);
+            nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: bodyRej.error });
+            totalToolCallsThisTurn++;
+            inTurnRecords.push({ toolName: call.name, success: false, resultText: bodyRej.error });
+            memory.actions.log({
+              sessionId: GLOBAL_TIMELINE_SESSION_ID,
+              toolName: call.name,
+              params: call.input,
+              result: 'rejected_by_spec_body_guard',
+              success: false,
+            });
+            continue;
+          }
+        } catch { /* unparseable URL — the base runner surfaces its own error */ }
       }
 
       // 2026-05-11: plan_protocol_gate — slow mode + plan not reviewed → only allow plan_* /
