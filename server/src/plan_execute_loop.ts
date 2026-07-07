@@ -887,7 +887,33 @@ export async function runPlanExecuteLoop(
     // deliverable + a fulfilling step; only aux-judge extras remain as reported gaps.
     // Adopt ACTIONABLE work first (post/schedule/register…) — prod: the cap filled up with rule
     // items while the real posting requirement stayed unadopted.
-    const adopt = [...lastMandatoryGaps]
+    // Adoption filter (spec regime): items that are really RULES (behavioral constraints the
+    // compiled spec already carries) or that reference $VAR placeholders (another runtime's
+    // integration snippet — not executable here) must not become deliverables. Prod: "platform
+    // enforces a hard cap" and "POST $GENERATE_WEBHOOK_URL" were adopted and reported as fake ✅.
+    const specRuleTokens = (compiledSpec?.rules ?? []).map((r) => tokenize(r));
+    const isSpecRule = (text: string): boolean => {
+      const t = tokenize(text);
+      if (t.size === 0) return false;
+      return specRuleTokens.some((rt) => {
+        if (rt.size === 0) return false;
+        let inter = 0;
+        for (const x of t) if (rt.has(x)) inter++;
+        return inter / Math.min(t.size, rt.size) >= 0.6;
+      });
+    };
+    const adoptable = [...lastMandatoryGaps].filter((g) => {
+      if (/\$\{?[A-Z][A-Z0-9_]{2,}\}?/.test(g.text)) {
+        deps.log(`[plan-loop] adoption skipped ($VAR snippet, not executable here): ${g.text.slice(0, 80)}`);
+        return false;
+      }
+      if (isSpecRule(g.text)) {
+        deps.log(`[plan-loop] adoption skipped (spec rule, injected as constraint instead): ${g.text.slice(0, 80)}`);
+        return false;
+      }
+      return true;
+    });
+    const adopt = adoptable
       .sort((a, b) =>
         Number(ACTION_REQ_RE.test(b.text) || SCHEDULE_REQ_RE.test(b.text)) -
         Number(ACTION_REQ_RE.test(a.text) || SCHEDULE_REQ_RE.test(a.text)))
@@ -1013,7 +1039,19 @@ export async function runPlanExecuteLoop(
     // yet made ZERO relevant attempts ("read and hand in") — re-run ONCE with a hard directive. Prod:
     // publish-post and heartbeat ended with attempted 0 even after imperative wording + credentials.
     const attemptedSched = () => result.toolCallHistory.some((c) => SCHEDULE_TOOLS.has(c.name));
-    const attemptedAct = () => result.toolCallHistory.some(isActionCall);
+    // Endpoint-aware: when a covered deliverable names an endpoint (post/comment/vote…), only
+    // attempts MATCHING that hint count — prod: one unrelated ok action (an auth verify POST) let
+    // publish-first-post dodge the forced retry, and the post was never attempted at all.
+    const requiredHints = coverTexts
+      .filter((t) => ACTION_REQ_RE.test(t))
+      .map((t) => ENDPOINT_HINTS.find(([k]) => k.test(t))?.[1])
+      .filter((h): h is RegExp => !!h);
+    const attemptedAct = () =>
+      result.toolCallHistory.some(
+        (c) =>
+          isActionCall(c) &&
+          (requiredHints.length === 0 || requiredHints.some((h) => h.test(`${String(c.input.url ?? '')} ${c.name}`))),
+      );
     // No forced retry when the turn ledger ALREADY satisfies every covered deliverable's required
     // evidence — the retry exists to force an attempt, but the work happened in an earlier step
     // (prod: adopted duplicates ate a full extra mini-loop each, 30-50s of weak-model time apiece).

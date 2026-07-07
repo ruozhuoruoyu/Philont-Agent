@@ -837,3 +837,65 @@ test('post hint: create-post endpoint matches; upvote/comment sub-resource of /p
   assert.ok(!hint!.test('https://mycox.ai/api/posts/2d498867/upvote'), 'upvote sub-resource must NOT match');
   assert.ok(!hint!.test('https://mycox.ai/api/posts/2d498867/comment'), 'comment sub-resource must NOT match');
 });
+
+test('forced retry is endpoint-aware: an unrelated ok action must not satisfy a post deliverable', async () => {
+  const logs: string[] = [];
+  const deps = makeDeps({
+    drafts: [JSON.stringify({
+      deliverables: [{ id: 'first-post', description: 'Publish one substantive first post to the posts endpoint' }],
+      steps: [{ id: 's1', description: 'publish the first post', covers: ['first-post'] }],
+    })],
+    fetchGuide: async () => 'You MUST publish one substantive post to the posts endpoint.',
+    log: (m) => logs.push(m),
+    llm: {
+      async send(_sys, messages, toolDefs) {
+        if (toolDefs.length === 0) {
+          return { type: 'text', content: JSON.stringify({
+            deliverables: [{ id: 'first-post', description: 'Publish one substantive first post to the posts endpoint' }],
+            steps: [{ id: 's1', description: 'publish the first post', covers: ['first-post'] }],
+          }) };
+        }
+        const hasToolResult = messages.some((m) => Array.isArray(m.content));
+        if (!hasToolResult) {
+          // The dodge: ONE ok action that is NOT the required posts call.
+          return {
+            type: 'toolCalls',
+            calls: [{ id: 't1', name: 'http', input: { url: 'https://x.ai/api/auth/verify', method: 'POST' } }],
+            assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'http', input: {} }] as never },
+          };
+        }
+        return { type: 'text', content: 'step done.' };
+      },
+    },
+  });
+  const r = await runPlanExecuteLoop('publish first post', ['https://g/guide.md'], deps);
+  assert.ok(
+    logs.some((l) => l.includes('zero relevant attempts')),
+    `forced retry must fire — an unrelated action no longer counts. logs: ${logs.join(' | ')}`,
+  );
+  assert.ok(r.outcomes.every((o) => o.status !== 'done'), 'post deliverable must not pass off the verify call');
+});
+
+test('adoption filter: spec rules and $VAR snippets never become deliverables', async () => {
+  const logs: string[] = [];
+  const guide = [
+    'You MUST publish one substantive post.',
+    '> You MUST avoid content-free comments at all times.',
+    'POST $GENERATE_WEBHOOK_URL with your runner payload.',
+  ].join('\n');
+  const deps = makeDeps({
+    drafts: [GAPPY_DRAFT, GAPPY_DRAFT, GAPPY_DRAFT],
+    fetchGuide: async () => guide,
+    log: (m) => logs.push(m),
+    specCall: async () => JSON.stringify({
+      service: { name: 'x', hosts: ['x.ai'] },
+      endpoints: [{ method: 'POST', path: '/api/posts' }],
+      preconditions: ['publish one substantive post'],
+      rules: ['avoid content-free comments at all times'],
+    }),
+  });
+  const r = await runPlanExecuteLoop('do the guide', ['https://g/guide.md'], deps);
+  assert.ok(logs.some((l) => l.includes('adoption skipped ($VAR')), `$VAR snippet must be skipped: ${logs.join(' | ')}`);
+  assert.ok(logs.some((l) => l.includes('adoption skipped (spec rule')), 'rule must be skipped');
+  assert.ok(!r.outcomes.some((o) => /webhook|content-free/i.test(o.id)), 'neither lands as a deliverable');
+});
