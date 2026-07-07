@@ -190,6 +190,7 @@ import {
 } from './cleanup_scope.js';
 import { replyWithMediaTool } from './tools/reply_with_media.js';
 import { setConscienceLlm } from './conscience_gate.js';
+import { writeServiceSkill } from './service_skill.js';
 import { createAutoAdvanceLoop } from './deep_explore_autoadvance.js';
 import { createFollowUpLoop } from './deep_explore_followup.js';
 import { semanticToolPhrase, semanticToolFailPhrase, summarizingPhrase, type PhraseLang } from './channel_phrases.js';
@@ -6173,6 +6174,12 @@ async function handleChatSendInner(
           // Spec compiler (spec_regime.md increment 1): guide → validated SpecDoc via the aux LLM,
           // regex anchor as floor/fallback. Absent aux config → pure regex path, unchanged.
           specCall: isAuxLLMConfigured() ? (req) => callAuxLLM(req) : undefined,
+          // Increment 3: the compiled contract lands as a normal FS skill (hot-reloaded by the
+          // skills watcher; removed by the same uninstall/cleanup path as any other skill).
+          emitServiceSkill: (spec, verifiedCalls) => {
+            const r = writeServiceSkill(spec, verifiedCalls, join(process.cwd(), '.philont', 'skills'));
+            console.log(`[plan-loop] service skill emitted: ${r.name} (${spec.endpoints.length} endpoints, ${verifiedCalls.length} verified calls)`);
+          },
           log: (m) => console.log(m),
           // Cap forwarded progress messages at 2. WeChat limits how many bot messages one inbound
           // message may earn; the loop's ~10 per-state statuses exhausted that quota and the FINAL

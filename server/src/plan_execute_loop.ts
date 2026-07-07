@@ -23,7 +23,7 @@ import {
   type MiniLoopToolRunResult,
 } from '@agent/tools';
 import type { ToolDefinition } from '@agent/policy';
-import { compileSpec, specToGuideApi } from './spec_compile.js';
+import { compileSpec, specToGuideApi, type SpecDoc } from './spec_compile.js';
 
 // ── Flag ────────────────────────────────────────────────────────────────────
 
@@ -596,6 +596,11 @@ export interface PlanLoopDeps {
    */
   specCall?: (req: { system?: string; user: string; maxTokens?: number; signal?: AbortSignal }) => Promise<string>;
   /**
+   * Optional service-skill emitter (spec_regime.md increment 3). Called at CLOSE when the guide
+   * compiled into a SpecDoc, with this run's verified calls. Best-effort — failures are logged.
+   */
+  emitServiceSkill?: (spec: SpecDoc, verifiedCalls: string[]) => void;
+  /**
    * Input-aware capability classifier (server wires tools.classify(name, input)). Lets the loop
    * tell ACTION calls (write/execute — http POST/PUT/…, writeFile, shell) from reads. Needed for
    * the evidence criterion: prod marked "publish a post" done off 11 ok READ calls while the
@@ -743,13 +748,14 @@ export async function runPlanExecuteLoop(
   // any compile failure keeps the regex anchor verbatim.
   const regexApi = planEndpointGuardEnabled() ? extractGuideEndpoints(guideText) : { hosts: [], endpoints: [] };
   let guideApi = regexApi;
+  let compiledSpec: SpecDoc | null = null;
   if (deps.specCall && planEndpointGuardEnabled()) {
-    const spec = await compileSpec(guideText, regexApi, {
+    compiledSpec = await compileSpec(guideText, regexApi, {
       call: deps.specCall,
       log: deps.log,
       signal: budgetSignal(60_000),
     });
-    if (spec) guideApi = specToGuideApi(spec);
+    if (compiledSpec) guideApi = specToGuideApi(compiledSpec);
   }
   const endpointRegistry = buildEndpointRegistry(guideApi);
   if (guideApi.hosts.length) {
@@ -1165,6 +1171,17 @@ export async function runPlanExecuteLoop(
         deps.recordOperationalKnowledge(uniq.map((l) => `${l} — verified working this run (use {credential-id} placeholder for auth)`));
         deps.log(`[plan-loop] cookbook: ${uniq.length} verified call(s) recorded`);
       } catch { /* cookbook is best-effort */ }
+    }
+  }
+
+  // Spec regime increment 3: a successfully compiled contract lands as a service skill (generic —
+  // every string derives from the SpecDoc + this run's verified calls). Scheduled routines then
+  // use_skill instead of re-fetching the guide; cleanup uninstalls it by service slug.
+  if (deps.emitServiceSkill && compiledSpec) {
+    try {
+      deps.emitServiceSkill(compiledSpec, [...new Set(okBusinessCalls)]);
+    } catch (e) {
+      deps.log(`[plan-loop] service-skill emission failed (ignored): ${(e as Error)?.message ?? String(e)}`);
     }
   }
 
