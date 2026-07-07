@@ -34,7 +34,11 @@ export interface RenderedServiceSkill {
 
 /** Pure render — no I/O. Deterministic from (spec, verifiedCalls). */
 export function renderServiceSkill(spec: SpecDoc, verifiedCalls: readonly string[]): RenderedServiceSkill {
-  const service = slug(spec.service.name);
+  // Slug from the HOST's first label, not the LLM-provided service name: the name varies between
+  // compiles ("<svc>" vs "<svc>-agent" -> skill identity churn), while the host is stable AND is
+  // the same derivation the credential-capture layer uses — so the {<slug>-api-key} placeholder
+  // documented here matches the credential that layer actually stored.
+  const service = slug(spec.service.hosts[0]?.split('.')[0] ?? spec.service.name);
   const name = `${service}-service`;
   const host = spec.service.hosts[0] ?? '';
   const credId = `${service}-api-key`;

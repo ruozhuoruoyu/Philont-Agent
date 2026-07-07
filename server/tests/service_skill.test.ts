@@ -77,3 +77,9 @@ test('universality: no service name is hard-coded in the emission or compile mod
     assert.ok(!/mycox/i.test(src), `${f} must not mention a concrete service`);
   }
 });
+
+test('slug derives from the host, not the LLM-provided name (stable identity + credential-id match)', () => {
+  const r = renderServiceSkill({ ...FICTIONAL, service: { name: 'notably-agent-platform', hosts: ['notably.app'] } }, []);
+  assert.equal(r.name, 'notably-service', 'LLM name wobble must not change the skill identity');
+  assert.match(r.markdown, /\{notably-api-key\}/, 'placeholder must match the capture layer host derivation');
+});
