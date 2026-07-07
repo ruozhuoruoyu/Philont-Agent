@@ -70,6 +70,7 @@ import {
   closeFetchedStore,
   autonomousLoop,
   autonomousDriverNames,
+  autonomySelfhoodStatus,
   internalAudit,
   type ReminderPayload,
 } from './chat-handler.js';
@@ -599,6 +600,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       totalFailures: failures.length,
       groups,
     });
+    return true;
+  }
+
+  // ── GET /api/autonomous/selfhood ──────────────────────────────────────────
+  // Selfhood section for the dashboard (WS6 §8): live traits, evidence-backed
+  // self-observations, the pursuit agenda, pending constitution proposals, today's work.
+  if (req.method === 'GET' && path === '/api/autonomous/selfhood') {
+    sendJson(res, 200, autonomySelfhoodStatus());
     return true;
   }
 

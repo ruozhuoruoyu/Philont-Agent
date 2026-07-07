@@ -46,6 +46,8 @@ export interface SelfObservation {
   key: string;
   content: string;
   updatedAt: number;
+  /** When this observation FIRST appeared (carried across re-upserts; resets when cleared). */
+  sinceTs: number;
 }
 
 function upsert(
@@ -54,8 +56,16 @@ function upsert(
   key: string,
   content: string,
   sourceRefs: string[],
+  now: number,
 ): void {
-  deps.facts.updateSelfFact(key, content, sourceRefs.slice(0, MAX_REFS), 'self-observation');
+  // Persistence tracking (WS3 producer (b)): a tendency that KEEPS being observed is the signal
+  // worth annotating the constitution with — carry the first-seen timestamp across upserts.
+  const existing = deps.facts.getFact('self', key);
+  const prevSince = (existing?.value as { sinceTs?: number } | undefined)?.sinceTs;
+  const sinceTs = typeof prevSince === 'number' && prevSince > 0 ? prevSince : now;
+  deps.facts.updateSelfFact(key, content, sourceRefs.slice(0, MAX_REFS), 'self-observation', {
+    sinceTs,
+  });
   run.written.push(key);
 }
 
@@ -93,6 +103,7 @@ export function runSelfObservations(
         `"${top.signature}" (tool: ${top.toolName}). When I hit this again, I change approach ` +
         `or consult the failure notes instead of retrying the same call.`,
       refs,
+      now,
     );
   } else {
     clear(deps, run, 'obs.repeated-failures');
@@ -112,6 +123,7 @@ export function runSelfObservations(
         `7 days — I tend to hand work back to the user too early. I exhaust tool-reachable ` +
         `options before asking the user to do anything themselves.`,
       interventions.map((o) => `drive-outcome:${o.id}`),
+      now,
     );
   } else {
     clear(deps, run, 'obs.handoff-tendency');
@@ -129,6 +141,8 @@ export function recordRecipeDecayObservation(
   skillName: string,
   skillId: string,
 ): void {
+  const existing = facts.getFact('self', 'obs.recipe-decay');
+  const prevSince = (existing?.value as { sinceTs?: number } | undefined)?.sinceTs;
   facts.updateSelfFact(
     'obs.recipe-decay',
     `My recipe "${skillName}" failed its own verification when I reused it — it has been ` +
@@ -136,7 +150,66 @@ export function recordRecipeDecayObservation(
       `of trusting past success.`,
     [`skill:${skillId}`],
     'self-observation',
+    { sinceTs: typeof prevSince === 'number' && prevSince > 0 ? prevSince : Date.now() },
   );
+}
+
+// ── WS3 producer (b): persistent tendencies -> constitution value-annotation proposals ──────
+
+/**
+ * How each durable tendency reads as a constitution VALUE annotation. Static, mechanical —
+ * no LLM phrasing, so no fabrication surface. Only keys listed here can produce proposals.
+ */
+const VALUE_ANNOTATION_BY_OBS: Record<string, string> = {
+  'obs.handoff-tendency':
+    'Exhaust tool-reachable options before handing work back to the owner — my own ledger shows ' +
+    'this needs standing reinforcement, not turn-by-turn correction.',
+  'obs.repeated-failures':
+    'When a failure signature repeats, change approach or consult the failure notes before ' +
+    'retrying — repeated identical retries are my documented failure mode.',
+  'obs.recipe-decay':
+    'Re-verify a stored recipe against current reality before trusting it — my recipes have ' +
+    'demonstrably decayed in reuse.',
+};
+
+const DEFAULT_PERSIST_MS = 14 * 86_400_000;
+
+/**
+ * WS3 producer (b): a self-observation that has PERSISTED for two weeks despite being visible in
+ * every prompt is a standing conflict between behavior and the constitution's stated values —
+ * propose annotating the values (owner ratifies; the proposal store dedups and suppresses
+ * rejected content for 30d). Returns the proposal ids filed this run.
+ */
+export function proposeValueAnnotationsFromObservations(
+  facts: MemoryStore,
+  proposals: import('./constitution_proposals.js').ConstitutionProposalStore,
+  rootPursuitId: string,
+  now: number = Date.now(),
+  persistMs: number = DEFAULT_PERSIST_MS,
+): string[] {
+  const filed: string[] = [];
+  for (const obs of listSelfObservations(facts, 10)) {
+    const text = VALUE_ANNOTATION_BY_OBS[obs.key];
+    if (!text) continue;
+    if (!(obs.sinceTs > 0) || now - obs.sinceTs < persistMs) continue;
+    const fact = facts.getFact('self', obs.key);
+    if (!fact) continue;
+    const refs = (fact.value as { sourceRefs?: string[] }).sourceRefs ?? [];
+    const p = proposals.propose(
+      {
+        rootPursuitId,
+        kind: 'value_annotation',
+        payload: { text },
+        rationale:
+          `the tendency "${obs.key}" has persisted for ` +
+          `${Math.floor((now - obs.sinceTs) / 86_400_000)} days despite prompt-level visibility`,
+        evidenceRefs: [`fact:${fact.id}`, ...refs.slice(0, 8)],
+      },
+      now,
+    );
+    if (p && p.createdAt === now) filed.push(p.id);
+  }
+  return filed;
 }
 
 /** Current (non-forgotten) obs.* observations, newest first, for prompt rendering. */
@@ -145,10 +218,15 @@ export function listSelfObservations(facts: MemoryStore, topK = 5): SelfObservat
   const out: SelfObservation[] = [];
   for (const f of all) {
     if (!f.key.startsWith('obs.')) continue;
-    const v = f.value as { content?: string | string[]; updatedAt?: number };
+    const v = f.value as { content?: string | string[]; updatedAt?: number; sinceTs?: number };
     const content = typeof v.content === 'string' ? v.content : null;
     if (!content) continue;
-    out.push({ key: f.key, content, updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : 0 });
+    out.push({
+      key: f.key,
+      content,
+      updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : 0,
+      sinceTs: typeof v.sinceTs === 'number' ? v.sinceTs : 0,
+    });
   }
   out.sort((a, b) => b.updatedAt - a.updatedAt);
   return out.slice(0, topK);

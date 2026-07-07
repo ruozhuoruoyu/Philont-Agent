@@ -1,9 +1,11 @@
 # Selfhood Closure — wire the last hop of every self loop
 
-Status: IMPLEMENTED 2026-07-06 (WS0 README + WS6 mouth + WS1 traits + WS2 params + WS4
+Status: FULLY IMPLEMENTED 2026-07-06 (WS0 README + WS6 mouth + WS1 traits + WS2 params + WS4
 self-observations + WS5 recipe reuse + WS3 constitution proposals; per-WS commits on main).
-Remaining from the original sketch: the `/autonomy` status panel (WS6 §8, web-ui surface) and the
-consolidation-conflict producer for value_annotation proposals (WS3 §5, producer (b)).
+Follow-up landed same day: the `/autonomy` status surface (WS6 §8 — GET /api/autonomous/selfhood,
+the '/autonomy' chat command, and a Selfhood section in the web-ui autonomy dashboard) and
+producer (b) for value_annotation proposals (a self-observation persisting ≥14 days despite
+prompt-level visibility files a ratifiable value annotation).
 Author: ruozhuoruoyu.
 Companion to `motivation_loop_architecture.md` (the spine) and `execution_ledger_anchor.md` (S1).
 Anchored to real `file:line`.

@@ -44,6 +44,14 @@ interface Overview {
   pushGloballyEnabled: boolean;
 }
 
+interface Selfhood {
+  traits: { competitiveness: number; curiosity: number; conscientiousness: number; live: boolean };
+  observations: Array<{ key: string; content: string; sinceTs: number }>;
+  pursuits: Array<{ id: string; title: string; stakeWeight: number; lastTouchedAt: number; evidenceCount: number }>;
+  proposals: Array<{ id: string; kind: string; card: string; createdAt: number }>;
+  initiativesToday: { done: number };
+}
+
 interface Initiative {
   id: string;
   kind: string;
@@ -92,6 +100,7 @@ interface PushSubscription {
 @customElement('autonomous-dashboard')
 export class AutonomousDashboard extends LitElement {
   @state() overview: Overview | null = null;
+  @state() selfhood: Selfhood | null = null;
   @state() initiatives: Initiative[] = [];
   @state() failures: FailureResponse | null = null;
   @state() subscriptions: PushSubscription[] = [];
@@ -122,6 +131,7 @@ export class AutonomousDashboard extends LitElement {
       await resolveAgentPort(); // 确保拿到正确 agent 端口再请求
       await Promise.all([
         this.loadOverview(),
+        this.loadSelfhood(),
         this.loadInitiatives(),
         this.loadFailures(),
         this.loadSubscriptions(),
@@ -137,6 +147,12 @@ export class AutonomousDashboard extends LitElement {
     const r = await fetch(`${API_BASE()}/overview`);
     if (!r.ok) throw new Error(`overview ${r.status}`);
     this.overview = await r.json();
+  }
+
+  async loadSelfhood() {
+    const r = await fetch(`${API_BASE()}/selfhood`);
+    if (!r.ok) throw new Error(`selfhood ${r.status}`);
+    this.selfhood = await r.json();
   }
 
   async loadInitiatives() {
@@ -222,6 +238,68 @@ export class AutonomousDashboard extends LitElement {
             ${t('订阅', 'subscriptions')} ${ov.pushSubscriptionsActive}/${ov.pushSubscriptionsTotal}
           </span>
         </div>
+      </div>
+    `;
+  }
+
+  renderSelfhood() {
+    if (!this.selfhood) return html``;
+    const sh = this.selfhood;
+    const traitBar = (label: string, v: number) => html`
+      <div>
+        <div class="label">${label} ${Math.round(v * 100)}%</div>
+        <div class="bar"><div class="bar-fill" style="width:${Math.round(v * 100)}%"></div></div>
+      </div>
+    `;
+    return html`
+      <div class="card">
+        <h3>
+          ${t('🪞 Selfhood — 人格 / 自我观察 / 议程', '🪞 Selfhood — traits / self-model / agenda')}
+          <span class="meta-inline">
+            ${sh.traits.live ? t('(实时,源自自身履历)', '(live, from lived history)') : t('(冻结默认)', '(frozen defaults)')}
+          </span>
+        </h3>
+        <div class="budget-grid">
+          ${traitBar(t('好胜', 'competitiveness'), sh.traits.competitiveness)}
+          ${traitBar(t('好奇', 'curiosity'), sh.traits.curiosity)}
+          ${traitBar(t('尽责', 'conscientiousness'), sh.traits.conscientiousness)}
+        </div>
+        <div class="meta">
+          <span>${t('今日自主完成', 'Autonomous done today')}: ${sh.initiativesToday.done}</span>
+        </div>
+        ${sh.pursuits.length > 0
+          ? html`
+              <h4>${t('在追目标', 'Active pursuits')}</h4>
+              <ul class="plain-list">
+                ${sh.pursuits.map(
+                  (p) => html`<li>
+                    <b>${p.title}</b> — stake ${p.stakeWeight}/10 ·
+                    ${t('上次推进', 'last touched')} ${this.formatTs(p.lastTouchedAt || null)} ·
+                    ${t('证据', 'evidence')} ${p.evidenceCount}
+                  </li>`,
+                )}
+              </ul>
+            `
+          : html`<div class="meta">${t('暂无在追目标', 'No active pursuits yet')}</div>`}
+        ${sh.observations.length > 0
+          ? html`
+              <h4>${t('我对自己的观察(有据)', 'Self-observations (evidence-backed)')}</h4>
+              <ul class="plain-list">
+                ${sh.observations.map((o) => html`<li>${o.content}</li>`)}
+              </ul>
+            `
+          : ''}
+        ${sh.proposals.length > 0
+          ? html`
+              <h4>${t('待批准的宪法修正提案', 'Pending constitution proposals')}</h4>
+              <ul class="plain-list">
+                ${sh.proposals.map((pr) => html`<li>${pr.card}</li>`)}
+              </ul>
+              <div class="meta">
+                ${t('在聊天里回复同意/拒绝(附提案 id)即可生效。', 'Approve/reject in chat (quote the proposal id).')}
+              </div>
+            `
+          : ''}
       </div>
     `;
   }
@@ -430,6 +508,7 @@ export class AutonomousDashboard extends LitElement {
         </header>
         ${this.error ? html`<div class="error">⚠ ${this.error}</div>` : ''}
         ${this.renderOverview()}
+        ${this.renderSelfhood()}
         ${this.renderInitiatives()}
         ${this.renderFailures()}
         ${this.renderSubscriptions()}
@@ -438,6 +517,22 @@ export class AutonomousDashboard extends LitElement {
   }
 
   static styles = css`
+    .plain-list {
+      margin: 4px 0 8px;
+      padding-left: 18px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .meta-inline {
+      font-size: 12px;
+      font-weight: normal;
+      color: #888;
+      margin-left: 6px;
+    }
+    h4 {
+      margin: 10px 0 2px;
+      font-size: 13px;
+    }
     :host {
       display: block;
       padding: 16px;

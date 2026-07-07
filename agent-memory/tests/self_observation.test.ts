@@ -94,3 +94,61 @@ test('WS4: obs.* writes require evidence refs; ordinary storeFact still cannot w
   assert.match(obs[0].content, /deploy-flow/);
   handle.close();
 });
+
+test('WS3 producer (b): persistent observation -> value_annotation proposal; young one stays silent', async () => {
+  const { ConstitutionProposalStore } = await import('../src/index.js');
+  const { proposeValueAnnotationsFromObservations, BOOTSTRAP_ROOT_PURSUIT_ID } = await import(
+    '../src/index.js'
+  );
+  const handle = openMemoryDb(':memory:');
+  const proposals = new ConstitutionProposalStore(handle.db);
+  const t0 = Date.now();
+
+  // Seed a handoff tendency at t0
+  for (let i = 0; i < 3; i++) {
+    handle.driveOutcomes.append({
+      driveId: 'task-commitment',
+      triggerSnapshot: {},
+      injectedAction: {},
+      rootPursuitId: 'root',
+    });
+  }
+  const deps = { facts: handle.facts, actions: handle.actions, driveOutcomes: handle.driveOutcomes };
+  runSelfObservations(deps, t0);
+
+  // Young observation (same day): no proposal
+  assert.deepEqual(
+    proposeValueAnnotationsFromObservations(handle.facts, proposals, BOOTSTRAP_ROOT_PURSUIT_ID, t0),
+    [],
+  );
+
+  // Re-observed a week later: sinceTs must be CARRIED, not reset
+  runSelfObservations(deps, t0 + 7 * 86_400_000);
+  const obs = listSelfObservations(handle.facts).find((o) => o.key === 'obs.handoff-tendency')!;
+  assert.equal(obs.sinceTs, t0, 'sinceTs carried across upserts');
+
+  // Past the 14d persistence gate: exactly one proposal, evidence-backed
+  const t15 = t0 + 15 * 86_400_000;
+  const filed = proposeValueAnnotationsFromObservations(
+    handle.facts,
+    proposals,
+    BOOTSTRAP_ROOT_PURSUIT_ID,
+    t15,
+  );
+  assert.equal(filed.length, 1);
+  const p = proposals.get(filed[0])!;
+  assert.equal(p.kind, 'value_annotation');
+  assert.match(p.rationale, /persisted for 15 days/);
+  assert.ok(p.evidenceRefs.length >= 1 && p.evidenceRefs[0].startsWith('fact:'));
+
+  // Second run: store dedups the identical pending content
+  assert.deepEqual(
+    proposeValueAnnotationsFromObservations(handle.facts, proposals, BOOTSTRAP_ROOT_PURSUIT_ID, t15 + 1),
+    [],
+  );
+
+  // Cleared observation (evidence receded) resets persistence: clear, re-observe, no proposal
+  runSelfObservations(deps, t15 + 8 * 86_400_000); // outcomes now stale -> cleared
+  assert.ok(!listSelfObservations(handle.facts).some((o) => o.key === 'obs.handoff-tendency'));
+  handle.close();
+});

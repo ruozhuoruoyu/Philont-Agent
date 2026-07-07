@@ -83,6 +83,8 @@ export interface SelfFactValue {
   content: string | string[];
   sourceRefs: string[];
   updatedAt: number;
+  /** WS4 observations: when this key was FIRST observed (carried across upserts by the writer). */
+  sinceTs?: number;
 }
 
 export class MemoryStore {
@@ -417,6 +419,7 @@ export class MemoryStore {
     content: string | string[],
     sourceRefs: string[],
     caller: 'self-reflector' | 'self-observation',
+    opts: { sinceTs?: number } = {},
   ): Fact {
     if (caller !== 'self-reflector' && caller !== 'self-observation') {
       throw new SelfDescriptionWriteForbiddenError(key, String(caller));
@@ -433,6 +436,7 @@ export class MemoryStore {
       content,
       sourceRefs,
       updatedAt: Date.now(),
+      ...(opts.sinceTs !== undefined ? { sinceTs: opts.sinceTs } : {}),
     };
     return this.storeFact(
       {

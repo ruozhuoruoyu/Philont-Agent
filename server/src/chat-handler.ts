@@ -78,6 +78,7 @@ import {
   k8DriveOutcomeInput,
   runSelfObservations,
   listSelfObservations,
+  proposeValueAnnotationsFromObservations,
   ConstitutionProposalStore,
   approveAndApply,
   renderProposalCard,
@@ -240,7 +241,12 @@ import {
 import { PushDispatcher } from './push/dispatcher.js';
 import { serviceDriverTick } from './push/service_driver.js';
 import { maybeAutoSubscribe } from './push/auto_subscribe.js';
-import { currentTraitProfile } from './trait_profile.js';
+import { currentTraitProfile, traitsLiveEnabled } from './trait_profile.js';
+import {
+  buildSelfhoodStatus,
+  renderSelfhoodStatusText,
+  isAutonomyStatusCommand,
+} from './autonomy_status.js';
 
 /** WS4 (selfhood_closure) kill switch: PHILONT_SELF_OBSERVATIONS=0/off/false/no disables. */
 function selfObservationsEnabled(): boolean {
@@ -792,6 +798,18 @@ const idleConsolidator = startIdleConsolidator({
           console.log(
             `[idle-consolidator] self-observations: written=[${r.written.join(',')}] cleared=[${r.cleared.join(',')}]`,
           );
+        }
+        // WS3 producer (b): a tendency that persisted >=14d despite prompt visibility becomes a
+        // ratifiable value-annotation proposal (store dedups; rejections suppress 30d).
+        if (constitutionProposalsEnabled()) {
+          const filed = proposeValueAnnotationsFromObservations(
+            memory.facts,
+            constitutionProposals,
+            BOOTSTRAP_ROOT_PURSUIT_ID,
+          );
+          if (filed.length > 0) {
+            console.log(`[idle-consolidator] value-annotation proposals filed: ${filed.length}`);
+          }
         }
       } catch (e) {
         console.error('[idle-consolidator] self-observations failed', e);
@@ -2405,6 +2423,26 @@ export const autonomousLoop: AutonomousLoopHandle = startAutonomousLoop({
   },
 });
 autonomousLoop.start();
+
+/**
+ * Selfhood status snapshot (WS6 §8): one read-only composition consumed by the
+ * GET /api/autonomous/selfhood endpoint (index.ts) and the '/autonomy' chat command.
+ */
+export function autonomySelfhoodStatus() {
+  return buildSelfhoodStatus({
+    traits: () =>
+      currentTraitProfile({
+        driveOutcomes: memory.driveOutcomes,
+        initiatives: autonomousLoop.initiatives,
+      }),
+    traitsLive: traitsLiveEnabled(),
+    facts: memory.facts,
+    pursuits: memory.pursuits,
+    proposals: constitutionProposals,
+    initiatives: autonomousLoop.initiatives,
+    budget: autonomousLoop.budget,
+  });
+}
 
 // Background auto-advance for opted-in reasoning sessions (Part 2). Default-off:
 // PHILONT_DEEP_EXPLORE_AUTO_ADVANCE gates the whole loop, and each session is opt-in via
@@ -4763,6 +4801,19 @@ export async function handleChatSend(
     } catch (e) {
       console.warn('[push] first-contact auto-subscribe failed', e);
     }
+  }
+
+  // '/autonomy' status command (WS6 §8): answered straight from the stores, zero LLM calls —
+  // works identically on WeChat / Telegram / web-ui / CLI. Not recorded to the timeline (it is
+  // telemetry about the agent, not conversation).
+  if (isAutonomyStatusCommand(userMessage)) {
+    try {
+      onDelta(renderSelfhoodStatusText(autonomySelfhoodStatus()));
+    } catch (e) {
+      console.error('[autonomy] status command failed', e);
+      onDelta('autonomy status unavailable: ' + (e as Error).message);
+    }
+    return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
   }
   const grants = globalGrants;
 
