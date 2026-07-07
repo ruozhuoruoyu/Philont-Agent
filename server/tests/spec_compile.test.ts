@@ -126,3 +126,41 @@ test('compileSpec: kill switch PHILONT_SPEC_COMPILE=0 → null without calling t
     else process.env.PHILONT_SPEC_COMPILE = saved;
   }
 });
+
+test('specBodyGuardReject: corrects non-JSON and incomplete write bodies on documented endpoints', async () => {
+  const { specBodyGuardReject } = await import('../src/spec_compile.js');
+  const spec: SpecDoc = {
+    source: { contentHash: 'h' },
+    service: { name: 'mycox', hosts: ['mycox.ai'] },
+    endpoints: [
+      { method: 'POST', path: '/api/posts', requiredFields: ['community_id', 'title', 'body'] },
+      { method: 'POST', path: '/api/posts/:public_id/upvote' },
+    ],
+    preconditions: [], rules: [], confidence: 1,
+  };
+  // Prod shape: raw markdown string as body → rejected naming the documented fields.
+  const raw = specBodyGuardReject('http', {
+    url: 'https://mycox.ai/api/posts', method: 'POST', body: '# My Post\n\nlots of markdown…',
+  }, spec);
+  assert.ok(raw);
+  assert.match(raw!.error, /JSON OBJECT/);
+  assert.match(raw!.error, /community_id.*title.*body/s);
+  // Missing documented field → rejected naming the gap.
+  const missing = specBodyGuardReject('http', {
+    url: 'https://mycox.ai/api/posts', method: 'POST', body: { title: 't', body: 'b' },
+  }, spec);
+  assert.ok(missing);
+  assert.match(missing!.error, /missing documented required field\(s\): community_id/);
+  // Complete object body (or its JSON string form) passes.
+  assert.equal(specBodyGuardReject('http', {
+    url: 'https://mycox.ai/api/posts', method: 'POST', body: { community_id: 'c', title: 't', body: 'b' },
+  }, spec), null);
+  assert.equal(specBodyGuardReject('http', {
+    url: 'https://mycox.ai/api/posts', method: 'POST', body: '{"community_id":"c","title":"t","body":"b"}',
+  }, spec), null);
+  // Param-path endpoint without documented fields: bodyless POST passes; GET / other hosts / undocumented paths ignored.
+  assert.equal(specBodyGuardReject('http', { url: 'https://mycox.ai/api/posts/05f3693d/upvote', method: 'POST' }, spec), null);
+  assert.equal(specBodyGuardReject('http', { url: 'https://mycox.ai/api/posts', method: 'GET' }, spec), null);
+  assert.equal(specBodyGuardReject('http', { url: 'https://other.io/api/posts', method: 'POST', body: 'x' }, spec), null);
+  assert.equal(specBodyGuardReject('http', { url: 'https://mycox.ai/api/unknown', method: 'POST', body: 'x' }, spec), null);
+});

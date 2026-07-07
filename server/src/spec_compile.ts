@@ -186,6 +186,78 @@ export function clearSpecCache(): void {
   specCache.clear();
 }
 
+/**
+ * Spec-driven body guard: for a documented endpoint, a write request whose body is not a JSON
+ * object (prod: POST /api/posts got a 2945-char raw-markdown string body → server 500 "Failed to
+ * create post") or is missing documented required fields is rejected BEFORE sending, with a
+ * corrective message naming the expected shape. Only enforced when the spec actually documents the
+ * endpoint; endpoints without requiredFields only get the JSON-object check. Generic — everything
+ * comes from the SpecDoc.
+ */
+export function specBodyGuardReject(
+  toolName: string,
+  input: Record<string, unknown>,
+  spec: SpecDoc,
+): { error: string } | null {
+  if (toolName !== 'http') return null;
+  const method = String(input.method ?? 'GET').toUpperCase();
+  if (!/^(POST|PUT|PATCH)$/.test(method)) return null;
+  let u: URL;
+  try {
+    u = new URL(String(input.url ?? ''));
+  } catch {
+    return null;
+  }
+  if (!spec.service.hosts.includes(u.host.toLowerCase())) return null;
+  const ep = spec.endpoints.find((e) => {
+    if (e.method !== method) return false;
+    // Param segments (:id / $VAR / {id}) match any one path segment.
+    const pattern = e.path
+      .split('/')
+      .map((seg) => (/^[:$]|^\{/.test(seg) ? '[^/]+' : seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+      .join('/');
+    return new RegExp(`^${pattern}/?$`).test(u.pathname);
+  });
+  if (!ep) return null;
+  const raw = input.body;
+  let parsed: Record<string, unknown> | null = null;
+  if (raw !== undefined && raw !== null) {
+    if (typeof raw === 'object' && !Array.isArray(raw)) {
+      parsed = raw as Record<string, unknown>;
+    } else if (typeof raw === 'string') {
+      try {
+        const p = JSON.parse(raw) as unknown;
+        if (typeof p === 'object' && p !== null && !Array.isArray(p)) parsed = p as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
+    }
+  }
+  const fieldsDoc = ep.requiredFields?.length
+    ? `Required fields: ${ep.requiredFields.join(', ')}.`
+    : 'Send a JSON object body.';
+  if (raw !== undefined && raw !== null && parsed === null) {
+    return {
+      error:
+        `[spec body guard] ${method} ${ep.path} expects a JSON OBJECT body, but the body is ` +
+        `${typeof raw === 'string' ? `a raw string (${(raw as string).length} chars — likely your content pasted directly)` : `of type ${Array.isArray(raw) ? 'array' : typeof raw}`}. ` +
+        `${fieldsDoc} Wrap your content in the documented fields, e.g. body: {${(ep.requiredFields ?? ['...']).map((f) => `"${f}": "..."`).join(', ')}}.`,
+    };
+  }
+  if (ep.requiredFields?.length) {
+    const have = new Set(Object.keys(parsed ?? {}));
+    const missing = ep.requiredFields.filter((f) => !have.has(f));
+    if (missing.length > 0) {
+      return {
+        error:
+          `[spec body guard] ${method} ${ep.path} body is missing documented required field(s): ` +
+          `${missing.join(', ')}. ${fieldsDoc} Do not send until every required field is present.`,
+      };
+    }
+  }
+  return null;
+}
+
 export interface CompileSpecDeps {
   call: AuxLLMCaller;
   log?: (msg: string) => void;
