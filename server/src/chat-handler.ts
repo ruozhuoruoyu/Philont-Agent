@@ -6215,6 +6215,7 @@ async function handleChatSendInner(
           emitServiceSkill: (spec, verifiedCalls) => {
             const r = writeServiceSkill(spec, verifiedCalls, join(process.cwd(), '.philont', 'skills'));
             console.log(`[plan-loop] service skill emitted: ${r.name} (${spec.endpoints.length} endpoints, ${verifiedCalls.length} verified calls)`);
+            return { name: r.name };
           },
           log: (m) => console.log(m),
           // Cap forwarded progress messages at 2. WeChat limits how many bot messages one inbound

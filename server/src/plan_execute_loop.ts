@@ -599,7 +599,7 @@ export interface PlanLoopDeps {
    * Optional service-skill emitter (spec_regime.md increment 3). Called at CLOSE when the guide
    * compiled into a SpecDoc, with this run's verified calls. Best-effort — failures are logged.
    */
-  emitServiceSkill?: (spec: SpecDoc, verifiedCalls: string[]) => void;
+  emitServiceSkill?: (spec: SpecDoc, verifiedCalls: string[]) => { name: string } | void;
   /**
    * Input-aware capability classifier (server wires tools.classify(name, input)). Lets the loop
    * tell ACTION calls (write/execute — http POST/PUT/…, writeFile, shell) from reads. Needed for
@@ -1219,9 +1219,18 @@ export async function runPlanExecuteLoop(
   // Spec regime increment 3: a successfully compiled contract lands as a service skill (generic —
   // every string derives from the SpecDoc + this run's verified calls). Scheduled routines then
   // use_skill instead of re-fetching the guide; cleanup uninstalls it by service slug.
+  let emittedSkillNote = '';
   if (deps.emitServiceSkill && compiledSpec) {
     try {
-      deps.emitServiceSkill(compiledSpec, [...new Set(okBusinessCalls)]);
+      const emitted = deps.emitServiceSkill(compiledSpec, [...new Set(okBusinessCalls)]);
+      // Surface the emission in the USER-FACING report — it only ever hit the console log, so the
+      // compiled-contract skill looked like it never existed to anyone reading the chat.
+      if (emitted?.name) {
+        emittedSkillNote =
+          `\n\n📘 服务契约已编译为技能 \`${emitted.name}\`` +
+          `(${compiledSpec.endpoints.length} 个端点,${okBusinessCalls.length ? [...new Set(okBusinessCalls)].length : 0} 条已验证调用)` +
+          ` — 定时例程将直接使用它,不再重抓 guide;清除该服务时会一并删除。`;
+      }
     } catch (e) {
       deps.log(`[plan-loop] service-skill emission failed (ignored): ${(e as Error)?.message ?? String(e)}`);
     }
@@ -1271,6 +1280,7 @@ export async function runPlanExecuteLoop(
         : '任务未能执行:\n') +
     lines.join('\n') +
     gapLines +
+    emittedSkillNote +
     budgetNote;
   return { outcome, deliverables: plan.deliverables, steps: plan.steps, outcomes: list, reply, unresolvedGaps };
 }
