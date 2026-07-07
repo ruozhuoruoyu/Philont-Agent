@@ -23,6 +23,7 @@ import {
   type MiniLoopToolRunResult,
 } from '@agent/tools';
 import type { ToolDefinition } from '@agent/policy';
+import { compileSpec, specToGuideApi } from './spec_compile.js';
 
 // ── Flag ────────────────────────────────────────────────────────────────────
 
@@ -589,6 +590,12 @@ export interface PlanLoopDeps {
    */
   auxJudge?: (guideText: string, deliverables: readonly LoopDeliverable[]) => Promise<string[] | null>;
   /**
+   * Optional aux-LLM caller for the spec compiler (spec_regime.md increment 1). When present, the
+   * guide is compiled into a validated SpecDoc and the endpoint anchor reads from it (regex floor
+   * merged in); when absent or the compile fails, the regex anchor runs verbatim.
+   */
+  specCall?: (req: { system?: string; user: string; maxTokens?: number; signal?: AbortSignal }) => Promise<string>;
+  /**
    * Input-aware capability classifier (server wires tools.classify(name, input)). Lets the loop
    * tell ACTION calls (write/execute — http POST/PUT/…, writeFile, shell) from reads. Needed for
    * the evidence criterion: prod marked "publish a post" done off 11 ok READ calls while the
@@ -731,7 +738,19 @@ export async function runPlanExecuteLoop(
   }
   const guideText = guideTexts.join('\n\n---\n\n').slice(0, 60_000);
   // Endpoint anchor (weak-model guarantee): the documented API surface + a host allowlist guard.
-  const guideApi = planEndpointGuardEnabled() ? extractGuideEndpoints(guideText) : { hosts: [], endpoints: [] };
+  // Spec regime: when an aux caller is wired, the guide is COMPILED into a validated SpecDoc (the
+  // model understands prose; the mechanism validates truth) with the regex extraction as floor;
+  // any compile failure keeps the regex anchor verbatim.
+  const regexApi = planEndpointGuardEnabled() ? extractGuideEndpoints(guideText) : { hosts: [], endpoints: [] };
+  let guideApi = regexApi;
+  if (deps.specCall && planEndpointGuardEnabled()) {
+    const spec = await compileSpec(guideText, regexApi, {
+      call: deps.specCall,
+      log: deps.log,
+      signal: budgetSignal(60_000),
+    });
+    if (spec) guideApi = specToGuideApi(spec);
+  }
   const endpointRegistry = buildEndpointRegistry(guideApi);
   if (guideApi.hosts.length) {
     deps.log(`[plan-loop] endpoint anchor: hosts=[${guideApi.hosts.join(',')}] endpoints=${guideApi.endpoints.length}`);

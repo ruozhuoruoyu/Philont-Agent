@@ -6170,6 +6170,9 @@ async function handleChatSendInner(
                 }
               }
             : undefined,
+          // Spec compiler (spec_regime.md increment 1): guide → validated SpecDoc via the aux LLM,
+          // regex anchor as floor/fallback. Absent aux config → pure regex path, unchanged.
+          specCall: isAuxLLMConfigured() ? (req) => callAuxLLM(req) : undefined,
           log: (m) => console.log(m),
           // Cap forwarded progress messages at 2. WeChat limits how many bot messages one inbound
           // message may earn; the loop's ~10 per-state statuses exhausted that quota and the FINAL
