@@ -278,3 +278,26 @@ test('store_fact rejects secret-shaped values (credential hygiene gate)', async 
   const ok3 = await storeFact.execute({ namespace: 'user', key: 'name', value: 'alice' });
   assert.equal(ok3.success, true);
 });
+
+test('store_fact rejects secrets wrapped in object values (prod bypass)', async () => {
+  const { facts, notes } = openMemoryDb(':memory:');
+  const [storeFact] = createMemoryTools(facts, notes);
+  const r = await storeFact.execute({
+    namespace: 'project',
+    key: 'mycox.credentials',
+    value: {
+      actor_id: '00000000-0000-4000-8000-000000000000',
+      handle: 'example-agent',
+      api_key: 'exampleservice_b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2',
+    },
+  });
+  assert.equal(r.success, false);
+  assert.match(r.error ?? '', /saveCredential/);
+  // Objects without secret leaves still store fine (nested prefix strings are not keys).
+  const ok = await storeFact.execute({
+    namespace: 'project',
+    key: 'mycox.credentials_status',
+    value: { handle: 'example-agent', api_key_prefix: 'exampleservice_b2b2b2', status: 'saved-in-credential-store' },
+  });
+  assert.equal(ok.success, true, ok.error);
+});

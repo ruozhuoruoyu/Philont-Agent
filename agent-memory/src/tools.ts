@@ -55,6 +55,26 @@ const JWT_SHAPE = /^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/
 const SERVICE_KEY_SHAPE = /^[A-Za-z][A-Za-z0-9]{1,24}[_-][A-Fa-f0-9]{32,}$/; // e.g. mycox_<64 hex>
 const KEYNAME_IMPLIES_CREDENTIAL = /api[_-]?key|apikey|token|secret|credential|passwd|password|bearer/i;
 
+/**
+ * Recursive companion: the gate was bypassed in prod by wrapping the key in a JSON OBJECT
+ * ({actor_id, handle, api_key: "<raw key>"}). Scan object/array leaves (depth-limited) and apply
+ * the same detection to every string leaf, using the leaf's own field name as key context.
+ */
+export function detectSecretShapedLeaf(
+  namespace: string,
+  key: string,
+  value: unknown,
+  depth = 0,
+): string | null {
+  if (typeof value === 'string') return detectSecretShapedValue(namespace, key, value);
+  if (depth >= 3 || value === null || typeof value !== 'object') return null;
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    const hit = detectSecretShapedLeaf(namespace, `${key}.${k}`, v, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 export function detectSecretShapedValue(
   namespace: string,
   key: string,
@@ -65,7 +85,7 @@ export function detectSecretShapedValue(
   if (v.length < 16 || /\s/.test(v) || /^[{[]/.test(v)) return null;
   const strongShape = KNOWN_TOKEN_PREFIX.test(v) || JWT_SHAPE.test(v) || SERVICE_KEY_SHAPE.test(v);
   const keyImplies = KEYNAME_IMPLIES_CREDENTIAL.test(`${namespace}.${key}`);
-  const tokenLike = /^[A-Za-z0-9._-]{24,}$/.test(v);
+  const tokenLike = /^(?=.*\d)[A-Za-z0-9._-]{24,}$/.test(v); // real keys carry digits; slug-phrases don't
   // Flag an unmistakable secret shape anywhere, or a bare token-like value under a credential-named key.
   if (!(strongShape || (keyImplies && tokenLike))) return null;
   const suggestedId = `${namespace}.${key}`
@@ -519,6 +539,12 @@ export function createMemoryTools(
               };
             }
             const secretErr = detectSecretShapedValue(p.namespace, p.key, p.value);
+            if (secretErr) {
+              return { success: false, error: secretErr };
+            }
+          } else if (typeof p.value === 'object' && p.value !== null) {
+            // Prod bypass: the raw key arrived wrapped in an object fact ({..., api_key: "<key>"}).
+            const secretErr = detectSecretShapedLeaf(p.namespace, p.key, p.value);
             if (secretErr) {
               return { success: false, error: secretErr };
             }
