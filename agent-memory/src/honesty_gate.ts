@@ -165,6 +165,11 @@ export function classifyToolResult(content: string): 'ok' | 'fail' | 'unknown' {
   if (content.startsWith(TOOL_FAIL_MARK)) return 'fail';
   // Legacy format compatibility
   if (/^Error:\s/.test(content)) return 'fail';
+  // Mechanism-layer rejections (plan gate / in-turn block): the call DID NOT run. For honesty
+  // accounting that is a failure — a "sent / built / done" claim cannot stand on a blocked call.
+  // (prod 2026-07-07: gate-rejected replyWithMedia counted as 'unknown', so "已发到微信" passed
+  // the gate with 0 failCount while the send never happened.)
+  if (/^\[(?:plan_protocol_gate|in-turn-tool-block)\]/.test(content)) return 'fail';
   return 'unknown';
 }
 
@@ -319,6 +324,7 @@ export interface HonestyEvaluation {
   /** Specific trigger reason */
   reason:
     | 'failures_with_claim'
+    | 'delivery_claim_without_send'
     | 'unverified_destructive'
     | 'unknown_results_with_claim'
     | 'memory_claim_without_write'
@@ -602,6 +608,44 @@ export function findActionAnnouncement(text: string): string | null {
   return null;
 }
 
+// ── Delivery claims ("sent to you / 已发到微信 / 请查收") ─────────────────────────────────────
+// Tools whose success actually delivers an artifact to the user's channel.
+const DELIVERY_TOOLS = new Set(['replyWithMedia']);
+
+function isDeliveryTool(name: string): boolean {
+  return DELIVERY_TOOLS.has(name);
+}
+
+const DELIVERY_CLAIM_PATTERNS: RegExp[] = [
+  // 已(通过微信)发到/发给 你|您|微信
+  /已(?:经)?(?:通过\S{0,4})?发(?:送)?(?:到|给)\s*(?:你|您|本?微信)/,
+  // 文件/PPT/图片/文档/附件 …已发送/已发出
+  /(?:文件|PPT|pptx|图片|文档|附件)[^。!!\n]{0,12}已(?:经)?发(?:送|出)/i,
+  /请查收/,
+  // English: "sent (the file) to you / via wechat", "file ... sent"
+  /\bsent\b[^.!?\n]{0,30}\b(?:to you|via wechat)\b/i,
+  /\b(?:file|pptx?|document|attachment)\b[^.!?\n]{0,24}\b(?:has been |was )?sent\b/i,
+];
+
+const DELIVERY_NEGATION = /(?:未能?|没有?|无法|不能|失败|还没|尚未|will|准备|即将|然后再?|再)\s*[^。!!\n]{0,6}发/;
+
+export function findDeliveryClaim(text: string): string | null {
+  for (const re of DELIVERY_CLAIM_PATTERNS) {
+    const m = re.exec(text);
+    if (!m) continue;
+    // Screen negation within the same sentence ("还没发给你" / "修复后再发送")
+    const start = Math.max(0, text.lastIndexOf('\n', m.index), text.lastIndexOf('。', m.index));
+    const end = (() => {
+      const candidates = [text.indexOf('。', m.index), text.indexOf('\n', m.index)].filter((i) => i >= 0);
+      return candidates.length ? Math.min(...candidates) : text.length;
+    })();
+    const sentence = text.slice(start, end);
+    if (DELIVERY_NEGATION.test(sentence)) continue;
+    return m[0].trim().slice(0, 60);
+  }
+  return null;
+}
+
 export function evaluateHonesty(
   assistantText: string,
   opts: EvaluateOptions,
@@ -639,6 +683,31 @@ export function evaluateHonesty(
         evidence:
           `You said "${memClaim}", but this turn had **no calls** to store_fact / create_calendar_event /` +
           ` schedule_reminder or other memory-write tools. Verbal agreement ≠ persistence.`,
+      };
+    }
+  }
+
+  // ── Delivery claim while the send this turn did not succeed → high ─────────────────────────
+  // prod 2026-07-07 09:06: plan gate rejected replyWithMedia, final text still said "已发到微信,
+  // 请查收!". Trigger condition is deliberately narrow (zero false-positive by construction): a
+  // delivery tool was ATTEMPTED this turn and none succeeded, yet the text claims delivery.
+  // (A truthful recap of a PREVIOUS turn's send has no delivery attempt this turn → not fired.)
+  const deliveryClaim = findDeliveryClaim(assistantText);
+  if (deliveryClaim) {
+    const attempts = records.filter((r) => isDeliveryTool(r.toolName));
+    const anyDeliveryOk = attempts.some((r) => classifyToolResult(r.content) === 'ok');
+    if (attempts.length > 0 && !anyDeliveryOk) {
+      return {
+        severity: 'high',
+        reason: 'delivery_claim_without_send',
+        matchedClaim: deliveryClaim,
+        okCount: ok,
+        failCount: fail,
+        unknownCount: unknown,
+        evidence:
+          `You said "${deliveryClaim}", but this turn's delivery attempt (replyWithMedia) did NOT ` +
+          `succeed (blocked or failed). The user has received nothing. Either actually send it now ` +
+          `or say plainly that it has not been sent yet.`,
       };
     }
   }

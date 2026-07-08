@@ -29,7 +29,6 @@ import {
   installSkillFromRegistryTool,
   removeLock,
   createPlanAndExecuteTool,
-  PlanBudgetTracker,
   createCredentialTools,
   hostEnvPromptLine,
   matchBarriers,
@@ -1828,7 +1827,10 @@ const planAndExecuteTool = createPlanAndExecuteTool({
       description: t.description,
       parameters: JSON.stringify(t.schema),
     })),
-  budgetTracker: new PlanBudgetTracker(),
+  // NOTE: no budgetTracker injected — createPlanAndExecuteTool constructs a FRESH tracker per
+  // invocation. A module-lifetime singleton here once anchored the wallclock budget to PROCESS
+  // START (prod 2026-07-07: resume-after-auth turns saw "wallclock reached 1416439ms/300000ms"
+  // and skipped every sub-task) and accumulated the token/tool budget across all calls forever.
   defaultMaxIters: 8,
   defaultMaxSubTasks: 6,
   toolBlacklist: PLAN_EXEC_BLACKLIST,
@@ -5617,6 +5619,8 @@ async function handleChatSendInner(
         { id: pending.toolCallId, name: pending.toolName, input: pending.input },
         ...pending.remainingCalls,
       ];
+      // The user explicitly approved THIS call — the plan gate must not re-block it on resume.
+      signalBus.authApprovedCallId = pending.toolCallId;
       // Carry the pre-pause tool ledger into this resumed segment so same-turn honesty/verdict checks
       // see what already succeeded before the auth pause (prevents a false skill_forget_claim_without_call
       // after a real forget_skill that happened before the approval gate).
@@ -6842,6 +6846,11 @@ interface TurnSignalBus {
     assistantText: string;
   };
   /**
+   * The tool_use id the user explicitly approved via the pending-auth card this turn. That exact
+   * call bypasses the plan_protocol_gate on resume (approval outranks the plan state machine).
+   */
+  authApprovedCallId?: string;
+  /**
    * WS5 (selfhood_closure): the skill most recently retrieved via use_skill this turn. Subsequent
    * tool actions are logged with linkedSkill=this name, which is what lets the reflector attribute
    * their success/failure to the recipe and run reuse verification (recordLinkedSkillOutcomes).
@@ -7168,7 +7177,10 @@ async function runToolLoop(
       }
       const planAllowsExec = lastPlan?.status === 'executing';
       const needsPlanReview = !planAllowsExec && !terminalClosedThisTurn;
-      const exempt = isPlanGateExempt(call.name, classification, call.input);
+      // A call the user JUST approved via the auth card is exempt: re-blocking it punishes the
+      // approval and (prod 2026-07-07 09:06) left a narrated "sent" with nothing sent.
+      const exempt = isPlanGateExempt(call.name, classification, call.input) ||
+        signalBus.authApprovedCallId === call.id;
       if (needsPlanReview && !exempt) {
         const baseReason = !lastPlan
           ? `slow 模式下尚未调 plan_draft 拆解任务。`
@@ -8825,7 +8837,10 @@ async function runToolLoop(
         }
         const planAllowsExec = lastPlan?.status === 'executing';
         const needsPlanReview = !planAllowsExec && !terminalClosedThisTurn;
-        const exempt = isPlanGateExempt(call.name, classification, call.input);
+        // A call the user JUST approved via the auth card is exempt: re-blocking it punishes the
+        // approval and (prod 2026-07-07 09:06) left a narrated "sent" with nothing sent.
+        const exempt = isPlanGateExempt(call.name, classification, call.input) ||
+          signalBus.authApprovedCallId === call.id;
         if (needsPlanReview && !exempt) {
           const baseReason = !lastPlan
             ? `In slow mode, plan_draft has not been called to break down the task.`

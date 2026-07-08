@@ -571,3 +571,54 @@ test('P3 recall: non-empty callback → recall section appended with query = par
     'recall section precedes the closing instruction',
   );
 });
+
+test('budget is per invocation: a later call on the SAME tool is not pre-exhausted (wallclock/spend)', async () => {
+  // Prod regression (2026-07-07): a module-lifetime PlanBudgetTracker anchored the wallclock to
+  // process start, so a planAndExecute called after an auth pause saw "wallclock reached
+  // 1416439ms/300000ms" and skipped every sub-task. Each execute() must start a fresh budget.
+  const realNow = Date.now;
+  try {
+    let now = realNow();
+    Date.now = () => now;
+
+    // One scripted LLM serving TWO runs (plan + 2 sub-tasks each), one tool instance —
+    // exactly the production wiring (tool created once at module load, executed per turn).
+    const { llm } = makeScriptedLLM([
+      planResp({
+        subTasks: [
+          { id: 'st-1', description: 'a', dependsOn: [] },
+          { id: 'st-2', description: 'b', dependsOn: [] },
+        ],
+      }),
+      subTaskTextResp('did a'),
+      subTaskTextResp('did b'),
+      planResp({
+        subTasks: [
+          { id: 'st-1', description: 'c', dependsOn: [] },
+          { id: 'st-2', description: 'd', dependsOn: [] },
+        ],
+      }),
+      subTaskTextResp('did c'),
+      subTaskTextResp('did d'),
+    ]);
+    const tool = createPlanAndExecuteTool({
+      llm,
+      toolRunner: NOOP_RUNNER,
+      toolDefs: NO_TOOLS,
+    });
+
+    const r1 = await tool.execute({ task: 'run one', aggregateMode: 'concat' });
+    assert.equal(r1.success, true);
+    assert.match(r1.output ?? '', /2 succeeded \/ 0 failed/);
+
+    // 20 minutes pass (auth pause / idle) — far beyond the 5-minute wallclock budget.
+    now += 20 * 60_000;
+
+    const r2 = await tool.execute({ task: 'run two', aggregateMode: 'concat' });
+    assert.equal(r2.success, true);
+    assert.match(r2.output ?? '', /2 succeeded \/ 0 failed/, 'second invocation must not be wallclock-starved');
+    assert.doesNotMatch(r2.output ?? '', /wallclock reached/);
+  } finally {
+    Date.now = realNow;
+  }
+});

@@ -364,6 +364,7 @@ export interface PlanAndExecuteDeps {
     input: Record<string, unknown>,
   ) => Promise<MiniLoopToolRunResult>;
   toolDefs: ToolDefinition[];
+  /** Tests only. Production must omit this so each invocation gets a fresh budget (see execute()). */
   budgetTracker?: PlanBudgetTracker;
   defaultMaxIters?: number;
   defaultMaxSubTasks?: number;
@@ -465,6 +466,10 @@ export function createPlanAndExecuteTool(deps: PlanAndExecuteDeps): Tool {
         return { success: false, output: '', error: 'task is required' };
       }
 
+      // Budget is PER INVOCATION: wallclock starts now, token/tool counters start at zero.
+      // deps.budgetTracker exists for tests only — a long-lived shared instance would anchor
+      // the wallclock to construction time (across auth suspends / prior calls) and pre-exhaust
+      // every later run.
       const budgetTracker = deps.budgetTracker ?? new PlanBudgetTracker();
 
       onProgress?.(`▸ plan phase: decompose (max ${maxSubTasks} sub-tasks)`);

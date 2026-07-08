@@ -49,6 +49,10 @@ function defaultDownloadDir(): string {
   return join(homedir(), '.philont', 'downloads');
 }
 
+/** Extensions that imply a binary (or at least non-HTML) artifact — used by the got-HTML guard. */
+const BINARY_EXT_RE =
+  /\.(?:png|jpe?g|gif|webp|svg|bmp|ico|pdf|zip|gz|tgz|7z|rar|mp4|mp3|wav|webm|pptx?|docx?|xlsx?|epub|woff2?)$/i;
+
 /** content-type → file extension mapping; only common formats listed; returns empty string for unknown */
 const MIME_EXT: Record<string, string> = {
   'application/pdf': '.pdf',
@@ -310,6 +314,25 @@ export const downloadFileTool: Tool = {
       }
 
       const contentType = response.headers.get('content-type') || 'unknown';
+
+      // Binary-expected vs got-HTML guard (prod 2026-07-07): a .webp URL behind a bot check
+      // returned text/html; the 378KB anti-bot page was saved as ai_timeline.webp and reported
+      // success — garbage silently entered the artifact chain. If the requested filename clearly
+      // implies a binary artifact and the server answers text/html, that is an error/consent/
+      // bot-check page, not the artifact: fail loudly instead of saving it.
+      const expectedName = (dest && !dest.endsWith('/') && !dest.endsWith(sep) ? dest : '') ||
+        (() => { try { return new URL(url).pathname; } catch { return ''; } })();
+      if (BINARY_EXT_RE.test(expectedName) && /^text\/html\b/i.test(contentType)) {
+        return {
+          success: false,
+          output: '',
+          error:
+            `Expected a binary file (${expectedName.slice(-24)}) but the server returned text/html — ` +
+            `almost certainly a bot-check / error / consent page, not the artifact. ` +
+            `Try webFetch on the page to find the real file URL, or a different mirror.`,
+        };
+      }
+
       const contentLength = Number(response.headers.get('content-length')) || 0;
       if (contentLength > maxBytes) {
         return {

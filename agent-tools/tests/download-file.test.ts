@@ -70,6 +70,13 @@ describe('downloadFile', () => {
         // 路径无扩展名,需要靠 mime 兜底
         res.writeHead(200, { 'content-type': 'application/pdf' });
         res.end(Buffer.from('xx'));
+      } else if (req.url === '/botcheck.webp') {
+        // Anti-bot / consent page served where an image was expected (prod 2026-07-07)
+        res.writeHead(200, { 'content-type': 'text/html; charset=UTF-8' });
+        res.end('<html><body>Just a moment…</body></html>');
+      } else if (req.url === '/legit.html') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=UTF-8' });
+        res.end('<html><body>a real page download</body></html>');
       } else if (req.url === '/') {
         // 根路径,文件名要走兜底
         res.writeHead(200, { 'content-type': 'application/octet-stream' });
@@ -322,6 +329,36 @@ describe('downloadFile', () => {
       else process.env.HOME = oldHome;
       if (oldDl !== undefined) process.env.PHILONT_DOWNLOAD_DIR = oldDl;
     }
+  });
+
+  describe('binary-expected vs got-HTML guard (prod 2026-07-07 regression)', () => {
+    test('.webp URL answered with text/html → fail, nothing written', async () => {
+      const dest = join(TMP, 'ai_timeline.webp');
+      const r = await downloadFileTool.execute({
+        url: `http://127.0.0.1:${port}/botcheck.webp`,
+        dest,
+      });
+      assert.equal(r.success, false);
+      assert.match(r.error ?? '', /text\/html/);
+      await assert.rejects(stat(dest), 'the bot-check page must not be saved');
+    });
+
+    test('explicit .png dest with html body → fail even when URL has no extension', async () => {
+      const r = await downloadFileTool.execute({
+        url: `http://127.0.0.1:${port}/legit.html`,
+        dest: join(TMP, 'diagram.png'),
+      });
+      assert.equal(r.success, false);
+      assert.match(r.error ?? '', /bot-check|text\/html/);
+    });
+
+    test('downloading an actual .html page still works', async () => {
+      const r = await downloadFileTool.execute({
+        url: `http://127.0.0.1:${port}/legit.html`,
+        dest: join(TMP, 'page.html'),
+      });
+      assert.equal(r.success, true);
+    });
   });
 });
 

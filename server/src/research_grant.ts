@@ -60,7 +60,7 @@ export function reconstructDmSessionId(channel: string, peer: string): string | 
 export interface WorkflowGrant {
   tool: string;
   capability: 'write' | 'execute';
-  domain: 'local';
+  domain: 'local' | 'network';
 }
 
 /**
@@ -72,8 +72,12 @@ export interface WorkflowGrant {
  * (pariGp/z3Verify were missing entirely). This unified set lets ONE approval of any member cover the
  * whole local loop for WORKFLOW_GRANT_TTL_MS.
  *
- * Deliberately excluded (stay per-call): downloadFile (capability=write but domain=network — fetching
- * from arbitrary hosts is the untrusted boundary), deleteFile (destructive), and any external/untrusted
+ * downloadFile (write/network) IS included since 2026-07-07: `shell` in this same set can fetch any
+ * URL anyway (curl/python), so a per-call confirmation on downloadFile bought no security — only
+ * consent fatigue (prod: ~12 "ok"s for one PPT task, mostly re-approving downloads). The set is
+ * only granted after the user approves one of its members, for WORKFLOW_GRANT_TTL_MS.
+ *
+ * Deliberately excluded (stay per-call): deleteFile (destructive) and any external/untrusted
  * execution (domain≠local).
  */
 export const LOCAL_RESEARCH_WORKFLOW: WorkflowGrant[] = [
@@ -83,6 +87,7 @@ export const LOCAL_RESEARCH_WORKFLOW: WorkflowGrant[] = [
   { tool: 'shell', capability: 'execute', domain: 'local' },
   { tool: 'pariGp', capability: 'execute', domain: 'local' },
   { tool: 'z3Verify', capability: 'execute', domain: 'local' },
+  { tool: 'downloadFile', capability: 'write', domain: 'network' },
 ];
 
 /**
@@ -96,8 +101,13 @@ export function localWorkflowGrants(
   approvedDomain: string,
   approvedTool: string,
 ): WorkflowGrant[] {
-  if (approvedDomain !== 'local') return [];
-  if (approvedCapability !== 'write' && approvedCapability !== 'execute') return [];
+  // Entry: a local write/execute approval, or approving downloadFile itself (an artifact loop that
+  // STARTS with a download continues with write/run — same workflow, same one-approval contract).
+  const isLocalWorkflow =
+    approvedDomain === 'local' &&
+    (approvedCapability === 'write' || approvedCapability === 'execute');
+  const isDownload = approvedTool === 'downloadFile';
+  if (!isLocalWorkflow && !isDownload) return [];
   return LOCAL_RESEARCH_WORKFLOW.filter((g) => g.tool !== approvedTool);
 }
 
