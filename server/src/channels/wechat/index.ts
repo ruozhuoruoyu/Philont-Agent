@@ -190,7 +190,10 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
   const pushChannelName = `wechat:${creds.accountId}`;
   const pushChannel: PushChannel = {
     name: pushChannelName,
-    isReady: () => true, // gateway is running, client is set up
+    // Real long-poll health (prod 2026-07-08: this was hardcoded true, so pushes were attempted
+    // into a dead connection during network flaps). Not-ready => dispatcher skips with
+    // channel_not_ready and the finding still reaches the user via next-turn injection.
+    isReady: () => gw.isHealthy(),
     async pushText(peer, text) {
       try {
         const r = await outbound.sendText(peer, text);

@@ -60,6 +60,7 @@ export class TelegramGateway {
   private offset = 0;
   private running = false;
   private abort: AbortController | null = null;
+  private consecutiveErrors = 0;
 
   constructor(opts: TelegramGatewayOptions) {
     this.client = opts.client;
@@ -76,21 +77,26 @@ export class TelegramGateway {
     this.offset = this.loadOffset();
   }
 
+  /** Poll health for the push layer (mirrors the WeChat gateway's contract). */
+  isHealthy(): boolean {
+    return this.running && this.consecutiveErrors < 5;
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
     this.logger.info('gateway started (long-poll)', { offset: this.offset });
 
-    let consecutiveErrors = 0;
+    this.consecutiveErrors = 0;
     while (this.running) {
       this.abort = new AbortController();
       let updates: TelegramUpdate[];
       try {
         updates = await this.client.getUpdates(this.offset, this.pollTimeoutSec, this.abort.signal);
-        consecutiveErrors = 0;
+        this.consecutiveErrors = 0;
       } catch (e) {
         if (!this.running) break;
-        consecutiveErrors++;
+        this.consecutiveErrors++;
         const err = e as Error & { code?: number };
         if (err.code === 401) {
           this.logger.error('token invalid (401), stopping gateway. Check TELEGRAM_BOT_TOKEN', {});
@@ -98,9 +104,9 @@ export class TelegramGateway {
           break;
         }
         const isConflict = err.code === 409;
-        const backoff = isConflict ? 5_000 : Math.min(2_000 * consecutiveErrors, 30_000);
+        const backoff = isConflict ? 5_000 : Math.min(2_000 * this.consecutiveErrors, 30_000);
         this.logger.warn(`getUpdates failed (${isConflict ? '409 conflict: another poller is running' : err.message})`, {
-          consecutiveErrors,
+          consecutiveErrors: this.consecutiveErrors,
           backoffMs: backoff,
         });
         await this.sleep(backoff);

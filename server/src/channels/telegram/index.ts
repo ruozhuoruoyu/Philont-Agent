@@ -80,7 +80,7 @@ export async function startTelegramGateway(opts: MountOptions): Promise<Telegram
   const pushChannelName = `telegram:${botId}`;
   const pushChannel: PushChannel = {
     name: pushChannelName,
-    isReady: () => true,
+    isReady: () => gw.isHealthy(),
     async pushText(peer, text) {
       try {
         const r = await outbound.sendText(peer, text);

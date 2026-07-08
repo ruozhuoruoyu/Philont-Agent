@@ -655,3 +655,44 @@ test('loop WS6: escalate + written evidence fires HIGH severity; escalate withou
     handle.close();
   }
 });
+
+test('loop WS6: note-only outcome NEVER escalates (prod 2026-07-08 "no new data" finding)', async () => {
+  const handle = openMemoryDb(':memory:');
+  handle.facts.storeFact({
+    namespace: 'project',
+    key: 'needs-check',
+    value: { text: 'unclear' },
+    confidence: 0.2,
+  });
+  // Executor "found nothing", wrote a status note about it, and still self-rated escalate=true
+  const llmOut = JSON.stringify({
+    summary: 'No tools produced new data; fact still lacks sourceRefs. Will retry.',
+    facts: [],
+    notes: [{ title: 'verification status', body: 'no new data this run', importance: 0.3 }],
+    shouldEscalate: true,
+  });
+  const exe = new StandardExecutor({
+    facts: handle.facts,
+    notes: handle.notes,
+    llm: llmReturning(llmOut, 200),
+    tools: tools({ webSearch: { ok: true, output: '...' } }),
+  });
+  const severities: Array<'normal' | 'high'> = [];
+  const loop = startAutonomousLoop({
+    db: handle.db,
+    facts: handle.facts,
+    notes: handle.notes,
+    raw: handle.raw,
+    skills: handle.skills,
+    routingRules: handle.routingRules,
+    pursuits: handle.pursuits,
+    drivers: [new GapDriver()],
+    executor: exe,
+    interrupt: { fire: (sev) => severities.push(sev) },
+  });
+  const ev = await loop.tickOnce();
+  assert.equal(ev.initiativesRun, 1);
+  assert.deepEqual(severities, ['normal'], 'a zero-progress note must not page the user');
+  await loop.stop();
+  handle.close();
+});

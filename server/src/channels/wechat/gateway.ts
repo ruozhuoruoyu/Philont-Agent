@@ -186,6 +186,16 @@ export class ILinkGateway {
    * Start the long-poll loop. The returned Promise resolves when stop() is called
    * or an unrecoverable error occurs.
    */
+
+  /**
+   * Long-poll health for the push layer: after MAX_CONSECUTIVE_FAILURES straight getUpdates
+   * failures the gateway is in slow backoff — treat the channel as not ready so PushDispatcher
+   * skips (channel_not_ready) instead of queueing sends into a dead connection.
+   */
+  isHealthy(): boolean {
+    return this.running && this.consecutiveFailures < MAX_CONSECUTIVE_FAILURES;
+  }
+
   async start(): Promise<void> {
     if (this.running) throw new Error('gateway already running');
 

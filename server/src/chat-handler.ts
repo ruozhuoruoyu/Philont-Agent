@@ -2248,6 +2248,19 @@ const autonomousInterruptSink: InterruptSink = {
       }
       // Proactive push (urgent): actually sends only when there is an opt-in subscription and rate limit not exceeded.
       // dispatcher internally checks global kill / frequency / quiet / dedup; failure is only audited and does not affect main flow.
+      // Double-disturbance guard (2026-07-08): when a web-ui client is CONNECTED the user already
+      // saw the finding above — don't also spend the hourly urgent budget on WeChat/Telegram.
+      // Grant requests and service digests keep their own paths (they fire when the user is away).
+      if (webuiClients.size > 0) {
+        internalAudit.append('self_domain_write', {
+          source: 'push_dispatcher',
+          origin: 'Internal',
+          toolName: 'push_skipped_webui_active',
+          kind: payload.kind,
+          initiativeId: payload.initiativeId,
+        });
+        return;
+      }
       void pushDispatcher
         .enqueue({
           severity: 'urgent',

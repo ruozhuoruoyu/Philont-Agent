@@ -226,14 +226,15 @@ export function startAutonomousLoop(
       budget.commit(userId, spent);
       if (updated && opts.interrupt) {
         // WS6 (selfhood_closure): escalate to 'high' only when the executor LLM flagged the finding
-        // AND it actually wrote evidence (facts/notes) — an escalation with nothing written would be
-        // an unevidenced page. 'high' reaches the user at discovery time (web-ui finding + urgent
-        // push via the sink); 'normal' stays next-turn injection as before.
-        const hasEvidence =
-          result.outcomeRefs != null &&
-          result.outcomeRefs.facts.length + result.outcomeRefs.notes.length > 0;
+        // AND it produced at least one NEW FACT (evidence-backed knowledge). Notes do NOT qualify:
+        // prod 2026-07-08 — the executor wrote a note saying "no tools called, verification produced
+        // no new data" and self-rated it escalate=true, so a zero-progress status report surfaced as
+        // a HIGH finding in the web-ui. A discovery worth interrupting the user carries a sourced
+        // fact by definition; note-only outcomes stay 'normal' (next-turn silent injection).
+        const hasNewFacts =
+          result.outcomeRefs != null && result.outcomeRefs.facts.length > 0;
         opts.interrupt.fire(
-          result.escalate === true && hasEvidence ? 'high' : 'normal',
+          result.escalate === true && hasNewFacts ? 'high' : 'normal',
           {
             kind: 'discovery_made',
             initiativeId: initiative.id,
