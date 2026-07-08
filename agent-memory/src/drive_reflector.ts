@@ -42,6 +42,9 @@ import { BOOTSTRAP_ROOT_PURSUIT_ID } from './schema.js';
 
 const EWMA_ALPHA = 0.3;
 const MIN_SAMPLES_BEFORE_TUNING = 5;
+/** Built-in cooldownMs range when the constitution configures no driveBounds: 1s .. 30min.
+ *  30min at the default 5-min tick still lets a throttled driver run ~2x/hour — an autonomy floor. */
+const DEFAULT_COOLDOWN_BOUNDS_MS: [number, number] = [1_000, 1_800_000];
 const LOW_EWMA_THRESHOLD = -0.3;
 const HIGH_EWMA_THRESHOLD = 0.5;
 
@@ -206,10 +209,14 @@ export class SessionDriveReflector {
     }
     if (proposed === null || proposed === cooldown) return 'skipped';
 
-    // Bounds check
+    // Bounds check. When the constitution has no explicit driveBounds for this kind, a built-in
+    // default range applies (prod 2026-07-08: with bounds null the doubling was UNBOUNDED —
+    // curiosity cooldown reached 1920s in a day and would keep doubling toward "never runs",
+    // while recovery needs positive samples the throttled driver can barely produce). Exceeding
+    // the range is not a dead end: it files a WS3 constitution proposal for the owner to ratify.
     const kindBounds = bounds?.[cfg.kind];
-    const range = kindBounds?.['cooldownMs'];
-    if (range) {
+    const range = kindBounds?.['cooldownMs'] ?? DEFAULT_COOLDOWN_BOUNDS_MS;
+    {
       const [min, max] = range;
       if (proposed < min || proposed > max) {
         this.auditHook?.append('self_domain_write', {

@@ -138,3 +138,36 @@ test('WS3: drive_reflector out-of-bounds tuning files a ratifiable proposal', as
   assert.match(pending[0].rationale, /outside the constitution bound/);
   handle.close();
 });
+
+test('WS3: with NO configured driveBounds, the built-in 30min cap applies and over-cap tuning files a proposal', async () => {
+  const handle = openMemoryDb(':memory:');
+  const store = new ConstitutionProposalStore(handle.db);
+  ensureK8DriveConfigs(handle.driveConfigs, ROOT);
+  // No setConstitution call: driveBounds are absent (the prod condition).
+  // Put the cooldown at the built-in cap so the doubling attempt must exceed it.
+  handle.driveConfigs.updateParams(k8DriveConfigId('curiosity'), { cooldownMs: 1_800_000 });
+  for (let i = 0; i < 6; i++) {
+    handle.driveOutcomes.append({
+      driveId: k8DriveConfigId('curiosity'),
+      triggerSnapshot: {},
+      injectedAction: {},
+      subsequentToolCalls: [{ ok: false }, { ok: false }],
+      rootPursuitId: ROOT,
+    });
+  }
+  const reflector = new SessionDriveReflector(
+    handle.driveOutcomes,
+    handle.driveConfigs,
+    handle.pursuits,
+    { rootPursuitId: ROOT, proposals: store },
+  );
+  const res = await reflector.reflect();
+  assert.equal(res.tuneSkippedOutOfBounds, 1, 'doubling past the built-in cap must be skipped');
+  // cooldown unchanged (capped), and the owner got a ratifiable proposal instead
+  const cd = handle.driveConfigs.get(k8DriveConfigId('curiosity'))!.params.cooldownMs;
+  assert.equal(cd, 1_800_000);
+  const pending = store.listPending(ROOT);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].kind, 'drive_bounds');
+  handle.close();
+});
