@@ -2106,8 +2106,12 @@ const AUTONOMOUS_DRIVERS = [
     },
     isSystemStuck: () => {
       // Same "high" tier as the ViabilityGate's same_root_cause weighting — a constant, no env knob.
+      // Window is 2h, not 24h: this gate asks "is the system stuck NOW". With 24h, one afternoon
+      // task's failure burst (prod 2026-07-07: downloadFile fetch-failed ×7 in the PPT task)
+      // suppressed token-curiosity for the rest of the DAY, long after the wall was gone.
+      // Reflection/plan_close keep their 24h windows — their job is cross-day lesson writing.
       try {
-        const recent = memory.actions.listRecentFailures({ sinceTs: Date.now() - 24 * 60 * 60_000, limit: 30 });
+        const recent = memory.actions.listRecentFailures({ sinceTs: Date.now() - 2 * 60 * 60_000, limit: 30 });
         return countSameRootCauseFailures(recent) >= CURIOSITY_STUCK_SUPPRESS_THRESHOLD;
       } catch {
         return false;
@@ -6839,6 +6843,13 @@ async function deriveRedoGoal(sessionId: string, currentMessage: string): Promis
   }
 }
 
+/** First not-done step id of a plan — concrete id for gate hints (the model has often never seen
+ *  the real ids; an abstract `step_id` placeholder made it guess "step-1", prod 2026-07-07). */
+function firstOpenStepId(plan: { steps: Array<{ id: string; status: string }> }): string {
+  const open = plan.steps.find((st) => st.status !== 'done' && st.status !== 'skipped');
+  return (open ?? plan.steps[0])?.id ?? 'step-1';
+}
+
 interface TurnSignalBus {
   honesty?: {
     evaluation: HonestyEvaluation;
@@ -7196,7 +7207,7 @@ async function runToolLoop(
           : lastPlan.isPlaceholder
             ? `plan_revise({plan_id:"${lastPlan.id}", new_steps, new_deliverables, reason}) — 转正占位 plan(必须提供 new_deliverables)`
             : lastPlan.status === 'draft'
-              ? `plan_update_step({plan_id:"${lastPlan.id}", step_id, status:"doing"}) — 开始执行第一步`
+              ? `plan_update_step({plan_id:"${lastPlan.id}", step_id:"${firstOpenStepId(lastPlan)}", status:"doing"}) — 开始执行第一步`
               : `plan_revise({plan_id:"${lastPlan.id}", ...}) — 修订 plan 路径`;
         const closeHint = !lastPlan
           ? '(当前无活 plan,跳到第 2 步)'
@@ -8294,9 +8305,14 @@ async function runToolLoop(
       // "said something but no section breaks" (WeChat and similar channels rely on ## For User to extract push content).
       //
       // env PHILONT_OUTPUT_FORMAT_GATE=0 to disable.
+      // Scheduled turns are exempt: their reply goes to the schedule-outcome log (and channel
+      // fallback already sends full text when the section is missing), so the two-section format
+      // buys nothing there — while the regeneration cost one extra LLM call on EVERY heartbeat
+      // (prod 2026-07-07: the gate fired on ~10 consecutive mycox check-ins).
       if (
         outputFormatAttempts < 1 &&
-        process.env.PHILONT_OUTPUT_FORMAT_GATE !== '0'
+        process.env.PHILONT_OUTPUT_FORMAT_GATE !== '0' &&
+        !sessionId.startsWith('system:scheduled:')
       ) {
         const fmt = evaluateOutputFormat({ finalText: response.content });
         if (fmt.shouldRegenerate) {
@@ -8856,7 +8872,7 @@ async function runToolLoop(
             : lastPlan.isPlaceholder
               ? `plan_revise({plan_id:"${lastPlan.id}", new_steps, new_deliverables, reason}) — promote the placeholder plan (new_deliverables required)`
               : lastPlan.status === 'draft'
-                ? `plan_update_step({plan_id:"${lastPlan.id}", step_id, status:"doing"}) — start executing the first step`
+                ? `plan_update_step({plan_id:"${lastPlan.id}", step_id:"${firstOpenStepId(lastPlan)}", status:"doing"}) — start executing the first step`
                 : `plan_revise({plan_id:"${lastPlan.id}", ...}) — revise the plan path`;
           const closeHint = !lastPlan
             ? '(no active plan — skip to step 2)'

@@ -37,6 +37,27 @@ const DELIVERABLE_DESC_MIN_CHARS = 8;
  * deliverable ids, step.covers, and close-time deliverable_status keys so references always resolve.
  * Returns '' for an id with no alphanumerics (then the original validation reports it cleanly).
  */
+/**
+ * Forgiving step-id resolution (pure). Accepts, in order:
+ *   1. exact id;
+ *   2. unique prefix of exactly one real id ("close" -> "close-with-persistence");
+ *   3. ordinal forms "step-2" / "st2" / "s_2" / "2" -> the 2nd step.
+ * Returns the resolved real id, or null when nothing matches unambiguously (ambiguity = null:
+ * silently guessing wrong would be worse than the error message that lists the real ids).
+ */
+export function resolveStepId(requested: string, realIds: string[]): string | null {
+  const req = requested.trim();
+  if (realIds.includes(req)) return req;
+  const prefixHits = realIds.filter((id) => id.startsWith(req));
+  if (prefixHits.length === 1) return prefixHits[0];
+  const ord = /^(?:step|st|s)?[-_]?(\d+)$/i.exec(req);
+  if (ord) {
+    const idx = Number(ord[1]) - 1;
+    if (idx >= 0 && idx < realIds.length) return realIds[idx];
+  }
+  return null;
+}
+
 export function kebabize(id: string): string {
   return id
     .trim()
@@ -884,9 +905,14 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
               : 'Please decompose real deliverables from the user task, then plan_revise to convert.'),
         };
       }
-      // step_id not in plan.steps[] → list real ids
+      // step_id not in plan.steps[] → try forgiving resolution first (prod 2026-07-07: the model
+      // has never SEEN the placeholder's semantic ids on its first call and guesses "step-1"/"st-2";
+      // an unambiguous guess should not burn a failure + a same_root_cause point).
       const realStepIds = currentPlan.steps.map((s) => s.id);
-      if (!realStepIds.includes(stepId)) {
+      const effectiveStepId = realStepIds.includes(stepId)
+        ? stepId
+        : resolveStepId(stepId, realStepIds) ?? stepId;
+      if (!realStepIds.includes(effectiveStepId)) {
         const stepList = currentPlan.steps
           .map((s) => `  - ${s.id} [${s.status}] ${s.description.slice(0, 60)}`)
           .join('\n');
@@ -900,20 +926,24 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
             `\n\nCommon mistake: shortening the full id across turns (e.g. \`step-1-read-feed\` → \`step-1\`). Please copy the full id.`,
         };
       }
-      const updated = plans.updateStep(planId, stepId, status, evidence);
+      const updated = plans.updateStep(planId, effectiveStepId, status, evidence);
       if (!updated) {
         // reaching here indicates an internal store error (plan suddenly deleted / db error) — should not happen.
         return {
           success: false,
           output: '',
-          error: `plan '${planId}' / step '${stepId}' update failed (internal error; plan may have been concurrently closed)`,
+          error: `plan '${planId}' / step '${effectiveStepId}' update failed (internal error; plan may have been concurrently closed)`,
         };
       }
+      // When forgiving resolution rewrote the id, say so — the model must use the REAL id from now on.
+      const idNote =
+        effectiveStepId !== stepId ? `(note: '${stepId}' resolved to real step id '${effectiveStepId}' — use the full id next time)\n` : '';
       const overallProgress = `${updated.steps.filter((s) => s.status === 'done').length}/${updated.steps.length} done`;
       return {
         success: true,
         output:
-          `step [${stepId}] → ${status}${evidence ? `\nevidence: ${evidence}` : ''}\n` +
+          idNote +
+          `step [${effectiveStepId}] → ${status}${evidence ? `\nevidence: ${evidence}` : ''}\n` +
           `plan status: ${updated.status} (${overallProgress})`,
       };
     },

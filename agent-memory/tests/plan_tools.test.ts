@@ -1593,3 +1593,37 @@ test('Phase 16 C6: 持续性任务 + outcome=failure → 跳过 C6(失败收尾�
   assert.equal(r.success, true, 'failure 收尾不该被 C6 拦');
   if (planFileBaseDir) rmSync(planFileBaseDir, { recursive: true, force: true });
 });
+
+// ── forgiving step-id resolution (prod 2026-07-07: "has no step 'step-1'" churn) ──────────────
+
+test('resolveStepId: exact / unique prefix / ordinal forms; ambiguity and out-of-range stay null', async () => {
+  const { resolveStepId } = await import('../src/plan_tools.js');
+  const ids = ['find-existing', 'decompose', 'execute', 'close-with-persistence'];
+  assert.equal(resolveStepId('decompose', ids), 'decompose');
+  assert.equal(resolveStepId('close', ids), 'close-with-persistence'); // unique prefix
+  assert.equal(resolveStepId('step-2', ids), 'decompose'); // ordinal → 2nd step
+  assert.equal(resolveStepId('st_3', ids), 'execute');
+  assert.equal(resolveStepId('3', ids), 'execute');
+  assert.equal(resolveStepId('step-99', ids), null); // out of range
+  assert.equal(resolveStepId('e', ids), 'execute'); // 'e' prefixes only 'execute'
+  assert.equal(resolveStepId('x', ids), null);
+  // ambiguity → null (two ids share the prefix)
+  assert.equal(resolveStepId('c', ['close-a', 'close-b']), null);
+});
+
+test('plan_update_step: ordinal step_id resolves to the real step and says so', async () => {
+  const { drafts, updateStep, memory, sessionId } = setup();
+  await drafts.execute(specDraftArgs({
+    steps: [{ description: 'step alpha' }, { description: 'step beta' }],
+  }));
+  const planId = memory.plans.listBySession(sessionId)[0].id;
+  const realIds = memory.plans.listBySession(sessionId)[0].steps.map((s) => s.id);
+
+  // model guesses the bare ordinal '2' — must land on the 2nd real step, not error
+  const r = await updateStep.execute({ plan_id: planId, step_id: '2', status: 'doing' });
+  assert.equal(r.success, true, r.error);
+  assert.match(r.output ?? '', new RegExp(`resolved to real step id '${realIds[1]}'`));
+  const after = memory.plans.listBySession(sessionId)[0];
+  assert.equal(after.steps[1].status, 'doing');
+  assert.equal(after.steps[0].status, 'pending');
+});
