@@ -217,6 +217,43 @@ export function directRouteWantsFast(dec: IntentDecision | null): boolean {
 // exactly like force-continue guarantees a continue. Gated by explicitDepth so it never fires on a casual
 // research question (those only ever get the soft OFFER).
 
+// ── Three-tier deep_explore routing (2026-07-09, owner decision) ────────────────────────────
+// Prod showed the advisory nudge is never adopted on research tasks (two flat runs in one day:
+// the survey and the candidate-path generation both had route=deep_explore conf>=0.9 and still
+// flattened into webSearch). Tiering by router confidence:
+//   conf >= FORCE (default 0.9) → force-start (the existing backstop, no longer gated on the
+//                                 user typing an explicit depth keyword);
+//   ASK <= conf < FORCE (0.7)   → ask the owner first (one question; their reply decides);
+//   conf < ASK                  → direct flat execution, no nudge (it never worked anyway).
+export type DeepExploreRouteTier = 'force' | 'ask' | 'direct';
+
+function parseConf(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 && n <= 1.01 ? n : fallback;
+}
+
+export function deepExploreRouteTier(
+  dec: IntentDecision | null,
+  env: NodeJS.ProcessEnv = process.env,
+): DeepExploreRouteTier | null {
+  if (!dec || dec.route !== 'deep_explore') return null;
+  const force = parseConf(env.PHILONT_DEEP_EXPLORE_FORCE_CONF, 0.9);
+  const ask = parseConf(env.PHILONT_DEEP_EXPLORE_ASK_CONF, 0.7);
+  if (dec.confidence >= force) return 'force';
+  if (dec.confidence >= ask) return 'ask';
+  return 'direct';
+}
+
+/** The one question the ask tier sends (the reply is classified grant/deny like an auth card). */
+export function buildDeepExploreAskText(dec: IntentDecision | null): string {
+  const mode = dec?.domain === 'formal' ? '形式化证明' : '循证推演';
+  return (
+    `🧭 这个任务看起来适合进入深度推理引擎(${mode}模式):会创建一个可跨天续跑、逐节点验证的推理会话,` +
+    `每轮约 10 分钟。
+回复"进"开始深度推理;回复"直接"就快速平铺作答。`
+  );
+}
+
 export function deepExploreForceStartEnabled(): boolean {
   const v = (process.env.PHILONT_DEEP_EXPLORE_FORCE_START ?? '').trim().toLowerCase();
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
@@ -231,10 +268,15 @@ export function shouldForceDeepExploreStart(opts: {
   alreadyForcedContinue: boolean;
   deepExploreRanThisTurn: boolean;
   hasActiveSession: boolean;
+  /** Three-tier routing: 'force' makes explicit depth keywords unnecessary. */
+  tier?: DeepExploreRouteTier | null;
+  /** The owner answered the ask-tier question with approval this turn. */
+  approvedViaAsk?: boolean;
 }): boolean {
   if (opts.alreadyForcedStart || opts.alreadyForcedContinue) return false; // anti-reentry
   if (!opts.decision || opts.decision.route !== 'deep_explore') return false;
-  if (!opts.explicitDepth) return false; // only the confirmed "明确要深度才直接进" case
+  // Entry: explicit depth keyword (legacy), OR high-confidence tier, OR the owner just said yes.
+  if (!opts.explicitDepth && opts.tier !== 'force' && !opts.approvedViaAsk) return false;
   // A forced session needs a real goal. Short context-dependent messages ("调研深度不够，重做", "深入点")
   // point at the PRIOR topic the harness can't capture as a goal → don't auto-start a garbage session.
   if (!opts.goalSubstantial) return false;

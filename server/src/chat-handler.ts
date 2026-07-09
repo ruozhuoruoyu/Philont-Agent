@@ -180,6 +180,8 @@ import {
   shouldForceDeepExploreStart,
   buildForceStartInput,
   messageIsSelfContainedGoal,
+  deepExploreRouteTier,
+  buildDeepExploreAskText,
   type IntentDecision,
 } from './intent_router.js';
 import { looksLikeCleanupIntent } from './intent_router.js';
@@ -268,6 +270,11 @@ function isAuthExemptManagementCall(call: { name: string; input: unknown }): boo
 
 /** WS6: sessions already checked for first-contact push auto-subscribe (one store read per session). */
 const autoSubscribeCheckedSessions = new Set<string>();
+
+/** Ask-tier deep_explore routing (2026-07-09): the pending question per session — the goal we
+ *  offered to deep-explore, awaiting the owner's 进/直接 reply. TTL'd; one entry per session. */
+const pendingExploreAsk = new Map<string, { goal: string; decision: IntentDecision; ts: number }>();
+const EXPLORE_ASK_TTL_MS = 10 * 60_000;
 import {
   resolveAutonomousBudgetCaps,
   describeBudgetCapsOverrides,
@@ -4928,6 +4935,34 @@ export async function handleChatSend(
   // session→bus map + currentSessionId() to look it up on demand inside tool execute.
   activeSignalBuses.set(sessionId, signalBus);
 
+  // Ask-tier deep_explore routing: a pending "要进深度推理吗?" question is resolved by THIS message.
+  // 进/好/yes → restore the original goal and force the engine; 直接/不/no → restore the goal and run
+  // flat; anything else (or expired) → treat this message as brand-new input.
+  {
+    const exploreAsk = pendingExploreAsk.get(sessionId);
+    if (exploreAsk) {
+      pendingExploreAsk.delete(sessionId);
+      if (Date.now() - exploreAsk.ts <= EXPLORE_ASK_TTL_MS) {
+        const askIntent = await intentClassifier.classify(
+          userMessage,
+          'Enter the deep reasoning engine (deep_explore) for the research goal just proposed',
+        );
+        if (askIntent === 'grant') {
+          signalBus.exploreAskApproved = true;
+          signalBus.intentDecision = exploreAsk.decision;
+          userMessage = exploreAsk.goal;
+          console.log(`[intent-router] session=${sessionId} ask-tier APPROVED → deep_explore on restored goal`);
+        } else if (askIntent === 'deny') {
+          signalBus.exploreAskDeclined = true;
+          signalBus.intentDecision = exploreAsk.decision;
+          userMessage = exploreAsk.goal;
+          console.log(`[intent-router] session=${sessionId} ask-tier declined → flat run on restored goal`);
+        }
+        // unclear → fall through: the reply is a new message; the offer is dropped.
+      }
+    }
+  }
+
   // Interrupt teeth: one new AbortController per turn. ws `chat.stop` fires abortActiveTurn
   // to trigger it, canceling in-flight LLM calls + letting runToolLoop stop early at a boundary. Deleted in finally.
   activeTurnAborters.set(sessionId, new AbortController());
@@ -4988,6 +5023,22 @@ export async function handleChatSend(
     signalBus.intentDecision = intentDecision; // carried to handleChatSendInner for the deep_explore nudge
     if (intentDecision) {
       console.log(`[intent-router] session=${sessionId} route=${intentDecision.route}${intentDecision.domain ? `:${intentDecision.domain}` : ''} conf=${intentDecision.confidence}`);
+      // Three-tier deep_explore routing, ASK tier: mid-confidence reasoning task → one question,
+      // zero LLM turn cost; the next reply decides (grant → force engine, deny → flat). Only for
+      // interactive sessions with a self-contained goal and no recently-active session.
+      const askTier =
+        deepExploreRouteTier(intentDecision) === 'ask' &&
+        !sessionId.startsWith('system:') &&
+        !signalBus.exploreAskApproved &&
+        !signalBus.exploreAskDeclined &&
+        messageIsSelfContainedGoal(userMessage) &&
+        !hasRecentlyActiveExploreSession(sessionId);
+      if (askTier) {
+        pendingExploreAsk.set(sessionId, { goal: userMessage, decision: intentDecision, ts: Date.now() });
+        onDelta(buildDeepExploreAskText(intentDecision));
+        console.log(`[intent-router] session=${sessionId} ask-tier question sent (conf=${intentDecision.confidence})`);
+        return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
+      }
     }
     // Cleanup-turn scoping: (1) flag the turn so runToolLoop rejects external write http (clear
     // turns drifted into re-registering the service being cleared); (2) soft-pause schedules that
@@ -6187,7 +6238,15 @@ async function handleChatSendInner(
   // high confidence, else OFFER one line). Skipped when a reasoning session is already active for this owner
   // — the model continues that one, so we don't spawn duplicate sessions (the clutter fixed earlier).
   const intentDecision = signalBus.intentDecision ?? null;
-  if (messages[0] && intentDecision?.route === 'deep_explore') {
+  // Nudge only on the FORCE tier (first chance for the model to enter the engine itself; the
+  // force backstop guarantees it either way). Ask tier already asked; direct tier runs flat by
+  // the owner's decision; a declined ask must not re-nag.
+  if (
+    messages[0] &&
+    intentDecision?.route === 'deep_explore' &&
+    (deepExploreRouteTier(intentDecision) === 'force' || signalBus.exploreAskApproved) &&
+    !signalBus.exploreAskDeclined
+  ) {
     // Suppress the nudge only when a session is RECENTLY active (the user is mid-exploration now), NOT when
     // any session merely exists — the user accumulates stale never-closed sessions, and a blanket "any
     // active" guard suppressed every nudge (the feature looked dead). Same recency guard as force-start.
@@ -6441,10 +6500,14 @@ async function handleChatSendInner(
       // gets its goal derived from the recent transcript (the topic being redone) — only then does a redo
       // reach the engine instead of falling through to flat search.
       const selfContained = messageIsSelfContainedGoal(userMessage);
+      const routeTier = deepExploreRouteTier(signalBus.intentDecision ?? null);
+      const depthWanted =
+        !signalBus.exploreAskDeclined &&
+        (userSignaledDepth(userMessage) || routeTier === 'force' || !!signalBus.exploreAskApproved);
       const baseEligible =
         deepExploreForceStartEnabled() &&
         (signalBus.intentDecision?.route === 'deep_explore') &&
-        userSignaledDepth(userMessage) &&
+        depthWanted &&
         !deepExploreRanThisTurn &&
         !signalBus.forcedDeepExploreStart &&
         !signalBus.forcedDeepExploreContinue &&
@@ -6458,7 +6521,9 @@ async function handleChatSendInner(
         deepExploreForceStartEnabled() &&
         shouldForceDeepExploreStart({
           decision: signalBus.intentDecision ?? null,
-          explicitDepth: userSignaledDepth(userMessage),
+          explicitDepth: depthWanted,
+          tier: routeTier,
+          approvedViaAsk: !!signalBus.exploreAskApproved,
           goalSubstantial: !!forceGoal && forceGoal.trim().length >= 12,
           alreadyForcedStart: !!signalBus.forcedDeepExploreStart,
           alreadyForcedContinue: !!signalBus.forcedDeepExploreContinue,
@@ -6964,6 +7029,10 @@ interface TurnSignalBus {
   authApprovedCallId?: string;
   /** The user message that opened this turn (for correction-aware honesty branches). */
   userMessage?: string;
+  /** Ask-tier deep_explore: the owner approved entering the engine for the restored goal this turn. */
+  exploreAskApproved?: boolean;
+  /** Ask-tier deep_explore: the owner declined — run flat, do not re-ask or force this turn. */
+  exploreAskDeclined?: boolean;
   /**
    * WS5 (selfhood_closure): the skill most recently retrieved via use_skill this turn. Subsequent
    * tool actions are logged with linkedSkill=this name, which is what lets the reflector attribute

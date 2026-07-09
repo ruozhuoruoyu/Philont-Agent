@@ -264,3 +264,49 @@ test('directRouteWantsFast: confident direct only', () => {
   assert.equal(directRouteWantsFast({ route: 'plan', confidence: 1 } as never), false);
   assert.equal(directRouteWantsFast(null), false);
 });
+
+// ── Three-tier deep_explore routing (2026-07-09) ─────────────────────────────
+
+test('deepExploreRouteTier: force/ask/direct by confidence; env-tunable; non-explore route → null', async () => {
+  const { deepExploreRouteTier } = await import('../src/intent_router.js');
+  const dec = (conf: number) => ({ route: 'deep_explore' as const, confidence: conf, domain: 'deliberate' as const });
+  const env = {} as NodeJS.ProcessEnv;
+  assert.equal(deepExploreRouteTier(dec(0.95), env), 'force');
+  assert.equal(deepExploreRouteTier(dec(0.9), env), 'force');
+  assert.equal(deepExploreRouteTier(dec(0.8), env), 'ask');
+  assert.equal(deepExploreRouteTier(dec(0.7), env), 'ask');
+  assert.equal(deepExploreRouteTier(dec(0.6), env), 'direct');
+  assert.equal(deepExploreRouteTier(null, env), null);
+  assert.equal(
+    deepExploreRouteTier({ route: 'plan', confidence: 0.99 } as never, env),
+    null,
+  );
+  // env overrides
+  const custom = { PHILONT_DEEP_EXPLORE_FORCE_CONF: '0.95', PHILONT_DEEP_EXPLORE_ASK_CONF: '0.5' } as NodeJS.ProcessEnv;
+  assert.equal(deepExploreRouteTier(dec(0.9), custom), 'ask');
+  assert.equal(deepExploreRouteTier(dec(0.4), custom), 'direct');
+});
+
+test('shouldForceDeepExploreStart: force tier or ask approval works WITHOUT explicit depth keywords', async () => {
+  const { shouldForceDeepExploreStart } = await import('../src/intent_router.js');
+  const base = {
+    decision: { route: 'deep_explore' as const, confidence: 0.95, domain: 'deliberate' as const },
+    explicitDepth: false,
+    goalSubstantial: true,
+    alreadyForcedStart: false,
+    alreadyForcedContinue: false,
+    deepExploreRanThisTurn: false,
+    hasActiveSession: false,
+  };
+  // prod 2026-07-09: conf 0.9-0.95 research tasks flattened because explicitDepth was mandatory
+  assert.equal(shouldForceDeepExploreStart({ ...base, tier: 'force' }), true);
+  assert.equal(shouldForceDeepExploreStart({ ...base, approvedViaAsk: true }), true);
+  // ask/direct tier without approval and without depth keywords → no force
+  assert.equal(shouldForceDeepExploreStart({ ...base, tier: 'ask' }), false);
+  assert.equal(shouldForceDeepExploreStart({ ...base, tier: 'direct' }), false);
+  // legacy path unchanged: explicit depth still forces regardless of tier
+  assert.equal(shouldForceDeepExploreStart({ ...base, explicitDepth: true, tier: 'direct' }), true);
+  // guards still hold under force tier
+  assert.equal(shouldForceDeepExploreStart({ ...base, tier: 'force', hasActiveSession: true }), false);
+  assert.equal(shouldForceDeepExploreStart({ ...base, tier: 'force', deepExploreRanThisTurn: true }), false);
+});
