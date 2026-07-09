@@ -77,7 +77,11 @@ export function buildIntentPrompt(userMessage: string): string {
     'work that executes concrete actions (write files, run commands, call APIs) and benefits from a plan ' +
     'with review/revise.\n\n' +
     'ROUTE "direct" — a single lookup, a single action, a quick factual answer, a confirmation, or ' +
-    'chitchat. No structured reasoning or multi-step execution needed.\n\n' +
+    'chitchat. No structured reasoning or multi-step execution needed. ALSO direct: META-QUESTIONS about ' +
+    'the assistant itself or its previous turn — how an answer was produced, which tool/mode was used, ' +
+    'why it said something, status of its own sessions ("你这个分析是平铺的还是用deep_explore做的?", ' +
+    '"你刚才用了什么工具?", "did you actually run it?"). The answer lives in the assistant\'s own ' +
+    'records, never in external research.\n\n' +
     'KEY boundary: if the core ask is "figure out / which / why / whether / should" → deep_explore. If it ' +
     'is "build / set it up / make it work / deploy / implement and run" → plan. A reasoning task that only ' +
     'happens to need web search is still deep_explore, NOT plan.\n\n' +
@@ -272,9 +276,12 @@ export function shouldForceDeepExploreStart(opts: {
   tier?: DeepExploreRouteTier | null;
   /** The owner answered the ask-tier question with approval this turn. */
   approvedViaAsk?: boolean;
+  /** The message is a meta-question about the assistant itself (isSelfReferentialMetaQuestion). */
+  selfReferentialMeta?: boolean;
 }): boolean {
   if (opts.alreadyForcedStart || opts.alreadyForcedContinue) return false; // anti-reentry
   if (!opts.decision || opts.decision.route !== 'deep_explore') return false;
+  if (opts.selfReferentialMeta) return false; // meta-question about the assistant — never a session goal
   // Entry: explicit depth keyword (legacy), OR high-confidence tier, OR the owner just said yes.
   if (!opts.explicitDepth && opts.tier !== 'force' && !opts.approvedViaAsk) return false;
   // A forced session needs a real goal. Short context-dependent messages ("调研深度不够，重做", "深入点")
@@ -283,6 +290,22 @@ export function shouldForceDeepExploreStart(opts: {
   if (opts.deepExploreRanThisTurn) return false; // model already used the engine → nothing to force
   if (opts.hasActiveSession) return false; // a session exists → continue path / force-continue handles it
   return true;
+}
+
+/**
+ * Meta-questions about the assistant itself must never become a deep_explore GOAL (prod
+ * 2026-07-09: "你这个分析是平铺的还是使用deepexplore做的?" was force-started as a session — the
+ * engine spent 9.5 minutes web-searching its own tool's name and a dictionary entry for 平铺 to
+ * answer a question whose answer sits in its own ledger). Heuristic: the message references the
+ * assistant's own machinery (tool/mode names) or its previous output in second person.
+ */
+export function isSelfReferentialMetaQuestion(msg: string): boolean {
+  const m = (msg ?? '').toLowerCase();
+  const mentionsMachinery =
+    /deep[\s_-]?explore|philont|平铺|工作日志|work log|honesty|执行账本|ledger|什么工具|哪个工具|which tool|what tool/.test(m);
+  const referencesPriorSelf =
+    /你(?:这|刚|上|之前|前面)|你的(?:分析|回答|报告|结论)|(?:刚才|上一(?:条|轮|次)|之前)的?(?:分析|回答|报告|结论)|did you|你是怎么|你用(?:了|的)/.test(m);
+  return mentionsMachinery && referencesPriorSelf;
 }
 
 /** Does the message carry a self-contained reasoning goal? (Crude length proxy; dense Chinese ≥ ~12 chars.) */

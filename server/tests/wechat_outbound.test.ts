@@ -267,3 +267,70 @@ test('OutboundQueue.sendText 出向前会清洗 ↵ 和 U+FFFD', async () => {
   assert.equal(sent.length, 1);
   assert.equal(sent[0].text, 'line1\nline2 ??? end');
 });
+
+// ── mergeChunks + quota-failure remainder (2026-07-09 ret=-2 lost chunk 7) ───
+
+test('mergeChunks: 相邻小块合并到不超过 char/byte 限', async () => {
+  const { mergeChunks } = await import('../src/channels/wechat/outbound.js');
+  // 5 small paragraphs, char limit 100 → should merge greedily
+  const chunks = ['a'.repeat(30), 'b'.repeat(30), 'c'.repeat(30), 'd'.repeat(30), 'e'.repeat(30)];
+  const merged = mergeChunks(chunks, 4000, 100);
+  assert.equal(merged.join(''), chunks.join(''), 'no content lost');
+  assert.equal(merged.length, 2, '30×3=90 fits in 100; 4th starts a new chunk');
+  // byte limit dominates for CJK: 40 chars = 120 bytes each, byteLimit 200 → pairs of 1 (40*2=240>200)
+  const cjk = ['中'.repeat(40), '文'.repeat(40), '字'.repeat(40)];
+  const mergedCjk = mergeChunks(cjk, 200, 4000);
+  assert.equal(mergedCjk.length, 3, 'byte limit prevents merging');
+  assert.equal(mergeChunks([], 4000, 100).length, 0);
+});
+
+test('OutboundQueue: 长报告经 merge 后 chunk 数减少(同内容更少配额)', async () => {
+  const sender = makeMockSender();
+  const clock = makeFakeClock();
+  const q = new OutboundQueue(sender, { chunkLimit: 100, chunkDelayMs: 0, clock });
+  // many small paragraphs — the old splitter would send one per paragraph boundary
+  const text = Array.from({ length: 8 }, (_, i) => `para${i} ` + 'x'.repeat(20)).join('\n\n');
+  const r = await q.sendText('alice', text);
+  assert.equal(sender.calls.map((c) => c[1]).join(''), text, 'content intact');
+  assert.ok(r.chunksSent <= 3, `expected merged chunks, got ${r.chunksSent}`);
+});
+
+test('OutboundQueue: 发送失败即中止,remainder 带回未发尾巴', async () => {
+  // sender fails from the 2nd call on (simulates WeChat per-inbound-message quota ret=-2)
+  let calls = 0;
+  const sent: string[] = [];
+  const sender: RawSender = async (_to, text) => {
+    calls++;
+    if (calls >= 2) return { ok: false };
+    sent.push(text);
+    return { ok: true, messageId: `m${calls}` };
+  };
+  const clock = makeFakeClock();
+  const q = new OutboundQueue(sender, { chunkLimit: 50, chunkDelayMs: 0, clock });
+  const text = 'A'.repeat(40) + '\n\n' + 'B'.repeat(40) + '\n\n' + 'C'.repeat(40);
+  const r = await q.sendText('alice', text);
+  assert.equal(r.chunksSent, 1);
+  assert.ok(r.chunksFailed >= 1);
+  assert.ok(r.remainder, 'unsent tail must be reported');
+  assert.equal(sent.join('') + r.remainder, text, 'sent + remainder reassembles the full text');
+  assert.equal(calls, 2, 'must stop after the first failure, not burn quota on the rest');
+});
+
+test('OutboundQueue: 失败的 chunk 不进去重窗口,稍后重发不会被 dedup 吞掉', async () => {
+  let failNext = true;
+  const sent: string[] = [];
+  const sender: RawSender = async (_to, text) => {
+    if (failNext) { failNext = false; return { ok: false }; }
+    sent.push(text);
+    return { ok: true, messageId: 'm' };
+  };
+  const clock = makeFakeClock();
+  const q = new OutboundQueue(sender, { clock, chunkDelayMs: 0 });
+  const r1 = await q.sendText('alice', 'important tail');
+  assert.equal(r1.chunksSent, 0);
+  assert.equal(r1.remainder, 'important tail');
+  // immediate retry (same content, well inside the 5-min window) must NOT be deduped
+  const r2 = await q.sendText('alice', 'important tail');
+  assert.equal(r2.chunksSent, 1);
+  assert.equal(sent[0], 'important tail');
+});

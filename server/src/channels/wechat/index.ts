@@ -233,6 +233,9 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
   return gw;
 }
 
+/** How long a quota-suspended reply tail stays deliverable (the peer may come back hours later) */
+const REMAINDER_TTL_MS = 6 * 60 * 60_000;
+
 /** Build InboundDispatcher: inbound → handleChatSend → buffer → outbound */
 function makeDispatcher(opts: {
   accountId: string;
@@ -241,6 +244,41 @@ function makeDispatcher(opts: {
   logger: GatewayLogger;
 }): (e: InboundEvent) => Promise<void> {
   const { accountId, chatSend, outbound, logger } = opts;
+
+  // Quota-suspended reply tails, keyed by replyTo. WeChat caps bot messages per inbound message
+  // (sendText ret=-2); when a reply's tail is rejected, it is parked here and delivered at the
+  // START of the peer's next inbound turn — that inbound message carries fresh quota, and the
+  // tail must go out before the new reply or the conversation reads out of order.
+  const pendingRemainders = new Map<string, { text: string; ts: number }>();
+
+  const stashRemainder = (replyTo: string, text: string, sessionId: string) => {
+    // Keep the newest tail only; a stale one would be confusing after a newer reply.
+    pendingRemainders.set(replyTo, { text: text.slice(0, 64_000), ts: Date.now() });
+    logger.warn('outbound tail suspended (quota) — will resend on next inbound', {
+      sessionId,
+      replyTo,
+      suspendedLen: text.length,
+    });
+  };
+
+  const flushRemainder = async (replyTo: string) => {
+    const pending = pendingRemainders.get(replyTo);
+    if (!pending) return;
+    pendingRemainders.delete(replyTo);
+    if (Date.now() - pending.ts > REMAINDER_TTL_MS) {
+      logger.info('suspended tail expired, dropped', { replyTo, ageMs: Date.now() - pending.ts });
+      return;
+    }
+    try {
+      const r = await outbound.sendText(replyTo, '(续上条被微信限额截断的回复)\n\n' + pending.text);
+      logger.info('suspended tail resent', { replyTo, chunks: r.chunksSent, failed: r.chunksFailed });
+      // Still quota-blocked? Park what's left again (fingerprints differ due to the prefix,
+      // but the content is intact — better duplicated framing than lost content).
+      if (r.remainder) stashRemainder(replyTo, r.remainder, 'remainder-flush');
+    } catch (e) {
+      logger.error(`suspended tail resend failed: ${String(e)}`, { replyTo });
+    }
+  };
 
   return async (event: InboundEvent) => {
     if (!event.text) {
@@ -254,6 +292,9 @@ function makeDispatcher(opts: {
     // chat-handler's pendingAuth (yes/no follow-up) can work across inbound events.
     const sessionId = makeSessionId(accountId, event);
     const replyTo = event.groupId || event.fromUserId;
+
+    // Deliver any quota-suspended tail from the previous turn BEFORE producing the new reply.
+    await flushRemainder(replyTo);
 
     const buffer: string[] = [];
     const onDelta = (chunk: string) => {
@@ -360,8 +401,10 @@ function makeDispatcher(opts: {
             replyTo,
             chunks: r.chunksSent,
             deduped: r.chunksDeduped,
+            failed: r.chunksFailed,
             sectionHit: filtered.usedSection,
           });
+          if (r.remainder) stashRemainder(replyTo, r.remainder, sessionId);
         } catch (e) {
           logger.error(`outbound.sendText failed: ${String(e)}`, { replyTo });
         }

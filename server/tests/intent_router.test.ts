@@ -310,3 +310,36 @@ test('shouldForceDeepExploreStart: force tier or ask approval works WITHOUT expl
   assert.equal(shouldForceDeepExploreStart({ ...base, tier: 'force', hasActiveSession: true }), false);
   assert.equal(shouldForceDeepExploreStart({ ...base, tier: 'force', deepExploreRanThisTurn: true }), false);
 });
+
+// ── Self-referential meta-question guard (2026-07-09 KV-cache log) ───────────
+
+test('isSelfReferentialMetaQuestion: catches questions about the agent itself', async () => {
+  const { isSelfReferentialMetaQuestion } = await import('../src/intent_router.js');
+  // prod: this exact message got conf=1 from the keyword "deepexplore" and force-started a
+  // 558s session (web-searched 平铺 in a dictionary) to answer a 2-second question
+  assert.equal(isSelfReferentialMetaQuestion('你这个分析是平铺的还是使用deepexplore做的？'), true);
+  assert.equal(isSelfReferentialMetaQuestion('你刚才用了什么工具？'), true);
+  assert.equal(isSelfReferentialMetaQuestion('你之前的报告里 deep_explore 跑了几轮?'), true);
+  // machinery mention alone is NOT meta — a genuine research request must stay routable
+  assert.equal(isSelfReferentialMetaQuestion('用deep_explore研究一下KV-cache的最新进展'), false);
+  assert.equal(isSelfReferentialMetaQuestion('调研KV-cache压缩方向'), false);
+  // prior-turn reference alone is fine too (follow-up on content, not on mechanism)
+  assert.equal(isSelfReferentialMetaQuestion('研究一下量子计算对密码学的影响'), false);
+  assert.equal(isSelfReferentialMetaQuestion(''), false);
+});
+
+test('shouldForceDeepExploreStart: selfReferentialMeta blocks force even at force tier', async () => {
+  const { shouldForceDeepExploreStart } = await import('../src/intent_router.js');
+  const base = {
+    decision: { route: 'deep_explore' as const, confidence: 1, domain: 'deliberate' as const },
+    explicitDepth: true,
+    goalSubstantial: true,
+    alreadyForcedStart: false,
+    alreadyForcedContinue: false,
+    deepExploreRanThisTurn: false,
+    hasActiveSession: false,
+    tier: 'force' as const,
+  };
+  assert.equal(shouldForceDeepExploreStart(base), true);
+  assert.equal(shouldForceDeepExploreStart({ ...base, selfReferentialMeta: true }), false);
+});

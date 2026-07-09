@@ -75,6 +75,16 @@ export interface SendTextResult {
   chunksDeduped: number;
   /** messageId for each sent chunk */
   messageIds: string[];
+  /** Number of chunks whose send failed (sender returned ok=false or threw) */
+  chunksFailed: number;
+  /**
+   * Unsent tail after the first failed chunk (the failed chunk itself plus everything after it).
+   * WeChat caps how many bot messages ONE inbound message may earn (sendText ret=-2); once a chunk
+   * is rejected, later chunks are rejected too — sending on would burn nothing but log noise and
+   * could deliver out of order. The caller stores this and re-delivers on the peer's next inbound
+   * message, which carries fresh quota. null when everything was delivered.
+   */
+  remainder: string | null;
 }
 
 /**
@@ -174,6 +184,35 @@ export function chunkMarkdownBytes(
   return out;
 }
 
+/**
+ * Greedily merge adjacent chunks back together while the combined size stays within both limits.
+ *
+ * Why: the boundary-aware splitter happily cuts at every paragraph break well before the limit,
+ * so a long report becomes many small messages — and WeChat's quota is counted per MESSAGE
+ * (prod 2026-07-09: a report went out as 7 chunks, chunk 7 — the conclusion — was rejected with
+ * ret=-2). Fewer, fuller chunks spend less quota for the same content.
+ */
+export function mergeChunks(
+  chunks: string[],
+  byteLimit: number = TEXT_CHUNK_BYTE_LIMIT,
+  charLimit: number = TEXT_CHUNK_LIMIT,
+): string[] {
+  const out: string[] = [];
+  for (const chunk of chunks) {
+    const prev = out[out.length - 1];
+    if (
+      prev !== undefined &&
+      prev.length + chunk.length <= charLimit &&
+      Buffer.byteLength(prev, 'utf8') + Buffer.byteLength(chunk, 'utf8') <= byteLimit
+    ) {
+      out[out.length - 1] = prev + chunk;
+    } else {
+      out.push(chunk);
+    }
+  }
+  return out;
+}
+
 /** Content hash for deduplication (short hash: first 16 hex chars of SHA-256) */
 export function fingerprint(to: string, text: string): string {
   return createHash('sha256').update(to).update('\0').update(text).digest('hex').slice(0, 16);
@@ -208,12 +247,23 @@ export class OutboundQueue {
     // upstream tool results may carry these (typical sources: Windows GBK decode failure,
     // tool render layer's ↵ markers)
     const trimmed = sanitizeForWechat(text ?? '');
-    if (trimmed.length === 0) return { chunksSent: 0, chunksDeduped: 0, messageIds: [] };
+    const result: SendTextResult = {
+      chunksSent: 0,
+      chunksDeduped: 0,
+      messageIds: [],
+      chunksFailed: 0,
+      remainder: null,
+    };
+    if (trimmed.length === 0) return result;
 
-    const chunks = chunkMarkdownBytes(trimmed, TEXT_CHUNK_BYTE_LIMIT, this.chunkLimit);
-    const result: SendTextResult = { chunksSent: 0, chunksDeduped: 0, messageIds: [] };
+    const chunks = mergeChunks(
+      chunkMarkdownBytes(trimmed, TEXT_CHUNK_BYTE_LIMIT, this.chunkLimit),
+      TEXT_CHUNK_BYTE_LIMIT,
+      this.chunkLimit,
+    );
 
-    for (const chunk of chunks) {
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
       const fp = fingerprint(to, chunk);
       const now = this.clock.now();
       const seenAt = this.recent.get(fp);
@@ -232,12 +282,18 @@ export class OutboundQueue {
       const r = await this.sender(to, chunk);
       const after = this.clock.now();
       this.lastSentAt = after;
-      this.recent.set(fp, after);
       this.gcRecent(after);
 
       if (r.ok) {
+        this.recent.set(fp, after); // only delivered chunks enter the dedup window
         result.chunksSent++;
         if (r.messageId) result.messageIds.push(r.messageId);
+      } else {
+        // First failure aborts the rest: with a quota rejection (ret=-2) every later chunk
+        // fails too, and with a transient error, skipping a middle chunk would garble order.
+        result.chunksFailed = chunks.length - i;
+        result.remainder = chunks.slice(i).join('');
+        break;
       }
     }
 

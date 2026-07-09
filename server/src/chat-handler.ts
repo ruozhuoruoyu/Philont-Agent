@@ -182,6 +182,7 @@ import {
   messageIsSelfContainedGoal,
   deepExploreRouteTier,
   buildDeepExploreAskText,
+  isSelfReferentialMetaQuestion,
   type IntentDecision,
 } from './intent_router.js';
 import { looksLikeCleanupIntent } from './intent_router.js';
@@ -5021,6 +5022,7 @@ export async function handleChatSend(
     // applied as a system-prefix nudge once messages[0] exists.
     intentDecision = await classifyIntent(userMessage);
     signalBus.intentDecision = intentDecision; // carried to handleChatSendInner for the deep_explore nudge
+    signalBus.selfReferentialMeta = isSelfReferentialMetaQuestion(userMessage);
     if (intentDecision) {
       console.log(`[intent-router] session=${sessionId} route=${intentDecision.route}${intentDecision.domain ? `:${intentDecision.domain}` : ''} conf=${intentDecision.confidence}`);
       // Three-tier deep_explore routing, ASK tier: mid-confidence reasoning task → one question,
@@ -5028,6 +5030,7 @@ export async function handleChatSend(
       // interactive sessions with a self-contained goal and no recently-active session.
       const askTier =
         deepExploreRouteTier(intentDecision) === 'ask' &&
+        !isSelfReferentialMetaQuestion(userMessage) &&
         !sessionId.startsWith('system:') &&
         !signalBus.exploreAskApproved &&
         !signalBus.exploreAskDeclined &&
@@ -6245,7 +6248,8 @@ async function handleChatSendInner(
     messages[0] &&
     intentDecision?.route === 'deep_explore' &&
     (deepExploreRouteTier(intentDecision) === 'force' || signalBus.exploreAskApproved) &&
-    !signalBus.exploreAskDeclined
+    !signalBus.exploreAskDeclined &&
+    !signalBus.selfReferentialMeta
   ) {
     // Suppress the nudge only when a session is RECENTLY active (the user is mid-exploration now), NOT when
     // any session merely exists — the user accumulates stale never-closed sessions, and a blanket "any
@@ -6501,6 +6505,7 @@ async function handleChatSendInner(
       // reach the engine instead of falling through to flat search.
       const selfContained = messageIsSelfContainedGoal(userMessage);
       const routeTier = deepExploreRouteTier(signalBus.intentDecision ?? null);
+      const metaQuestion = isSelfReferentialMetaQuestion(userMessage);
       const depthWanted =
         !signalBus.exploreAskDeclined &&
         (userSignaledDepth(userMessage) || routeTier === 'force' || !!signalBus.exploreAskApproved);
@@ -6524,6 +6529,7 @@ async function handleChatSendInner(
           explicitDepth: depthWanted,
           tier: routeTier,
           approvedViaAsk: !!signalBus.exploreAskApproved,
+          selfReferentialMeta: metaQuestion,
           goalSubstantial: !!forceGoal && forceGoal.trim().length >= 12,
           alreadyForcedStart: !!signalBus.forcedDeepExploreStart,
           alreadyForcedContinue: !!signalBus.forcedDeepExploreContinue,
@@ -7059,6 +7065,8 @@ interface TurnSignalBus {
   forcedDeepExploreContinue?: boolean;
   /** Set once when the forced-START mechanism has injected a real deep_explore(start) this turn (anti-reentry). */
   forcedDeepExploreStart?: boolean;
+  /** The user message is a meta-question about the agent itself (isSelfReferentialMetaQuestion). */
+  selfReferentialMeta?: boolean;
   /**
    * This turn's user message is a STATUS/COUNT/LIST query about deep_explore ("how many unfinished
    * explores", "状态/进度") rather than a request to advance. Suppresses force-continue (a status question
@@ -7219,6 +7227,39 @@ export function shouldForceDeepExploreAdvance(
   return DEEP_EXPLORE_FABRICATION_RE.test(text);
 }
 
+/**
+ * Force-tier deep_explore turns must not be captured by the plan protocol (prod 2026-07-09: the
+ * first KV-cache turn was routed force-tier, but the model opened with task_mode_classify(slow) →
+ * plan gate took over → the force-start mechanism, which only evaluates on a text response, never
+ * ran → the research went flat). On such turns a task_mode_classify(slow) call is mechanically
+ * rejected with a redirect to deep_explore(start); slow mode is never set, so the plan gate never
+ * engages and the harness force-start stays reachable if the model still answers flat.
+ */
+function forceTierClassifyRedirect(
+  call: { name: string; input: Record<string, unknown> },
+  signalBus: TurnSignalBus,
+): string | null {
+  if (call.name !== 'task_mode_classify') return null;
+  if ((call.input as { mode?: unknown })?.mode !== 'slow') return null;
+  const decision = signalBus.intentDecision ?? null;
+  if (decision?.route !== 'deep_explore') return null;
+  const forceTier = deepExploreRouteTier(decision) === 'force' || !!signalBus.exploreAskApproved;
+  if (!forceTier) return null;
+  if (signalBus.selfReferentialMeta) return null; // meta-question turns are not explore turns
+  if (signalBus.forcedDeepExploreStart || signalBus.forcedDeepExploreContinue) return null;
+  return (
+    `[intent_router] task_mode_classify(slow) is disabled for this turn: the intent router already ` +
+    `routed it to deep_explore (confidence ${decision.confidence}). Open exploration/research goes ` +
+    `through deep_explore's own decompose→verify protocol — it is exempt from the plan gate, and ` +
+    `wrapping it in a plan would flatten the research.
+
+` +
+    `Call deep_explore({ action: "start", goal: "<the user's research goal>" }) now. ` +
+    `If this really is an EXECUTION task (deploy/register/send/write external data), reply in text ` +
+    `explaining why and the harness will not force-start.`
+  );
+}
+
 async function runToolLoop(
   sessionId: string,
   messages: NativeMessage[],
@@ -7322,6 +7363,17 @@ async function runToolLoop(
       toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: `Error: Unknown tool '${call.name}'` });
       totalToolCallsThisTurn++;
       continue;
+    }
+
+    {
+      const redirect = forceTierClassifyRedirect(call, signalBus);
+      if (redirect) {
+        console.warn(`[intent-router] session=${sessionId} rejected task_mode_classify(slow) on force-tier deep_explore turn`);
+        toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: redirect });
+        totalToolCallsThisTurn++;
+        inTurnRecords.push({ toolName: call.name, success: false, resultText: redirect });
+        continue;
+      }
     }
 
     // 2026-05-13 constitutional amendment bug: plan_protocol_gate previously only checked in secondary iter (line ~4452)
@@ -8801,6 +8853,17 @@ async function runToolLoop(
         nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: `Error: Unknown tool '${call.name}'` });
         totalToolCallsThisTurn++;
         continue;
+      }
+
+      {
+        const redirect = forceTierClassifyRedirect(call, signalBus);
+        if (redirect) {
+          console.warn(`[intent-router] session=${sessionId} rejected task_mode_classify(slow) on force-tier deep_explore turn`);
+          nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: redirect });
+          totalToolCallsThisTurn++;
+          inTurnRecords.push({ toolName: call.name, success: false, resultText: redirect });
+          continue;
+        }
       }
 
       // 2026-05-10: autonomous turn blacklist check must also be applied inside the main loop branch
