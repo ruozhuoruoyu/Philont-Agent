@@ -6747,14 +6747,21 @@ async function handleChatSendInner(
             strongSignal = `honesty fired (severity=${ev.severity} reason=${ev.reason})`;
           } else {
             try {
-              const sinceTs = Date.now() - 24 * 60 * 60_000;
-              const recent = memory.actions.listRecentFailures({
-                sinceTs,
-                limit: 30,
-              });
-              const sameRoot = countSameRootCauseFailures(recent);
+              // THIS TURN's failures only. The old global-24h window closed a healthy executing
+              // plan on a turn with 32/32 tools OK because YESTERDAY's failures were still inside
+              // the window (prod 2026-07-09 06:51) — and the failed plan state then made the gate
+              // reject the session's compute tool. "This plan keeps hitting a wall" must be
+              // evidenced by this plan's own execution.
+              const turnFailures = (signalBus.inTurnRecords ?? [])
+                .filter((r) => !r.success)
+                .map((r) => ({
+                  toolName: r.toolName,
+                  result: r.resultText ?? null,
+                  timestamp: Date.now(),
+                }));
+              const sameRoot = countSameRootCauseFailures(turnFailures);
               if (sameRoot >= 2) {
-                strongSignal = `sameRootCauseFailures=${sameRoot}`;
+                strongSignal = `sameRootCauseFailures=${sameRoot} (this turn)`;
               }
             } catch {
               /* ignore */

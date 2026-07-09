@@ -269,3 +269,13 @@ test('isPlanGateExempt: deep_explore is exempt (its own deep-work protocol, not 
   // and even with no classification available
   assert.equal(isPlanGateExempt('deep_explore', null), true);
 });
+
+test('plan gate: local compute tools are exempt (continuous computation, prod 2026-07-09)', async () => {
+  const { isPlanGateExempt } = await import('../src/plan_gate.js');
+  const exec = { capability: 'execute', domain: 'local' };
+  assert.equal(isPlanGateExempt('pariGp', exec), true);
+  assert.equal(isPlanGateExempt('z3Verify', exec), true);
+  assert.equal(isPlanGateExempt('leanCheck', exec), true);
+  // shell (arbitrary commands) remains gated
+  assert.equal(isPlanGateExempt('shell', exec, { command: 'python x.py' }), false);
+});

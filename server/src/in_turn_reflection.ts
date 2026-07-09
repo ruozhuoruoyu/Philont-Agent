@@ -184,6 +184,13 @@ function buildReflectionReminder(signature: string, count: number): string {
  */
 export function isMechanicalFailure(signature: string | undefined): boolean {
   if (!signature) return false;
+  // ANY failure of a local compute tool is mechanical BY DEFINITION: the tool is a calculator —
+  // every error is a script bug or a resource limit, and the recovery is always fix-and-rerun,
+  // never research/plan/switch-direction. Prod 2026-07-09: `pariGp:gp-other` (generic gp error)
+  // missed the keyword list below, so the strategic gates (in-turn-block, research-before-retry,
+  // auto-revise placeholder plan) piled onto an OEIS computation session and blocked the very
+  // tool needed to iterate — five same-root failures, direction reported "systematically stuck".
+  if (/^(?:pariGp|z3Verify|leanCheck):/i.test(signature)) return true;
   return /script error|syntax error|\btraceback\b|SyntaxError|NameError|ImportError|ModuleNotFoundError|IndentationError|TypeError|AttributeError|not a function|too few arguments|unexpected (?:token|character|symbol)|cmd-not-found|command not found|no such file/i.test(
     signature,
   );
@@ -203,6 +210,7 @@ function authoringCheatsheet(signature: string): string[] {
       'PARI/GP authoring rules (this is the recurring one — apply them, do not guess again):',
       '  • Balance every "(": for( / forstep( / forprime( / sum( / if( must each be closed. An unclosed "(" → "unexpected end of file, expecting )".',
       '  • Multi-statement body → wrap in braces and balance them: `{ a = ...; b = ...; print(b) }`. Statements separated by ";".',
+      '  • Braces can NOT nest ("embedded braces" error): define each brace-bodied helper at TOP level; never wrap the whole script in one outer { } block.',
       '  • Helper: `f(x) = { ...; value }` on its own, call it on the next line.',
       '  • A "*** Warning: increasing stack size" line is NOT an error — the script ran. Read the printed result; do not treat it as failure.',
     ];

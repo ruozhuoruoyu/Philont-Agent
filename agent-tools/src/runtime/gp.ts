@@ -57,6 +57,34 @@ interface GpRun {
 }
 
 /** Run a script with one gp candidate; ENOENT is flagged separately so the caller can try the next candidate. */
+/**
+ * GP { } blocks cannot nest (parser limitation: "embedded braces"). Detect depth > 1 and explain
+ * the fix: define brace-bodied helpers at TOP LEVEL and never wrap the whole script in an outer
+ * brace block — statements at top level are separated by newlines/semicolons already.
+ */
+export function checkGpNestedBraces(script: string): string | null {
+  // Same stripping as checkGpParenBalance: braces inside comments / string literals don't count.
+  const stripped = script
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\\\\[^\n]*/g, ' ')
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  let depth = 0;
+  for (const ch of stripped) {
+    if (ch === '{') {
+      depth++;
+      if (depth > 1) {
+        return (
+          'nested { } blocks — GP braces cannot nest. Define each brace-bodied helper at TOP level ' +
+          '(f(x) = { ... } on its own), and do NOT wrap the whole script in an outer { } block'
+        );
+      }
+    } else if (ch === '}') {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return null;
+}
+
 function runOnce(gp: string, script: string, timeoutMs: number): Promise<GpRun> {
   return new Promise((resolve) => {
     let stdout = '';
@@ -221,6 +249,14 @@ export const pariGpTool: Tool = {
     const syntaxIssue = checkGpParenBalance(script);
     if (syntaxIssue) {
       return { success: false, output: '', error: `PARI/GP pre-check: ${syntaxIssue}. Not executed — fix and resend.` };
+    }
+    // Pre-flight: NESTED brace blocks. GP's { } multiline blocks cannot nest — wrapping a whole
+    // script (with brace-bodied helper functions inside) in one outer { } dies with the cryptic
+    // "*** sorry, embedded braces (in parser)" (prod 2026-07-09: burned 5 iterations). Catch it
+    // here with an instruction instead.
+    const nested = checkGpNestedBraces(script);
+    if (nested) {
+      return { success: false, output: '', error: `PARI/GP pre-check: ${nested}. Not executed — fix and resend.` };
     }
     const rawTimeout =
       typeof params.timeoutMs === 'number' && Number.isFinite(params.timeoutMs)

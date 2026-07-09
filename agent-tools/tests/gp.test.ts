@@ -106,3 +106,18 @@ describe('pariGp 语法预检(括号配平,无需 gp)', () => {
     assert.match(r.error ?? '', /pre-check/);
   });
 });
+
+// ── nested-brace preflight (prod 2026-07-09: "embedded braces" burned 5 iterations) ──
+
+it('checkGpNestedBraces: nested blocks rejected with instruction; top-level braces and comments pass', async () => {
+  const { checkGpNestedBraces } = await import('../src/runtime/gp.js');
+  // The prod failure shape: whole script wrapped in one outer block with brace-bodied helpers inside
+  assert.match(
+    checkGpNestedBraces('{\n f(x) = { x^2 };\n print(f(3))\n}') ?? '',
+    /cannot nest/,
+  );
+  // Legal: sequential top-level brace blocks
+  assert.equal(checkGpNestedBraces('f(x) = { x^2 }\ng(x) = { x+1 }\nprint(f(g(2)))'), null);
+  // Braces inside comments and strings do not count
+  assert.equal(checkGpNestedBraces('\\\\ comment with { {\nf(x) = { x }\nprint("{{")'), null);
+});

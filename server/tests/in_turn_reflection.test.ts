@@ -262,3 +262,14 @@ test('混合:机制层拒 × 5 + 真失败 × 2 → 仅真失败被计数 触发
   assert.match(r.signature ?? '', /shell:cmd-not-found:rg/);
   assert.equal(r.count, 2);
 });
+
+test('isMechanicalFailure: ANY compute-tool signature is mechanical (prod 2026-07-09 pariGp:gp-other)', async () => {
+  const { isMechanicalFailure } = await import('../src/in_turn_reflection.js');
+  assert.equal(isMechanicalFailure('pariGp:gp-other'), true);
+  assert.equal(isMechanicalFailure('pariGp:timeout'), true);
+  assert.equal(isMechanicalFailure('z3Verify:whatever'), true);
+  assert.equal(isMechanicalFailure('leanCheck:unsolved-goals'), true);
+  // Non-compute generic errors still need the keyword list
+  assert.equal(isMechanicalFailure('http:http-401'), false);
+  assert.equal(isMechanicalFailure('downloadFile:other:download failed: fetch failed'), false);
+});

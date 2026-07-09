@@ -127,6 +127,12 @@ export function isPlanGateExempt(
   // mode for an exploration-shaped request, then the gate banned deep_explore until a plan was
   // drafted — so the model fell back to inline web searching. Let it be chosen directly.
   if (toolName === 'deep_explore') return true;
+  // Local compute tools are a calculator, not a world-changing action — the gate's contract is
+  // "pause at the moment before changing the world". Forcing a plan state before every pariGp
+  // call made continuous computation (the math-research core loop: write → run → fix → run)
+  // impossible whenever any plan was in a non-executing state (prod 2026-07-09: pariGp rejected
+  // 5x while the algorithm itself was already verified correct).
+  if (toolName === 'pariGp' || toolName === 'z3Verify' || toolName === 'leanCheck') return true;
   // askUserQuestion is classified as read×local, but during the plan-drafting phase
   // the LLM must not ask the user (prevents offloading responsibility).
   // Legitimate use is during the plan-executing phase where the gate already opens all tools.
