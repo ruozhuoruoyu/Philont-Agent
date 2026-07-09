@@ -2,15 +2,6 @@
 
 <p align="center"><b>A self-hostable AI agent that runs complex, multi-step work on a model ~100× cheaper than the frontier — and is built so it can't fake success.</b></p>
 
-<!-- TODO(demo): record a 30-second GIF, drop it at docs/media/demo.gif, then uncomment the block below.
-     Shot-by-shot scripts for the two best candidates are in docs/media/demo-storyboard.md.
-
-<p align="center">
-  <img src="docs/media/demo.gif" alt="Philont in action — honesty gate catching a fabricated result" width="760">
-  <br><sub><i>↑ 30-second demo</i></sub>
-</p>
--->
-
 [![CI](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Status: developer preview](https://img.shields.io/badge/status-developer%20preview-orange.svg)](#status)
