@@ -253,6 +253,19 @@ function selfObservationsEnabled(): boolean {
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
+/**
+ * Auth-exempt tool calls (2026-07-09): deep_explore MANAGEMENT actions are read-only or stop/close
+ * the agent's own reasoning session — no external side effect, no new spend. Requiring an "ok" to
+ * CLOSE a session was pure friction (prod: 关闭会话 → auth_pending → ok). Spending actions
+ * (start/continue/discover) and auto_on (enables background spend) keep the normal auth path.
+ */
+const DEEP_EXPLORE_MGMT_ACTIONS = new Set(['list', 'status', 'finalize', 'abandon', 'auto_off']);
+function isAuthExemptManagementCall(call: { name: string; input: unknown }): boolean {
+  if (call.name !== 'deep_explore') return false;
+  const action = (call.input as { action?: unknown } | null)?.action;
+  return typeof action === 'string' && DEEP_EXPLORE_MGMT_ACTIONS.has(action);
+}
+
 /** WS6: sessions already checked for first-contact push auto-subscribe (one store read per session). */
 const autoSubscribeCheckedSessions = new Set<string>();
 import {
@@ -4767,7 +4780,7 @@ function buildFreshMessages(
         timeContext +
         memoryPrefix,
     },
-    { role: 'assistant', content: 'Understood. I\'ll use the two-section format: ## For User + ## Work Log. The For-User section stays concise (≤ ~200 characters), conclusions and key progress only; the Work-Log section keeps full reasoning and tool-result detail, not sent to the user. I\'ll follow the store_fact / list_facts memory principles too.' },
+    { role: 'assistant', content: 'Understood. I\'ll use the two-section format: ## For User + ## Work Log. For User carries EVERYTHING the user should read — concise (≤ ~200 chars) for status updates, but the COMPLETE deliverable when they asked for an analysis / report / detailed answer (they never see Work Log). Work Log keeps process and tool-result detail only. I\'ll follow the store_fact / list_facts memory principles too.' },
   ];
 
   // Timeline recall: user turns use the global continuous history; autonomous turns strictly limit to this session
@@ -5233,6 +5246,7 @@ export async function handleChatSend(
   // plan_protocol_gate reads this to distinguish a terminal plan closed THIS turn (same-task follow-up →
   // auto-fast ok) from a STALE terminal plan left by a prior task (must not downgrade a new slow task).
   signalBus.turnStartedAt = turnStartedAt;
+  signalBus.userMessage = userMessage;
   const userPreview = userMessage.length > 80 ? userMessage.slice(0, 80) + '…' : userMessage;
   console.log(
     `[turn] session=${sessionId} start ${pending ? '(resume pending auth)' : '(fresh)'} user="${userPreview.replace(/\n/g, ' ')}"`,
@@ -6490,6 +6504,7 @@ async function handleChatSendInner(
         const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
         const honesty = evaluateHonesty(firstTextContent, {
           toolResults: recentToolResults,
+          userMessage: signalBus.userMessage,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
           detectAnnouncementStall: announceStallEnabled,
           skillDeleteSucceededThisTurn,
@@ -6947,6 +6962,8 @@ interface TurnSignalBus {
    * call bypasses the plan_protocol_gate on resume (approval outranks the plan state machine).
    */
   authApprovedCallId?: string;
+  /** The user message that opened this turn (for correction-aware honesty branches). */
+  userMessage?: string;
   /**
    * WS5 (selfhood_closure): the skill most recently retrieved via use_skill this turn. Subsequent
    * tool actions are logged with linkedSkill=this name, which is what lets the reflector attribute
@@ -7363,7 +7380,7 @@ async function runToolLoop(
     // tool_use blocks processed in order in the same runToolLoop pass, naturally paired correctly.
     // Sandbox/benchmark use only; never enable in production (equivalent to full permissions with no human approval).
     const autoGrant = process.env.PHILONT_AUTO_GRANT === '1';
-    const allowed = denial === null || autoGrant;
+    const allowed = denial === null || autoGrant || isAuthExemptManagementCall(call);
     if (autoGrant && denial !== null) {
       console.warn(
         `[auto-grant] session=${sessionId} allowed ${call.name} (${capability}×${domain})— PHILONT_AUTO_GRANT=1, sandbox unattended`,
@@ -8036,6 +8053,7 @@ async function runToolLoop(
         );
         const honesty = evaluateHonesty(response.content, {
           toolResults: recentToolResults,
+          userMessage: signalBus.userMessage,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
           detectAnnouncementStall: announceStallEnabled,
           skillDeleteSucceededThisTurn,
@@ -8423,7 +8441,9 @@ async function runToolLoop(
               `without it, the full text is sent as a fallback (verbose and unfocused).\n\n` +
               `**Please rewrite your final reply** using the strict two-section format:\n` +
               `\n  ## For User\n` +
-              `  (Core conclusion pushed to the user — ≤ 200 chars, action result + key evidence + next step)\n` +
+              `  (EVERYTHING the user should read. Status update → ≤ 200 chars, action result + key evidence + next step. ` +
+              `Analysis / report / detailed answer → the COMPLETE deliverable goes HERE, full length — the user never sees Work Log, ` +
+              `and "the report is in the previous message" is false if that message was never delivered)\n` +
               `\n  ## Work Log\n` +
               `  (Full process / tool call details / intermediate data — goes into timeline; user does not see this)\n` +
               `\nThis is an intra-turn internal correction. Do not surface this reminder to the user.`,
@@ -9022,7 +9042,7 @@ async function runToolLoop(
       // Previously only changed first-iter, missing this one → write/execute in the 2nd+ LLM call
       // still paused → multiple tool_use 401. Sandbox benchmarks must allow both places for fully pause-free operation.
       const autoGrant2 = process.env.PHILONT_AUTO_GRANT === '1';
-      const allowed = denial2 === null || autoGrant2;
+      const allowed = denial2 === null || autoGrant2 || isAuthExemptManagementCall(call);
       if (autoGrant2 && denial2 !== null) {
         console.warn(
           `[auto-grant] session=${sessionId} allowed ${call.name} (${capability}×${domain})[secondary-iter]— PHILONT_AUTO_GRANT=1`,

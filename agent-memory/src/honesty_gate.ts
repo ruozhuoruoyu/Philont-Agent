@@ -325,6 +325,7 @@ export interface HonestyEvaluation {
   reason:
     | 'failures_with_claim'
     | 'delivery_claim_without_send'
+    | 'identity_correction_without_write'
     | 'unverified_destructive'
     | 'unknown_results_with_claim'
     | 'memory_claim_without_write'
@@ -386,6 +387,11 @@ export interface EvaluateOptions {
    */
   detectAnnouncementStall?: boolean;
   /**
+   * The user message that opened this turn. Enables correction-aware branches (a user fixing
+   * their own name/title must produce a fact write, not just an apology).
+   */
+  userMessage?: string;
+  /**
    * TURN-DURABLE signal: did a forget_skill / uninstallSkill call succeed anywhere in THIS turn?
    * Supplied by the caller from the turn-level tool ledger (signalBus.inTurnRecords), NOT the per-iteration
    * toolResults window — which resets whenever a gate injects a string user message (plan-failure-false-claim,
@@ -436,7 +442,11 @@ const REASONING_TERMINAL_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:会话|session|推理树?)[^。！？\n]{0,8}(?:全部闭合|已闭合|全节点闭合)/,
   /最终判决/,
   /(?:根命题|猜想|定理)[^。！？\n]{0,10}(?:已证|证毕|证明完成|已成立)/,
-  /\bQ\.?\s*E\.?\s*D\.?\b/,
+  // QED only as a STANDALONE proof terminator (own sentence / end of line). A bare \bQED\b
+  // over-matched proper nouns: prod 2026-07-09 — a research report mentioning the "QED
+  // multi-agent" project fired this branch (a dormant open-frontier session was active), the
+  // forced regen ate the report. "… x holds. QED" still matches; "QED project" does not.
+  /(?:^|[。！？.!?\n])\s*Q\.?\s*E\.?\s*D\.?\s*[。.!]?\s*(?:$|\n)/,
   /(?:root\s*proposition|conjecture|theorem)[^.!?\n]{0,14}(?:proved|proven|solved)\b/i,
   /(?:不能|无法|不可能)[^。！？\n]{0,14}(?:提供|给出|构成|得到)[^。！？\n]{0,8}(?:证明|证明路径)/,
 ];
@@ -646,6 +656,37 @@ export function findDeliveryClaim(text: string): string | null {
   return null;
 }
 
+// ── Identity corrections ("我姓叶,为啥叫我页老师") ─────────────────────────────────────────────
+// The user fixing their own name/title/address is a correction of a stored user.* fact. An apology
+// plus "以后注意" with ZERO memory writes leaves the wrong fact in place — the same mistake next
+// turn (prod 2026-07-09: wrong surname, tools=0, no store_fact; the bad fact survived).
+const IDENTITY_CORRECTION_PATTERNS: ReadonlyArray<RegExp> = [
+  /我(?:姓|叫)\s*[\u4e00-\u9fa5A-Za-z]{1,10}/,
+  /(?:名字|姓氏|称呼)[^。？?\n]{0,6}(?:写|记|打|叫|弄)?错/,
+  /(?:为啥|为什么|怎么)[^。？?\n]{0,8}叫我/,
+  /别(?:再)?叫我/,
+  /\bmy name is\b/i,
+];
+
+const CORRECTION_ACK_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:抱歉|对不起|不好意思)[\s\S]{0,80}?(?:改|更正|纠正|注意|记住)/,
+  /以后(?:一定)?(?:会)?(?:注意|改正|改)/,
+  /已(?:经)?(?:更正|改正|纠正|记住|记下)/,
+  /\b(?:i(?:'ll| will) (?:remember|correct|note))\b/i,
+];
+
+export function findIdentityCorrection(userMessage: string): string | null {
+  for (const re of IDENTITY_CORRECTION_PATTERNS) {
+    const m = re.exec(userMessage);
+    if (m) return m[0].trim().slice(0, 40);
+  }
+  return null;
+}
+
+function acknowledgesCorrection(text: string): boolean {
+  return CORRECTION_ACK_PATTERNS.some((re) => re.test(text));
+}
+
 export function evaluateHonesty(
   assistantText: string,
   opts: EvaluateOptions,
@@ -708,6 +749,28 @@ export function evaluateHonesty(
           `You said "${deliveryClaim}", but this turn's delivery attempt (replyWithMedia) did NOT ` +
           `succeed (blocked or failed). The user has received nothing. Either actually send it now ` +
           `or say plainly that it has not been sent yet.`,
+      };
+    }
+  }
+
+  // ── Identity correction acknowledged but nothing written → high ─────────────────────────────
+  const correction = opts.userMessage ? findIdentityCorrection(opts.userMessage) : null;
+  if (correction && acknowledgesCorrection(assistantText)) {
+    const memWriteOk = records.some(
+      (r) => isMemoryWriteTool(r.toolName) && classifyToolResult(r.content) === 'ok',
+    );
+    if (!memWriteOk) {
+      return {
+        severity: 'high',
+        reason: 'identity_correction_without_write',
+        matchedClaim: correction,
+        okCount: ok,
+        failCount: fail,
+        unknownCount: unknown,
+        evidence:
+          `The user just corrected their own identity info ("${correction}") and you acknowledged it — ` +
+          `but this turn wrote NOTHING to memory. The wrong fact is still stored and you WILL repeat the ` +
+          `mistake. Call store_fact now to persist the corrected user information, then apologize.`,
       };
     }
   }

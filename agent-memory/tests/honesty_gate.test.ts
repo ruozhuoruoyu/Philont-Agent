@@ -1079,3 +1079,39 @@ test('delivery_claim_without_send: successful send does NOT fire; recap without 
   });
   assert.ok(!negated || negated.reason !== 'delivery_claim_without_send');
 });
+
+// ── prod 2026-07-09 regressions: QED proper noun + identity correction ─────────
+
+test('fabricated_reasoning_state: "QED" as a project name does NOT match; standalone terminator does', async () => {
+  const { findReasoningTerminalClaim } = await import('../src/honesty_gate.js');
+  // Proper-noun / reference contexts (the research-report case that ate the report)
+  assert.equal(findReasoningTerminalClaim('QED multi-agent mathematical proof project shows...'), null);
+  assert.equal(findReasoningTerminalClaim('the QED system (2026) proves open problems'), null);
+  assert.equal(findReasoningTerminalClaim('调研了 QED 多智能体证明项目的进展'), null);
+  // Genuine proof terminators still match
+  assert.ok(findReasoningTerminalClaim('因此结论成立。QED'));
+  assert.ok(findReasoningTerminalClaim('...and the bound follows.\nQ.E.D.\n'));
+});
+
+test('identity_correction_without_write: acknowledged correction with zero writes → high; with store_fact ok → silent', () => {
+  const fired = evaluateHonesty('## For User\n抱歉叶老师！我打错字了。以后一定注意。', {
+    userMessage: '我姓叶，为啥叫我页老师了？',
+    toolResults: [],
+  });
+  assert.ok(fired, 'should fire');
+  assert.equal(fired!.severity, 'high');
+  assert.equal(fired!.reason, 'identity_correction_without_write');
+
+  const wrote = evaluateHonesty('抱歉叶老师！已更正您的姓氏并记住了。', {
+    userMessage: '我姓叶，为啥叫我页老师了？',
+    toolResults: [{ toolName: 'store_fact', content: '✓ TOOL OK — stored user.name' }],
+  });
+  assert.ok(!wrote || wrote.reason !== 'identity_correction_without_write');
+
+  // Non-correction user message → branch silent even with apologetic text
+  const unrelated = evaluateHonesty('抱歉，我会注意格式。', {
+    userMessage: '报告格式乱了',
+    toolResults: [],
+  });
+  assert.ok(!unrelated || unrelated.reason !== 'identity_correction_without_write');
+});
