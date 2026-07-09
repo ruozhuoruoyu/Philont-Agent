@@ -3156,6 +3156,74 @@ export function splitPrefixBySection(raw: string): Array<{ title: string; chars:
 }
 
 /**
+ * Priority-aware prefix trimming (2026-07-09). The old last-line-of-defense was a blunt
+ * `raw.slice(0, cap)`: it cut whatever happened to be rendered LAST — typically the
+ * highest-signal sections (verified working calls, self-observations, pending constitution
+ * proposals, the plan-protocol teaching that ended the placeholder churn). Instead, shave the
+ * tails of bulky low-priority sections first; only fall back to the blunt cut if that is not
+ * enough. Pure; exported for tests.
+ */
+const PREFIX_TRIM_ORDER: readonly string[] = [
+  // lowest value-per-char first — long historical accumulations whose tails age worst
+  'Lessons I have learned',
+  'Known user information',
+  'Operational Knowledge',
+  'Known project information',
+  'Recent Runs',
+  'Extended capabilities',
+  'Endpoints',
+];
+const PREFIX_SECTION_MIN_KEEP = 1_000;
+
+export function trimPrefixToCap(
+  raw: string,
+  cap: number,
+): { text: string; trimmed: Array<{ title: string; cut: number }> } {
+  if (raw.length <= cap) return { text: raw, trimmed: [] };
+
+  // Positional section scan (## headings), preserving order.
+  const bounds: Array<{ title: string; start: number; end: number }> = [];
+  const headingRe = /^## (.+)$/gm;
+  let lastIdx = 0;
+  let lastTitle = '<preamble>';
+  let m: RegExpExecArray | null;
+  while ((m = headingRe.exec(raw)) !== null) {
+    if (m.index > lastIdx) bounds.push({ title: lastTitle, start: lastIdx, end: m.index });
+    lastTitle = m[1].trim();
+    lastIdx = m.index;
+  }
+  bounds.push({ title: lastTitle, start: lastIdx, end: raw.length });
+
+  const pieces = bounds.map((b) => raw.slice(b.start, b.end));
+  const trimmed: Array<{ title: string; cut: number }> = [];
+  let overflow = raw.length - cap;
+
+  for (const prefix of PREFIX_TRIM_ORDER) {
+    if (overflow <= 0) break;
+    for (let i = 0; i < bounds.length && overflow > 0; i++) {
+      if (!bounds[i].title.startsWith(prefix)) continue;
+      const body = pieces[i];
+      const trimmable = body.length - PREFIX_SECTION_MIN_KEEP;
+      if (trimmable <= 0) continue;
+      const marker = `\n...[section trimmed to fit the prefix cap]\n`;
+      const cut = Math.min(trimmable, overflow + marker.length);
+      pieces[i] = body.slice(0, body.length - cut) + marker;
+      overflow -= cut - marker.length;
+      trimmed.push({ title: bounds[i].title.slice(0, 60), cut });
+    }
+  }
+
+  let text = pieces.join('');
+  if (text.length > cap) {
+    // Order exhausted and still over cap — the old blunt cut remains the true last line of defense.
+    text =
+      text.slice(0, cap) +
+      `\n...[memory prefix too long, truncated. Original ${raw.length} chars]\n[End of memory layer]`;
+  }
+  return { text, trimmed };
+}
+
+/**
  * K0/K0.7: no longer depends on currentSessionId. The LLM sees a continuous timeline;
  * the concept of "last session" no longer exists — history is naturally brought back by TimelineRetriever.
  *
@@ -4105,14 +4173,14 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
   // Total limit gate — even when each section was truncated, the sum can still exceed the limit.
   // Exceeding the total limit necessarily indicates a bug (too many facts? a section truncation not effective?); this is the last line of defense.
   if (raw.length > MEMORY_PREFIX_TOTAL_CAP) {
+    const { text, trimmed } = trimPrefixToCap(raw, MEMORY_PREFIX_TOTAL_CAP);
     console.warn(
-      `[memory-prefix] over cap ${raw.length} → ${MEMORY_PREFIX_TOTAL_CAP} chars, force truncated`,
+      `[memory-prefix] over cap ${raw.length} → ${text.length} chars, trimmed: ` +
+        (trimmed.length > 0
+          ? trimmed.map((t) => `${t.title}(-${t.cut})`).join(', ')
+          : 'blunt tail cut (no trimmable sections)'),
     );
-    return (
-      raw.slice(0, MEMORY_PREFIX_TOTAL_CAP) +
-      `\n...[memory prefix too long, truncated. Original ${raw.length} chars]\n[End of memory layer]` +
-      ledgerTail
-    );
+    return text + ledgerTail;
   }
   console.log(`[memory-prefix] size=${raw.length} chars`);
   return raw + ledgerTail;
@@ -4966,8 +5034,13 @@ export async function handleChatSend(
         reasons: cls.reasons,
         signatureCandidate: sig,
       });
+      // When the heuristic list is empty the escalation came from the intent router — say so
+      // (prod 2026-07-09 logged "fast→slow reasons=[]", which read like an unexplained switch).
+      const reasonLabel = cls.reasons.length > 0
+        ? cls.reasons.join(',')
+        : `intent:plan:${intentDecision?.confidence ?? '?'}`;
       console.log(
-        `[auto-task-mode] session=${sessionId} ${modeAtEntry}→slow reasons=[${cls.reasons.join(',')}]` +
+        `[auto-task-mode] session=${sessionId} ${modeAtEntry}→slow reasons=[${reasonLabel}]` +
         (modeAtEntry === 'slow' ? ' (re-plan for new task at boundary)' : ''),
       );
 

@@ -47,6 +47,8 @@ export function startScheduler(
   // concurrent runs of the SAME schedule (the avalanche). Skip a schedule whose previous run has not
   // finished; it will be reconsidered once its finally-block clears the flag and advances next_run_at.
   const inflight = new Set<string>();
+  /** Schedules whose overlap-skip has already been logged this streak (cleared when the run frees up). */
+  const overlapLogged = new Set<string>();
 
   async function tick(): Promise<number> {
     if (stopped) return 0;
@@ -54,9 +56,15 @@ export function startScheduler(
     let fired = 0;
     for (const schedule of due) {
       if (inflight.has(schedule.id)) {
-        console.warn(`[scheduler] task '${schedule.name}' still running — skipping this fire (no overlap)`);
+        // Log once per overlap streak, not every poll (a 2-min run under a 30s poll printed the
+        // same line 4x; the signal is "an overlap happened", not a heartbeat).
+        if (!overlapLogged.has(schedule.id)) {
+          overlapLogged.add(schedule.id);
+          console.warn(`[scheduler] task '${schedule.name}' still running — skipping fires until it finishes (no overlap)`);
+        }
         continue;
       }
+      overlapLogged.delete(schedule.id);
       inflight.add(schedule.id);
       try {
         await onFire(schedule);
