@@ -510,3 +510,19 @@ test('getBySkill: DESC order + limit truncation, unknown skill -> []', () => {
   assert.equal(h.actions.getBySkill('never-used').length, 0);
   h.close();
 });
+
+test('getBySkill: uses idx_actions_skill, not a full table scan (real-deployment cost matters — this runs on every autonomous tick once P2 wires SkillRepairDriver)', () => {
+  const h = openMemoryDb(':memory:');
+  for (let i = 0; i < 50; i++) {
+    h.actions.log({
+      sessionId: 's', toolName: 'shell', params: {}, result: 'noise', success: true,
+      linkedSkill: i % 2 === 0 ? 'target-recipe' : `other-${i}`,
+    });
+  }
+  const plan = h.db
+    .prepare(`EXPLAIN QUERY PLAN SELECT * FROM memory_actions WHERE linked_skill = ? ORDER BY timestamp DESC, id DESC LIMIT ?`)
+    .all('target-recipe', 30) as Array<{ detail: string }>;
+  const usesIndex = plan.some((row) => /USING (COVERING )?INDEX idx_actions_skill/.test(row.detail));
+  assert.ok(usesIndex, `expected idx_actions_skill in query plan, got: ${JSON.stringify(plan)}`);
+  h.close();
+});

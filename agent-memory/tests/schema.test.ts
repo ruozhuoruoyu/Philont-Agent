@@ -304,6 +304,41 @@ test('migration v4 → v5: existing memory_skills gets kind=positive default', (
   assert.equal(row.kind, 'positive', '迁移后老 skill kind 必须默认为 positive');
 });
 
+test('migration v34 → v35: memory_skills gets revision_history, existing H2 recipe data intact', () => {
+  // 用 initSchema 建出完整 v35 schema(比手搭 20 张表更贴近真实用户 DB — 除了这一列,其余都已在 v34 迁移到位),
+  // 再退化成"v34 的样子":删掉这一列 + meta 写回 '34'。比手写整份 v34 DDL 更贴近真实升级场景,也更不容易漏表。
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.exec(`ALTER TABLE memory_skills DROP COLUMN revision_history;`);
+  db.prepare(`UPDATE memory_meta SET value = '34' WHERE key = 'schema_version'`).run();
+  assert.ok(!hasColumn(db, 'memory_skills', 'revision_history'), '退化状态应确实没有这一列');
+
+  // 插入一条真实的 H2 callable recipe(verification + tool_policy 都设了),模拟已有用户数据
+  db.prepare(
+    `INSERT INTO memory_skills
+     (id, name, description, trigger_keywords, action_template, created_at, kind, maturity, verification, tool_policy)
+     VALUES ('sk-recipe', 'deploy-recipe', 'deploys the thing', '["deploy"]', 'call shell then curl', 1000,
+             'positive', 'stable', '{"kind":"tool_result_ok","check":"curl"}', '["shell","curl"]')`
+  ).run();
+
+  initSchema(db);
+
+  assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 35);
+  assert.ok(hasColumn(db, 'memory_skills', 'revision_history'), 'v35 迁移后必须补回 revision_history 列');
+
+  const row = db
+    .prepare(`SELECT * FROM memory_skills WHERE id = ?`)
+    .get('sk-recipe') as Record<string, unknown>;
+  // 老数据必须原样保留 — 这是升级路径最容易悄悄丢数据的地方
+  assert.equal(row.name, 'deploy-recipe');
+  assert.equal(row.maturity, 'stable');
+  assert.equal(row.verification, '{"kind":"tool_result_ok","check":"curl"}');
+  assert.equal(row.tool_policy, '["shell","curl"]');
+  // 新列对已有行必须是 NULL(从未 revise 过),不是 '[]' 或空字符串
+  assert.equal(row.revision_history, null, '迁移前已存在的行 revision_history 应为 NULL,不是空数组');
+});
+
 test('migration v5 → v6: adds memory_raw_messages_fts and backfills existing messages', () => {
   const db = new Database(':memory:');
 
