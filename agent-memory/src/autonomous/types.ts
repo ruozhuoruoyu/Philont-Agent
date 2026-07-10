@@ -11,8 +11,9 @@
  * changes in one from cascading to the other.
  */
 
-import type { Fact, Pursuit, Skill } from '../types.js';
+import type { Action, Fact, Pursuit, Skill } from '../types.js';
 import type { RoutingRule } from '../routing_rules.js';
+import type { RecipeVerification } from '../skill_recipes.js';
 
 /**
  * Status of a single initiative.
@@ -143,6 +144,33 @@ export interface InitiativeExecutor {
   run(initiative: Initiative): Promise<InitiativeRunResult>;
 }
 
+/**
+ * H3 (skill_self_repair.md): the diagnosis evidence a `skill_repair` initiative needs — the broken
+ * recipe's current body plus its most recent FAILED executions (from `ActionLog.getBySkill`). Read by
+ * the executor when it renders the repair prompt; supplied via `InitiativeExecutorOptions.skillRepairContext`
+ * so the executor does not have to depend on SkillStore/ActionLog directly (same decoupling as `isToolGranted`).
+ */
+export interface SkillRepairContext {
+  actionTemplate: string;
+  verification: RecipeVerification | null;
+  toolPolicy: string[] | null;
+  /** Most recent failed executions attributed to this recipe (newest first). */
+  failures: readonly Pick<Action, 'toolName' | 'result' | 'timestamp'>[];
+}
+
+/**
+ * H3: the executor LLM's proposed fix for a broken recipe. `verification` omitted = keep the existing
+ * check (a diagnosis that only rewrites the steps is the common case). Applied by the
+ * `skillRevisionWriter` OutcomeHook via `SkillStore.reviseRecipe`, never by the executor itself —
+ * mirroring how `questionAnswered` / `requestedTool` are applied by `pursuitProgressWriter`.
+ */
+export interface SkillRevisionProposal {
+  actionTemplate: string;
+  verification?: RecipeVerification;
+  /** The root cause the diagnosis found — becomes part of the revision_history entry. */
+  diagnosis: string;
+}
+
 export interface InitiativeRunResult {
   status: 'done' | 'failed' | 'skipped';
   outcomeSummary?: string;
@@ -166,6 +194,13 @@ export interface InitiativeRunResult {
    * the loop additionally requires non-empty outcomeRefs before firing 'high' (no evidence → no page).
    */
   escalate?: boolean;
+  /**
+   * H3: a `skill_repair` initiative's proposed fix, mapped 1:1 from ExecutorLlmOutput.skillRevision.
+   * The `skillRevisionWriter` OutcomeHook applies it via SkillStore.reviseRecipe. Absent when the
+   * diagnosis was inconclusive (no fix proposed) — the recipe stays demoted rather than being
+   * rewritten on a guess.
+   */
+  skillRevision?: SkillRevisionProposal;
   /** Actual LLM tokens spent (used to calibrate estimates) */
   llmTokensSpent: number;
   /** Actual number of tool calls made */
@@ -213,6 +248,12 @@ export interface ExecutorLlmOutput {
    * Executor uses this to take the needsGrant path (see InitiativeRunResult).
    */
   requestedTool?: { tool: string; why: string };
+  /**
+   * H3 (skill_repair initiatives only): the proposed fix for the broken recipe. Omit entirely when the
+   * failed trajectories do not support a confident fix — an unrepaired recipe stays demoted (advisory),
+   * which is strictly safer than rewriting it on a guess.
+   */
+  skillRevision?: SkillRevisionProposal;
 }
 
 export interface ExecutorFactProposal {

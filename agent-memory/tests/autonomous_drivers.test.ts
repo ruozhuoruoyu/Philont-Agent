@@ -430,7 +430,14 @@ test('SkillRepairDriver: demoted recipe (playbook + verification) 命中', () =>
   assert.equal(ps.length, 1);
   assert.equal(ps[0].kind, 'skill_repair');
   assert.equal(ps[0].targetRef, 'skill:web-research');
-  assert.equal(ps[0].plan?.[0].tool, 'deep_explore');
+});
+
+test('SkillRepairDriver: 不发 plan — 证据在本地账本,executor 直接读,不需要工具调用', () => {
+  const d = new SkillRepairDriver();
+  const ps = d.propose(snap({ skills: [demotedRecipeSkill()] }));
+  // A plan referencing a tool outside DEFAULT_TOOL_WHITELIST (e.g. deep_explore) would be rejected
+  // by StandardExecutor before the LLM ever runs — and a repair needs no lookup anyway.
+  assert.equal(ps[0].plan, undefined);
 });
 
 test('SkillRepairDriver: demoted prose lesson(无 verification)不命中 — 那是 GapDriver skill_failing 的范围', () => {

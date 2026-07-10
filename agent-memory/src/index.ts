@@ -365,6 +365,10 @@ export {
   DEFAULT_PURSUIT_CONFIG,
   SkillRepairDriver,
   DEFAULT_SKILL_REPAIR_CONFIG,
+  skillRevisionWriter,
+  applySkillRevision,
+  parseSkillTargetRef,
+  SKILL_REPAIR_KIND,
   extractSpecificTokens,
   // K7 → K8 bridge (2026-05-06)
   collectK7BridgeInitiatives,
@@ -405,6 +409,9 @@ export type {
   GapDriverConfig,
   PursuitDriverConfig,
   SkillRepairDriverConfig,
+  SkillRepairContext,
+  SkillRevisionProposal,
+  ApplySkillRevisionResult,
   Initiative,
   InitiativeExecutor,
   InitiativeExecutorOptions,
@@ -875,3 +882,6 @@ export * from './drives_to_goals.js';
 export * from './trait_signals.js';
 export * from './self_observation.js';
 export * from './constitution_proposals.js';
+// H3 skill self-repair (skill_self_repair.md): the pure repair-candidate gate + thrash guard, needed by
+// both the driver (this layer) and the server's skillRepairContext re-check at execution time.
+export * from './skill_repair.js';

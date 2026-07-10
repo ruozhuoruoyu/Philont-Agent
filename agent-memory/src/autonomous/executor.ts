@@ -26,7 +26,13 @@ import type {
   Initiative,
   InitiativeExecutor,
   InitiativeRunResult,
+  SkillRepairContext,
+  SkillRevisionProposal,
 } from './types.js';
+import type { RecipeVerification } from '../skill_recipes.js';
+
+/** H3: initiative.kind emitted by SkillRepairDriver; the executor renders a diagnosis prompt for these. */
+export const SKILL_REPAIR_KIND = 'skill_repair';
 
 export const DEFAULT_TOOL_WHITELIST: ReadonlySet<string> = new Set([
   'webSearch',
@@ -78,6 +84,13 @@ export interface InitiativeExecutorOptions {
    * Avoids agent-memory depending on agent-policy — only declares the callback shape.
    */
   isToolGranted?: (tool: string) => boolean;
+  /**
+   * H3 (skill_self_repair.md): resolves the diagnosis evidence for a `skill_repair` initiative —
+   * the broken recipe's body + its recent failed executions. Returns null when the skill is gone
+   * or is no longer a repair candidate (executor then fails the initiative rather than guessing).
+   * A callback, not the stores themselves, so the executor stays decoupled (same as `isToolGranted`).
+   */
+  skillRepairContext?: (skillName: string) => SkillRepairContext | null;
   /** Default namespace for writing back facts. Default 'autonomous'. */
   factNamespace?: string;
   /** Fallback token estimator (used when LLM client doesn't return tokensUsed). Default ceil(text.length * 0.3). */
@@ -94,6 +107,7 @@ export class StandardExecutor implements InitiativeExecutor {
   private readonly tools: ToolRunner;
   private readonly whitelist: ReadonlySet<string>;
   private readonly isToolGranted: (tool: string) => boolean;
+  private readonly skillRepairContext: (skillName: string) => SkillRepairContext | null;
   private readonly factNs: string;
   private readonly estimate: (t: string) => number;
   private readonly maxOut: number;
@@ -106,6 +120,7 @@ export class StandardExecutor implements InitiativeExecutor {
     this.tools = opts.tools;
     this.whitelist = opts.toolWhitelist ?? DEFAULT_TOOL_WHITELIST;
     this.isToolGranted = opts.isToolGranted ?? (() => false);
+    this.skillRepairContext = opts.skillRepairContext ?? (() => null);
     this.factNs = opts.factNamespace ?? 'autonomous';
     this.estimate =
       opts.tokenEstimator ?? ((t: string) => Math.max(1, Math.ceil(t.length * 0.3)));
@@ -124,6 +139,23 @@ export class StandardExecutor implements InitiativeExecutor {
   async run(initiative: Initiative): Promise<InitiativeRunResult> {
     const toolResults: Array<{ tool: string; output: string; ok: boolean }> = [];
     let toolCalls = 0;
+
+    // 0) H3: a skill_repair initiative reads its evidence from the local ledger, not from tools.
+    // Resolve it first — if the recipe vanished or was already repaired between propose() and now,
+    // fail loudly instead of prompting the LLM to fix something that no longer needs fixing.
+    let repair: SkillRepairContext | null = null;
+    if (initiative.kind === SKILL_REPAIR_KIND) {
+      const skillName = parseSkillTargetRef(initiative.targetRef);
+      repair = skillName ? this.skillRepairContext(skillName) : null;
+      if (!repair) {
+        return {
+          status: 'failed',
+          error: `skill_repair: no repair context for targetRef "${initiative.targetRef}" (skill missing, or no longer a repair candidate)`,
+          llmTokensSpent: 0,
+          toolCallsSpent: 0,
+        };
+      }
+    }
 
     // 1) Run tools in the plan
     const plan = initiative.plan ?? [];
@@ -158,7 +190,7 @@ export class StandardExecutor implements InitiativeExecutor {
     }
 
     // 2) Build prompt → single-turn LLM
-    const prompt = renderExecutorPrompt(initiative, toolResults);
+    const prompt = renderExecutorPrompt(initiative, toolResults, repair);
     let llmText: string;
     let llmTokens: number;
     try {
@@ -259,6 +291,9 @@ export class StandardExecutor implements InitiativeExecutor {
       outcomeRefs: { facts: factIds, notes: noteIds, pursuits: [] },
       questionAnswered: out.questionAnswered === true,
       escalate: out.shouldEscalate === true,
+      // H3: only a skill_repair initiative may carry a revision — a stray skillRevision on a
+      // curiosity/gap initiative must never reach SkillStore.reviseRecipe.
+      ...(repair && out.skillRevision ? { skillRevision: out.skillRevision } : {}),
       llmTokensSpent: llmTokens,
       toolCallsSpent: toolCalls,
     };
@@ -267,10 +302,70 @@ export class StandardExecutor implements InitiativeExecutor {
 
 // ── prompt + parser ──────────────────────────────────────────────────────
 
+/** H3: `skill:<name>` → `<name>`. Returns null when the targetRef is not skill-shaped. */
+export function parseSkillTargetRef(targetRef: string): string | null {
+  const m = /^skill:(.+)$/.exec(targetRef);
+  return m ? m[1] : null;
+}
+
+/**
+ * H3: the diagnosis prompt for a broken recipe. Deliberately NOT a research prompt — the evidence is
+ * already in hand (the ledger's failed executions), so the LLM's only job is root-cause + a concrete fix.
+ * "Propose no fix" is an explicitly allowed, explicitly safe answer: an unrepaired recipe stays demoted
+ * to advisory, whereas a guessed rewrite silently re-arms a broken recipe for callable reuse.
+ */
+function renderSkillRepairPrompt(init: Initiative, repair: SkillRepairContext): string {
+  const failureBlock = repair.failures.length === 0
+    ? '(no failed executions recorded — if you cannot see WHY it failed, propose no fix)'
+    : repair.failures
+        .map((f, i) => `### Failure ${i + 1}: ${f.toolName}\n${truncate(f.result ?? '(no result recorded)', 800)}`)
+        .join('\n\n');
+
+  return [
+    "You are philont's autonomous skill-repair diagnostician.",
+    'A callable recipe failed its own reuse verification and has been demoted to advisory. Read its',
+    'body and its real failed executions below, find the root cause, and propose a corrected recipe.',
+    '',
+    '## The broken recipe',
+    `- name: ${parseSkillTargetRef(init.targetRef) ?? init.targetRef}`,
+    `- why it is here: ${init.rationale}`,
+    `- current steps:\n${truncate(repair.actionTemplate, 2000)}`,
+    `- its verification (the check it failed): ${repair.verification ? JSON.stringify(repair.verification) : '(none)'}`,
+    `- tools it is allowed to use: ${repair.toolPolicy?.join(', ') || '(none declared)'}`,
+    '',
+    '## Its real failed executions (from the execution ledger)',
+    failureBlock,
+    '',
+    '## Rules',
+    '- Diagnose from the EVIDENCE above. Do not invent a failure mode the ledger does not show.',
+    '- The fix must stay within the recipe\'s declared tools; do not introduce new tools.',
+    '- If the evidence does not support a confident fix, OMIT skillRevision entirely. That is a correct,',
+    '  safe answer — the recipe simply stays advisory. A guessed rewrite is worse than no rewrite.',
+    '',
+    '## Output format (strict JSON, no other explanations)',
+    '```json',
+    '{',
+    '  "summary": "<= 500 char summary of the diagnosis, for your future self",',
+    '  "facts": [],',
+    '  "notes": [],',
+    '  "shouldEscalate": false,',
+    '  "skillRevision": {              // OMIT this whole field if you cannot confidently fix it',
+    '    "actionTemplate": "the corrected steps, complete and self-contained",',
+    '    "verification": { "kind": "tool_result_ok"|"assert"|"compute_recheck", "check": "..." },  // omit to keep the existing check',
+    '    "diagnosis": "the root cause you found, in one or two sentences"',
+    '  }',
+    '}',
+    '```',
+  ].join('\n');
+}
+
 function renderExecutorPrompt(
   init: Initiative,
   toolResults: Array<{ tool: string; output: string; ok: boolean }>,
+  repair?: SkillRepairContext | null,
 ): string {
+  if (repair) return renderSkillRepairPrompt(init, repair);
+
   const toolBlock = toolResults.length === 0
     ? '(no tools were called this turn)'
     : toolResults
@@ -463,11 +558,40 @@ export function parseExecutorOutput(text: string): ParseOk | ParseErr {
     }
   }
 
+  // H3: proposed recipe fix. Strictly validated — a malformed/empty skillRevision is DROPPED (treated as
+  // "no fix proposed", the safe outcome) rather than failing the whole initiative, because the diagnosis
+  // summary is still worth persisting. Only actionTemplate is required; verification is optional (keep
+  // the existing check); diagnosis defaults to the summary when the LLM omits it.
+  let skillRevision: SkillRevisionProposal | undefined;
+  const sr = obj.skillRevision;
+  if (sr && typeof sr === 'object') {
+    const sro = sr as Record<string, unknown>;
+    const actionTemplate = typeof sro.actionTemplate === 'string' ? sro.actionTemplate.trim() : '';
+    if (actionTemplate) {
+      skillRevision = {
+        actionTemplate,
+        diagnosis: typeof sro.diagnosis === 'string' && sro.diagnosis.trim() ? sro.diagnosis.trim() : summary,
+        ...(parseVerification(sro.verification) ? { verification: parseVerification(sro.verification)! } : {}),
+      };
+    }
+  }
+
   if (errors.length > 0) return { ok: false, errors };
   return {
     ok: true,
-    output: { summary, facts, notes, shouldEscalate, questionAnswered, requestedTool },
+    output: { summary, facts, notes, shouldEscalate, questionAnswered, requestedTool, skillRevision },
   };
+}
+
+/** H3: a RecipeVerification is only accepted with a known kind + a non-empty check. Anything else → null (keep the existing check). */
+function parseVerification(raw: unknown): RecipeVerification | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const kind = o.kind;
+  const check = typeof o.check === 'string' ? o.check.trim() : '';
+  if (!check) return null;
+  if (kind !== 'tool_result_ok' && kind !== 'assert' && kind !== 'compute_recheck') return null;
+  return { kind, check };
 }
 
 function truncate(s: string, n: number): string {

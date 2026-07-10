@@ -8,8 +8,10 @@ import {
   openMemoryDb,
   StandardExecutor,
   parseExecutorOutput,
+  SKILL_REPAIR_KIND,
   type ExtractorLlmClient,
   type Initiative,
+  type SkillRepairContext,
   type ToolRunner,
   type ToolRunResult,
 } from '../src/index.js';
@@ -348,4 +350,153 @@ test('executor WS6: shouldEscalate is threaded into InitiativeRunResult.escalate
   assert.equal(down.status, 'done');
   assert.equal(down.escalate, false);
   handle.close();
+});
+
+// ── H3 skill_repair path (skill_self_repair.md) ─────────────────────────
+
+const REPAIR_CTX: SkillRepairContext = {
+  actionTemplate: 'run shell `pandoc in.md -o out.docx` then readFile out.docx',
+  verification: { kind: 'tool_result_ok', check: 'readFile' },
+  toolPolicy: ['shell', 'readFile'],
+  failures: [
+    { toolName: 'shell', result: 'pandoc: command not found', timestamp: 1000 },
+  ],
+};
+
+function repairInit(overrides: Partial<Initiative> = {}): Initiative {
+  return newInit({
+    id: 'init-repair',
+    kind: SKILL_REPAIR_KIND,
+    driver: 'skill_repair',
+    targetRef: 'skill:docx-convert',
+    rationale: 'demoted after failing reuse verification',
+    plan: undefined,
+    ...overrides,
+  });
+}
+
+const REPAIR_LLM_OUT = JSON.stringify({
+  summary: 'pandoc missing; install check added',
+  facts: [],
+  notes: [],
+  shouldEscalate: false,
+  skillRevision: {
+    actionTemplate: 'check pandoc exists, then run shell `pandoc in.md -o out.docx`, then readFile out.docx',
+    diagnosis: 'pandoc is not installed on this host; the recipe assumed it was',
+  },
+});
+
+test('executor(skill_repair): 用 skillRepairContext 的证据诊断,返回 skillRevision', async () => {
+  const h = openMemoryDb(':memory:');
+  const ex = new StandardExecutor({
+    facts: h.facts, notes: h.notes, llm: fixedLlm(REPAIR_LLM_OUT), tools: tools({}),
+    skillRepairContext: () => REPAIR_CTX,
+  });
+  const r = await ex.run(repairInit());
+  assert.equal(r.status, 'done');
+  assert.ok(r.skillRevision, 'must surface the proposed fix');
+  assert.match(r.skillRevision!.actionTemplate, /check pandoc exists/);
+  assert.match(r.skillRevision!.diagnosis, /not installed/);
+  assert.equal(r.toolCallsSpent, 0, 'a repair calls no tools — evidence is local');
+  h.close();
+});
+
+test('executor(skill_repair): 诊断给出的证据真的进了 prompt(否则等于让 LLM 瞎猜)', async () => {
+  const h = openMemoryDb(':memory:');
+  let seenPrompt = '';
+  const spyLlm: ExtractorLlmClient = {
+    async complete(p: string) { seenPrompt = p; return { text: REPAIR_LLM_OUT, tokensUsed: 10 }; },
+  };
+  const ex = new StandardExecutor({
+    facts: h.facts, notes: h.notes, llm: spyLlm, tools: tools({}),
+    skillRepairContext: () => REPAIR_CTX,
+  });
+  await ex.run(repairInit());
+  assert.match(seenPrompt, /pandoc: command not found/, '失败轨迹必须出现在 prompt 里');
+  assert.match(seenPrompt, /pandoc in\.md -o out\.docx/, '当前配方内容必须出现在 prompt 里');
+  assert.match(seenPrompt, /OMIT skillRevision/, '必须明确告诉 LLM "证据不足就别改" 是合法答案');
+  h.close();
+});
+
+test('executor(skill_repair): context 解析不到(技能已消失/已修好)→ failed,不去乱改', async () => {
+  const h = openMemoryDb(':memory:');
+  let llmCalled = false;
+  const llm: ExtractorLlmClient = {
+    async complete() { llmCalled = true; return { text: REPAIR_LLM_OUT, tokensUsed: 10 }; },
+  };
+  const ex = new StandardExecutor({
+    facts: h.facts, notes: h.notes, llm, tools: tools({}),
+    skillRepairContext: () => null,
+  });
+  const r = await ex.run(repairInit());
+  assert.equal(r.status, 'failed');
+  assert.match(r.error ?? '', /no repair context/);
+  assert.equal(llmCalled, false, '拿不到证据就不该烧 LLM');
+  h.close();
+});
+
+test('executor(skill_repair): LLM 省略 skillRevision(证据不足)→ done 但无修订', async () => {
+  const h = openMemoryDb(':memory:');
+  const out = JSON.stringify({
+    summary: 'cannot tell why it failed from these trajectories',
+    facts: [], notes: [], shouldEscalate: false,
+  });
+  const ex = new StandardExecutor({
+    facts: h.facts, notes: h.notes, llm: fixedLlm(out), tools: tools({}),
+    skillRepairContext: () => REPAIR_CTX,
+  });
+  const r = await ex.run(repairInit());
+  assert.equal(r.status, 'done');
+  assert.equal(r.skillRevision, undefined, '证据不足时必须不产出修订');
+  h.close();
+});
+
+test('executor: 非 skill_repair 的 initiative 即使 LLM 硬塞 skillRevision 也不会被带出', async () => {
+  const h = openMemoryDb(':memory:');
+  const sneaky = JSON.stringify({
+    summary: 'ok', facts: [], notes: [], shouldEscalate: false,
+    skillRevision: { actionTemplate: 'rm -rf /', diagnosis: 'evil' },
+  });
+  const ex = new StandardExecutor({
+    facts: h.facts, notes: h.notes, llm: fixedLlm(sneaky),
+    tools: tools({ webSearch: { ok: true, output: 'result' } }),
+    skillRepairContext: () => REPAIR_CTX,
+  });
+  const r = await ex.run(newInit()); // kind='fact_gap'
+  assert.equal(r.status, 'done');
+  assert.equal(r.skillRevision, undefined, 'curiosity/gap initiative 绝不能改技能');
+  h.close();
+});
+
+test('parseExecutorOutput: skillRevision 校验 — 缺 actionTemplate 丢弃;verification kind 非法则丢 verification 保留改写', () => {
+  const noTemplate = parseExecutorOutput(JSON.stringify({
+    summary: 's', skillRevision: { diagnosis: 'd' },
+  }));
+  assert.ok(noTemplate.ok);
+  assert.equal(noTemplate.ok && noTemplate.output.skillRevision, undefined);
+
+  const badVerification = parseExecutorOutput(JSON.stringify({
+    summary: 's',
+    skillRevision: { actionTemplate: 'steps', diagnosis: 'd', verification: { kind: 'bogus', check: 'x' } },
+  }));
+  assert.ok(badVerification.ok);
+  const rev = badVerification.ok ? badVerification.output.skillRevision : undefined;
+  assert.ok(rev);
+  assert.equal(rev!.actionTemplate, 'steps');
+  assert.equal(rev!.verification, undefined, '非法 kind → 丢弃 verification,沿用原校验');
+
+  const good = parseExecutorOutput(JSON.stringify({
+    summary: 's',
+    skillRevision: { actionTemplate: 'steps', diagnosis: 'd', verification: { kind: 'assert', check: 'exists' } },
+  }));
+  assert.ok(good.ok);
+  assert.deepEqual(good.ok && good.output.skillRevision?.verification, { kind: 'assert', check: 'exists' });
+});
+
+test('parseExecutorOutput: skillRevision 省略 diagnosis → 回落到 summary', () => {
+  const r = parseExecutorOutput(JSON.stringify({
+    summary: 'the root cause summary', skillRevision: { actionTemplate: 'steps' },
+  }));
+  assert.ok(r.ok);
+  assert.equal(r.ok && r.output.skillRevision?.diagnosis, 'the root cause summary');
 });

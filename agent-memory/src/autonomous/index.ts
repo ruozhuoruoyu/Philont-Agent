@@ -28,6 +28,8 @@ export type {
   ExecutorFactProposal,
   ExecutorNoteProposal,
   OutcomeHook,
+  SkillRepairContext,
+  SkillRevisionProposal,
 } from './types.js';
 
 export { InitiativeStore } from './initiatives.js';
@@ -67,6 +69,8 @@ export type {
   TickEvent,
 } from './loop.js';
 
+export { parseSkillTargetRef, SKILL_REPAIR_KIND } from './executor.js';
+
 export {
   CuriosityDriver,
   DEFAULT_CURIOSITY_CONFIG,
@@ -86,12 +90,17 @@ export {
 } from './drivers/pursuit_driver.js';
 export type { PursuitDriverConfig } from './drivers/pursuit_driver.js';
 
-/** H3 (skill_self_repair.md) — exported for tests; NOT in AUTONOMOUS_DRIVERS yet, see the driver's own doc comment. */
+/** H3 (skill_self_repair.md): the continuous self-evolution loop — driver proposes, executor diagnoses, writer applies. */
 export {
   SkillRepairDriver,
   DEFAULT_SKILL_REPAIR_CONFIG,
 } from './drivers/skill_repair_driver.js';
 export type { SkillRepairDriverConfig } from './drivers/skill_repair_driver.js';
+export {
+  skillRevisionWriter,
+  applySkillRevision,
+} from './skill_revision_writer.js';
+export type { ApplySkillRevisionResult } from './skill_revision_writer.js';
 
 // K7 → K8 bridge
 export {

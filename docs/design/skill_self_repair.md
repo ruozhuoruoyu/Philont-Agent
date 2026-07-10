@@ -1,6 +1,6 @@
 # Skill Self-Repair (H3) — from demote-and-forget to diagnose-and-rewrite
 
-Status: DESIGN. Author: ruozhuoruoyu.
+Status: IMPLEMENTED (P0–P2), shipped default-off behind `PHILONT_SKILL_REPAIR`. Author: ruozhuoruoyu.
 The sequel to `skill_recipes.md` (H2): H2 built the verification contract that CATCHES a recipe that
 stopped working; H3 closes the loop it left open — what happens after the catch. Anchored to real
 `file:line`.
@@ -70,18 +70,31 @@ Everything else below is composition, not new infrastructure.
    `snapshot.skills` for recipes at `maturity==='playbook'` with `verification != null` (a demoted
    *recipe*, not a demoted prose lesson — see Decision 1) and repair-attempt count under the ceiling
    (3.3). Emit one `InitiativeProposal` per candidate, budget-estimated like the existing drivers.
-3. **Diagnose** (reuse `deep_explore`, don't rebuild reasoning). When the proposal runs: fetch failed
-   trajectories via `ActionLog.getBySkill(skillName, {onlyFailed: true, limit})` (`linked_skill` stores the
-   skill's *name*, matching `recordLinkedSkillOutcomes`'s existing lookup convention), then call
-   `deepExploreTool.execute({ action:'start', mode:'formal', goal: <diagnosis prompt: failed
-   trajectories + current recipe body + its verification> })`. "Why did this recipe fail, and what should
-   the corrected steps/verification be" is the same shape of task `deep_explore` already handles for open
-   questions — this points it at the agent's own artifact instead.
-4. **Rewrite.** On a `solved`/`finalize` outcome, extract the proposed revision and call
-   `SkillStore.reviseRecipe(name, { actionTemplate, verification, reason: `skill_repair:<session id>` })` —
-   a dedicated method (shipped in P0), not `updateSkill`, because a revision needs the append-only history
-   bookkeeping every other `updateSkill` field does not, and always re-enters the maturity ladder at
-   `'draft'` (has not yet re-earned trust), regardless of the demoted `'playbook'` state it came from.
+3. **Diagnose** (the shared K8 executor — *not* `deep_explore`). The proposal carries **no `plan`**: the
+   evidence is already local. `StandardExecutor` resolves it through the new
+   `InitiativeExecutorOptions.skillRepairContext` callback, which reads the recipe body plus
+   `ActionLog.getBySkill(skillName, {onlyFailed: true, limit: 5})` (`linked_skill` stores the skill's
+   *name*, matching `recordLinkedSkillOutcomes`'s existing lookup convention), and renders a diagnosis
+   prompt instead of the generic research prompt. One single-turn LLM call, zero tool calls.
+
+   > **Why not `deep_explore`.** An earlier draft of this doc routed the diagnosis through
+   > `deep_explore(start, mode:'formal')`. That was wrong on two counts. Mechanically, `deep_explore` is
+   > not in the autonomous read-only tool whitelist, so the driver could never have run. More
+   > fundamentally, `deep_explore` is a multi-round, cross-day, resumable session engine for *open
+   > questions*; "given these failed runs and this recipe body, what is the root cause and the fix" is a
+   > **bounded judgement over evidence already in hand**. Spawning long-lived reasoning sessions from a
+   > per-tick idle loop would make the repair loop non-continuous — the exact property this feature
+   > exists to add. A repair is the same shape as every other K8 initiative, and uses the same executor.
+4. **Rewrite.** The fix returns on `InitiativeRunResult.skillRevision`; the `skillRevisionWriter`
+   OutcomeHook (`autonomous/skill_revision_writer.ts`) calls
+   `SkillStore.reviseRecipe(name, { actionTemplate, verification, reason: 'skill_repair:<initiative id>: <diagnosis>' })`.
+   A dedicated method, not `updateSkill`, because a revision needs the append-only history bookkeeping
+   every other `updateSkill` field does not, and always re-enters the maturity ladder at `'draft'` (has
+   not yet re-earned trust), regardless of the demoted `'playbook'` state it came from. The executor
+   never writes skill state itself — mirroring how `pursuitProgressWriter` applies pursuit state.
+   **An inconclusive diagnosis omits `skillRevision` entirely**: the initiative still succeeds, and the
+   recipe simply stays advisory. A guessed rewrite would silently re-arm a broken recipe for callable
+   reuse, which is strictly worse than no rewrite.
 5. **Re-verify** (unchanged). Next recall+reuse runs `recipeReuseMaturityMove` exactly as today — the loop
    closes without touching the verification mechanism itself.
 
@@ -102,16 +115,21 @@ ladder.
    `{at, actionTemplate, verification, reason}` snapshots — nullable column on `memory_skills`,
    append-only from the rewrite step. Inline JSON, not a join table (mirrors how `RecipeVerification`
    is already stored inline, not normalized out).
-3. **Repair-attempt ceiling.** 3 consecutive failed repairs excludes the skill from future
-   `SkillRepairDriver` proposals and raises a `recordRecipeDecayObservation`-style self-fact for the owner
-   (visible in `/autonomy`). Reuses `skill_maturity.ts`'s own "consecutive failures ≥ 3" deprecation
+3. **Repair-attempt ceiling.** 3 repairs (counted from `revision_history` entries whose `reason` carries
+   the `skill_repair:` marker — a manual edit never counts against it) excludes the skill from future
+   `SkillRepairDriver` proposals. Reuses `skill_maturity.ts`'s own "consecutive failures ≥ 3" deprecation
    threshold instead of picking a new arbitrary number.
-4. **Diagnosis mode.** `deep_explore` `formal`, not `deliberate` — "does this tool sequence actually work"
-   is machine-checkable, closer to a proof than a belief. A session that can't reach `solved` reports
-   inconclusive rather than force-writing a low-confidence rewrite.
-5. **Consent.** No new ask. Recipe demotion already happens fully automatically today with no owner
-   approval — this is skill CONTENT, not constitution/identity, so the existing governance level applies
-   unchanged. Visible after the fact via `/autonomy` and `revision_history`, not gated before the fact.
+4. **Inconclusive diagnosis is a first-class outcome.** The prompt explicitly permits omitting
+   `skillRevision`, and the parser drops a malformed one rather than failing the initiative. An unrepaired
+   recipe stays demoted to advisory — strictly safer than a guessed rewrite that re-arms it for callable
+   reuse. `compute_recheck` recipes (whose verification wraps pariGp/z3) are the case where a single-turn
+   judgement is weakest; today they take the same path, and the honest answer is that a low-confidence
+   diagnosis should decline. If dogfooding shows they systematically produce bad rewrites, gate that
+   `verification.kind` out of the candidate set rather than escalating the whole loop's machinery.
+5. **Consent.** No new ask, but the feature ships **default-off** (`PHILONT_SKILL_REPAIR`). Recipe
+   *demotion* already happens automatically today with no owner approval; recipe *rewriting* is a strictly
+   larger step — it is the only autonomous driver whose outcome mutates a reusable artifact — so it stays
+   opt-in until dogfooding proves it out. Visible after the fact via `/autonomy` and `revision_history`.
    (Contrast: constitution amendments stay owner-ratified — this feature does not touch that boundary.)
 
 ## 5. Rollout
@@ -121,19 +139,26 @@ ladder.
   query and the revision-history bookkeeping. **Shipped**: `schema.ts` v34→v35, `actions.ts`,
   `skill_repair.ts` (types + `isRepairCandidate`/`repairAttemptsExhausted`), `skills.ts:reviseRecipe`.
 - **P1** — `SkillRepairDriver.propose()` (pure, unit-tested against a fixture `MemorySnapshot`).
-  **Shipped, but deliberately NOT registered into `AUTONOMOUS_DRIVERS`** (`server/src/chat-handler.ts`)
-  yet: the shared `InitiativeExecutor` writes facts/notes back on completion, not skill revisions — with
-  no `OutcomeHook` to turn a finished diagnosis into a `reviseRecipe()` call, registering the driver today
-  would spend real `deep_explore` budget and produce nothing (see the driver's own doc comment for detail).
-  The `PHILONT_SKILL_REPAIR` flag + registration + the `OutcomeHook` are P2, together — splitting them
-  further doesn't buy a safe intermediate state.
-- **P2** — an `OutcomeHook` (mirroring `pursuit_progress_writer.ts`'s pattern) that, on a `skill_repair`
-  initiative's `done` result, extracts the proposed revision and calls
-  `SkillStore.reviseRecipe(name, { ..., reason: 'skill_repair:' + initiative.id })` — the
-  `REPAIR_REASON_PREFIX` marker `repairAttemptsExhausted` (shipped in P0/P1) already checks for. Register
-  `SkillRepairDriver` into `AUTONOMOUS_DRIVERS` behind `PHILONT_SKILL_REPAIR` (default off) alongside the
-  hook. Flip the default on once a dogfood pass shows repaired recipes measurably outperforming their
-  prior version — measurable for the first time, via `revision_history`.
+  **Shipped.** Initially written with a `plan: [{tool:'deep_explore'}]` and left unregistered; both were
+  corrected in P2 (see the note in 3.2 — the driver now emits no plan at all).
+- **P2** — **Shipped.** The loop is closed end to end, default-off:
+  - `StandardExecutor` gained `skillRepairContext` (resolves the recipe body + its failed ledger runs) and
+    renders a diagnosis prompt for `kind==='skill_repair'`; `ExecutorLlmOutput.skillRevision` /
+    `InitiativeRunResult.skillRevision` carry the fix back. A stray `skillRevision` on a non-repair
+    initiative is dropped; a missing repair context fails the initiative **before** any LLM call.
+  - `skillRevisionWriter` OutcomeHook (`autonomous/skill_revision_writer.ts`) applies it via
+    `reviseRecipe`, stamping `REPAIR_REASON_PREFIX` so `repairAttemptsExhausted` can enforce the ceiling.
+  - `SkillRepairDriver` registered in `AUTONOMOUS_DRIVERS` behind `PHILONT_SKILL_REPAIR` (**default off**);
+    the server re-checks `isRepairCandidate` at execution time, so a recipe repaired or deleted between
+    propose and run is never rewritten.
+  - Verified: a subprocess test asserts the driver is absent by default and present under the flag; a
+    closed-loop test drives three real repairs and asserts the ceiling then trips.
+
+- **Next (P3, not started)** — flip the default on once a dogfood pass shows repaired recipes measurably
+  outperforming their prior version, which `revision_history` makes measurable for the first time. Until
+  there is data, "does the rewrite actually help" is exactly the question the Rutgers/UNC survey flags as
+  unanswered by every existing benchmark ("no benchmark evaluates evolution longitudinally") — so it must
+  be answered from production, not asserted here.
 
 ## 6. Non-goals
 

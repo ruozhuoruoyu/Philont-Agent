@@ -72,6 +72,9 @@ import {
   DEFAULT_PURSUIT_CONFIG,
   collectK7BridgeInitiatives,
   pursuitProgressWriter,
+  SkillRepairDriver,
+  skillRevisionWriter,
+  isRepairCandidate,
   ensureK8DriveConfigs,
   readK8DriverCooldowns,
   k8DriveOutcomeInput,
@@ -2103,6 +2106,15 @@ const CLEANUP_SCHEDULE_PAUSE_MS = 15 * 60_000;
 
 // Autonomous driver registry — single source of truth; dashboard / tests / loop all reference it.
 // PursuitDriver injects an isGranted callback: used to query GrantStore when replaying proactive research "request permission".
+/**
+ * H3 skill self-repair kill switch. Default OFF (opt-in): this is the only autonomous driver whose
+ * outcome rewrites a reusable artifact (a callable recipe's steps). PHILONT_SKILL_REPAIR=1/on/true/yes.
+ */
+export function skillRepairEnabled(): boolean {
+  const v = (process.env.PHILONT_SKILL_REPAIR ?? '').trim().toLowerCase();
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+}
+
 const AUTONOMOUS_DRIVERS = [
   new GapDriver(),
   // Phase 18 (2026-06-16): suppress token-curiosity while the system is in a doom-loop (high global
@@ -2140,6 +2152,12 @@ const AUTONOMOUS_DRIVERS = [
     },
   }),
   new PursuitDriver(DEFAULT_PURSUIT_CONFIG, (tool) => globalGrants.isGranted(tool)),
+  // H3 (skill_self_repair.md): continuous self-evolution — a callable recipe that failed its own reuse
+  // verification gets diagnosed from the ledger's real failed runs and rewritten, instead of being
+  // demoted and forgotten. Default OFF while dogfooding: it is the only driver whose outcome REWRITES
+  // a reusable artifact, so it stays opt-in until repaired recipes are shown (via revision_history) to
+  // actually outperform their prior version.
+  ...(skillRepairEnabled() ? [new SkillRepairDriver()] : []),
 ] as const;
 export const autonomousDriverNames: readonly string[] = AUTONOMOUS_DRIVERS.map((d) => d.name);
 
@@ -2252,6 +2270,8 @@ function enqueueResearchGrantPush(
 
 /** PursuitProgressWriter instance (reused by the onOutcome composite hook). */
 const pursuitWriter = pursuitProgressWriter(memory.pursuits);
+/** H3 SkillRevisionWriter instance (same composite hook). Inert unless a skill_repair initiative settles. */
+const skillRepairWriter = skillRevisionWriter(memory.skills);
 
 const autonomousInterruptSink: InterruptSink = {
   fire(severity, payload) {
@@ -2387,6 +2407,28 @@ const autonomousExecutor = new StandardExecutor({
   tools: autonomousToolRunner,
   // Proactive research "request permission": let executor include user-authorized gated tools in the effective whitelist.
   isToolGranted: (tool) => globalGrants.isGranted(tool),
+  // H3: a skill_repair initiative's evidence is local ledger state, not something to fetch with a tool.
+  // Re-checks isRepairCandidate at execution time: the recipe may have been repaired, deleted, or
+  // promoted between propose() and now — returning null makes the executor fail loudly instead of
+  // rewriting a recipe that no longer needs it.
+  skillRepairContext: (skillName) => {
+    try {
+      const skill = memory.skills.getByName(skillName);
+      if (!skill || !isRepairCandidate(skill) || !skill.verification) return null;
+      const failures = memory.actions
+        .getBySkill(skillName, { onlyFailed: true, limit: 5 })
+        .map((a) => ({ toolName: a.toolName, result: a.result, timestamp: a.timestamp }));
+      return {
+        actionTemplate: skill.actionTemplate,
+        verification: skill.verification,
+        toolPolicy: skill.toolPolicy,
+        failures,
+      };
+    } catch (e) {
+      console.warn('[skill-repair] skillRepairContext lookup failed', e);
+      return null;
+    }
+  },
 });
 
 // 2026-05-06: autonomous budget caps support env override; see autonomous_budget_env.ts
@@ -2420,6 +2462,10 @@ export const autonomousLoop: AutonomousLoopHandle = startAutonomousLoop({
   // permission" (needsGrant) → proactively push WeChat authorization card + register pending (in-conversation authorization still serves as fallback).
   onOutcome: (init, result) => {
     pursuitWriter(init, result);
+    // H3: the last hop of self-evolution — a diagnosed fix is written back to the skill library
+    // (old version snapshotted into revision_history, recipe re-enters at 'draft'). No-op for every
+    // non-skill_repair initiative. Never throws.
+    skillRepairWriter(init, result);
     if (result.needsGrant && result.requestedTool) {
       try {
         enqueueResearchGrantPush(init.targetRef, result.requestedTool);

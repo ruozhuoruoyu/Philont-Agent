@@ -7,13 +7,15 @@
  * This driver surfaces it as a candidate initiative. `propose` is pure (no DB writes, no LLM calls, no
  * tool execution) — matching every other `Driver`.
  *
- * NOT YET WIRED into `AUTONOMOUS_DRIVERS` (server/src/chat-handler.ts) — see the design doc's P1/P2
- * split. The shared `InitiativeExecutor` writes back facts/notes on completion, not skill revisions;
- * actually closing the loop (running the `deep_explore` diagnosis this driver's `plan` points at, then
- * calling `SkillStore.reviseRecipe` on its outcome) needs a dedicated `OutcomeHook`, not yet built —
- * registering this driver today would spend real diagnosis budget with no rewrite ever happening.
- * Exported and fully unit-tested so that wiring is a deliberate follow-up decision, not an accidental
- * side effect of adding this file.
+ * Emits NO `plan`: unlike a gap/curiosity initiative, a repair's evidence is already local (the
+ * execution ledger's failed runs for this recipe), so there is nothing to look up. The executor resolves
+ * that evidence via `InitiativeExecutorOptions.skillRepairContext` and runs the same single-turn LLM call
+ * every other initiative gets. Diagnosing a broken recipe is a bounded judgement, not an open research
+ * question — routing it through `deep_explore` (multi-round, cross-day, resumable) would be the wrong
+ * shape and would make the loop non-continuous, which is precisely what this feature exists to fix.
+ *
+ * The fix comes back on `InitiativeRunResult.skillRevision` and is applied by the `skillRevisionWriter`
+ * OutcomeHook (`skill_revision_writer.ts`), mirroring how `pursuitProgressWriter` applies pursuit state.
  */
 
 import type { Driver, InitiativeProposal, MemorySnapshot } from '../types.js';
@@ -21,8 +23,9 @@ import { isRepairCandidate, repairAttemptsExhausted, MAX_REPAIR_ATTEMPTS } from 
 
 export interface SkillRepairDriverConfig {
   /**
-   * Maximum candidates to produce per tick; default 3. Lower than GapDriver's 5 — a repair is a
-   * `deep_explore` diagnosis session, not a single tool call, so each candidate is far more expensive.
+   * Maximum candidates to produce per tick; default 3. Lower than GapDriver's 5: a repair rewrites a
+   * reusable artifact, so a burst of them is a bigger blast radius than a burst of lookups — and there
+   * should rarely be more than a couple of broken recipes at once.
    */
   maxProposals: number;
 }
@@ -60,20 +63,9 @@ export class SkillRepairDriver implements Driver {
         // recipe silently degrades to an advisory lesson forever otherwise) but never crowds out
         // higher-urgency gap-driver/curiosity-driver candidates in the same tick.
         utility: 0.55,
-        budgetEstimate: 6000,
-        plan: [
-          {
-            tool: 'deep_explore',
-            params: {
-              action: 'start',
-              mode: 'formal',
-              goal:
-                `Diagnose why the recipe "${s.name}" failed its reuse verification and propose a fix. ` +
-                `Current steps: ${s.actionTemplate}. ` +
-                `Current verification: ${s.verification ? JSON.stringify(s.verification) : 'none'}.`,
-            },
-          },
-        ],
+        // One single-turn LLM call over the recipe body + a handful of failed trajectories. No tools,
+        // hence no plan — the executor reads the ledger directly (skillRepairContext).
+        budgetEstimate: 2500,
       });
     }
 
