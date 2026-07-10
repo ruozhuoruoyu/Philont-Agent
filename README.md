@@ -1,13 +1,13 @@
 # Philont-Agent
 
-<p align="center"><b>A self-hostable AI agent that runs complex, multi-step work on a model ~100× cheaper than the frontier — and is built so it can't fake success.</b></p>
+<p align="center"><b>A self-hosted AI agent that acts on its own initiative, remembers you across every session, and is structurally unable to fake success — on a model ~100× cheaper than the frontier.</b></p>
 
 [![CI](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Status: developer preview](https://img.shields.io/badge/status-developer%20preview-orange.svg)](#status)
 [![Wiki](https://img.shields.io/badge/docs-Wiki-2563eb.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/wiki)
 
-**Philont: the being-agent.** Most open-source agents are **task runners** — powerful at carrying out what you ask, but tools all the same. Philont is built to be a **being**: an independent character with intrinsic drives that research while you're away, continuous memory across every session and channel, and — anchored to an execution ledger of what actually happened — a runtime that makes it structurally unable to **pretend success**. Because its intelligence lives in the **loop, not the model**, it runs on a model ~100× cheaper than the frontier (DeepSeek Flash class); bring your own: Claude, DeepSeek, GLM, Kimi, MiniMax, Gemini, or any compatible endpoint. It reaches you on **WeChat, Telegram, a Web UI, or a headless CLI**.
+**Philont: Selfhood Engineering.** Most open-source agents are **task runners** — powerful at carrying out what you ask, but tools all the same. Philont is built to be a **being** instead: intrinsic drives that research while you're away, memory that survives every session and channel, and autonomy that stays **bounded** — every action passes an auditable permission layer, and its core values sit behind red lines it cannot rewrite itself. Anchored to an execution ledger of what actually happened, it's structurally unable to **pretend success**. Because its intelligence lives in the **loop, not the model**, it runs on a model ~100× cheaper than the frontier (DeepSeek Flash class); bring your own: Claude, DeepSeek, GLM, Kimi, MiniMax, Gemini, or any compatible endpoint. Self-hosted on your own machine, it reaches you on **WeChat, Telegram, a Web UI, or a headless CLI**.
 
 > 📖 **Deep dive: the [Philont Wiki](https://github.com/ruozhuoruoyu/Philont-Agent/wiki)** (English / 中文) — [Architecture](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Architecture) · [Selfhood Engineering](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Selfhood-Engineering) · [Honesty Gates](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Honesty-Gates) · [Plan Protocol](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Plan-Protocol) · [Deep Reasoning](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Deep-Reasoning) · [Why a Cheap Model Is Enough](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough)
 
@@ -42,11 +42,12 @@ Open **http://localhost:5173**. The **Memory** tab shows what Philont learns as 
 
 ## Why Philont
 
-One idea, applied everywhere: **an agent's reliability comes from the loop it runs, not the prompt it reads.** A prompt instruction is a suggestion the model can ignore; a loop is code it cannot. Three consequences:
+One idea, applied everywhere: **an agent's reliability comes from the loop it runs, not the prompt it reads.** A prompt instruction is a suggestion the model can ignore; a loop is code it cannot. Four consequences:
 
 - **It can't fake success.** Every turn is anchored to an **execution ledger** — the real record of what tools ran — and a family of honesty gates compares every claim ("done", "sent", "proved", "remembered") against it, forcing an honest regeneration when they diverge. → [Honesty Gates](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Honesty-Gates)
 - **A cheap model is enough.** The gap between a frontier model and a cheap one on long tasks is a small, predictable set of failure modes (winging it, premature "done", fabricated numbers, blind retries) — and each one is caught by a runtime mechanism instead of paid for in frontier tokens. → [Why a Cheap Model Is Enough](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough)
 - **It's a being, not a task runner.** Intrinsic drives (curiosity / pursuit / commitment) generate its own goals at idle time; its personality traits are **derived from its own track record**, not constants; it keeps an evidence-backed self-model of how it actually behaves; and its constitution evolves only through amendment proposals **you ratify** — red lines can never be amended. All of it visible: send `/autonomy` in chat or open the dashboard. → [Selfhood Engineering](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Selfhood-Engineering) · [design doc](docs/design/selfhood_closure.md)
+- **It remembers — episodically and procedurally.** A 5-layer memory (timeline, actions, FTS notes, facts, skills) persists across every session and channel; a service's prose guide is compiled once into a machine-checked spec instead of being re-read and mis-remembered on every call. → [Memory System](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Memory-System)
 
 | | OpenClaw | Hermes | **Philont** |
 |---|:---:|:---:|:---:|
@@ -74,7 +75,7 @@ OpenClaw and Hermes are excellent at *doing what you ask* — and we [gratefully
 | **Permission & audit layer** | Every tool call passes a 3×4 capability matrix (read/write/execute × local/network/system/self) with a SHA-256-chained audit log. Approving one local write/execute unlocks the **research workflow set** (write → run → download loop) for 30 minutes — one "ok" per task, not twelve — while destructive deletes and external/untrusted execution stay per-call. A validator chain blocks sensitive paths (`~/.ssh`, `.env`, …) and catastrophic commands (`rm -rf /`, fork bombs, secret-exfil pipes). See **[SECURITY-DESIGN.md](SECURITY-DESIGN.md)** for exactly what is and isn't enforced today. |
 | **5-layer persistent memory** | SQLite-backed raw timeline, action log, FTS notes, structured facts, and learned skills — cross-session, cross-channel. Skills carry maturity grades, decay, and **reuse-time verification**: a recipe that stops working is caught by its own check and demoted. |
 | **Autonomy you can see** | While you're away, drives research knowledge gaps and advance stalled goals under strict budgets; important findings (new sourced facts only) reach you at discovery time via push. `/autonomy` in chat — or the Web UI dashboard — shows the agenda, live traits, self-observations, and anything awaiting your approval. |
-| **MCP, plugins & BYOM** | Mount any MCP server (Playwright gives it a full browser), load sandboxed plugins, and point it at any Anthropic- or OpenAI-compatible model with a config change. |
+| **MCP, plugins & BYOM** | Mount any MCP server (Playwright gives it a full browser), load sandboxed plugins, add vision on a dedicated multimodal endpoint if your main model isn't multimodal, and point it at any Anthropic- or OpenAI-compatible model with a config change. |
 
 ---
 
