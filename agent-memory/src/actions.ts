@@ -161,4 +161,27 @@ export class ActionLog {
       .all(...params) as ActionRow[];
     return rows.map(rowToAction);
   }
+
+  /**
+   * H3 (skill_self_repair.md): all actions that were executed while a given skill's `linked_skill`
+   * was set (i.e. actions taken via `use_skill(<skillName>)`), across every session — the raw
+   * trajectories a repair diagnosis reads, uses `idx_actions_skill`. Ordered DESC (most recent first)
+   * so a limited fetch favors the recipe's latest, most relevant failures.
+   */
+  getBySkill(skillName: string, opts: { onlyFailed?: boolean; limit?: number } = {}): Action[] {
+    const limit = opts.limit ?? 30;
+    const conds: string[] = ['linked_skill = ?'];
+    const params: unknown[] = [skillName];
+    if (opts.onlyFailed) conds.push('success = 0');
+    params.push(limit);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_actions
+         WHERE ${conds.join(' AND ')}
+         ORDER BY timestamp DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(...params) as ActionRow[];
+    return rows.map(rowToAction);
+  }
 }

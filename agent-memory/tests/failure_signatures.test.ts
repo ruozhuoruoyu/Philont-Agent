@@ -450,3 +450,63 @@ test('listRecentFailures: sessionId + sinceTs 组合 — sessionId 过滤后再 
   assert.match(r[0].result ?? '', /A fail/);
   h.close();
 });
+
+// ── ActionLog.getBySkill (H3, skill_self_repair.md) ──────────────────────
+
+test('getBySkill: only actions with the matching linked_skill, across every session', () => {
+  const h = openMemoryDb(':memory:');
+  h.actions.log({
+    sessionId: 's1', toolName: 'shell', params: {}, result: 'ok', success: true,
+    linkedSkill: 'deploy-recipe',
+  });
+  h.actions.log({
+    sessionId: 's2', toolName: 'shell', params: {}, result: 'boom', success: false,
+    linkedSkill: 'deploy-recipe',
+  });
+  h.actions.log({
+    sessionId: 's1', toolName: 'shell', params: {}, result: 'unrelated', success: false,
+    linkedSkill: 'other-recipe',
+  });
+  h.actions.log({
+    sessionId: 's3', toolName: 'shell', params: {}, result: 'no skill', success: false,
+  });
+
+  const all = h.actions.getBySkill('deploy-recipe');
+  assert.equal(all.length, 2);
+  for (const a of all) assert.equal(a.linkedSkill, 'deploy-recipe');
+  h.close();
+});
+
+test('getBySkill: onlyFailed narrows to success=0', () => {
+  const h = openMemoryDb(':memory:');
+  h.actions.log({
+    sessionId: 's', toolName: 'shell', params: {}, result: 'ok', success: true,
+    linkedSkill: 'r1',
+  });
+  h.actions.log({
+    sessionId: 's', toolName: 'shell', params: {}, result: 'fail', success: false,
+    linkedSkill: 'r1',
+  });
+
+  assert.equal(h.actions.getBySkill('r1').length, 2);
+  const failed = h.actions.getBySkill('r1', { onlyFailed: true });
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].success, false);
+  h.close();
+});
+
+test('getBySkill: DESC order + limit truncation, unknown skill -> []', () => {
+  const h = openMemoryDb(':memory:');
+  for (let i = 0; i < 5; i++) {
+    h.actions.log({
+      sessionId: 's', toolName: 'shell', params: {}, result: `attempt ${i}`, success: false,
+      linkedSkill: 'flaky-recipe',
+    });
+  }
+  const limited = h.actions.getBySkill('flaky-recipe', { limit: 2 });
+  assert.equal(limited.length, 2);
+  assert.match(limited[0].result ?? '', /attempt 4/); // most recent first
+
+  assert.equal(h.actions.getBySkill('never-used').length, 0);
+  h.close();
+});

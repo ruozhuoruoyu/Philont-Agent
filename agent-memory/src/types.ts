@@ -2,6 +2,7 @@
  * Core types for the memory layer
  */
 import type { RecipeVerification } from './skill_recipes.js';
+import type { SkillRevision } from './skill_repair.js';
 
 // ── Layer 2: Structured Facts ─────────────────────────────────────────────────
 
@@ -217,6 +218,11 @@ export interface Skill {
    */
   verification: RecipeVerification | null;
   toolPolicy: string[] | null;
+  /**
+   * v35 (H3): append-only history of prior (actionTemplate, verification, toolPolicy) snapshots,
+   * written by `SkillStore.reviseRecipe()` before each overwrite. Empty for a never-revised skill.
+   */
+  revisionHistory: SkillRevision[];
 }
 
 export interface SkillInput {

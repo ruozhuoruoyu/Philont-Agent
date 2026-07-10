@@ -86,6 +86,13 @@ export {
 } from './drivers/pursuit_driver.js';
 export type { PursuitDriverConfig } from './drivers/pursuit_driver.js';
 
+/** H3 (skill_self_repair.md) — exported for tests; NOT in AUTONOMOUS_DRIVERS yet, see the driver's own doc comment. */
+export {
+  SkillRepairDriver,
+  DEFAULT_SKILL_REPAIR_CONFIG,
+} from './drivers/skill_repair_driver.js';
+export type { SkillRepairDriverConfig } from './drivers/skill_repair_driver.js';
+
 // K7 → K8 bridge
 export {
   collectK7BridgeInitiatives,

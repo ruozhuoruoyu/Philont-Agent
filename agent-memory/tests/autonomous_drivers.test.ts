@@ -10,11 +10,13 @@ import {
   GapDriver,
   CuriosityDriver,
   DEFAULT_CURIOSITY_CONFIG,
+  SkillRepairDriver,
   extractSpecificTokens,
   type MemorySnapshot,
 } from '../src/index.js';
 import type { Fact, Pursuit, Skill } from '../src/types.js';
 import type { RoutingRule } from '../src/routing_rules.js';
+import { REPAIR_REASON_PREFIX, type SkillRevision } from '../src/skill_repair.js';
 
 const NOW = 1_750_000_000_000; // 固定时刻方便复现
 
@@ -95,6 +97,7 @@ function skill(over: Partial<Skill> = {}): Skill {
     source: null,
     verification: null,
     toolPolicy: null,
+    revisionHistory: [],
     ...over,
   };
 }
@@ -405,5 +408,86 @@ test('CuriosityDriver: maxProposals 截断', () => {
   const ps = d.propose(snap({
     recentTimelineTokens: ['CVE-1', 'CVE-2', 'CVE-3', 'CVE-4'],
   }));
+  assert.equal(ps.length, 2);
+});
+
+// ── SkillRepairDriver (H3, skill_self_repair.md) ─────────────────────────
+
+function demotedRecipeSkill(over: Partial<Skill> = {}): Skill {
+  return skill({
+    maturity: 'playbook',
+    verification: { kind: 'tool_result_ok', check: 'readFile' },
+    toolPolicy: ['shell', 'readFile'],
+    actionTemplate: 'call shell then readFile',
+    failureCount: 2,
+    ...over,
+  });
+}
+
+test('SkillRepairDriver: demoted recipe (playbook + verification) 命中', () => {
+  const d = new SkillRepairDriver();
+  const ps = d.propose(snap({ skills: [demotedRecipeSkill()] }));
+  assert.equal(ps.length, 1);
+  assert.equal(ps[0].kind, 'skill_repair');
+  assert.equal(ps[0].targetRef, 'skill:web-research');
+  assert.equal(ps[0].plan?.[0].tool, 'deep_explore');
+});
+
+test('SkillRepairDriver: demoted prose lesson(无 verification)不命中 — 那是 GapDriver skill_failing 的范围', () => {
+  const d = new SkillRepairDriver();
+  const ps = d.propose(snap({
+    skills: [skill({ maturity: 'playbook', verification: null })],
+  }));
+  assert.equal(ps.length, 0);
+});
+
+test('SkillRepairDriver: 未被降级的 recipe(draft/confirmed/stable)不命中', () => {
+  const d = new SkillRepairDriver();
+  for (const maturity of ['draft', 'confirmed', 'stable'] as const) {
+    const ps = d.propose(snap({
+      skills: [demotedRecipeSkill({ maturity })],
+    }));
+    assert.equal(ps.length, 0, `maturity=${maturity} 不该命中`);
+  }
+});
+
+test('SkillRepairDriver: 修复次数达上限(MAX_REPAIR_ATTEMPTS)后不再提案 — 防抖', () => {
+  const d = new SkillRepairDriver();
+  const revisionHistory: SkillRevision[] = Array.from({ length: 3 }, (_, i) => ({
+    at: NOW - i, actionTemplate: 'x', verification: null, toolPolicy: null,
+    reason: `${REPAIR_REASON_PREFIX}sess-${i}`,
+  }));
+  const ps = d.propose(snap({
+    skills: [demotedRecipeSkill({ revisionHistory })],
+  }));
+  assert.equal(ps.length, 0);
+});
+
+test('SkillRepairDriver: 非修复来源的 revision 不计入上限', () => {
+  const d = new SkillRepairDriver();
+  const revisionHistory: SkillRevision[] = Array.from({ length: 3 }, () => ({
+    at: NOW, actionTemplate: 'x', verification: null, toolPolicy: null, reason: 'manual edit',
+  }));
+  const ps = d.propose(snap({
+    skills: [demotedRecipeSkill({ revisionHistory })],
+  }));
+  assert.equal(ps.length, 1);
+});
+
+test('SkillRepairDriver: 24h 已 done 的 targetRef 跳过', () => {
+  const d = new SkillRepairDriver();
+  const ps = d.propose(snap({
+    skills: [demotedRecipeSkill()],
+    recentDoneTargetRefs: new Set(['skill:web-research']),
+  }));
+  assert.equal(ps.length, 0);
+});
+
+test('SkillRepairDriver: maxProposals 截断,按 utility 排序', () => {
+  const d = new SkillRepairDriver({ maxProposals: 2 });
+  const skills = Array.from({ length: 5 }, (_, i) =>
+    demotedRecipeSkill({ name: `recipe-${i}` }),
+  );
+  const ps = d.propose(snap({ skills }));
   assert.equal(ps.length, 2);
 });

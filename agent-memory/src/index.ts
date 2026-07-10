@@ -363,6 +363,8 @@ export {
   DEFAULT_GAP_CONFIG,
   PursuitDriver,
   DEFAULT_PURSUIT_CONFIG,
+  SkillRepairDriver,
+  DEFAULT_SKILL_REPAIR_CONFIG,
   extractSpecificTokens,
   // K7 → K8 bridge (2026-05-06)
   collectK7BridgeInitiatives,
@@ -402,6 +404,7 @@ export type {
   ExecutorNoteProposal,
   GapDriverConfig,
   PursuitDriverConfig,
+  SkillRepairDriverConfig,
   Initiative,
   InitiativeExecutor,
   InitiativeExecutorOptions,

@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 34;
+export const SCHEMA_VERSION = 35;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -171,7 +171,9 @@ CREATE TABLE IF NOT EXISTS memory_skills (
   source           TEXT,
   -- v33 (H2): callable-recipe fields. NULL = advisory lesson (today's behavior); set = verified callable recipe.
   verification     TEXT,   -- JSON RecipeVerification { kind, check }
-  tool_policy      TEXT    -- JSON string[] of allowed tool names
+  tool_policy      TEXT,   -- JSON string[] of allowed tool names
+  -- v35 (H3): append-only revision history for reviseRecipe(); JSON SkillRevision[]. NULL = never revised.
+  revision_history TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_skills_use_count ON memory_skills(use_count DESC);
@@ -1162,6 +1164,15 @@ function migrateV33ToV34(db: Database.Database): void {
   addColumnIfMissing(db, 'reasoning_sessions', 'rounds_run', 'INTEGER NOT NULL DEFAULT 0');
 }
 
+/**
+ * v34 → v35: memory_skills.revision_history (H3, skill_self_repair.md) — append-only JSON history
+ * of a recipe's prior (action_template, verification, tool_policy) snapshots, written by
+ * SkillStore.reviseRecipe() before overwriting. NULL for every skill until first revised.
+ */
+function migrateV34ToV35(db: Database.Database): void {
+  addColumnIfMissing(db, 'memory_skills', 'revision_history', 'TEXT');
+}
+
 function migrateV19ToV20(db: Database.Database): void {
   if (!tableExists(db, 'memory_plans')) return; // guard: fresh init already has the column
   const cols = db.prepare(`PRAGMA table_info(memory_plans)`).all() as Array<{
@@ -1409,6 +1420,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 34) {
     migrateV33ToV34(db);
+  }
+  if (current < 35) {
+    migrateV34ToV35(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

@@ -569,19 +569,19 @@ test('scoreSkill: frequent success > rare success > frequent failure', () => {
     id: '1', name: 'winner', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 10, lastUsedAt: recent, createdAt: 0,
     successCount: 10, failureCount: 0, lastFailureAt: null, lastSuccessAt: recent,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const rare = {
     id: '2', name: 'rare', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 1, lastUsedAt: recent, createdAt: 0,
     successCount: 1, failureCount: 0, lastFailureAt: null, lastSuccessAt: recent,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'draft' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'draft' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const loser = {
     id: '3', name: 'loser', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 10, lastUsedAt: recent, createdAt: 0,
     successCount: 2, failureCount: 8, lastFailureAt: recent, lastSuccessAt: recent,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'deprecated' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'deprecated' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
 
   const scores = [winner, rare, loser].map((s) => scoreSkill(s, now));
@@ -595,13 +595,13 @@ test('scoreSkill: recency decay discounts long-unused skills', () => {
     id: '1', name: 'old', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 5, lastUsedAt: now - 90 * 86_400_000, createdAt: 0,
     successCount: 5, failureCount: 0, lastFailureAt: null, lastSuccessAt: now - 90 * 86_400_000,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const fresh = {
     id: '2', name: 'fresh', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 2, lastUsedAt: now, createdAt: 0,
     successCount: 2, failureCount: 0, lastFailureAt: null, lastSuccessAt: now,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
 
   assert.ok(scoreSkill(fresh, now) > scoreSkill(old, now), '最近用的 > 90 天前用的');
@@ -804,7 +804,7 @@ test('scoreSkill: negative 比 positive 衰减更慢(同参数下分数更高)',
     id: '1', name: 'p', description: '', triggerKeywords: [], actionTemplate: '',
     useCount: 3, lastUsedAt: daysAgo60, createdAt: 0,
     successCount: 3, failureCount: 0, lastFailureAt: null, lastSuccessAt: daysAgo60,
-    consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null,
+    consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const negative = { ...positive, id: '2', name: 'n', kind: 'negative' as const };
   // positive half-life 30d → 60d 前用过衰减成 0.25;negative half-life 90d → 0.63
@@ -1167,4 +1167,79 @@ test('createSkill: verification + tool_policy round-trip (H2 recipe persistence)
   const l = store.getByName('plain-lesson')!;
   assert.equal(l.verification, null);
   assert.equal(l.toolPolicy, null);
+});
+
+// ── SkillStore.reviseRecipe (H3, skill_self_repair.md) ────────────────────
+
+function demotedRecipe(store: ReturnType<typeof openMemoryDb>['skills'], name = 'flaky-recipe') {
+  store.createSkill({
+    name,
+    description: 'do the thing',
+    triggerKeywords: ['x'],
+    actionTemplate: 'call shell then readFile',
+    verification: { kind: 'tool_result_ok', check: 'readFile' },
+    toolPolicy: ['shell', 'readFile'],
+    maturity: 'playbook', // as if just demoted by recordLinkedSkillOutcomes
+  });
+  return name;
+}
+
+test('reviseRecipe: overwrites actionTemplate/verification/toolPolicy and re-enters at draft', () => {
+  const { skills: store } = openMemoryDb(':memory:');
+  const name = demotedRecipe(store);
+
+  const revised = store.reviseRecipe(name, {
+    actionTemplate: 'call shell with --fixed-flag then readFile',
+    verification: { kind: 'tool_result_ok', check: 'readFile (fixed)' },
+    reason: 'skill_repair:sess-abc',
+  });
+
+  assert.ok(revised);
+  assert.equal(revised!.actionTemplate, 'call shell with --fixed-flag then readFile');
+  assert.deepEqual(revised!.verification, { kind: 'tool_result_ok', check: 'readFile (fixed)' });
+  assert.deepEqual(revised!.toolPolicy, ['shell', 'readFile']); // omitted -> unchanged
+  assert.equal(revised!.maturity, 'draft', 'a revision must re-earn trust, not stay at playbook');
+});
+
+test('reviseRecipe: appends the OUTGOING version to revision_history (measurable before/after)', () => {
+  const { skills: store } = openMemoryDb(':memory:');
+  const name = demotedRecipe(store);
+  const before = store.getByName(name)!;
+  assert.deepEqual(before.revisionHistory, []);
+
+  store.reviseRecipe(name, { actionTemplate: 'v2 steps', reason: 'skill_repair:sess-1' });
+  const afterFirst = store.getByName(name)!;
+  assert.equal(afterFirst.revisionHistory.length, 1);
+  assert.equal(afterFirst.revisionHistory[0].actionTemplate, 'call shell then readFile'); // the ORIGINAL, not v2
+  assert.equal(afterFirst.revisionHistory[0].reason, 'skill_repair:sess-1');
+  assert.deepEqual(afterFirst.revisionHistory[0].verification, before.verification);
+
+  store.reviseRecipe(name, { actionTemplate: 'v3 steps', reason: 'skill_repair:sess-2' });
+  const afterSecond = store.getByName(name)!;
+  assert.equal(afterSecond.revisionHistory.length, 2);
+  assert.equal(afterSecond.revisionHistory[1].actionTemplate, 'v2 steps'); // v2 preserved when superseded by v3
+  assert.equal(afterSecond.actionTemplate, 'v3 steps');
+});
+
+test('reviseRecipe: no-op on a prose lesson (no verification) — that is updateSkill\'s job', () => {
+  const { skills: store } = openMemoryDb(':memory:');
+  store.createSkill({ name: 'lesson', description: 'x', triggerKeywords: [], actionTemplate: 'do x' });
+
+  const result = store.reviseRecipe('lesson', { actionTemplate: 'do y', reason: 'skill_repair:sess-1' });
+  assert.equal(result, null);
+  assert.equal(store.getByName('lesson')!.actionTemplate, 'do x'); // untouched
+});
+
+test('reviseRecipe: unknown skill name -> null', () => {
+  const { skills: store } = openMemoryDb(':memory:');
+  assert.equal(store.reviseRecipe('does-not-exist', { reason: 'skill_repair:x' }), null);
+});
+
+test('reviseRecipe: emits changed event like other mutators', () => {
+  const { skills: store } = openMemoryDb(':memory:');
+  const name = demotedRecipe(store);
+  let fired: unknown = null;
+  store.once('changed', (ev) => { fired = ev; });
+  store.reviseRecipe(name, { actionTemplate: 'v2', reason: 'skill_repair:sess-1' });
+  assert.deepEqual(fired, { type: 'updated', name });
 });

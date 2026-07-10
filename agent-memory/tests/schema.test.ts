@@ -36,7 +36,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 34);
+  assert.equal(SCHEMA_VERSION, 35);
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
   assert.ok(tableExists(db, 'reasoning_sessions'));
@@ -116,6 +116,8 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   for (const col of ['verification', 'tool_policy']) {
     assert.ok(hasColumn(db, 'memory_skills', col), `memory_skills 缺列 ${col}`);
   }
+  // v35 (H3): skill self-repair revision history
+  assert.ok(hasColumn(db, 'memory_skills', 'revision_history'), 'memory_skills 缺列 revision_history');
 
   // memory_actions 回链列
   assert.ok(hasColumn(db, 'memory_actions', 'linked_skill'));

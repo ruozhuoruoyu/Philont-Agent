@@ -16,6 +16,7 @@ import { EventEmitter } from 'node:events';
 import type { Skill, SkillInput, SkillMaturity } from './types.js';
 import type { RecipeVerification } from './skill_recipes.js';
 import { nextMaturity, parseMaturity } from './skill_maturity.js';
+import { parseRevisionHistory, type SkillRevision } from './skill_repair.js';
 
 /** SkillStore event payload */
 export interface SkillChangeEvent {
@@ -45,6 +46,8 @@ interface SkillRow {
   /** v33 (H2): callable-recipe fields, JSON-encoded. NULL = advisory prose lesson. */
   verification: string | null;
   tool_policy: string | null;
+  /** v35 (H3): append-only revision history, JSON-encoded. NULL = never revised. */
+  revision_history: string | null;
 }
 
 /** Skill composite scoring constants */
@@ -111,6 +114,7 @@ function rowToSkill(row: SkillRow): Skill {
     source: row.source ?? null,
     verification: parseRecipeJson<RecipeVerification>(row.verification),
     toolPolicy: parseRecipeJson<string[]>(row.tool_policy),
+    revisionHistory: parseRevisionHistory(row.revision_history),
   };
 }
 
@@ -172,6 +176,7 @@ export class SkillStore extends EventEmitter {
       lastSuccessAt: null,
       consecutiveFailures: 0,
       maturity,
+      revisionHistory: [],
       kind,
       source,
       verification,
@@ -494,6 +499,68 @@ export class SkillStore extends EventEmitter {
          WHERE name = ?`
       )
       .run(description, JSON.stringify(triggerKeywords), actionTemplate, kind, source, whenToUse || null, name);
+
+    this.emit('changed', { type: 'updated', name } satisfies SkillChangeEvent);
+    return this.getByName(name);
+  }
+
+  /**
+   * H3 (skill_self_repair.md): overwrite a callable recipe's steps/verification/tool-policy after a
+   * diagnosis, preserving the OUTGOING values in `revision_history` first (so "did rev N+1 beat rev N"
+   * is measurable — the whole point of repairing rather than just demoting).
+   *
+   * Dedicated method rather than folding into `updateSkill`: recipe fields need the append-only
+   * history bookkeeping every other `updateSkill` field does not, and a revision always re-enters the
+   * maturity ladder at 'draft' (it has not yet re-earned trust) regardless of where it was ('playbook'
+   * after demotion, in the common case).
+   *
+   * No-op (returns null) on a skill that isn't a callable recipe (`verification` currently null) —
+   * revising a prose lesson's `actionTemplate` is what `updateSkill` is for.
+   */
+  reviseRecipe(
+    name: string,
+    updates: {
+      actionTemplate?: string;
+      verification?: RecipeVerification | null;
+      toolPolicy?: string[] | null;
+      /** why — e.g. `skill_repair:<deep_explore session id>` (see skill_repair.ts REPAIR_REASON_PREFIX) */
+      reason: string;
+    },
+  ): Skill | null {
+    const existing = this.getByName(name);
+    if (!existing || existing.verification == null) return null;
+
+    const outgoing: SkillRevision = {
+      at: Date.now(),
+      actionTemplate: existing.actionTemplate,
+      verification: existing.verification,
+      toolPolicy: existing.toolPolicy,
+      reason: updates.reason,
+    };
+    const revisionHistory = [...existing.revisionHistory, outgoing];
+
+    const actionTemplate = updates.actionTemplate ?? existing.actionTemplate;
+    const verification = Object.prototype.hasOwnProperty.call(updates, 'verification')
+      ? (updates.verification ?? null)
+      : existing.verification;
+    const toolPolicy = Object.prototype.hasOwnProperty.call(updates, 'toolPolicy')
+      ? (updates.toolPolicy ?? null)
+      : existing.toolPolicy;
+
+    this.db
+      .prepare<[string, string | null, string | null, string, string, string]>(
+        `UPDATE memory_skills
+         SET action_template = ?, verification = ?, tool_policy = ?, maturity = ?, revision_history = ?
+         WHERE name = ?`
+      )
+      .run(
+        actionTemplate,
+        verification ? JSON.stringify(verification) : null,
+        toolPolicy ? JSON.stringify(toolPolicy) : null,
+        'draft' satisfies SkillMaturity,
+        JSON.stringify(revisionHistory),
+        name,
+      );
 
     this.emit('changed', { type: 'updated', name } satisfies SkillChangeEvent);
     return this.getByName(name);
