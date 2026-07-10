@@ -151,14 +151,28 @@ ladder.
   - `SkillRepairDriver` registered in `AUTONOMOUS_DRIVERS` behind `PHILONT_SKILL_REPAIR` (**default off**);
     the server re-checks `isRepairCandidate` at execution time, so a recipe repaired or deleted between
     propose and run is never rewritten.
-  - Verified: a subprocess test asserts the driver is absent by default and present under the flag; a
-    closed-loop test drives three real repairs and asserts the ceiling then trips.
+  - Verified three ways, from cheapest to most real:
+    1. **Segment unit tests** — `driver.propose` / executor `skillRepairContext` path / `applySkillRevision`
+       each in isolation (`autonomous_drivers`, `autonomous_executor`, `skill_revision_writer` test files).
+    2. **End-to-end pipeline, canned LLM** (`agent-memory/tests/skill_repair_loop.test.ts`) — a real DB + a
+       real `startAutonomousLoop` tick drives driver→executor→OutcomeHook and asserts the recipe is actually
+       rewritten, re-enters `draft`, the old version lands in `revision_history`, a repaired recipe stops
+       being a candidate (proven by the reverse-control: demote it again → it reappears, so the "0 proposals"
+       is not just 24h dedup), and the attempt ceiling trips after three. Also asserts an empty driver set
+       leaves the recipe untouched (the substance of "default off"). A subprocess test on the server side
+       (`server/tests/skill_repair_flag.test.ts`) asserts the driver is absent by default and present only
+       under `PHILONT_SKILL_REPAIR=1` (env is read at module load, so this needs a fresh process, not a
+       post-import env mutation).
+    3. **Real-model dogfood, on demand** (`server/scripts/skill-repair-dogfood.ts`, `npm run
+       skill-repair:dogfood`) — seeds a genuinely broken recipe into a throwaway in-memory DB and runs ONE
+       real LLM diagnosis, printing before/after for eyeball judgement. This is the only check that answers
+       "does a real model produce a *good* fix", which no canned test can.
 
-- **Next (P3, not started)** — flip the default on once a dogfood pass shows repaired recipes measurably
-  outperforming their prior version, which `revision_history` makes measurable for the first time. Until
-  there is data, "does the rewrite actually help" is exactly the question the Rutgers/UNC survey flags as
-  unanswered by every existing benchmark ("no benchmark evaluates evolution longitudinally") — so it must
-  be answered from production, not asserted here.
+- **Next (P3, not started)** — flip the default on once dogfood + production runs show repaired recipes
+  measurably outperforming their prior version, which `revision_history` makes measurable for the first
+  time. Until there is data, "does the rewrite actually help" is exactly the question the Rutgers/UNC survey
+  flags as unanswered by every existing benchmark ("no benchmark evaluates evolution longitudinally") — so
+  it must be answered from production, not asserted here.
 
 ## 6. Non-goals
 

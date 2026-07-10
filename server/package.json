@@ -9,7 +9,8 @@
     "test": "tsx --test tests/*.test.ts",
     "wechat:login": "tsx src/channels/wechat/cli.ts login",
     "wechat:list": "tsx src/channels/wechat/cli.ts list",
-    "wechat:logout": "tsx src/channels/wechat/cli.ts logout"
+    "wechat:logout": "tsx src/channels/wechat/cli.ts logout",
+    "skill-repair:dogfood": "tsx scripts/skill-repair-dogfood.ts"
   },
   "dependencies": {
     "@agent/mcp": "file:../agent-mcp",
