@@ -16,6 +16,7 @@
  *           SKILL_REPAIR_SCENARIO=nested-braces npx tsx scripts/skill-repair-dogfood.ts
  */
 
+import '../src/load-env.js'; // MUST be first: loads .env so createLLMAdapter() sees the real model config
 import {
   openMemoryDb,
   StandardExecutor,
@@ -89,6 +90,19 @@ async function main(): Promise<void> {
       success: false,
       linkedSkill: scenario.name,
     });
+  }
+
+  // Guard: without a real provider, createLLMAdapter() returns the mock (which echoes the prompt's
+  // example JSON), and the run would print a meaningless "inconclusive". Fail loudly instead so the
+  // signal is "your env isn't set", not "the model couldn't fix it".
+  const provider = (process.env.LLM_PROVIDER || 'mock').toLowerCase();
+  if (provider === 'mock') {
+    console.error(
+      '\n✗ No real model configured (LLM_PROVIDER is unset → mock mode).\n' +
+      '  This dogfood needs the SAME env your server uses. Make sure `.env` exists in this dir (or set\n' +
+      '  PHILONT_ENV_FILE) with LLM_PROVIDER + its key — the same config `npm run dev` loads. Nothing was run.',
+    );
+    process.exit(1);
   }
 
   const base = createLLMAdapter();
