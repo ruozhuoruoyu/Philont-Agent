@@ -16,7 +16,10 @@
  *           SKILL_REPAIR_SCENARIO=nested-braces npx tsx scripts/skill-repair-dogfood.ts
  */
 
-import '../src/load-env.js'; // MUST be first: loads .env so createLLMAdapter() sees the real model config
+import dotenv from 'dotenv';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
   openMemoryDb,
   StandardExecutor,
@@ -29,6 +32,31 @@ import {
   type Initiative,
 } from '@agent/memory';
 import { createLLMAdapter } from '../src/llm-adapter.js';
+
+/**
+ * Resolve the SAME env `npm run dev` / the launcher would use, in priority order:
+ *   1. PHILONT_ENV_FILE (what the launcher sets)
+ *   2. ./.env           (dev convention: `cp .env.example .env` in server/)
+ *   3. ~/.philont/.env  (where the launcher keeps it after packaging)
+ * createLLMAdapter reads process.env lazily (inside the factory, not at import), so loading here —
+ * before we call it in main() — is enough; no hoisted side-effect module needed.
+ */
+function loadDogfoodEnv(): string | null {
+  const candidates = [
+    process.env.PHILONT_ENV_FILE,
+    join(process.cwd(), '.env'),
+    join(homedir(), '.philont', '.env'),
+  ].filter((p): p is string => !!p);
+  for (const path of candidates) {
+    if (existsSync(path)) {
+      dotenv.config({ path, override: true });
+      console.log(`[dogfood] loaded env from ${path}`);
+      return path;
+    }
+  }
+  console.warn(`[dogfood] no .env found; looked in:\n  ${candidates.join('\n  ')}`);
+  return null;
+}
 
 /** A broken recipe + the real failure output the model will diagnose from. */
 interface Scenario {
@@ -63,6 +91,7 @@ const SCENARIOS: Record<string, Scenario> = {
 };
 
 async function main(): Promise<void> {
+  loadDogfoodEnv(); // before any createLLMAdapter() / env read
   const scenarioKey = process.env.SKILL_REPAIR_SCENARIO ?? 'missing-binary';
   const scenario = SCENARIOS[scenarioKey];
   if (!scenario) {
@@ -99,8 +128,10 @@ async function main(): Promise<void> {
   if (provider === 'mock') {
     console.error(
       '\n✗ No real model configured (LLM_PROVIDER is unset → mock mode).\n' +
-      '  This dogfood needs the SAME env your server uses. Make sure `.env` exists in this dir (or set\n' +
-      '  PHILONT_ENV_FILE) with LLM_PROVIDER + its key — the same config `npm run dev` loads. Nothing was run.',
+      '  Looked for .env in: PHILONT_ENV_FILE, ./.env, ~/.philont/.env — none set LLM_PROVIDER.\n' +
+      '  Point at your real env: set PHILONT_ENV_FILE to the file `npm run dev` / the launcher uses\n' +
+      '  (usually ~/.philont/.env), or run from a dir that has a .env with LLM_PROVIDER + its key.\n' +
+      '  Nothing was run.',
     );
     process.exit(1);
   }
