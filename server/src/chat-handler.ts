@@ -2107,12 +2107,16 @@ const CLEANUP_SCHEDULE_PAUSE_MS = 15 * 60_000;
 // Autonomous driver registry — single source of truth; dashboard / tests / loop all reference it.
 // PursuitDriver injects an isGranted callback: used to query GrantStore when replaying proactive research "request permission".
 /**
- * H3 skill self-repair kill switch. Default OFF (opt-in): this is the only autonomous driver whose
- * outcome rewrites a reusable artifact (a callable recipe's steps). PHILONT_SKILL_REPAIR=1/on/true/yes.
+ * H3 skill self-repair kill switch. DEFAULT ON (2026-07-11, after two clean dogfood runs — detect-and-
+ * report on a missing-dependency recipe, a real in-place rewrite on a syntax-bug recipe). This is the
+ * only autonomous driver whose outcome rewrites a reusable artifact, so it keeps its own switch:
+ * PHILONT_SKILL_REPAIR=0/off/false/no disables. Safety rails stay in force regardless — only demoted
+ * callable recipes are touched, the diagnosis prompt forbids OS-assuming / privileged / system-mutating
+ * fixes, an inconclusive diagnosis rewrites nothing, and 3 failed repairs retire the recipe from proposals.
  */
 export function skillRepairEnabled(): boolean {
   const v = (process.env.PHILONT_SKILL_REPAIR ?? '').trim().toLowerCase();
-  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
 const AUTONOMOUS_DRIVERS = [
@@ -2154,9 +2158,9 @@ const AUTONOMOUS_DRIVERS = [
   new PursuitDriver(DEFAULT_PURSUIT_CONFIG, (tool) => globalGrants.isGranted(tool)),
   // H3 (skill_self_repair.md): continuous self-evolution — a callable recipe that failed its own reuse
   // verification gets diagnosed from the ledger's real failed runs and rewritten, instead of being
-  // demoted and forgotten. Default OFF while dogfooding: it is the only driver whose outcome REWRITES
-  // a reusable artifact, so it stays opt-in until repaired recipes are shown (via revision_history) to
-  // actually outperform their prior version.
+  // demoted and forgotten. DEFAULT ON (PHILONT_SKILL_REPAIR=0 disables); it is still the only driver
+  // whose outcome REWRITES a reusable artifact, so it keeps its own kill switch and safety rails
+  // (bounded prompt, inconclusive → no rewrite, 3-strike retirement — see skillRepairEnabled).
   ...(skillRepairEnabled() ? [new SkillRepairDriver()] : []),
 ] as const;
 export const autonomousDriverNames: readonly string[] = AUTONOMOUS_DRIVERS.map((d) => d.name);

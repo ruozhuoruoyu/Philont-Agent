@@ -1,6 +1,6 @@
 # Skill Self-Repair (H3) — from demote-and-forget to diagnose-and-rewrite
 
-Status: IMPLEMENTED (P0–P2), shipped default-off behind `PHILONT_SKILL_REPAIR`. Author: ruozhuoruoyu.
+Status: IMPLEMENTED (P0–P3), DEFAULT ON (2026-07-11); `PHILONT_SKILL_REPAIR=0` disables. Author: ruozhuoruoyu.
 The sequel to `skill_recipes.md` (H2): H2 built the verification contract that CATCHES a recipe that
 stopped working; H3 closes the loop it left open — what happens after the catch. Anchored to real
 `file:line`.
@@ -140,11 +140,12 @@ ladder.
    judgement is weakest; today they take the same path, and the honest answer is that a low-confidence
    diagnosis should decline. If dogfooding shows they systematically produce bad rewrites, gate that
    `verification.kind` out of the candidate set rather than escalating the whole loop's machinery.
-5. **Consent.** No new ask, but the feature ships **default-off** (`PHILONT_SKILL_REPAIR`). Recipe
-   *demotion* already happens automatically today with no owner approval; recipe *rewriting* is a strictly
-   larger step — it is the only autonomous driver whose outcome mutates a reusable artifact — so it stays
-   opt-in until dogfooding proves it out. Visible after the fact via `/autonomy` and `revision_history`.
-   (Contrast: constitution amendments stay owner-ratified — this feature does not touch that boundary.)
+5. **Consent.** No new ask. Recipe *demotion* already happens automatically today with no owner
+   approval; recipe *rewriting* is a strictly larger step — the only autonomous driver whose outcome
+   mutates a reusable artifact — so it shipped opt-in first (P2), was validated by dogfood (P3), and is
+   now **default on** with its own kill switch (`PHILONT_SKILL_REPAIR=0`). Visible after the fact via
+   `/autonomy` and `revision_history`. (Contrast: constitution amendments stay owner-ratified — this
+   feature does not touch that boundary.)
 
 ## 5. Rollout
 
@@ -155,16 +156,16 @@ ladder.
 - **P1** — `SkillRepairDriver.propose()` (pure, unit-tested against a fixture `MemorySnapshot`).
   **Shipped.** Initially written with a `plan: [{tool:'deep_explore'}]` and left unregistered; both were
   corrected in P2 (see the note in 3.2 — the driver now emits no plan at all).
-- **P2** — **Shipped.** The loop is closed end to end, default-off:
+- **P2** — **Shipped.** The loop is closed end to end (shipped opt-in; flipped to default-on in P3):
   - `StandardExecutor` gained `skillRepairContext` (resolves the recipe body + its failed ledger runs) and
     renders a diagnosis prompt for `kind==='skill_repair'`; `ExecutorLlmOutput.skillRevision` /
     `InitiativeRunResult.skillRevision` carry the fix back. A stray `skillRevision` on a non-repair
     initiative is dropped; a missing repair context fails the initiative **before** any LLM call.
   - `skillRevisionWriter` OutcomeHook (`autonomous/skill_revision_writer.ts`) applies it via
     `reviseRecipe`, stamping `REPAIR_REASON_PREFIX` so `repairAttemptsExhausted` can enforce the ceiling.
-  - `SkillRepairDriver` registered in `AUTONOMOUS_DRIVERS` behind `PHILONT_SKILL_REPAIR` (**default off**);
-    the server re-checks `isRepairCandidate` at execution time, so a recipe repaired or deleted between
-    propose and run is never rewritten.
+  - `SkillRepairDriver` registered in `AUTONOMOUS_DRIVERS` behind `PHILONT_SKILL_REPAIR`; the server
+    re-checks `isRepairCandidate` at execution time, so a recipe repaired or deleted between propose and
+    run is never rewritten.
   - Verified three ways, from cheapest to most real:
     1. **Segment unit tests** — `driver.propose` / executor `skillRepairContext` path / `applySkillRevision`
        each in isolation (`autonomous_drivers`, `autonomous_executor`, `skill_revision_writer` test files).
@@ -173,20 +174,31 @@ ladder.
        rewritten, re-enters `draft`, the old version lands in `revision_history`, a repaired recipe stops
        being a candidate (proven by the reverse-control: demote it again → it reappears, so the "0 proposals"
        is not just 24h dedup), and the attempt ceiling trips after three. Also asserts an empty driver set
-       leaves the recipe untouched (the substance of "default off"). A subprocess test on the server side
-       (`server/tests/skill_repair_flag.test.ts`) asserts the driver is absent by default and present only
-       under `PHILONT_SKILL_REPAIR=1` (env is read at module load, so this needs a fresh process, not a
+       leaves the recipe untouched (the kill switch's substance). A subprocess test on the server side
+       (`server/tests/skill_repair_flag.test.ts`) asserts the driver is present by default and removed
+       under `PHILONT_SKILL_REPAIR=0` (env is read at module load, so this needs a fresh process, not a
        post-import env mutation).
     3. **Real-model dogfood, on demand** (`server/scripts/skill-repair-dogfood.ts`, `npm run
        skill-repair:dogfood`) — seeds a genuinely broken recipe into a throwaway in-memory DB and runs ONE
        real LLM diagnosis, printing before/after for eyeball judgement. This is the only check that answers
        "does a real model produce a *good* fix", which no canned test can.
 
-- **Next (P3, not started)** — flip the default on once dogfood + production runs show repaired recipes
-  measurably outperforming their prior version, which `revision_history` makes measurable for the first
-  time. Until there is data, "does the rewrite actually help" is exactly the question the Rutgers/UNC survey
-  flags as unanswered by every existing benchmark ("no benchmark evaluates evolution longitudinally") — so
-  it must be answered from production, not asserted here.
+- **P3 — default flipped ON (2026-07-11).** Two dogfood runs against a real model (DeepSeek V4 Pro),
+  covering the two complementary shapes of repair, both came back clean:
+  - `missing-binary` (environment dependency): after the §3.2a prompt hardening, the fix became a
+    `command -v pandoc` pre-check that fails early with a clear message — no `apt-get`, no OS assumption,
+    no install. The model's own summary named the reasoning ("keeps the recipe portable and safe across
+    environments without trying to install software"), i.e. it understood the bound, not lucked into it.
+  - `nested-braces` (pure content/syntax bug): a real in-place rewrite — replaced nested `{…{…}}` with a
+    single top-level block / `vector()` constructor and a concrete working example — proving the tightened
+    prompt did not over-correct into timidity; it still confidently rewrites content when that is the fix.
+
+  On that evidence the shipped default is now ON, with the kill switch, hard rails, and 3-strike
+  retirement intact. This does NOT retire the underlying open question the Rutgers/UNC survey flags ("no
+  benchmark evaluates evolution longitudinally"): two curated scenarios are not production. The live
+  metric to watch is whether a *repaired* recipe's subsequent reuse success rate actually beats its
+  pre-repair version — now measurable per recipe via `revision_history` + the reuse-verify outcomes. If
+  production shows repairs net-harming, the default flips back; that is a data decision, not a design one.
 
 ## 6. Non-goals
 
