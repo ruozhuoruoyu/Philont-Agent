@@ -29,7 +29,13 @@ test('withWebCallCap: cap=0 blocks web immediately; non-web unaffected', async (
   assert.match((await runner('reason_record', {})).output, /ran reason_record/);
 });
 
-import { webDedupEnabled, webDedupKey } from '../src/deep_explore.js';
+import {
+  webDedupEnabled,
+  webDedupKey,
+  searchNearDupEnabled,
+  searchNearDupKey,
+  deliberateSoftAnswerEnabled,
+} from '../src/deep_explore.js';
 
 test('webDedupEnabled: default ON, =0 off', () => {
   const prev = process.env.PHILONT_DEEP_EXPLORE_WEB_DEDUP;
@@ -65,4 +71,44 @@ test('webDedupKey: normalizes search query (case/whitespace); null for non-web /
   assert.equal(webDedupKey('reason_decompose', { parentNodeId: 'n1' }), null);
   assert.equal(webDedupKey('webFetch', {}), null);
   assert.equal(webDedupKey('webSearch', { query: '   ' }), null);
+});
+
+test('searchNearDupKey: reworded query with same key terms → same key (year/order/stopword-insensitive)', () => {
+  // The production log's actual repeats: same PFR question, different wording each round.
+  assert.equal(
+    searchNearDupKey('webSearch', { query: 'Terence Tao PFR formalization Lean 2024 2025 Polynomial Freiman Ruzsa' }),
+    searchNearDupKey('webSearch', { query: 'Polynomial Freiman-Ruzsa PFR Lean formalization of Tao Terence' }),
+    'same significant terms, different order/year → collapse',
+  );
+  // Adding a genuinely new subject term keeps it distinct (do not over-block refinement).
+  assert.notEqual(
+    searchNearDupKey('webSearch', { query: 'Goldbach conjecture Lean mathlib' }),
+    searchNearDupKey('webSearch', { query: 'Goldbach conjecture Lean mathlib DeepSeek prover' }),
+    'a new discriminating term → distinct query, not blocked',
+  );
+  // But it must NOT collapse two genuinely different questions that share one word.
+  assert.notEqual(
+    searchNearDupKey('webSearch', { query: 'Lean software verification industry' }),
+    searchNearDupKey('webSearch', { query: 'Lean mathematics formalization number theory' }),
+  );
+  assert.equal(searchNearDupKey('webFetch', { url: 'https://x' }), null, 'fetch is exact-keyed, not near-dup');
+  assert.equal(searchNearDupKey('webSearch', { query: '2024 the latest' }), null, 'only stopwords/years → null');
+});
+
+test('searchNearDupEnabled / deliberateSoftAnswerEnabled: default ON, =off disables', () => {
+  for (const [envVar, fn] of [
+    ['PHILONT_DEEP_EXPLORE_SEARCH_NEARDUP', searchNearDupEnabled],
+    ['PHILONT_DEEP_EXPLORE_SOFT_ANSWER', deliberateSoftAnswerEnabled],
+  ] as const) {
+    const prev = process.env[envVar];
+    try {
+      delete process.env[envVar];
+      assert.equal(fn(), true, `${envVar} default ON`);
+      process.env[envVar] = 'off';
+      assert.equal(fn(), false, `${envVar}=off disables`);
+    } finally {
+      if (prev === undefined) delete process.env[envVar];
+      else process.env[envVar] = prev;
+    }
+  }
 });

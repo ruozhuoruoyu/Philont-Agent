@@ -305,6 +305,28 @@ const DELIBERATE_ANSWER_MAX_ROUNDS = (() => {
 })();
 
 /**
+ * Deliberate SOFT auto-answer (default ON). Same terminal CONDITIONS as the hard auto-answer, but a
+ * different ACTION: deliver the synthesized conclusion while keeping the session 'active'. This is the
+ * safe re-enable of the exit ramp that the hard-close version (deliberateAutoAnswerEnabled) was reverted
+ * for: a terminal 'answered' session drops out of active-only continue/status resolution, so the next
+ * "继续" hops to a different open session owned by the same user → incoherent context → confabulation.
+ * Keeping the session active means continue/status keep resolving to THIS session → no hop → no
+ * confabulation, while the user still gets a real conclusion instead of "reply continue" forever.
+ * Disable with PHILONT_DEEP_EXPLORE_SOFT_ANSWER=0/off.
+ */
+export function deliberateSoftAnswerEnabled(): boolean {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_SOFT_ANSWER ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+/**
+ * Per-session roundsRun index at which a soft answer was last delivered. Suppresses re-emitting the same
+ * synthesis on a subsequent NON-substantive round (so "继续" on a stalled session escalates/redirects
+ * instead of repeating the identical report); a later SUBSTANTIVE round clears the suppression so a
+ * refreshed synthesis can be delivered. Module-scoped, mirrors sessionWebKeys' lifetime.
+ */
+const sessionLastSoftAnswerRound = new Map<string, number>();
+
+/**
  * Did this round make SUBSTANTIVE progress, or just trivial churn around a wall? Substantive =
  *  (1) a node went open→refuted/dead_end (a real kill / backtrack), OR
  *  (2) a node near the root (depth ≤ 1) was settled (matters regardless of value), OR
@@ -653,6 +675,38 @@ export function webDedupKey(name: string, input: Record<string, unknown>): strin
   return null;
 }
 
+/** Paraphrase-resistant search dedup (default ON; PHILONT_DEEP_EXPLORE_SEARCH_NEARDUP=0/off disables). */
+export function searchNearDupEnabled(): boolean {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_SEARCH_NEARDUP ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+/** Stop/boilerplate tokens that carry no discriminating signal in a search query — dropped before canonicalizing. */
+const SEARCH_NEARDUP_STOPWORDS = new Set([
+  'the', 'a', 'an', 'of', 'for', 'to', 'in', 'on', 'and', 'or', 'vs', 'versus', 'with', 'is', 'are',
+  'how', 'what', 'which', 'new', 'recent', 'latest', 'current', 'state', 'progress', 'overview',
+  'survey', 'review', 'update', 'about', 'best', 'top', 'site',
+]);
+/**
+ * Canonical near-dup key for a webSearch query: lowercase, strip boolean/quote operators, drop bare
+ * 4-digit years (2024/2025/… — the log's reworded repeats differed only by year) and stopwords, then
+ * SORT the remaining significant tokens. Two queries with the same significant-token SET collapse to
+ * one key, so "Tao PFR formalization Lean 2024 2025" and "Tao PFR Lean formalization 2024" dedup —
+ * while a query that adds a genuinely new term (a different subject) stays distinct. Only affects
+ * webSearch (never webFetch, whose URL is already exact). Returns null when nothing significant remains.
+ */
+export function searchNearDupKey(name: string, input: Record<string, unknown>): string | null {
+  if (name !== 'webSearch') return null;
+  const q = typeof input.query === 'string' ? input.query : '';
+  if (!q.trim()) return null;
+  const tokens = q
+    .toLowerCase()
+    .replace(/[^a-z0-9一-鿿]+/g, ' ') // punctuation → space: splits hyphens (freiman-ruzsa), quotes, OR/AND operators
+    .split(/\s+/)
+    .filter((t) => t.length > 1 && !/^\d{4}$/.test(t) && !SEARCH_NEARDUP_STOPWORDS.has(t));
+  if (!tokens.length) return null;
+  return `searchnd:${[...new Set(tokens)].sort().join(' ')}`;
+}
+
 /**
  * Wrap a tool runner so a repeat web call (same webFetch URL / webSearch query) within a session is
  * short-circuited instead of re-hitting the network. Shares sessionWebKeys with the main reasoning loop:
@@ -680,6 +734,22 @@ export function withSessionWebDedup(
         }
         seen.add(dkey);
         sessionWebKeys.set(sessionId, seen);
+      }
+      if (searchNearDupEnabled()) {
+        const nkey = searchNearDupKey(name, input);
+        if (nkey) {
+          const seen = sessionWebKeys.get(sessionId) ?? new Set<string>();
+          if (seen.has(nkey)) {
+            return {
+              ok: true,
+              output:
+                `⚠ NEAR-DUPLICATE search: a query with the same key terms was already run this session — ` +
+                `that finding should be in the tree. Do NOT re-search a reworded variant; use what is there, or search a genuinely NEW subject.`,
+            };
+          }
+          seen.add(nkey);
+          sessionWebKeys.set(sessionId, seen);
+        }
       }
     }
     return delegate(name, input);
@@ -2471,6 +2541,25 @@ export function makeReasoningToolRunner(
         seen.add(dkey);
         sessionWebKeys.set(sessionId, seen);
       }
+      // Paraphrase-resistant layer: catch a reworded repeat of a search already run this session (the
+      // observed "same PFR/mathlib question re-searched every round with different wording" waste).
+      if (searchNearDupEnabled()) {
+        const nkey = searchNearDupKey(name, input);
+        if (nkey) {
+          const seen = sessionWebKeys.get(sessionId) ?? new Set<string>();
+          if (seen.has(nkey)) {
+            return {
+              ok: true,
+              output:
+                `⚠ NEAR-DUPLICATE: a search with the same key terms already ran this session — its result is ` +
+                `in your context. Do NOT re-search a reworded variant: use what you have, or search a genuinely ` +
+                `NEW subject, then commit a node (reason_decompose / reason_record).`,
+            };
+          }
+          seen.add(nkey);
+          sessionWebKeys.set(sessionId, seen);
+        }
+      }
     }
 
     // Delegate everything else (read-only research tools + verify teeth z3Verify/pariGp/magnitude).
@@ -2840,20 +2929,40 @@ export function createDeepExploreTool(
     // (observed: a GLM-5.2 session stuck at 1 settled / 21 open). Once it has gathered enough cited
     // evidence AND converge has stopped making substantive progress (or the frontier emptied → 'stuck'),
     // deliver the synthesis and close 'answered' instead of asking the user to keep typing "continue".
-    if (
-      shouldDeliberateAutoAnswer({
-        profileId: profile.id,
-        status,
-        settledCount: after.filter((n) => n.status === 'proved').length,
-        substantive,
-        noProgressRounds,
-        roundsRun,
-      })
-    ) {
+    // Evaluate the terminal CONDITIONS (enough evidence / stalled / round-ceiling) with enabled:true; the
+    // enable *policy* (hard-close vs soft-deliver vs off) is decided just below.
+    const answerConditionsMet = shouldDeliberateAutoAnswer({
+      profileId: profile.id,
+      status,
+      settledCount: after.filter((n) => n.status === 'proved').length,
+      substantive,
+      noProgressRounds,
+      roundsRun,
+      enabled: true,
+    });
+    if (answerConditionsMet && deliberateAutoAnswerEnabled()) {
+      // Legacy hard-close (opt-in): terminal 'answered'. Off by default — see deliberateSoftAnswerEnabled
+      // for why a terminal deliberate session is unsafe when the user has other open sessions.
       reasoning.setSessionStatus(session.id, 'answered');
       const report = profile.renderReport(session, after, 'answered');
       deps.onMilestone?.(report); // persist the conclusion as a chat bubble so it is not lost
       return { success: true, output: report };
+    }
+    if (answerConditionsMet && deliberateSoftAnswerEnabled()) {
+      // Soft-deliver: give the conclusion, keep the session active. Deliver once; suppress a re-send on a
+      // later NON-substantive round (that path falls through to the stuck/redirect escalation below);
+      // a later substantive round re-arms delivery of a refreshed synthesis.
+      const deliveredBefore = sessionLastSoftAnswerRound.has(session.id);
+      if (!deliveredBefore || substantive) {
+        sessionLastSoftAnswerRound.set(session.id, roundsRun);
+        const report = profile.renderReport(session, after, 'answered');
+        deps.onMilestone?.(report); // persist the conclusion as a chat bubble so it is not lost
+        return {
+          success: true,
+          output:
+            `${report}\n\n---\n（已给出当前证据下的结论；会话仍保持打开——回复"继续"可继续深化，或用 action=abandon 收尾。session id: ${session.id}）`,
+        };
+      }
     }
 
     // NOTE: the converge→diverge backward edge (decidePhaseTransition convergeAllDead) is intentionally
