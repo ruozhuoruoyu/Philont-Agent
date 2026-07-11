@@ -252,6 +252,12 @@ import {
   renderSelfhoodStatusText,
   isAutonomyStatusCommand,
 } from './autonomy_status.js';
+import {
+  renderCapabilityManifest,
+  renderCapabilityDetail,
+  capabilityManifestInjectEnabled,
+  type CapabilityState,
+} from './capability_manifest.js';
 
 /** WS4 (selfhood_closure) kill switch: PHILONT_SELF_OBSERVATIONS=0/off/false/no disables. */
 function selfObservationsEnabled(): boolean {
@@ -1511,6 +1517,31 @@ const decideConstitutionProposalTool: Tool = {
   },
 };
 
+// self_capabilities: read-only introspection of the agent's CURRENT capabilities, generated from live
+// runtime state (feature flags + registered autonomous drivers + tool count) — never from memory or
+// training. Backs the always-injected compact manifest with on-demand depth, so when the agent reasons
+// about "what can I do / self-evaluate my abilities" it reads the current build, not a stale self-image
+// (prod 2026-07-11: it reported just-shipped self-repair/versioning/trajectory features as ❌ missing).
+const selfCapabilitiesTool: Tool = {
+  name: 'self_capabilities',
+  description:
+    'Read your OWN current capabilities — which self-learning / reasoning / autonomy features are ' +
+    'enabled right now, which autonomous drivers are running, how many tools you have. Generated live ' +
+    'from process state, so it is the ground truth, NOT what you may remember from training or an ' +
+    'earlier version of yourself. Call this before answering "what can you do" or self-evaluating your ' +
+    'abilities, especially after the user mentions an upgrade.',
+  schema: { type: 'object', properties: {} },
+  capability: 'read',
+  domain: 'self',
+  async execute() {
+    try {
+      return { success: true, output: renderCapabilityDetail(buildCapabilityState(tools.list().length)) };
+    } catch (e) {
+      return { success: false, output: '', error: `self_capabilities failed: ${(e as Error).message}` };
+    }
+  },
+};
+
 // forget_skill: delete SELF-LEARNED skills (reflection/plan-distilled, stored DB-only — the ones
 // uninstallSkill cannot reach because they have no SKILL.md on disk). This closes a real gap: the
 // model could `search_skills` and SEE these, and `uninstallSkill` only removes file-backed dirs, so a
@@ -1663,6 +1694,7 @@ const tools = createToolset({
     installFromRegistrySync,
     forgetSkillTool,
     decideConstitutionProposalTool,
+    selfCapabilitiesTool,
   ],
   // 2026-05-07: hook up SecretStore so the http tool uses the secured variant, supporting {SECRET_NAME}
   // placeholders. Credentials written by saveCredential can be referenced directly in http headers / body.
@@ -3307,6 +3339,41 @@ function executionLedgerEnabled(): boolean {
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
+/** WS5 recipe reuse-verification flag (mirror of agent-memory reflector). Default ON; =0/off/false/no disables. */
+function recipeReuseVerifyEnabled(): boolean {
+  const v = (process.env.PHILONT_RECIPE_REUSE_VERIFY ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/**
+ * Assemble the capability manifest's ground-truth from LIVE runtime state — never hand-authored (see
+ * capability_manifest.ts for why). Reads the real feature-flag functions, the actually-registered
+ * autonomous-driver set, and the tool count, so a newly shipped+enabled capability appears with no manual
+ * edit. `toolCount` is passed in because the tool registry is finalized later in module init than this fn.
+ */
+/** Live capability ground-truth (exported for tests / introspection): reads real flags + driver set. */
+export function currentCapabilityState(): CapabilityState {
+  return buildCapabilityState(tools.list().length);
+}
+
+function buildCapabilityState(toolCount: number): CapabilityState {
+  return {
+    skillSelfRepair: skillRepairEnabled(),
+    recipeReuseVerify: recipeReuseVerifyEnabled(),
+    // Versioning rides on the schema (memory_skills.revision_history, v35+); reviseRecipe is always
+    // available once the column exists, which it does for any DB this build opened (migration is forced).
+    skillVersioning: true,
+    selfObservations: selfObservationsEnabled(),
+    liveTraits: traitsLiveEnabled(),
+    constitutionProposals: constitutionProposalsEnabled(),
+    deepExplore: process.env.PHILONT_DEEP_EXPLORE !== '0',
+    autonomousLoop: process.env.PHILONT_AUTONOMOUS !== '0',
+    executionLedger: executionLedgerEnabled(),
+    autonomousDrivers: autonomousDriverNames,
+    toolCount,
+  };
+}
+
 /**
  * S1 — execution-ledger anchor (`docs/design/execution_ledger_anchor.md`). Renders the owner's active
  * deep_explore reasoning session as an AUTHORITATIVE read-only snapshot (open frontier / proved / dead)
@@ -4771,6 +4838,13 @@ function buildFreshMessages(
       ? `\n\nRed lines — never cross these:\n${charterRedLines.map((r) => `- ${r}`).join('\n')}`
       : '');
 
+  // Capability manifest — generated from live runtime state (flags + registered drivers + tool count),
+  // NOT hand-authored, so the agent self-assesses against the current build instead of a stale memory of
+  // itself (prod 2026-07-11: reported just-shipped self-repair/versioning/trajectory features as ❌).
+  const capabilityBlock = capabilityManifestInjectEnabled()
+    ? '\n\n' + renderCapabilityManifest(buildCapabilityState(tools.list().length))
+    : '';
+
   const init: NativeMessage[] = [
     {
       role: 'user',
@@ -4783,6 +4857,7 @@ function buildFreshMessages(
         ` You stay with one user across channels (WeChat, Telegram, web) and act through a broad, permission-gated toolset` +
         ` — files, shell, web, persistent memory, skills, vision, and mounted MCP servers. Working directory: ${process.cwd()}.` +
         charterBlock +
+        capabilityBlock +
         `\n\nTool-use principles:` +
         `\n- Do not call tools for ordinary chit-chat. (Exception: persisting a durable fact the user just revealed is never "chit-chat" — store_fact it even mid-conversation; see the proactive-memory principle below.)` +
         `\n- When the user asks you to "remember / note down / set" any fact (name, preference, role, project info, etc.),` +
