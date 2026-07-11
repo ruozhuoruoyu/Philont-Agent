@@ -415,6 +415,10 @@ test('executor(skill_repair): 诊断给出的证据真的进了 prompt(否则等
   assert.match(seenPrompt, /pandoc: command not found/, '失败轨迹必须出现在 prompt 里');
   assert.match(seenPrompt, /pandoc in\.md -o out\.docx/, '当前配方内容必须出现在 prompt 里');
   assert.match(seenPrompt, /OMIT skillRevision/, '必须明确告诉 LLM "证据不足就别改" 是合法答案');
+  // 2026-07-11 dogfood 发现:模型对"pandoc 缺失"给了 apt-get install 自愈方案(不可移植+越权)。
+  // prompt 必须显式禁止假设 OS/包管理器、禁止装软件自愈,改成"检测并报告"。
+  assert.match(seenPrompt, /DETECT it and REPORT it/, 'prompt 必须要求缺依赖时检测并报告,而非安装');
+  assert.match(seenPrompt, /Do NOT assume an OS, shell, or package manager/, 'prompt 必须禁止假设 OS/包管理器');
   h.close();
 });
 

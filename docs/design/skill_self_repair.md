@@ -98,6 +98,20 @@ Everything else below is composition, not new infrastructure.
 5. **Re-verify** (unchanged). Next recall+reuse runs `recipeReuseMaturityMove` exactly as today — the loop
    closes without touching the verification mechanism itself.
 
+### 3.2a Repair bounds (from the first real dogfood, 2026-07-11)
+
+The first real-model run (`missing-binary` scenario, DeepSeek V4 Pro) diagnosed correctly ("pandoc not
+installed") but proposed a fix that ran `apt-get install -y pandoc`. That is a real failure mode, not a
+model fluke: a repair is a **reusable recipe under a permission layer**, so "self-heal by installing
+software" is wrong three ways — non-portable (the failing host was Windows, no apt), privileged/system-
+mutating, and it silently escalates what the recipe does to the host on every future reuse, against the
+bounded-autonomy charter. The diagnosis prompt (`renderSkillRepairPrompt`) now hard-forbids assuming an
+OS/shell/package manager and forbids install/privileged/system-mutating remediation: a missing external
+dependency must be **detected and reported** (`command -v X` → stop with a clear message), never installed;
+if the genuine fix would require stepping outside those bounds, the recipe is "not repairable" and
+`skillRevision` is omitted. The lesson generalizes — a repaired recipe must stay portable and side-effect-
+bounded, because it re-runs everywhere, not just on the machine that happened to fail.
+
 ### 3.3 Thrash guard
 
 A skill rewritten and immediately failing again is the same shape `countSameRootCauseFailures` already
