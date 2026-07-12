@@ -285,6 +285,29 @@ const autoSubscribeCheckedSessions = new Set<string>();
  *  offered to deep-explore, awaiting the owner's 进/直接 reply. TTL'd; one entry per session. */
 const pendingExploreAsk = new Map<string, { goal: string; decision: IntentDecision; ts: number }>();
 const EXPLORE_ASK_TTL_MS = 10 * 60_000;
+
+/**
+ * Intent decision carried across a pending-auth RESUME (prod bug 2026-07-12).
+ *
+ * The intent router is gated on `!pending` — correctly, since re-classifying the bare "ok" that answers
+ * an auth card would yield a garbage `direct` route. But that left signalBus.intentDecision NULL on the
+ * resumed turn, and shouldForceDeepExploreStart bails on `!opts.decision` — so force-start could never
+ * fire on a resume. The trap: any deep_explore-routed task whose model reaches for an EXECUTE tool first
+ * (pariGp / shell / writeFile — i.e. exactly what a math task does) hits the auth card BEFORE ever
+ * emitting the flat text response that force-start evaluates on. Observed: "我希望你能独立提出一个新的
+ * 数学猜想" routed deep_explore conf=0.95, grabbed pariGp, auth-prompted, and on resume the route was
+ * gone → the whole 6-minute turn ran flat pariGp/shell with no engine, then fabricated a "Conjecture 1
+ * disproved" claim that the honesty gate had to catch.
+ *
+ * Fix: stash the ORIGINAL message's decision/goal/depth-signal when the router runs, and restore it on
+ * the resume instead of re-classifying "ok". Mirrors how pendingExploreAsk carries state across the
+ * ask-tier reply. TTL matches the auth grant window (30 min) — a stale approval is not this turn's route.
+ */
+const carriedIntent = new Map<
+  string,
+  { decision: IntentDecision | null; selfReferentialMeta: boolean; goal: string; depthSignaled: boolean; ts: number }
+>();
+const INTENT_CARRY_TTL_MS = 30 * 60_000;
 import {
   resolveAutonomousBudgetCaps,
   describeBudgetCapsOverrides,
@@ -5148,6 +5171,16 @@ export async function handleChatSend(
     intentDecision = await classifyIntent(userMessage);
     signalBus.intentDecision = intentDecision; // carried to handleChatSendInner for the deep_explore nudge
     signalBus.selfReferentialMeta = isSelfReferentialMetaQuestion(userMessage);
+    // Stash for a possible pending-auth resume: if the model reaches for an execute tool before it ever
+    // answers flat, this turn ends in auth_pending and the resumed turn re-enters with userMessage="ok"
+    // and the router skipped. Without this the route (and the real goal) are lost. See carriedIntent.
+    carriedIntent.set(sessionId, {
+      decision: intentDecision,
+      selfReferentialMeta: !!signalBus.selfReferentialMeta,
+      goal: userMessage,
+      depthSignaled: userSignaledDepth(userMessage),
+      ts: Date.now(),
+    });
     if (intentDecision) {
       console.log(`[intent-router] session=${sessionId} route=${intentDecision.route}${intentDecision.domain ? `:${intentDecision.domain}` : ''} conf=${intentDecision.confidence}`);
       // Three-tier deep_explore routing, ASK tier: mid-confidence reasoning task → one question,
@@ -5155,6 +5188,9 @@ export async function handleChatSend(
       // interactive sessions with a self-contained goal and no recently-active session.
       const askTier =
         deepExploreRouteTier(intentDecision) === 'ask' &&
+        // The owner ALREADY asked for depth ("深入研究…") — re-asking "要深挖吗?" is redundant noise.
+        // That path goes straight to force-start (userSignaledDepth is its own entry condition).
+        !userSignaledDepth(userMessage) &&
         !isSelfReferentialMetaQuestion(userMessage) &&
         !sessionId.startsWith('system:') &&
         !signalBus.exploreAskApproved &&
@@ -5168,6 +5204,25 @@ export async function handleChatSend(
         return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
       }
     }
+    // Pending-auth resume: restore the ORIGINAL message's intent decision (the router above was skipped
+    // because re-classifying the bare "ok" would produce a garbage `direct` route). Without this the
+    // deep_explore route is lost on resume and force-start can never fire. See carriedIntent.
+    if (pending) {
+      const carried = carriedIntent.get(sessionId);
+      if (carried && Date.now() - carried.ts <= INTENT_CARRY_TTL_MS) {
+        intentDecision = carried.decision;
+        signalBus.intentDecision = carried.decision;
+        signalBus.selfReferentialMeta = carried.selfReferentialMeta;
+        signalBus.carriedExploreGoal = carried.goal;
+        signalBus.carriedDepthSignaled = carried.depthSignaled;
+        if (carried.decision) {
+          console.log(
+            `[intent-router] session=${sessionId} auth-resume: carried route=${carried.decision.route} conf=${carried.decision.confidence} (router skipped on resume)`,
+          );
+        }
+      }
+    }
+
     // Cleanup-turn scoping: (1) flag the turn so runToolLoop rejects external write http (clear
     // turns drifted into re-registering the service being cleared); (2) soft-pause schedules that
     // mention the cleanup target so a scheduled check-in can't fire mid-clear and resurrect the
@@ -6628,12 +6683,19 @@ async function handleChatSendInner(
       // Resolve the goal: a self-contained message is its own goal; a short context-dependent "重做/深入点"
       // gets its goal derived from the recent transcript (the topic being redone) — only then does a redo
       // reach the engine instead of falling through to flat search.
-      const selfContained = messageIsSelfContainedGoal(userMessage);
+      // On a pending-auth resume the live userMessage is the bare "ok" that answered the auth card, so the
+      // goal / depth-signal / meta checks must run against the ORIGINAL message carried across the resume
+      // (carriedIntent) — otherwise "ok" is judged non-self-contained and depth-less, and force-start dies.
+      const forceMessage = signalBus.carriedExploreGoal ?? userMessage;
+      const selfContained = messageIsSelfContainedGoal(forceMessage);
       const routeTier = deepExploreRouteTier(signalBus.intentDecision ?? null);
-      const metaQuestion = isSelfReferentialMetaQuestion(userMessage);
+      const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
       const depthWanted =
         !signalBus.exploreAskDeclined &&
-        (userSignaledDepth(userMessage) || routeTier === 'force' || !!signalBus.exploreAskApproved);
+        (userSignaledDepth(forceMessage) ||
+          !!signalBus.carriedDepthSignaled ||
+          routeTier === 'force' ||
+          !!signalBus.exploreAskApproved);
       const baseEligible =
         deepExploreForceStartEnabled() &&
         (signalBus.intentDecision?.route === 'deep_explore') &&
@@ -6644,8 +6706,8 @@ async function handleChatSendInner(
         !hasRecentlyActiveExploreSession(sessionId);
       const forceGoal = baseEligible
         ? selfContained
-          ? userMessage.trim()
-          : await deriveRedoGoal(sessionId, userMessage) // aux: pull the topic being redone from context
+          ? forceMessage.trim()
+          : await deriveRedoGoal(sessionId, forceMessage) // aux: pull the topic being redone from context
         : null;
       if (
         deepExploreForceStartEnabled() &&
@@ -7179,6 +7241,14 @@ interface TurnSignalBus {
   activeSkillName?: string;
   /** Aux-LLM intent route for this turn (computed in handleChatSend, read in handleChatSendInner for the deep_explore nudge). */
   intentDecision?: IntentDecision | null;
+  /**
+   * Pending-auth resume only: the ORIGINAL user message that opened the turn (this turn's userMessage is
+   * the bare "ok" answering the auth card). force-start uses it as the session goal — "ok" is neither a
+   * self-contained goal nor a depth signal, so without these the resumed turn cannot force-start. See carriedIntent.
+   */
+  carriedExploreGoal?: string;
+  /** Pending-auth resume only: did the ORIGINAL message signal depth ("深入…")? See carriedExploreGoal. */
+  carriedDepthSignaled?: boolean;
   /**
    * Cleanup-turn scoping (2026-07-06): set when the user message is a pure cleanup command
    * (looksLikeCleanupIntent). runToolLoop then mechanism-rejects external write http for the whole

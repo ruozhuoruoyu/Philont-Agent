@@ -271,8 +271,11 @@ test('deepExploreRouteTier: force/ask/direct by confidence; env-tunable; non-exp
   const { deepExploreRouteTier } = await import('../src/intent_router.js');
   const dec = (conf: number) => ({ route: 'deep_explore' as const, confidence: conf, domain: 'deliberate' as const });
   const env = {} as NodeJS.ProcessEnv;
-  assert.equal(deepExploreRouteTier(dec(0.95), env), 'force');
-  assert.equal(deepExploreRouteTier(dec(0.9), env), 'force');
+  // 2026-07-12: FORCE defaults to 1.01 (unreachable) — router CONFIDENCE ALONE never force-starts.
+  // Even a 0.99 research route only ASKS the owner; an explicit depth keyword is the way in.
+  assert.equal(deepExploreRouteTier(dec(0.99), env), 'ask', 'confidence alone must never force');
+  assert.equal(deepExploreRouteTier(dec(0.95), env), 'ask');
+  assert.equal(deepExploreRouteTier(dec(0.9), env), 'ask');
   assert.equal(deepExploreRouteTier(dec(0.8), env), 'ask');
   assert.equal(deepExploreRouteTier(dec(0.7), env), 'ask');
   assert.equal(deepExploreRouteTier(dec(0.6), env), 'direct');
@@ -281,8 +284,9 @@ test('deepExploreRouteTier: force/ask/direct by confidence; env-tunable; non-exp
     deepExploreRouteTier({ route: 'plan', confidence: 0.99 } as never, env),
     null,
   );
-  // env overrides
+  // env overrides — the old confidence-force behavior is restorable.
   const custom = { PHILONT_DEEP_EXPLORE_FORCE_CONF: '0.95', PHILONT_DEEP_EXPLORE_ASK_CONF: '0.5' } as NodeJS.ProcessEnv;
+  assert.equal(deepExploreRouteTier(dec(0.96), custom), 'force');
   assert.equal(deepExploreRouteTier(dec(0.9), custom), 'ask');
   assert.equal(deepExploreRouteTier(dec(0.4), custom), 'direct');
 });

@@ -225,10 +225,25 @@ export function directRouteWantsFast(dec: IntentDecision | null): boolean {
 // Prod showed the advisory nudge is never adopted on research tasks (two flat runs in one day:
 // the survey and the candidate-path generation both had route=deep_explore conf>=0.9 and still
 // flattened into webSearch). Tiering by router confidence:
-//   conf >= FORCE (default 0.9) → force-start (the existing backstop, no longer gated on the
-//                                 user typing an explicit depth keyword);
-//   ASK <= conf < FORCE (0.7)   → ask the owner first (one question; their reply decides);
-//   conf < ASK                  → direct flat execution, no nudge (it never worked anyway).
+//   conf >= FORCE              → force-start without asking;
+//   ASK <= conf < FORCE (0.7)  → ask the owner first (one question; their reply decides);
+//   conf < ASK                 → direct flat execution, no nudge (it never worked anyway).
+//
+// 2026-07-12 (owner decision): FORCE defaults to 1.01 — UNREACHABLE, i.e. router CONFIDENCE ALONE
+// never force-starts a session; everything >= ASK asks the owner instead. Reasons:
+//   1. The force tier's accuracy was never validated, and it has a logged false positive expensive
+//      enough to need a special-case patch: "你这个分析是平铺的还是使用deepexplore做的?" routed
+//      conf>=0.9, was force-started, and the engine burned 9.5 minutes web-searching its own tool's
+//      name (hence isSelfReferentialMetaQuestion below). Needing a special case is the tell.
+//   2. Asking costs the owner NOTHING extra: deep_explore is capability='execute', so entering the
+//      engine already interrupts them with an auth card. The ask replaces a contentless approval
+//      prompt with a meaningful choice — same one round-trip.
+//   3. The ask path CARRIES its state (pendingExploreAsk stores {goal, decision} and restores both on
+//      the reply), whereas force-start's state lives in a per-turn signalBus that is silently lost
+//      across a pending-auth resume (prod 2026-07-12, see the carry fix in chat-handler).
+// An EXPLICIT depth request from the user ("深入研究…") still force-starts — userSignaledDepth is an
+// independent entry into shouldForceDeepExploreStart. Only the confidence-based auto-force is off.
+// Set PHILONT_DEEP_EXPLORE_FORCE_CONF=0.9 to restore the old behavior.
 export type DeepExploreRouteTier = 'force' | 'ask' | 'direct';
 
 function parseConf(raw: string | undefined, fallback: number): number {
@@ -241,7 +256,7 @@ export function deepExploreRouteTier(
   env: NodeJS.ProcessEnv = process.env,
 ): DeepExploreRouteTier | null {
   if (!dec || dec.route !== 'deep_explore') return null;
-  const force = parseConf(env.PHILONT_DEEP_EXPLORE_FORCE_CONF, 0.9);
+  const force = parseConf(env.PHILONT_DEEP_EXPLORE_FORCE_CONF, 1.01); // 1.01 = unreachable → confidence alone never forces
   const ask = parseConf(env.PHILONT_DEEP_EXPLORE_ASK_CONF, 0.7);
   if (dec.confidence >= force) return 'force';
   if (dec.confidence >= ask) return 'ask';
