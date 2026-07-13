@@ -738,6 +738,39 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
           existing &&
           (existing.status === 'draft' || existing.status === 'executing')
         ) {
+          // 2026-07-13: if the blocking plan is a PLACEHOLDER (auto-created by auto-plan-on-slow, never
+          // authored by the model), plan_draft is not a mistake to reject — it is the promotion, arriving
+          // under the wrong tool name. The model has ALREADY handed us exactly what plan_revise wants:
+          // validated steps + deliverables. Rejecting and demanding it re-send them as plan_revise is pure
+          // friction, and prod shows the model does not comply: it ate the error, abandoned plans entirely,
+          // and did the work with writeFile/shell — leaving the placeholder stuck in `draft`, which then
+          // GATED real work ([plan_protocol_gate] rejected shell (slow + planStatus=draft)). Promote it.
+          // A real (non-placeholder) active plan still rejects: that is a genuine "close it first".
+          if (existing.isPlaceholder) {
+            const promoted = plans.revise(
+              existing.id,
+              steps,
+              (deliverables.length ? deliverables : null) as PlanDeliverable[] | null,
+              'plan_draft on an auto-created placeholder → promoted in place (preserves guide_ref / task_signature)',
+            );
+            if (promoted) {
+              console.log(
+                `[plan-draft-promote] plan_draft with placeholder ${existing.id} active → promoted in place ` +
+                  `(${steps.length} steps, ${deliverables.length} deliverables) instead of rejecting`,
+              );
+              return {
+                success: true,
+                output:
+                  `✅ plan promoted (an auto-created placeholder was already active, so this draft promoted it ` +
+                  `in place instead of creating a second plan — guide_ref / task_signature preserved)\n` +
+                  `plan_id: ${promoted.id}\nsteps: ${promoted.steps.length}\n` +
+                  `deliverables: ${deliverables.length}\nstatus: ${promoted.status}\n\n` +
+                  `Steps:\n` +
+                  promoted.steps.map((s, i) => `  ${i + 1}. [${s.id}] ${s.description}`).join('\n'),
+              };
+            }
+            // revise failed (should not happen for a draft placeholder) → fall through to the reject below.
+          }
           return {
             success: false,
             output: '',

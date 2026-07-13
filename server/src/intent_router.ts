@@ -85,6 +85,14 @@ export function buildIntentPrompt(userMessage: string): string {
     'KEY boundary: if the core ask is "figure out / which / why / whether / should" → deep_explore. If it ' +
     'is "build / set it up / make it work / deploy / implement and run" → plan. A reasoning task that only ' +
     'happens to need web search is still deep_explore, NOT plan.\n\n' +
+    'CRITICAL — debugging OUR OWN artifact is NOT deep_explore. If the ask is to fix / change / correct a ' +
+    'concrete artifact we produced and can simply open and edit (a file, a script, an HTML page, code), it ' +
+    'is EXECUTION — route "plan" if it is several coordinated edits, "direct" if it is one fix. This holds ' +
+    'even when the user phrases it as a diagnosis ("为什么搜索定位不到节点" / "点击不弹面板" / "问题4还是不对" / ' +
+    '"why does the search not jump to the node"): the answer is found by READING THE FILE, not by research ' +
+    'or a reasoning session. Reserve deep_explore\'s diagnosis mode for problems whose cause is genuinely ' +
+    'unknown and external (a production incident, a system nobody can just read). A bug report about a ' +
+    'file we just wrote is a work item, not an investigation.\n\n' +
     'Respond with ONLY a JSON object, no prose:\n' +
     '{"route":"direct|deep_explore|plan","domain":"formal|deliberate|discover","confidence":0.0-1.0,"reason":"<short>"}\n' +
     'Omit "domain" unless route is deep_explore.\n\n' +

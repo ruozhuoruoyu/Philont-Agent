@@ -361,3 +361,11 @@ test('classifyExploreAskReply: the words the ask itself offered are matched, not
   assert.equal(classifyExploreAskReply('帮我看看这个文件'), null);
   assert.equal(classifyExploreAskReply(''), null);
 });
+
+test('buildIntentPrompt: carries the "debugging our own artifact is NOT deep_explore" boundary', () => {
+  const p = buildIntentPrompt('问题1就是定位不到检索的节点');
+  assert.match(p, /debugging OUR OWN artifact is NOT deep_explore/i);
+  assert.match(p, /READING THE FILE/i);
+  // The prod misroutes it must now steer: a bug report on a file we wrote is a work item.
+  assert.match(p, /work item, not an investigation/i);
+});

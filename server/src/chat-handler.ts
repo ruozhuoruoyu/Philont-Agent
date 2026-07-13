@@ -734,6 +734,13 @@ driveRuntime.register(
 // the latter is an idle-time driver that actually runs webSearch / searchNotes, not an injection reminder.
 // See startAutonomousLoop below.
 
+const COMPACT_THRESHOLD_TOKENS = Number(process.env.COMPACT_THRESHOLD_TOKENS) || 180_000;
+const COMPACT_HARD_THRESHOLD_TOKENS = Number(process.env.COMPACT_HARD_THRESHOLD_TOKENS) || 250_000;
+/** A compaction that frees less than this fraction of the context is not worth another LLM call. */
+const COMPACT_MIN_GAIN_RATIO = 0.05;
+/** Sessions whose current turn has an incompressible tail — skip further compact() attempts. Cleared per turn. */
+const incompressibleTurns = new Set<string>();
+
 // Context compactor: summarize the middle segments when the conversation exceeds the threshold
 const compactor = new Compactor(extractorLlm, memory.notes, {
   // 2026-05-13: 100K → 180K + add hard-cap 250K safety net + protectLastN 6→10.
@@ -743,8 +750,8 @@ const compactor = new Compactor(extractorLlm, memory.notes, {
   //   2) In-turn tool loop only triggers at hard cap (250K) as a safety net against window overflow
   //   3) protectLastN 6→10 gives active plan/tool chain tail more room to avoid compression
   // env overrides still available: COMPACT_THRESHOLD_TOKENS / COMPACT_HARD_THRESHOLD_TOKENS.
-  thresholdTokens: Number(process.env.COMPACT_THRESHOLD_TOKENS) || 180_000,
-  hardThresholdTokens: Number(process.env.COMPACT_HARD_THRESHOLD_TOKENS) || 250_000,
+  thresholdTokens: COMPACT_THRESHOLD_TOKENS,
+  hardThresholdTokens: COMPACT_HARD_THRESHOLD_TOKENS,
   protectFirstN: 2,   // preserve system prompt + first turn
   protectLastN: 10,   // preserve the most recent ~5 conversation turns (gives active plan/tool chain tail room)
 }, { auditHook: internalAudit });
@@ -4384,7 +4391,15 @@ async function maybeCompact(
       ? compactor.needsHardCompaction(messages as unknown as { role: string; content: unknown }[])
       : compactor.needsCompaction(messages as unknown as { role: string; content: unknown }[]);
 
-  if (shouldCompact) {
+  // Incompressible-context latch (prod 2026-07-13). Compaction only summarizes the MIDDLE — the tail
+  // (protectLastN: 10) is verbatim by design, to protect plan_id / tool_result chains. In a turn whose
+  // tail holds huge tool_results (a 38KB readFile of an HTML file, a 44KB writeFile of a script), the
+  // middle is already summarized and there is nothing left to squeeze: observed
+  // `314831 → 314242` — a 0.2% gain. But the context is still over the hard cap, so the very next
+  // tool-loop iteration calls compact() again... ~12 LLM summarize calls in 10 minutes, all no-ops,
+  // context stuck at 314k. Once a compaction fails to make MEANINGFUL progress, stop paying for it
+  // this turn; eviction below still runs (it is cheap and idempotent).
+  if (shouldCompact && !incompressibleTurns.has(sessionId)) {
     const result = await compactor.compact(
       messages as unknown as { role: string; content: unknown }[],
       sessionId,
@@ -4395,12 +4410,26 @@ async function maybeCompact(
       );
       messages.length = 0;
       messages.push(...(result.compactedMessages as unknown as NativeMessage[]));
+      const gained = result.tokensBefore - result.tokensAfter;
+      if (gained < result.tokensBefore * COMPACT_MIN_GAIN_RATIO) {
+        incompressibleTurns.add(sessionId);
+        console.warn(
+          `[memory] compress session=${sessionId} freed only ${gained} tokens ` +
+            `(<${Math.round(COMPACT_MIN_GAIN_RATIO * 100)}%) — the tail is incompressible (oversized tool_results). ` +
+            `Suppressing further compaction this turn; relying on tool_result eviction.`,
+        );
+      }
     }
   }
 
-  // Capacity eviction: total tokens exceed budget → replace old tool_result content with placeholders,
-  // keeping the most recent K entries intact. Idempotent; multiple calls are no-op. Runs in both modes.
-  const eviction = evictOldToolResults(messages);
+  // Capacity eviction: replace old tool_result content with placeholders, keeping the most recent K
+  // intact. Idempotent; multiple calls are no-op. Runs in both modes.
+  //
+  // 2026-07-13: the budget used to be the 700K default while the compactor's hard cap is 250K, so between
+  // 250K and 700K we would compact on every tool-loop iteration while the ONLY mechanism that can actually
+  // shrink an oversized tail never ran. Prod sat at 314K–470K — squarely in that dead zone. Once we have
+  // decided the context is too big (the hard cap), eviction must be allowed to act at the same point.
+  const eviction = evictOldToolResults(messages, { budgetTokens: COMPACT_HARD_THRESHOLD_TOKENS });
   if (eviction.didEvict) {
     console.log(
       `[memory] evict old tool_result session=${sessionId}: ${eviction.tokensBefore} → ${eviction.tokensAfter} tokens (${eviction.evictedCount} items)`,
@@ -5084,6 +5113,9 @@ export async function handleChatSend(
   // createPlanTools is one-time at module load and cannot capture a per-turn bus — use a
   // session→bus map + currentSessionId() to look it up on demand inside tool execute.
   activeSignalBuses.set(sessionId, signalBus);
+  // Per-turn latch: a tail that was incompressible last turn may be compressible now (the huge
+  // tool_results have since been evicted / the turn's messages are rebuilt). Re-arm each turn.
+  incompressibleTurns.delete(sessionId);
 
   // Ask-tier deep_explore routing: a pending "要进深度推理吗?" question is resolved by THIS message.
   // 进/好/yes → restore the original goal and force the engine; 直接/不/no → restore the goal and run
