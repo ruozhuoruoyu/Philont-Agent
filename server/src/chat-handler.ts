@@ -6729,6 +6729,9 @@ async function handleChatSendInner(
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
           detectAnnouncementStall: announceStallEnabled,
           skillDeleteSucceededThisTurn,
+          // Turn-durable: the zero-tool branch must not false-fire just because a gate reset the
+          // per-iteration window (prod: replyWithMedia succeeded, gate still cried "ZERO tool calls").
+          turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
           session: honestySessionEnabled
             ? {
                 unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,
@@ -8439,6 +8442,9 @@ async function runToolLoop(
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
           detectAnnouncementStall: announceStallEnabled,
           skillDeleteSucceededThisTurn,
+          // Turn-durable: the zero-tool branch must not false-fire just because a gate reset the
+          // per-iteration window (prod: replyWithMedia succeeded, gate still cried "ZERO tool calls").
+          turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
           session: honestySessionEnabled
             ? {
                 unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,

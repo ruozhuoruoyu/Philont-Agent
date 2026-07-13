@@ -1127,3 +1127,20 @@ test('findDeliveryClaim: bare "已发送" (no recipient, no object) is a deliver
   assert.equal(findDeliveryClaim('还没发送，等我改完。'), null);
   assert.equal(findDeliveryClaim('修复后再发送给你。'), null);
 });
+
+test('artifact_claim_without_tools: turn-durable ledger beats the reset window — prod 2026-07-13', async () => {
+  const { evaluateHonesty } = await import('../src/honesty_gate.js');
+  const text = '已发送 ✅ 就是刚刚修正过的版本 E:\\dev\\philont\\server\\AI_Knowledge_Graph_v3_fixed.html';
+  // Window reset by a gate reminder → looks like zero tools. But the TURN did call tools
+  // (replyWithMedia succeeded 20s earlier) → the zero-tool branch must NOT fire.
+  assert.equal(
+    evaluateHonesty(text, { toolResults: [], turnHadAnyToolCall: true })?.reason,
+    undefined,
+    'a turn that DID call tools must not be accused of ZERO tool calls',
+  );
+  // Genuinely zero tool calls this turn → still fires (the original bug it was built for).
+  const fired = evaluateHonesty(text, { toolResults: [], turnHadAnyToolCall: false });
+  assert.equal(fired?.reason, 'artifact_claim_without_tools');
+  // Omitted (legacy callers) → preserves the old behaviour.
+  assert.equal(evaluateHonesty(text, { toolResults: [] })?.reason, 'artifact_claim_without_tools');
+});

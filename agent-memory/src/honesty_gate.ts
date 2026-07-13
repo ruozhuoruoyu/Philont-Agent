@@ -400,6 +400,17 @@ export interface EvaluateOptions {
    * deletion already succeeded (observed: forget_skill deleted 37, then the branch fired anyway on regen).
    */
   skillDeleteSucceededThisTurn?: boolean;
+  /**
+   * Did this TURN issue any tool call at all? Same source and same reason as skillDeleteSucceededThisTurn
+   * (signalBus.inTurnRecords), generalized: the zero-tool branches below key on `ok+fail+unknown === 0`,
+   * which is the per-iteration WINDOW, not the turn. When a gate injects a reminder the window resets, so a
+   * turn that really did call tools looks like it called none — and the "you claimed an artifact with ZERO
+   * tool calls" branch false-fires on the regenerated text. Prod 2026-07-13: replyWithMedia SUCCEEDED
+   * (`→ ok: ✓ 已通过 wechat… 发送 file`), and 20 seconds later the gate fired
+   * `artifact_claim_without_tools … okCount=0` on that very turn (tools=13). A gate that cannot tell
+   * "nothing happened" from "my window reset" is not measuring honesty, it is measuring its own amnesia.
+   */
+  turnHadAnyToolCall?: boolean;
 }
 
 /**
@@ -965,7 +976,15 @@ export function evaluateHonesty(
   // this turn is almost certainly fabricated — the file write it describes never happened (the user
   // checked: exists=false). A specific artifact path is a this-turn deliverable claim, not inherited
   // chit-chat, so it must be backed by at least one tool call.
-  if (ok + fail + unknown === 0) {
+  //
+  // 2026-07-13: `ok+fail+unknown === 0` is the per-iteration WINDOW, not the turn. A gate that injects a
+  // reminder resets the window, so a turn that really did call tools reads as zero — and this branch then
+  // false-fires on the regenerated text. Prod: replyWithMedia SUCCEEDED, and the gate fired
+  // artifact_claim_without_tools (okCount=0) on that same turn 20s later. Trust the turn-durable ledger
+  // (turnHadAnyToolCall) over the window: if the turn DID call tools, this branch has nothing to say —
+  // the claim is then judged by the tool-bound branches above (delivery / skill-delete / memory-write).
+  // Same fix already applied to the skill_forget branch; generalized here.
+  if (ok + fail + unknown === 0 && opts.turnHadAnyToolCall !== true) {
     const artifact = findArtifactPathClaim(assistantText);
     if (artifact) {
       return {
