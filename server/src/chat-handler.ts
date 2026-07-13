@@ -5644,10 +5644,18 @@ export async function handleChatSend(
       // This is the key step from routing_rules.recordRuleOutcome having 0 callers to a true closed loop:
       // without outcome backflow, the 5-tier confidence state machine is dead data.
       if (signalBus.activeRuleIds && signalBus.activeRuleIds.length > 0) {
+        // 2026-07-13: interruptDrained REMOVED from the strong-failure set. It counts K7 signals that
+        // accumulated during the IDLE PERIOD BEFORE this turn and were drained into it (see the drain at
+        // the top of the turn) — it is a statement about pre-existing system state, so it cannot be
+        // evidence that THIS turn's injected rule was wrong. And it is on nearly every turn, so it made
+        // "the turn closed clean" almost unreachable: prod 7d showed success=4 vs ambiguous_skipped=32,
+        // and with promotion needing 3 consecutive successes (provisional→tentative→validated) the result
+        // was 1022 stored rules and validated=0 (0%) — the confidence machine could only ever demote.
+        // The 2026-07-05 attribution fix was aimed at exactly this and left the one always-on signal in.
+        // The remaining three ARE genuine same-turn failure evidence.
         const strongFailure =
           signalBus.honesty !== undefined ||
           sameRootCauseFailures >= 2 ||
-          (signalBus.interruptDrainedCount ?? 0) > 0 ||
           signalBus.emptyConclusionFired === true;
         const outcome = !strongFailure;
         // 2026-07-05 attribution fix: a hard turn is NOT evidence against the injected rules — the
@@ -6643,99 +6651,15 @@ async function handleChatSendInner(
     const response = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
 
     if (response.type === 'text') {
-      // Forced-continue (mechanism, not prompt): the model recited deep_explore round results with ZERO
-      // deep_explore calls this turn (the "继续" recite-without-running stall). Rather than deflect to an
-      // honest "reply 继续" (which loops) or re-prompt (which the model ignores), GUARANTEE a real
-      // deep_explore(action=continue) runs now. Mirror the tool_use path exactly: push a synthetic
-      // assistant tool_use block (so the forthcoming tool_result has a matching tool_use — see the
-      // auth-resume note), then re-enter runToolLoop with that one call. #1's created_at resolution makes
-      // the forced continue target the session the user most recently started.
-      const deepExploreRanThisTurn = (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore');
-      if (
-        deepExploreForceAdvanceEnabled() &&
-        // A status/count question ("how many unfinished explores?") must never be forced into a 6-min
-        // advancing round — the model narrating the saved snapshot is the correct answer, not a stall.
-        !signalBus.userAsksExploreStatus &&
-        shouldForceDeepExploreAdvance(response.content, {
-          alreadyForced: !!signalBus.forcedDeepExploreContinue,
-          deepExploreRanThisTurn,
-          hasActiveSession: memory.reasoning.getMostRecentActiveSession(sessionId) != null,
-        })
-      ) {
-        signalBus.forcedDeepExploreContinue = true;
-        console.warn(
-          `[force-continue] session=${sessionId} model narrated deep_explore round results with 0 calls — forcing a real deep_explore(action=continue)`,
-        );
-        const forcedId = `forced-de-continue-${turnStartTs}`;
-        const forcedInput = { action: 'continue' };
-        messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: forcedId, name: 'deep_explore', input: forcedInput }] });
+      // Force deep_explore (mechanism, not prompt): if this turn is deep_explore-routed and depth was
+      // wanted/approved but the model answered flat, synthesize a real deep_explore call and run it.
+      // Shared with runToolLoop's terminal paths — see decideForcedDeepExploreCall for why.
+      const forced = await decideForcedDeepExploreCall(sessionId, response.content, signalBus, turnStartTs);
+      if (forced) {
+        messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: forced.id, name: forced.name, input: forced.input }] });
         return await runToolLoop(
           sessionId, messages, grants, audit,
-          [{ id: forcedId, name: 'deep_explore', input: forcedInput }],
-          [], 0,
-          onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
-        );
-      }
-      // Force-START (mechanism, not prompt): the intent router routed this turn to deep_explore AND the
-      // user explicitly asked for depth (深入/深度…), but the model answered flat without ever calling
-      // deep_explore. Soft nudges lose to the model's flat-search default (4-turn field evidence), so
-      // GUARANTEE a real deep_explore(action=start) — grounding + round 1 — mirroring force-continue.
-      // Resolve the goal: a self-contained message is its own goal; a short context-dependent "重做/深入点"
-      // gets its goal derived from the recent transcript (the topic being redone) — only then does a redo
-      // reach the engine instead of falling through to flat search.
-      // On a pending-auth resume the live userMessage is the bare "ok" that answered the auth card, so the
-      // goal / depth-signal / meta checks must run against the ORIGINAL message carried across the resume
-      // (carriedIntent) — otherwise "ok" is judged non-self-contained and depth-less, and force-start dies.
-      const forceMessage = signalBus.carriedExploreGoal ?? userMessage;
-      const selfContained = messageIsSelfContainedGoal(forceMessage);
-      const routeTier = deepExploreRouteTier(signalBus.intentDecision ?? null);
-      const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
-      const depthWanted =
-        !signalBus.exploreAskDeclined &&
-        (userSignaledDepth(forceMessage) ||
-          !!signalBus.carriedDepthSignaled ||
-          routeTier === 'force' ||
-          !!signalBus.exploreAskApproved);
-      const baseEligible =
-        deepExploreForceStartEnabled() &&
-        (signalBus.intentDecision?.route === 'deep_explore') &&
-        depthWanted &&
-        !deepExploreRanThisTurn &&
-        !signalBus.forcedDeepExploreStart &&
-        !signalBus.forcedDeepExploreContinue &&
-        !hasRecentlyActiveExploreSession(sessionId);
-      const forceGoal = baseEligible
-        ? selfContained
-          ? forceMessage.trim()
-          : await deriveRedoGoal(sessionId, forceMessage) // aux: pull the topic being redone from context
-        : null;
-      if (
-        deepExploreForceStartEnabled() &&
-        shouldForceDeepExploreStart({
-          decision: signalBus.intentDecision ?? null,
-          explicitDepth: depthWanted,
-          tier: routeTier,
-          approvedViaAsk: !!signalBus.exploreAskApproved,
-          selfReferentialMeta: metaQuestion,
-          goalSubstantial: !!forceGoal && forceGoal.trim().length >= 12,
-          alreadyForcedStart: !!signalBus.forcedDeepExploreStart,
-          alreadyForcedContinue: !!signalBus.forcedDeepExploreContinue,
-          deepExploreRanThisTurn,
-          // RECENCY, not mere existence: a stale never-closed session must not block a fresh explicit-depth
-          // dive (the same backlog that broke the nudge guard). Consistent with hasRecentlyActiveExploreSession.
-          hasActiveSession: hasRecentlyActiveExploreSession(sessionId),
-        })
-      ) {
-        signalBus.forcedDeepExploreStart = true;
-        const forcedInput = buildForceStartInput(signalBus.intentDecision ?? null, forceGoal ?? userMessage);
-        console.warn(
-          `[force-start] session=${sessionId} deep_explore route + explicit depth but model answered flat — forcing deep_explore(action=start, mode=${forcedInput.mode ?? 'auto'})`,
-        );
-        const forcedId = `forced-de-start-${turnStartTs}`;
-        messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: forcedId, name: 'deep_explore', input: forcedInput }] });
-        return await runToolLoop(
-          sessionId, messages, grants, audit,
-          [{ id: forcedId, name: 'deep_explore', input: forcedInput }],
+          [forced],
           [], 0,
           onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
         );
@@ -7214,6 +7138,102 @@ async function deriveRedoGoal(sessionId: string, currentMessage: string): Promis
 function firstOpenStepId(plan: { steps: Array<{ id: string; status: string }> }): string {
   const open = plan.steps.find((st) => st.status !== 'done' && st.status !== 'skipped');
   return (open ?? plan.steps[0])?.id ?? 'step-1';
+}
+
+/**
+ * Decide whether this turn must be FORCED into deep_explore, and return the synthesized call (or null).
+ * Single source of truth for BOTH force-continue and force-start; sets the anti-reentry flags + logs.
+ *
+ * REACHABILITY (prod 2026-07-12 & 07-13 — the reason this is a shared helper and not inline):
+ * the force checks used to live ONLY in handleChatSendInner's "the first LLM response was pure text"
+ * branch. But the moment the model calls ANY tool, control enters runToolLoop and never returns there —
+ * so the check was structurally unreachable for exactly the behaviour it exists to catch. A model that
+ * ignores the deep_explore nudge and flat-searches necessarily opens with a tool call, so it ALWAYS
+ * escaped. Observed twice: (a) the owner EXPLICITLY approved deep_explore via the ask tier, the model
+ * opened with search_skills, and the turn then ran 22 flat webSearches and hit the 20-iteration cap —
+ * engine never entered, approval silently ignored; (b) a "propose a new conjecture" task opened with
+ * pariGp, hit the auth card, and after the resume ran 6 minutes of flat pariGp/shell and fabricated a
+ * "Conjecture 1 disproved" claim. So the decision must be evaluated wherever the turn actually emits its
+ * FINAL text: the flat-text branch, runToolLoop's natural text exit, AND runToolLoop's maxIterations
+ * fallback (a flat-searching model reliably exits via that last one).
+ */
+async function decideForcedDeepExploreCall(
+  sessionId: string,
+  assistantText: string,
+  signalBus: TurnSignalBus,
+  idSeed: number,
+): Promise<{ id: string; name: string; input: Record<string, unknown> } | null> {
+  const deepExploreRanThisTurn = (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore');
+
+  // Force-CONTINUE: the model recited deep_explore round results with ZERO deep_explore calls this turn.
+  if (
+    deepExploreForceAdvanceEnabled() &&
+    // A status/count question ("how many unfinished explores?") must never be forced into an advancing
+    // round — narrating the saved snapshot is the correct answer, not a stall.
+    !signalBus.userAsksExploreStatus &&
+    shouldForceDeepExploreAdvance(assistantText, {
+      alreadyForced: !!signalBus.forcedDeepExploreContinue,
+      deepExploreRanThisTurn,
+      hasActiveSession: memory.reasoning.getMostRecentActiveSession(sessionId) != null,
+    })
+  ) {
+    signalBus.forcedDeepExploreContinue = true;
+    console.warn(
+      `[force-continue] session=${sessionId} model narrated deep_explore round results with 0 calls — forcing a real deep_explore(action=continue)`,
+    );
+    return { id: `forced-de-continue-${idSeed}`, name: 'deep_explore', input: { action: 'continue' } };
+  }
+
+  // Force-START. On a pending-auth resume the live userMessage is the bare "ok" that answered the auth
+  // card, so goal / depth-signal / meta all run against the ORIGINAL message carried across the resume.
+  const forceMessage = signalBus.carriedExploreGoal ?? signalBus.userMessage ?? '';
+  const selfContained = messageIsSelfContainedGoal(forceMessage);
+  const routeTier = deepExploreRouteTier(signalBus.intentDecision ?? null);
+  const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
+  const depthWanted =
+    !signalBus.exploreAskDeclined &&
+    (userSignaledDepth(forceMessage) ||
+      !!signalBus.carriedDepthSignaled ||
+      routeTier === 'force' ||
+      !!signalBus.exploreAskApproved);
+  const baseEligible =
+    deepExploreForceStartEnabled() &&
+    signalBus.intentDecision?.route === 'deep_explore' &&
+    depthWanted &&
+    !deepExploreRanThisTurn &&
+    !signalBus.forcedDeepExploreStart &&
+    !signalBus.forcedDeepExploreContinue &&
+    !hasRecentlyActiveExploreSession(sessionId);
+  // Short context-dependent messages ("重做"/"深入点") name no goal — derive it from the transcript.
+  const forceGoal = baseEligible
+    ? selfContained
+      ? forceMessage.trim()
+      : await deriveRedoGoal(sessionId, forceMessage)
+    : null;
+  if (
+    deepExploreForceStartEnabled() &&
+    shouldForceDeepExploreStart({
+      decision: signalBus.intentDecision ?? null,
+      explicitDepth: depthWanted,
+      tier: routeTier,
+      approvedViaAsk: !!signalBus.exploreAskApproved,
+      selfReferentialMeta: metaQuestion,
+      goalSubstantial: !!forceGoal && forceGoal.trim().length >= 12,
+      alreadyForcedStart: !!signalBus.forcedDeepExploreStart,
+      alreadyForcedContinue: !!signalBus.forcedDeepExploreContinue,
+      deepExploreRanThisTurn,
+      // RECENCY, not mere existence: a stale never-closed session must not block a fresh dive.
+      hasActiveSession: hasRecentlyActiveExploreSession(sessionId),
+    })
+  ) {
+    signalBus.forcedDeepExploreStart = true;
+    const forcedInput = buildForceStartInput(signalBus.intentDecision ?? null, forceGoal ?? forceMessage);
+    console.warn(
+      `[force-start] session=${sessionId} deep_explore route + depth wanted but the turn answered flat — forcing deep_explore(action=start, mode=${forcedInput.mode ?? 'auto'})`,
+    );
+    return { id: `forced-de-start-${idSeed}`, name: 'deep_explore', input: forcedInput };
+  }
+  return null;
 }
 
 interface TurnSignalBus {
@@ -8991,6 +9011,22 @@ async function runToolLoop(
         }
       }
 
+      // Force deep_explore before emitting a flat answer. This is the path a flat-searching model
+      // actually takes (it opened with a tool call, so handleChatSendInner's copy of this check was
+      // never reached) — without it, an owner who explicitly approved the engine gets a flat answer.
+      {
+        const forced = await decideForcedDeepExploreCall(sessionId, response.content, signalBus, Date.now());
+        if (forced) {
+          messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: forced.id, name: forced.name, input: forced.input }] });
+          return await runToolLoop(
+            sessionId, messages, grants, audit,
+            [forced],
+            [], 0,
+            onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
+          );
+        }
+      }
+
       // Anti-fabrication: block a tool-loop text response that claims deep_explore round/session
       // results when no deep_explore tool actually ran this turn (e.g. it called list_facts then
       // invented "第N轮/时间帽"). A response that did call deep_explore reports legitimately.
@@ -9484,6 +9520,25 @@ async function runToolLoop(
       break;
     }
     messages.push({ role: 'user', content: nextResults });
+  }
+
+  // Force deep_explore BEFORE summarizing away a flat run. A model that ignores the deep_explore nudge
+  // and flat-searches burns the whole iteration budget doing it, so this cap is precisely where such a
+  // turn lands (prod 2026-07-13: owner approved the engine via the ask tier, the model then ran 22
+  // webSearches and hit the 20-round cap — summarized flat, engine never entered). Passing '' as the
+  // assistant text means only force-START can fire here (force-CONTINUE keys off recited round text,
+  // which does not exist yet at the cap) — correct: there is no narration to catch, only a missing engine.
+  {
+    const forced = await decideForcedDeepExploreCall(sessionId, '', signalBus, Date.now());
+    if (forced) {
+      messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: forced.id, name: forced.name, input: forced.input }] });
+      return await runToolLoop(
+        sessionId, messages, grants, audit,
+        [forced],
+        [], 0, // fresh iteration budget: the forced engine round must not inherit the exhausted counter
+        onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
+      );
+    }
   }
 
   // maxIterations fallback: force the LLM to summarize all its previous attempts in text-only mode once;

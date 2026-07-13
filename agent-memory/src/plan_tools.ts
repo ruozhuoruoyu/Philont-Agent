@@ -267,6 +267,29 @@ const STEP_STATUS_VALUES: readonly PlanStepStatus[] = [
   'blocked',
 ];
 
+/**
+ * Render this session's live plan ids for a "plan_id not found" error, so the model can self-correct in
+ * ONE retry instead of looping into the circuit breaker. An LLM cannot reliably transcribe a 36-char UUID
+ * (prod 2026-07-13: a plan created as …4d0ace1ce4bd was addressed as …4d0ace1cebd4 — last four hex chars
+ * transposed), so the not-found path must hand back the correct id rather than just rejecting.
+ */
+function describeSessionActivePlans(plans: PlanStore, sessionId: string): string {
+  try {
+    const active = plans
+      .listBySession(sessionId, { limit: 5 })
+      .filter((p) => p.status === 'draft' || p.status === 'executing');
+    if (!active.length) return 'This session currently has no open plan.';
+    return (
+      `Open plans in this session (copy the id EXACTLY):\n` +
+      active
+        .map((p) => `  - ${p.id}  (${p.isPlaceholder ? 'placeholder' : 'real'}, status=${p.status})`)
+        .join('\n')
+    );
+  } catch {
+    return 'Could not list this session\'s plans.';
+  }
+}
+
 function isStepStatus(v: unknown): v is PlanStepStatus {
   return (
     typeof v === 'string' &&
@@ -884,12 +907,18 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
       // `step-1-read-feed` to `step-1` across turns; old error "step 'X' not found" gave LLM no
       // chance to see the correct id → repeated retries → in-turn-reflection locks tools.
       if (!currentPlan) {
+        // 2026-07-13: same class as the step-id bug above, one level up — an LLM cannot reliably
+        // transcribe a 36-char UUID (prod: …4d0ace1ce4bd came back as …4d0ace1cebd4, last four hex
+        // chars transposed). The old error told it to close the task and draft a NEW plan, which is
+        // exactly the wrong move for a typo, and never showed the correct id → retry loop → circuit
+        // breaker. Show the session's real active plan ids so it can self-correct in one retry.
         return {
           success: false,
           output: '',
           error:
-            `plan '${planId}' does not exist (may have already been closed or id is wrong).\n` +
-            `To look up recent plans, first close the current task with plan_close, then plan_draft a new plan.`,
+            `plan '${planId}' does not exist (id is wrong, or it was already closed).\n` +
+            `${describeSessionActivePlans(plans, getCurrentSessionId())}\n` +
+            `Do NOT draft a new plan — re-issue this call with the correct plan_id above.`,
         };
       }
       if (currentPlan.isPlaceholder) {
@@ -1050,7 +1079,19 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
       // Fix: when plan_id is missing, automatically use the most recent active plan in this session
       // (status=draft/executing, preferring isPlaceholder=true placeholder plan promotion path)
       // as the implicit plan_id. LLM can still revise that plan even when it forgets to pass the id.
-      if (typeof planId !== 'string' || !planId) {
+      //
+      // 2026-07-13 extension — a MIS-TYPED plan_id is the same failure, and the guard above missed it
+      // because it only checked for a FALSY id. Prod (mycox Run 17): the placeholder plan was created as
+      // …4d0ace1ce4bd and the LLM called plan_revise with …4d0ace1cebd4 — the last four hex chars
+      // TRANSPOSED. A 36-char UUID is simply not something an LLM can be relied on to transcribe. The
+      // wrong id fell straight through to "plan does not exist", failed 3x, tripped the circuit breaker,
+      // and the turn then falsely claimed "执行完成 → /plan.md" (caught by the honesty gate). Treat an id
+      // that resolves to NOTHING exactly like a missing one: fall back to the session's active plan.
+      // Safe because the fallback is session-scoped and placeholder-first — the plan the model meant.
+      const planIdUnresolvable =
+        typeof planId !== 'string' || !planId || !plans.get(planId);
+      if (planIdUnresolvable) {
+        const mistyped = typeof planId === 'string' && !!planId; // had an id, it just didn't exist
         try {
           const sid = getCurrentSessionId();
           const recent = plans.listBySession(sid, { limit: 5 });
@@ -1062,9 +1103,11 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
             placeholder ??
             recent.find((p) => p.status === 'draft' || p.status === 'executing');
           if (target) {
+            const bad = planId;
             planId = target.id;
             console.log(
-              `[plan-revise-fallback] LLM missing plan_id, auto-selected session=${sid} most recent active plan=${target.id} (${target.isPlaceholder ? 'placeholder' : 'real'}, status=${target.status})`,
+              `[plan-revise-fallback] LLM ${mistyped ? `passed a plan_id that does not exist ("${bad}" — likely a UUID transcription slip)` : 'missing plan_id'}, ` +
+                `auto-selected session=${sid} most recent active plan=${target.id} (${target.isPlaceholder ? 'placeholder' : 'real'}, status=${target.status})`,
             );
           }
         } catch (e) {
@@ -1135,7 +1178,9 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
         return {
           success: false,
           output: '',
-          error: `plan '${planId}' does not exist`,
+          error:
+            `plan '${planId}' does not exist (id is wrong, or it was already closed).\n` +
+            `${describeSessionActivePlans(plans, getCurrentSessionId())}`,
         };
       }
       if (current.status === 'completed' || current.status === 'failed') {
