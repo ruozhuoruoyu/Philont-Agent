@@ -7696,7 +7696,14 @@ async function runToolLoop(
             ? `plan_revise({plan_id:"${lastPlan.id}", new_steps, new_deliverables, reason}) — 转正占位 plan(必须提供 new_deliverables)`
             : lastPlan.status === 'draft'
               ? `plan_update_step({plan_id:"${lastPlan.id}", step_id:"${firstOpenStepId(lastPlan)}", status:"doing"}) — 开始执行第一步`
-              : `plan_revise({plan_id:"${lastPlan.id}", ...}) — 修订 plan 路径`;
+              : lastPlan.status === 'completed' || lastPlan.status === 'failed'
+                // A STALE terminal plan cannot be revised (plans.revise rejects completed/failed) and
+                // cannot be closed again. Telling the model to plan_revise it is a dead end — the gate
+                // blocks the tool and then hands out an instruction that always errors (prod 2026-07-13:
+                // writeFile + planAndExecute both rejected on planStatus=completed). The task is NEW:
+                // draft a NEW plan for it. The protocol is preserved, the deadlock is not.
+                ? 'plan_draft({deliverables, steps, task_signature}) — 上一个 plan 已关闭,为这个新任务建新 plan'
+                : `plan_revise({plan_id:"${lastPlan.id}", ...}) — 修订 plan 路径`;
         const closeHint = !lastPlan
           ? '(当前无活 plan,跳到第 2 步)'
           : lastPlan.status === 'failed' || lastPlan.status === 'completed'
@@ -9394,7 +9401,11 @@ async function runToolLoop(
               ? `plan_revise({plan_id:"${lastPlan.id}", new_steps, new_deliverables, reason}) — promote the placeholder plan (new_deliverables required)`
               : lastPlan.status === 'draft'
                 ? `plan_update_step({plan_id:"${lastPlan.id}", step_id:"${firstOpenStepId(lastPlan)}", status:"doing"}) — start executing the first step`
-                : `plan_revise({plan_id:"${lastPlan.id}", ...}) — revise the plan path`;
+                : lastPlan.status === 'completed' || lastPlan.status === 'failed'
+                  // See the zh copy above: a stale terminal plan can neither be revised nor re-closed,
+                  // so pointing the model at plan_revise is a guaranteed dead end. Draft a NEW plan.
+                  ? 'plan_draft({deliverables, steps, task_signature}) — the previous plan is closed; draft a NEW plan for this task'
+                  : `plan_revise({plan_id:"${lastPlan.id}", ...}) — revise the plan path`;
           const closeHint = !lastPlan
             ? '(no active plan — skip to step 2)'
             : lastPlan.status === 'failed' || lastPlan.status === 'completed'
