@@ -1115,3 +1115,15 @@ test('identity_correction_without_write: acknowledged correction with zero write
   });
   assert.ok(!unrelated || unrelated.reason !== 'identity_correction_without_write');
 });
+
+test('findDeliveryClaim: bare "已发送" (no recipient, no object) is a delivery claim — prod 2026-07-13', async () => {
+  const { findDeliveryClaim } = await import('../src/honesty_gate.js');
+  // The exact prod reply that slipped through while replyWithMedia had failed with ENOENT.
+  assert.ok(findDeliveryClaim('## For User\n\n已发送 ✅ 就是刚刚修正过的版本（搜索定位已修复 + 全部节点显示名称）。'));
+  assert.ok(findDeliveryClaim('已重新发送 AI_Knowledge_Graph_v3.html。'));
+  assert.ok(findDeliveryClaim('发给你了'));
+  // Negation / future intent must still be screened out.
+  assert.equal(findDeliveryClaim('发送失败了，我修好路径再发。'), null);
+  assert.equal(findDeliveryClaim('还没发送，等我改完。'), null);
+  assert.equal(findDeliveryClaim('修复后再发送给你。'), null);
+});

@@ -631,6 +631,16 @@ const DELIVERY_CLAIM_PATTERNS: RegExp[] = [
   /已(?:经)?(?:通过\S{0,4})?发(?:送)?(?:到|给)\s*(?:你|您|本?微信)/,
   // 文件/PPT/图片/文档/附件 …已发送/已发出
   /(?:文件|PPT|pptx|图片|文档|附件)[^。!!\n]{0,12}已(?:经)?发(?:送|出)/i,
+  // BARE "已发送 / 已发出 / 已重新发送" — no recipient, no object. Every pattern above needs either an
+  // explicit recipient (发给+你/您/微信) or an explicit object (文件/文档/附件…), so the most natural
+  // phrasing of all slipped through: prod 2026-07-13 opened a reply with "已发送 ✅ 就是刚刚修正过的版本"
+  // while the only replyWithMedia of the turn had FAILED (ENOENT — it sent a path the file was never
+  // written to). Six unrelated tools succeeded, so the aggregate ok/fail counts passed it and the user
+  // was told the file arrived when nothing arrived. Sentence-scoped DELIVERY_NEGATION below still
+  // screens "还没发送 / 发送失败 / 修好再发".
+  /已(?:经)?(?:重新)?发(?:送|出)(?:了|完毕|成功)?/,
+  // 发给你了 / 发您了
+  /发给\s*(?:你|您)\s*了/,
   /请查收/,
   // English: "sent (the file) to you / via wechat", "file ... sent"
   /\bsent\b[^.!?\n]{0,30}\b(?:to you|via wechat)\b/i,

@@ -347,3 +347,17 @@ test('shouldForceDeepExploreStart: selfReferentialMeta blocks force even at forc
   assert.equal(shouldForceDeepExploreStart(base), true);
   assert.equal(shouldForceDeepExploreStart({ ...base, selfReferentialMeta: true }), false);
 });
+
+test('classifyExploreAskReply: the words the ask itself offered are matched, not inferred (prod 2026-07-13)', async () => {
+  const { classifyExploreAskReply } = await import('../src/intent_router.js');
+  // 直接 is OUR deny word (回复"直接"就快速平铺作答) — the generic auth classifier read it as
+  // "just go ahead" and logged ask-tier APPROVED on an explicit refusal.
+  assert.equal(classifyExploreAskReply('直接'), 'deny');
+  assert.equal(classifyExploreAskReply('直接。'), 'deny');
+  assert.equal(classifyExploreAskReply('平铺'), 'deny');
+  assert.equal(classifyExploreAskReply('进'), 'grant');
+  assert.equal(classifyExploreAskReply('深度推理'), 'grant');
+  // Anything outside the offered vocabulary defers to the generic classifier.
+  assert.equal(classifyExploreAskReply('帮我看看这个文件'), null);
+  assert.equal(classifyExploreAskReply(''), null);
+});

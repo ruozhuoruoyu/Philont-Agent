@@ -273,6 +273,30 @@ export function buildDeepExploreAskText(dec: IntentDecision | null): string {
   );
 }
 
+/**
+ * Classify a reply to the ask-tier question DETERMINISTICALLY, on the exact vocabulary the question
+ * itself offered ("进" → engine, "直接" → flat). Returns null when the reply is neither, so the caller
+ * can fall back to the generic authorisation classifier.
+ *
+ * Why this must not go through the generic classifier (prod 2026-07-13): buildDeepExploreAskText tells
+ * the owner 回复"直接"就快速平铺作答 — i.e. 直接 is our DENY word. But the ask reply was handed to the
+ * generic auth classifier, whose prompt only asks "did the user authorise the operation?". Read in
+ * isolation, 直接 means "just go ahead / do it directly" → the LLM answered `grant`, and the log shows
+ * `ask-tier APPROVED` on a reply that was an explicit REFUSAL. We literally told the user which word to
+ * type and then used a classifier that does not know that word. Under the old code this was mostly
+ * harmless (the model happened not to call deep_explore); once force-start is evaluated at every
+ * terminal path, exploreAskApproved is authoritative and this would FORCE a reasoning session onto a
+ * task the owner just declined. The words we hand out must be matched, not inferred.
+ */
+export function classifyExploreAskReply(reply: string): 'grant' | 'deny' | null {
+  const r = (reply ?? '').trim().toLowerCase().replace(/[。！？，,!?.\s]+/g, '');
+  if (!r) return null;
+  // The offered words, plus the obvious near-synonyms a user types instead.
+  if (/^(进|进入|深度推理|深度|深入|深挖|推理)$/.test(r)) return 'grant';
+  if (/^(直接|平铺|快速|快答|直接答|不用|不深入|简单说)$/.test(r)) return 'deny';
+  return null; // anything else → generic classifier
+}
+
 export function deepExploreForceStartEnabled(): boolean {
   const v = (process.env.PHILONT_DEEP_EXPLORE_FORCE_START ?? '').trim().toLowerCase();
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');

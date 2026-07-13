@@ -179,6 +179,7 @@ import {
   directRouteWantsFast,
   buildDeepExploreNudge,
   userSignaledDepth,
+  classifyExploreAskReply,
   deepExploreForceStartEnabled,
   shouldForceDeepExploreStart,
   buildForceStartInput,
@@ -5092,10 +5093,16 @@ export async function handleChatSend(
     if (exploreAsk) {
       pendingExploreAsk.delete(sessionId);
       if (Date.now() - exploreAsk.ts <= EXPLORE_ASK_TTL_MS) {
-        const askIntent = await intentClassifier.classify(
-          userMessage,
-          'Enter the deep reasoning engine (deep_explore) for the research goal just proposed',
-        );
+        // Match the vocabulary the ask itself offered ("进" / "直接") BEFORE consulting the generic
+        // authorisation classifier — that classifier only knows "did the user authorise?", so it read
+        // our own DENY word 直接 as assent and logged ask-tier APPROVED on an explicit refusal
+        // (prod 2026-07-13). See classifyExploreAskReply.
+        const askIntent =
+          classifyExploreAskReply(userMessage) ??
+          (await intentClassifier.classify(
+            userMessage,
+            'Enter the deep reasoning engine (deep_explore) for the research goal just proposed',
+          ));
         if (askIntent === 'grant') {
           signalBus.exploreAskApproved = true;
           signalBus.intentDecision = exploreAsk.decision;
