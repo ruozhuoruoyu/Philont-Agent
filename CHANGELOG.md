@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-13
+
 ### Added
 - **Loop-engineering spine** (`docs/design/motivation_loop_architecture.md`) — the
   reliability discipline made structural:
@@ -42,6 +44,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer pauses output and freezes the whole agent; the file log is written before the
   console so it stays the durable source of truth.
 
+#### Production hardening (from live WeChat/scheduled-agent logs)
+
+- **`deep_explore` now reaches a conclusion.** A deliberate session had no reachable
+  terminal state (`judgeConvergence` is proof-shaped), so research goals asked the owner
+  to reply "continue" forever while the open frontier grew unbounded (observed: 14 rounds,
+  open 3→20). It now delivers a synthesized answer on the same conditions as the old
+  auto-answer but keeps the session active, so `continue`/`status` cannot hop to a
+  different session (`PHILONT_DEEP_EXPLORE_SOFT_ANSWER`). Reworded repeats of an
+  already-run search are deduped (exact-match missed them).
+- **The reasoning engine is now actually reachable.** The force-start check lived only in
+  the "first LLM response was pure text" branch — but a model that ignores the nudge and
+  flat-searches necessarily *opens with a tool call*, so the check was structurally
+  unreachable for exactly the behaviour it exists to catch. It is now evaluated wherever a
+  turn emits its final text, including the iteration-cap path a flat-searching turn
+  reliably lands on.
+- **Routing asks instead of guessing.** Router confidence alone no longer force-starts a
+  session — everything above the ask threshold asks the owner (entering the engine already
+  costs an authorization prompt, so the question is free). An explicit depth request still
+  goes straight in. The reply to that question is matched against the words the question
+  itself offered, not handed to a generic authorization classifier that read our own
+  "decline" word as consent. Debugging an artifact we wrote is routed as work, not research.
+- **Honesty gates measure the turn, not their own amnesia.** The zero-tool branch keyed on
+  a per-iteration window that resets whenever a gate injects a reminder, so a turn that had
+  just sent a file successfully was accused of making zero tool calls; it now trusts the
+  turn-durable ledger. A bare "sent it" with no successful send is caught.
+- **Deadlocks removed.** A mistyped plan id (an LLM cannot reliably transcribe a 36-char
+  UUID) now recovers instead of tripping the circuit breaker; a `plan_draft` against an
+  auto-created placeholder promotes it in place; a stale closed plan points at `plan_draft`
+  rather than at operations that can only error.
+- **Context compaction no longer burns tokens for nothing.** The compactor's in-turn cap
+  and the tool-result evictor's budget were misaligned, leaving a dead zone in which
+  compaction fired every iteration while the only mechanism that could shrink an oversized
+  tail never ran (observed: ~12 LLM summarize calls freeing 0.2%). Eviction now acts at the
+  same point, and a compaction that frees too little stops retrying.
+- **Self-learned routing rules can finally be validated.** Turn-close attribution counted a
+  drained idle-period signal as failure evidence, which is on nearly every turn — so "the
+  turn closed clean" was almost unreachable and no rule could ever collect the consecutive
+  successes promotion requires (1022 rules stored, 0 validated).
+
 ## [0.1.0] — Developer preview
 
 Initial public developer preview.
@@ -67,5 +108,6 @@ Initial public developer preview.
 - Multi-provider model support (Anthropic-, OpenAI-compatible: Claude, DeepSeek,
   GLM, Kimi, MiniMax, Gemini).
 
-[Unreleased]: https://github.com/<your-org>/philont/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/<your-org>/philont/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ruozhuoruoyu/Philont-Agent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ruozhuoruoyu/Philont-Agent/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/ruozhuoruoyu/Philont-Agent/releases/tag/v0.1.0
