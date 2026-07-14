@@ -10,6 +10,8 @@ import {
   stampChunk,
   dayStamp,
   logFileName,
+  stampTime,
+  logTimeZone,
   fileLoggingEnabled,
   logDir,
   initFileLogging,
@@ -38,10 +40,44 @@ test('stampChunk: prefixes each line start, carries state across writes', () => 
   assert.deepEqual(stampChunk('TS ', '', false), { out: '', atLineStart: false });
 });
 
-test('dayStamp / logFileName: UTC YYYYMMDD', () => {
-  const d = new Date(Date.UTC(2026, 5, 26, 23, 59)); // 2026-06-26 UTC
-  assert.equal(dayStamp(d), '20260626');
-  assert.equal(logFileName(d), 'philont-20260626.log');
+test('dayStamp / logFileName: YYYYMMDD in the OWNER timezone, not UTC', () => {
+  const d = new Date(Date.UTC(2026, 5, 26, 23, 59)); // 2026-06-26 23:59 UTC
+  assert.equal(dayStamp(d, 'UTC'), '20260626');
+  assert.equal(logFileName(d, 'UTC'), 'philont-20260626.log');
+  // Same instant is already the NEXT day in Shanghai (+08:00) — the file must roll over at the
+  // owner's midnight, so "today's log" is one file for them, not two.
+  assert.equal(dayStamp(d, 'Asia/Shanghai'), '20260627');
+  assert.equal(logFileName(d, 'Asia/Shanghai'), 'philont-20260627.log');
+  // …and still the PREVIOUS day in New York (-04:00).
+  assert.equal(dayStamp(d, 'America/New_York'), '20260626');
+});
+
+test('stampTime: local wall clock + a real offset (the instant stays unambiguous)', () => {
+  const d = new Date(Date.UTC(2026, 6, 13, 1, 46, 46, 545)); // the UTC stamp from a real prod log
+  assert.equal(stampTime(d, 'UTC'), '2026-07-13T01:46:46.545Z');
+  // 01:46 UTC is 09:46 the same morning in Shanghai — which is what the owner's clock said.
+  assert.equal(stampTime(d, 'Asia/Shanghai'), '2026-07-13T09:46:46.545+08:00');
+  // Negative offset, and a zone whose date differs from UTC's.
+  assert.equal(stampTime(d, 'America/New_York'), '2026-07-12T21:46:46.545-04:00');
+  // Half-hour zone — the offset label must not assume whole hours.
+  assert.equal(stampTime(d, 'Asia/Kolkata'), '2026-07-13T07:16:46.545+05:30');
+});
+
+test('logTimeZone: AGENT_TIMEZONE drives it; unset / bogus → UTC (never throws)', () => {
+  const saved = process.env.AGENT_TIMEZONE;
+  try {
+    delete process.env.AGENT_TIMEZONE;
+    assert.equal(logTimeZone(), 'UTC', 'unset → UTC');
+    process.env.AGENT_TIMEZONE = 'Asia/Shanghai';
+    assert.equal(logTimeZone(), 'Asia/Shanghai');
+    process.env.AGENT_TIMEZONE = '  ';
+    assert.equal(logTimeZone(), 'UTC', 'blank → UTC');
+    process.env.AGENT_TIMEZONE = 'Not/AZone';
+    assert.equal(logTimeZone(), 'UTC', 'a config typo must not crash the logger');
+  } finally {
+    if (saved === undefined) delete process.env.AGENT_TIMEZONE;
+    else process.env.AGENT_TIMEZONE = saved;
+  }
 });
 
 test('fileLoggingEnabled: default ON, off only on explicit off-ish value', () => {

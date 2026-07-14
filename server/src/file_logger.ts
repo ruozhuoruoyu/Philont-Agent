@@ -10,10 +10,12 @@
  *
  * Mechanism: wrap process.stdout.write / process.stderr.write so every byte still goes to the console
  * (original write called first, return value preserved) AND is mirrored, timestamped per line, to
- * ~/.philont/logs/philont-YYYYMMDD.log (UTC day). Zero per-call-site instrumentation — anything already
+ * ~/.philont/logs/philont-YYYYMMDD.log. Timestamps and the daily rollover use the OWNER's timezone
+ * (AGENT_TIMEZONE, set in the web-ui settings) — a log is read by a human against a wall clock. Zero per-call-site instrumentation — anything already
  * logged is captured. Best-effort: a file-write failure never breaks or blocks the console.
  *
  * Env: PHILONT_FILE_LOG=0/off/false/no disables (default ON). PHILONT_LOG_DIR overrides the directory.
+ * AGENT_TIMEZONE selects the timezone for stamps + rollover (unset / unknown → UTC).
  * PHILONT_LOG_KEEP_DAYS (default 14) prunes older daily files on rotation.
  */
 import { openSync, writeSync, closeSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
@@ -31,16 +33,74 @@ export function logDir(): string {
   return env && env.length > 0 ? env : join(homedir(), '.philont', 'logs');
 }
 
-/** UTC day stamp YYYYMMDD used for the rotating file name. */
-export function dayStamp(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}${m}${day}`;
+/**
+ * The owner's timezone — AGENT_TIMEZONE, configured in the web-ui settings (which prefills it from the
+ * browser's IANA zone). Falls back to UTC when unset or unrecognized by the ICU build.
+ *
+ * Logs are read by a human, and that human reads a wall clock. Stamping them in UTC forced the owner to
+ * mentally re-add their offset to every line just to answer "when did this happen?" — and a UTC day
+ * boundary rotated the file in the middle of their afternoon, so "today's log" was two files.
+ */
+export function logTimeZone(): string {
+  const tz = (process.env.AGENT_TIMEZONE ?? '').trim();
+  if (!tz) return 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return tz;
+  } catch {
+    return 'UTC'; // unknown zone → never crash the logger over a config typo
+  }
 }
 
-export function logFileName(d: Date): string {
-  return `philont-${dayStamp(d)}.log`;
+/** Calendar/clock parts of `d` as seen in `tz`. */
+function partsIn(d: Date, tz: string): { y: number; mo: number; da: number; h: number; mi: number; s: number } {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hourCycle: 'h23', // never yields "24" for midnight
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    })
+      .formatToParts(d)
+      .map((x) => [x.type, x.value]),
+  ) as Record<string, string>;
+  return { y: +p.year, mo: +p.month, da: +p.day, h: +p.hour, mi: +p.minute, s: +p.second };
+}
+
+/** UTC offset of `tz` at instant `d`, as "+08:00" / "-05:00" / "Z". */
+export function tzOffsetLabel(d: Date, tz: string): string {
+  const p = partsIn(d, tz);
+  // Interpret the local wall-clock parts as if they were UTC; the gap to the real instant IS the offset.
+  const asIfUtc = Date.UTC(p.y, p.mo - 1, p.da, p.h, p.mi, p.s);
+  const offMin = Math.round((asIfUtc - Math.floor(d.getTime() / 1000) * 1000) / 60000);
+  if (offMin === 0) return 'Z';
+  const sign = offMin > 0 ? '+' : '-';
+  const abs = Math.abs(offMin);
+  return `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+}
+
+/**
+ * ISO-8601 timestamp in `tz`, e.g. "2026-07-14T09:31:02.417+08:00". Keeps the offset so a line is still
+ * unambiguous (and machine-parseable) — the point is to spare the reader the arithmetic, not to discard
+ * which instant it was.
+ */
+export function stampTime(d: Date, tz: string = logTimeZone()): string {
+  const p = partsIn(d, tz);
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+  return (
+    `${p.y}-${pad(p.mo)}-${pad(p.da)}T${pad(p.h)}:${pad(p.mi)}:${pad(p.s)}.` +
+    `${pad(d.getMilliseconds(), 3)}${tzOffsetLabel(d, tz)}`
+  );
+}
+
+/** Day stamp YYYYMMDD in the owner's timezone — the file rolls over at THEIR midnight, not UTC's. */
+export function dayStamp(d: Date, tz: string = logTimeZone()): string {
+  const p = partsIn(d, tz);
+  return `${p.y}${String(p.mo).padStart(2, '0')}${String(p.da).padStart(2, '0')}`;
+}
+
+export function logFileName(d: Date, tz: string = logTimeZone()): string {
+  return `philont-${dayStamp(d, tz)}.log`;
 }
 
 /**
@@ -145,7 +205,7 @@ export function initFileLogging(): void {
               : Buffer.isBuffer(chunk)
                 ? chunk.toString(typeof enc === 'string' ? (enc as BufferEncoding) : 'utf8')
                 : String(chunk);
-          const stamped = stampChunk(`${now.toISOString()} [${tag}] `, text, atLineStart);
+          const stamped = stampChunk(`${stampTime(now)} [${tag}] `, text, atLineStart);
           atLineStart = stamped.atLineStart;
           writeSync(f, stamped.out);
         }

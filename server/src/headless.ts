@@ -17,7 +17,7 @@
  */
 
 import './load-env.js'; // must be first: loads dotenv override, overriding any shell/system residual env
-import { initFileLogging } from './file_logger.js';
+import { initFileLogging, stampTime } from './file_logger.js';
 initFileLogging(); // tee console → ~/.philont/logs so headless-run evidence survives (PHILONT_FILE_LOG=0 to disable)
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
@@ -216,7 +216,9 @@ async function run(): Promise<RunResult> {
 
   const log: string[] = [];
   const logLine = (tag: string, text: string) => {
-    log.push(`[${new Date().toISOString()}] ${tag} ${text}`);
+    // Owner-local wall clock (AGENT_TIMEZONE), same as the tee'd console log — a run log is read by a
+    // human, and forcing them to re-add their UTC offset to every line is a tax with no upside.
+    log.push(`[${stampTime(new Date())}] ${tag} ${text}`);
   };
   logLine('task', `session=${sessionId} workspace=${workspace}`);
 
