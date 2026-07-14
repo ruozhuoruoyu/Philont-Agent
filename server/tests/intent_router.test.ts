@@ -10,7 +10,6 @@ import {
   buildIntentPrompt,
   parseIntentDecision,
   classifyIntent,
-  userSignaledDepth,
   planRouteWantsSlow,
   buildDeepExploreNudge,
   deepExploreForceStartEnabled,
@@ -131,14 +130,6 @@ test('classifyIntent: aux call throws → null (degrade to today behavior, never
 
 const dExplore = (over: Partial<IntentDecision> = {}): IntentDecision => ({ route: 'deep_explore', domain: 'deliberate', confidence: 0.6, reason: 'r', ...over });
 
-test('userSignaledDepth: explicit depth/commitment words → true', () => {
-  for (const t of ['深度调研哪个适合', '深入分析一下', '系统地梳理', '彻底搞清楚', 'do a thorough investigation', 'deep dive into this']) {
-    assert.equal(userSignaledDepth(t), true, t);
-  }
-  for (const t of ['调研有没有类似方案', '今天天气如何', 'what is X']) {
-    assert.equal(userSignaledDepth(t), false, t);
-  }
-});
 
 test('planRouteWantsSlow: plan route ≥0.6 → reuse slow protocol; below / other routes → no', () => {
   assert.equal(planRouteWantsSlow({ route: 'plan', confidence: 0.7, reason: 'r' }), true);
@@ -370,27 +361,28 @@ test('buildIntentPrompt: carries the "debugging our own artifact is NOT deep_exp
   assert.match(p, /work item, not an investigation/i);
 });
 
-test('userSignaledDepth: a depth REQUEST, not any message containing a depth-ish noun (prod 2026-07-13)', async () => {
-  const { userSignaledDepth } = await import('../src/intent_router.js');
 
-  // ── FALSE POSITIVES that used to force-start a session and skip the ask ──
-  // The exact prod message: 系统 here is "orchestration SYSTEM", a noun.
+test('the ask tier has NO keyword bypass: a depth-ish NOUN cannot skip the owner\'s choice', async () => {
+  const { shouldForceDeepExploreStart } = await import('../src/intent_router.js');
+  const base = {
+    decision: { route: 'deep_explore' as const, domain: 'deliberate' as const, confidence: 0.95, reason: 'r' },
+    goalSubstantial: true,
+    alreadyForcedStart: false,
+    alreadyForcedContinue: false,
+    deepExploreRanThisTurn: false,
+    hasActiveSession: false,
+    tier: 'ask' as const,
+  };
+  // Depth is ESTABLISHED, never inferred. Without the owner's yes, no force — no matter what the
+  // message says. (Prod 2026-07-13: "完整多智能体编排系统" was read as a depth request and force-started.)
   assert.equal(
-    userSignaledDepth('调研分析以下两篇开源论文：Sakana Fugu — 支持通过单一API调用的完整多智能体编排系统'),
+    shouldForceDeepExploreStart({ ...base, explicitDepth: false, approvedViaAsk: false }),
     false,
-    '"编排系统" is a noun — it is not a request for depth',
+    'no approval → never force, whatever nouns the message contains',
   );
-  // 深度 as part of a model-architecture noun — lethal for an AI-focused owner.
-  for (const t of ['深度学习模型怎么选', '深度神经网络的梯度消失', '深度强化学习入门', '这个推荐系统怎么优化', '操作系统内核']) {
-    assert.equal(userSignaledDepth(t), false, `must not trip: ${t}`);
-  }
-
-  // ── Real depth requests still work ──
-  for (const t of [
-    '深入分析一下', '深度调研这个方向', '深度分析可行性', '系统地梳理一遍', '系统性复盘',
-    '彻底搞清楚', '全面评估', '仔细检查', '详细说明', '深挖一下',
-    'do a thorough investigation', 'deep dive into this', 'an in-depth review', 'be systematic',
-  ]) {
-    assert.equal(userSignaledDepth(t), true, `must trip: ${t}`);
-  }
+  // The owner said yes → in we go.
+  assert.equal(
+    shouldForceDeepExploreStart({ ...base, explicitDepth: true, approvedViaAsk: true }),
+    true,
+  );
 });

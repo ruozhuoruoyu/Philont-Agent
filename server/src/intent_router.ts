@@ -193,34 +193,28 @@ export async function classifyIntent(
 
 // ── Wiring helpers (pure) ────────────────────────────────────────────────────────────────────────
 //
-// Per the confirmed behavior: SUGGEST by default, but go straight in when the user explicitly signaled
-// depth/commitment (深入/深度/系统/彻底…) or the classifier is highly confident. plan-route reuses the
-// existing slow→plan protocol; deep_explore-route injects a nudge into the system prefix.
+// Per the confirmed behavior: SUGGEST by default. The engine is entered on the OWNER's word (the ask
+// tier), never on a keyword or on router confidence alone. plan-route reuses the existing slow→plan
+// protocol; deep_explore-route injects a nudge into the system prefix.
 
 /**
- * A depth REQUEST — not merely a message that happens to contain a depth-ish morpheme.
+ * NOTE (2026-07-13, owner decision): `userSignaledDepth` / DEPTH_SIGNAL_RE are GONE.
  *
- * 2026-07-13 regression: the old pattern had bare `深度` and `系统(?:地|性)?` (suffix OPTIONAL), so the
- * NOUNS matched. Prod: "…Sakana Fugu: 完整多智能体编排系统…" tripped on 系统 ("orchestration SYSTEM"),
- * the ask tier was skipped, and the turn was force-started into the engine — the owner never got the
- * choice. `深度` was worse: it matches 深度学习 / 深度神经网络 / 深度强化学习, so for an AI-focused owner
- * merely MENTIONING deep learning force-starts a 6-minute reasoning session.
+ * They answered "did the owner ask for depth?" — an open-ended question about THEIR language — with a
+ * keyword regex. That is the exact failure this router was built to replace (see the header: "keyword
+ * enumeration loses to paraphrase"), and it failed in both directions: bare 系统 matched "编排系统"
+ * (orchestration SYSTEM) and bare 深度 matched 深度学习, force-starting sessions the owner never asked
+ * for; while "花点时间好好琢磨一下" matched nothing and got no depth at all.
  *
- * This only became load-bearing when userSignaledDepth was made the sole bypass of the ask tier (7a34cec):
- * before that it just picked between two force paths, so a false positive was invisible. Widening what a
- * signal CONTROLS turns its false positives from harmless into harmful — the same trap as the ask-reply
- * classifier.
+ * The regex was only load-bearing because it was the SOLE bypass of the ask tier. Rather than make it
+ * accurate, the bypass itself is deleted: when the router lands in the ask tier, we ASK — always. The
+ * ask is free (deep_explore is capability=execute, so entering already costs an auth prompt), and the
+ * thing it buys back — never spending the owner's 6 minutes without their word — is worth far more than
+ * saving them one tap. Two regressions in one week came from bypass mechanisms built to save that tap.
  *
- * So: 系统 must carry its adverbial suffix (系统地/系统性), and 深度 must be followed by a research verb
- * (深度调研/深度分析/…) — never by a model architecture.
+ * Keywords remain correct where the vocabulary is OURS (classifyExploreAskReply: we told the owner to
+ * type "进"/"直接"). They are wrong where the vocabulary is THEIRS.
  */
-const DEPTH_SIGNAL_RE =
-  /深入|深挖|钻研|彻底|全面|仔细|认真|好好(?:地)?|详细|逐一|逐条|严谨|系统(?:地|性)|深度\s*(?:调研|调查|研究|分析|思考|推理|探索|挖掘|梳理|评估|论证|复盘|剖析)|\bin[-\s]?depth\b|\bthorough|\bsystematic|\brigorous|\bdeep[-\s]?dive\b/i;
-
-/** Did the user explicitly ask for depth/thoroughness → start the engine directly instead of offering. */
-export function userSignaledDepth(msg: string): boolean {
-  return DEPTH_SIGNAL_RE.test(msg ?? '');
-}
 
 /** plan route with enough confidence → drive the existing slow→plan protocol (reuse, don't reinvent). */
 export function planRouteWantsSlow(dec: IntentDecision | null): boolean {
@@ -243,8 +237,8 @@ export function directRouteWantsFast(dec: IntentDecision | null): boolean {
 // main-loop webSearch and ignores the soft START nudge. Soft prompts lose to the model's flat-search
 // default. So when the user EXPLICITLY asked for depth and the model still answered flat without ever
 // calling deep_explore, the harness synthesizes a real deep_explore(action=start) — grounding + round 1 —
-// exactly like force-continue guarantees a continue. Gated by explicitDepth so it never fires on a casual
-// research question (those only ever get the soft OFFER).
+// exactly like force-continue guarantees a continue. Gated on the owner having approved, so it never
+// fires on a casual research question (those get the ask).
 
 // ── Three-tier deep_explore routing (2026-07-09, owner decision) ────────────────────────────
 // Prod showed the advisory nudge is never adopted on research tasks (two flat runs in one day:
@@ -266,8 +260,7 @@ export function directRouteWantsFast(dec: IntentDecision | null): boolean {
 //   3. The ask path CARRIES its state (pendingExploreAsk stores {goal, decision} and restores both on
 //      the reply), whereas force-start's state lives in a per-turn signalBus that is silently lost
 //      across a pending-auth resume (prod 2026-07-12, see the carry fix in chat-handler).
-// An EXPLICIT depth request from the user ("深入研究…") still force-starts — userSignaledDepth is an
-// independent entry into shouldForceDeepExploreStart. Only the confidence-based auto-force is off.
+// The ONLY way in is the owner's yes (the ask tier). The keyword bypass is gone; see the note above.
 // Set PHILONT_DEEP_EXPLORE_FORCE_CONF=0.9 to restore the old behavior.
 export type DeepExploreRouteTier = 'force' | 'ask' | 'direct';
 
@@ -329,6 +322,11 @@ export function deepExploreForceStartEnabled(): boolean {
 
 export function shouldForceDeepExploreStart(opts: {
   decision: IntentDecision | null;
+  /**
+   * Depth is ESTABLISHED for this turn — i.e. the owner approved via the ask tier (or the force tier is
+   * explicitly re-enabled by env). No longer inferred from keywords in the owner's message: see the note
+   * above DEPTH_SIGNAL_RE's removal.
+   */
   explicitDepth: boolean;
   /** The message carries a self-contained goal (long enough to stand alone, not a bare "重做"/"深入点"). */
   goalSubstantial: boolean;
@@ -336,7 +334,7 @@ export function shouldForceDeepExploreStart(opts: {
   alreadyForcedContinue: boolean;
   deepExploreRanThisTurn: boolean;
   hasActiveSession: boolean;
-  /** Three-tier routing: 'force' makes explicit depth keywords unnecessary. */
+  /** Three-tier routing: 'force' (env-restorable only) enters without asking. */
   tier?: DeepExploreRouteTier | null;
   /** The owner answered the ask-tier question with approval this turn. */
   approvedViaAsk?: boolean;
@@ -346,7 +344,7 @@ export function shouldForceDeepExploreStart(opts: {
   if (opts.alreadyForcedStart || opts.alreadyForcedContinue) return false; // anti-reentry
   if (!opts.decision || opts.decision.route !== 'deep_explore') return false;
   if (opts.selfReferentialMeta) return false; // meta-question about the assistant — never a session goal
-  // Entry: explicit depth keyword (legacy), OR high-confidence tier, OR the owner just said yes.
+  // Entry: the owner said yes (ask tier), or the force tier was explicitly re-enabled by env.
   if (!opts.explicitDepth && opts.tier !== 'force' && !opts.approvedViaAsk) return false;
   // A forced session needs a real goal. Short context-dependent messages ("调研深度不够，重做", "深入点")
   // point at the PRIOR topic the harness can't capture as a goal → don't auto-start a garbage session.

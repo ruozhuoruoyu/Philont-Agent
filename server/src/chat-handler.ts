@@ -178,7 +178,6 @@ import {
   planRouteWantsSlow,
   directRouteWantsFast,
   buildDeepExploreNudge,
-  userSignaledDepth,
   classifyExploreAskReply,
   deepExploreForceStartEnabled,
   shouldForceDeepExploreStart,
@@ -306,7 +305,7 @@ const EXPLORE_ASK_TTL_MS = 10 * 60_000;
  */
 const carriedIntent = new Map<
   string,
-  { decision: IntentDecision | null; selfReferentialMeta: boolean; goal: string; depthSignaled: boolean; ts: number }
+  { decision: IntentDecision | null; selfReferentialMeta: boolean; goal: string; ts: number }
 >();
 const INTENT_CARRY_TTL_MS = 30 * 60_000;
 import {
@@ -5217,7 +5216,6 @@ export async function handleChatSend(
       decision: intentDecision,
       selfReferentialMeta: !!signalBus.selfReferentialMeta,
       goal: userMessage,
-      depthSignaled: userSignaledDepth(userMessage),
       ts: Date.now(),
     });
     if (intentDecision) {
@@ -5227,9 +5225,6 @@ export async function handleChatSend(
       // interactive sessions with a self-contained goal and no recently-active session.
       const askTier =
         deepExploreRouteTier(intentDecision) === 'ask' &&
-        // The owner ALREADY asked for depth ("深入研究…") — re-asking "要深挖吗?" is redundant noise.
-        // That path goes straight to force-start (userSignaledDepth is its own entry condition).
-        !userSignaledDepth(userMessage) &&
         !isSelfReferentialMetaQuestion(userMessage) &&
         !sessionId.startsWith('system:') &&
         !signalBus.exploreAskApproved &&
@@ -5253,7 +5248,6 @@ export async function handleChatSend(
         signalBus.intentDecision = carried.decision;
         signalBus.selfReferentialMeta = carried.selfReferentialMeta;
         signalBus.carriedExploreGoal = carried.goal;
-        signalBus.carriedDepthSignaled = carried.depthSignaled;
         if (carried.decision) {
           console.log(
             `[intent-router] session=${sessionId} auth-resume: carried route=${carried.decision.route} conf=${carried.decision.confidence} (router skipped on resume)`,
@@ -6482,7 +6476,8 @@ async function handleChatSendInner(
     // any session merely exists — the user accumulates stale never-closed sessions, and a blanket "any
     // active" guard suppressed every nudge (the feature looked dead). Same recency guard as force-start.
     if (!hasRecentlyActiveExploreSession(sessionId)) {
-      const nudge = buildDeepExploreNudge(intentDecision, userSignaledDepth(userMessage));
+      // START only once the owner has approved via the ask tier; otherwise the nudge merely OFFERS.
+      const nudge = buildDeepExploreNudge(intentDecision, !!signalBus.exploreAskApproved);
       if (nudge) {
         messages[0] = { ...messages[0], content: messages[0].content + nudge };
         console.log(`[intent-router] session=${sessionId} injected deep_explore nudge (mode=${intentDecision.domain ?? 'deliberate'})`);
@@ -7232,12 +7227,12 @@ async function decideForcedDeepExploreCall(
   const selfContained = messageIsSelfContainedGoal(forceMessage);
   const routeTier = deepExploreRouteTier(signalBus.intentDecision ?? null);
   const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
+  // Depth is ESTABLISHED, never inferred. The owner's yes (ask tier) is the only entry — the keyword
+  // bypass (userSignaledDepth) is deleted: it read "编排系统" as a depth request and force-started a
+  // session nobody asked for, and it missed "花点时间好好琢磨" entirely. 'force' tier is unreachable
+  // unless PHILONT_DEEP_EXPLORE_FORCE_CONF is explicitly lowered.
   const depthWanted =
-    !signalBus.exploreAskDeclined &&
-    (userSignaledDepth(forceMessage) ||
-      !!signalBus.carriedDepthSignaled ||
-      routeTier === 'force' ||
-      !!signalBus.exploreAskApproved);
+    !signalBus.exploreAskDeclined && (routeTier === 'force' || !!signalBus.exploreAskApproved);
   const baseEligible =
     deepExploreForceStartEnabled() &&
     signalBus.intentDecision?.route === 'deep_explore' &&
@@ -7309,8 +7304,6 @@ interface TurnSignalBus {
    * self-contained goal nor a depth signal, so without these the resumed turn cannot force-start. See carriedIntent.
    */
   carriedExploreGoal?: string;
-  /** Pending-auth resume only: did the ORIGINAL message signal depth ("深入…")? See carriedExploreGoal. */
-  carriedDepthSignaled?: boolean;
   /**
    * Cleanup-turn scoping (2026-07-06): set when the user message is a pure cleanup command
    * (looksLikeCleanupIntent). runToolLoop then mechanism-rejects external write http for the whole
