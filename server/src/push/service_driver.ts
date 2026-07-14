@@ -19,6 +19,7 @@
  * targetRef uses "service:<dateInDay>"; at most one digest per day.
  */
 
+import type { PhraseLang } from '../channel_phrases.js';
 import type { InitiativeStore, RawStore, Initiative } from '@agent/memory';
 import type { PushDispatcher } from './dispatcher.js';
 
@@ -33,6 +34,12 @@ export interface ServiceDriverOptions {
   /** Lower bound on dormancy (< this threshold = not pushed, prevents "false alarm" after 1-2 hours). Default 12h */
   minDormantHoursToConsider?: number;
   logger?: { log: (m: string) => void; warn: (m: string) => void; error: (m: string, e?: unknown) => void };
+  /**
+   * Language for the digest — resolved by the caller (AGENT_LANGUAGE → observed → mirror). A digest is the
+   * agent speaking FIRST, on a turn with no user message, so there is nothing to mirror and the language has
+   * to be told. Default 'zh' preserves the existing behaviour for callers that have not been updated.
+   */
+  lang?: PhraseLang;
   /** Clock injection for testing */
   now?: () => number;
 }
@@ -110,7 +117,7 @@ export async function serviceDriverTick(
   }
 
   // 3. Render + enqueue
-  const text = renderCheckInText(dormantHoursActual, findings);
+  const text = renderCheckInText(dormantHoursActual, findings, opts.lang ?? 'zh');
   const dayBucket = Math.floor(now / (24 * 60 * 60 * 1000));
   const result = await opts.dispatcher.enqueue({
     severity: 'digest',
@@ -140,20 +147,41 @@ export async function serviceDriverTick(
 export function renderCheckInText(
   dormantHours: number,
   findings: readonly Initiative[],
+  lang: PhraseLang = 'zh',
 ): string {
   const lines: string[] = [];
-  const hoursDisplay =
-    dormantHours < 36 ? `${dormantHours.toFixed(1)} 小时` : `${Math.round(dormantHours / 24)} 天`;
-  lines.push(`👋 ${hoursDisplay}没聊了。这段时间我自己做了 ${findings.length} 件事:`);
+  const en = lang === 'en';
+  const hoursDisplay = en
+    ? dormantHours < 36
+      ? `${dormantHours.toFixed(1)}h`
+      : `${Math.round(dormantHours / 24)}d`
+    : dormantHours < 36
+      ? `${dormantHours.toFixed(1)} 小时`
+      : `${Math.round(dormantHours / 24)} 天`;
+  lines.push(
+    en
+      ? `👋 It has been ${hoursDisplay} since we talked. I got ${findings.length} thing(s) done on my own:`
+      : `👋 ${hoursDisplay}没聊了。这段时间我自己做了 ${findings.length} 件事:`,
+  );
   for (const f of findings.slice(0, 3)) {
     const summary = (f.outcomeSummary ?? '').trim().slice(0, 200);
-    const driver = f.driver === 'k7-bridge' ? '自我复核' : f.driver;
+    const driver = f.driver === 'k7-bridge' ? (en ? 'self-review' : '自我复核') : f.driver;
     lines.push(`- (${driver}/${f.kind}) ${summary || f.targetRef}`);
   }
   if (findings.length > 3) {
-    lines.push(`... 还有 ${findings.length - 3} 条,回话时我可以详细说`);
+    lines.push(
+      en
+        ? `... and ${findings.length - 3} more — I can go into detail when you reply`
+        : `... 还有 ${findings.length - 3} 条,回话时我可以详细说`,
+    );
   }
   lines.push('');
-  lines.push('回一句"细说"我就把详情送上;不感兴趣可以回"别推送"取消订阅。');
+  // The off-switch offered here is REAL as of 2026-07-14 — classifyPushControlReply matches 别推送 and
+  // unsubscribes deterministically, before the model. It used to be a word nobody listened for.
+  lines.push(
+    en
+      ? 'Reply "tell me more" for details; reply "stop pushing" if you would rather I did not.'
+      : '回一句"细说"我就把详情送上;不感兴趣可以回"别推送"取消订阅。',
+  );
   return lines.join('\n');
 }

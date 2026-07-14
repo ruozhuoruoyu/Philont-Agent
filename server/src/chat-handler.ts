@@ -247,7 +247,11 @@ import {
 } from './research_grant.js';
 import { PushDispatcher } from './push/dispatcher.js';
 import { serviceDriverTick } from './push/service_driver.js';
-import { maybeAutoSubscribe } from './push/auto_subscribe.js';
+import {
+  maybeAutoSubscribe,
+  classifyPushControlReply,
+  parseDmPeerFromSessionId,
+} from './push/auto_subscribe.js';
 import { currentTraitProfile, traitsLiveEnabled } from './trait_profile.js';
 import {
   buildSelfhoodStatus,
@@ -1010,6 +1014,8 @@ const idleConsolidator = startIdleConsolidator({
         raw: memory.raw,
         initiatives: autonomousLoop.initiatives,
         dispatcher: pushDispatcher,
+        // The digest is the agent speaking first — no user message, nothing to mirror. Tell it the language.
+        lang: resolvePhraseLang({ userLocale: readUserLanguage() }),
       });
       if (r.triggered) {
         internalAudit.append('self_domain_write', {
@@ -5214,10 +5220,65 @@ export async function handleChatSend(
   if (onStatus && !autoSubscribeCheckedSessions.has(sessionId)) {
     autoSubscribeCheckedSessions.add(sessionId);
     try {
-      const notice = maybeAutoSubscribe(memory.pushSubscriptions, sessionId);
+      const notice = maybeAutoSubscribe(
+        memory.pushSubscriptions,
+        sessionId,
+        process.env,
+        resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }),
+      );
       if (notice) onStatus(notice);
     } catch (e) {
       console.warn('[push] first-contact auto-subscribe failed', e);
+    }
+  }
+
+  // The OFF-SWITCH we promised. The auto-subscribe notice tells the owner "reply 取消推送 to turn it off at
+  // any time" — and until 2026-07-14 NOTHING matched that phrase, while PushSubscriptionStore.unsubscribe(),
+  // sitting right there in the store, had ZERO callers anywhere in the server. We opt people IN
+  // automatically on first contact, tell them how to opt out, and did not listen. There was no way for a
+  // person to make us stop messaging them through the channel we told them to use — and the web-ui gate fix
+  // in this same release is what makes those pushes actually start flowing. Handled deterministically here,
+  // BEFORE the model, because an off-switch that depends on the model noticing is not an off-switch.
+  {
+    const ctl = classifyPushControlReply(userMessage);
+    if (ctl) {
+      const lang = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() });
+      const dm = parseDmPeerFromSessionId(sessionId);
+      let reply: string;
+      if (!dm) {
+        reply =
+          lang === 'en'
+            ? 'This chat does not receive proactive messages, so there is nothing to change.'
+            : '这个对话不接收主动消息,无需改动。';
+      } else if (ctl === 'unsubscribe') {
+        let ok = false;
+        try {
+          ok = memory.pushSubscriptions.unsubscribe(dm.channel, dm.peer);
+        } catch (e) {
+          console.warn('[push] unsubscribe failed', e);
+        }
+        console.log(`[push] owner asked to STOP pushes (session=${sessionId}) → unsubscribed=${ok}`);
+        reply = ok
+          ? lang === 'en'
+            ? 'Done — proactive messages are off. I will not message you unprompted again. Reply "resume pushing" if you ever want them back.'
+            : '好的,主动消息已关闭。我不会再主动给你发消息了。想恢复的话回复"恢复推送"。'
+          : lang === 'en'
+            ? 'Proactive messages were already off for this chat — nothing to turn off.'
+            : '这个对话本来就没开主动消息,无需关闭。';
+      } else {
+        try {
+          memory.pushSubscriptions.subscribe({ channel: dm.channel, peer: dm.peer });
+        } catch (e) {
+          console.warn('[push] resubscribe failed', e);
+        }
+        console.log(`[push] owner asked to RESUME pushes (session=${sessionId})`);
+        reply =
+          lang === 'en'
+            ? 'Proactive messages are back on. Reply "stop pushing" to turn them off again.'
+            : '主动消息已恢复。想再关掉的话回复"取消推送"。';
+      }
+      onDelta(reply);
+      return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
     }
   }
 
