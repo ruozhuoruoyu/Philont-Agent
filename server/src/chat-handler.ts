@@ -330,7 +330,11 @@ import {
 import { detectUngroundedArxivCitation, buildCitationGroundingDirective } from './citation_gate.js';
 import { detectUngroundedComputation, buildNumericGroundingDirective } from './numeric_grounding_gate.js';
 import { detectHandRolledParser, buildSkillReflexNudge } from './skill_reflex.js';
-import { resolveResponseLanguage, buildLanguageDirective } from './response_language.js';
+import {
+  resolveResponseLanguage,
+  buildLanguageDirective,
+  observeUserLanguage,
+} from './response_language.js';
 
 const llm = createLLMAdapter();
 
@@ -2269,6 +2273,38 @@ export interface WebuiProactiveMessage {
   /** Structured fields (grant request) — the front-end renders these bilingually. */
   payload?: Record<string, unknown>;
 }
+/**
+ * The user's language, persisted as the `user.locale` fact.
+ *
+ * Response language used to be resolved from the CHANNEL (wechat → Chinese). That was wrong: WeChat is
+ * international, and the app someone messages from is not evidence of the language they speak. The resolver
+ * always had a higher-priority tier for the user's own locale — but nothing ever wrote the fact and no
+ * caller ever passed it, so the tier was a comment and the channel pin silently decided for everyone.
+ *
+ * Observing it (rather than mirroring this turn's message) is what makes it work on a turn with NO user
+ * message — which is exactly what a proactive push is: the agent speaking first, with nothing to mirror.
+ */
+function readUserLanguage(): string | null {
+  try {
+    const v = memory.facts.getFact('user', 'locale')?.value;
+    return typeof v === 'string' && v.trim() ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function refreshUserLanguage(userMessage: string | null | undefined): void {
+  const observed = observeUserLanguage(userMessage);
+  if (!observed) return; // no decisive signal — never overwrite a known language with a guess
+  try {
+    if (readUserLanguage() === observed) return;
+    memory.facts.storeFact({ namespace: 'user', key: 'locale', value: observed });
+    console.log(`[response-language] user language observed → ${observed}`);
+  } catch {
+    // Best-effort: language observation must never break a turn.
+  }
+}
+
 const webuiClients = new Map<string, (msg: WebuiProactiveMessage) => void>();
 
 /**
@@ -5032,7 +5068,9 @@ function buildFreshMessages(
         ` otherwise the fallback mechanism may take the last section and accidentally expose it to the user.` +
         // i18n: prompt language (English) is decoupled from reply language — the user-facing "## For User"
         // section follows the channel/user language (WeChat → Chinese). See response_language.ts (and docs/i18n/glossary.md for terminology).
-        buildLanguageDirective(resolveResponseLanguage({ channel: sessionId })) +
+        buildLanguageDirective(
+          resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }),
+        ) +
         timeContext +
         memoryPrefix,
     },
@@ -5137,6 +5175,11 @@ export async function handleChatSend(
   // run inside this scope, so sid does not need to be passed individually.
   return runInTurnContext(sessionId, async () => {
   const audit = new AuditLog();
+
+  // Observe the language the user actually writes in and persist it (`user.locale`). This is what lets a
+  // PROACTIVE push — a turn with no user message at all, nothing to mirror — still reach them in their own
+  // language, without guessing it from the channel they happen to use.
+  refreshUserLanguage(userMessage);
 
   // First time seeing this ws sid → run orphan scan + register active session for finalize tracking
   if (!activeSessions.has(sessionId)) {
@@ -5898,7 +5941,10 @@ async function handleChatSendInner(
 
   // Resolve the language for user-facing status phrases (onStatus).
   // WeChat channel uses Chinese; all other channels use English.
-  const statusLang: PhraseLang = resolveResponseLanguage({ channel: sessionId }) === 'Chinese' ? 'zh' : 'en';
+  const statusLang: PhraseLang =
+    resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }) === 'Chinese'
+      ? 'zh'
+      : 'en';
 
   // B (2026-06-28): flag a deep_explore STATUS/COUNT query so force-continue can't hijack it into a 6-min
   // advancing round and the fabrication gate doesn't block the snapshot answer (read by both downstream).
@@ -6855,15 +6901,15 @@ async function handleChatSendInner(
                   `environment, which credential). Name the blocker. "Sorry, I have not run it yet" is not a ` +
                   `blocker and will be rejected.\n` +
                   `Do not repeat the claim "${honesty.matchedClaim}" — no process ran, so there is no result to ` +
-                  `report. Reply in the SAME LANGUAGE the user wrote in.\n` +
+                  `report.${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n` +
                   `This is an intra-turn internal correction. Do not surface this reminder to the user.`
                 : `[drive Honesty/${honesty.reason}] ${honesty.evidence}\n\n` +
                   `**Do ONE of these in your reply — do not straddle**:\n` +
                   `  A · Actually perform it NOW by CALLING the tool (e.g. forget_skill / store_fact / shell) — ` +
                   `writing the call in a Work Log / prose is NOT calling it;\n` +
                   `  B · Correct yourself: tell the user honestly you have NOT done it yet.\n` +
-                  `Do not repeat the claim "${honesty.matchedClaim}" unless a tool call THIS turn actually supports it.\n` +
-                  `Reply in the SAME LANGUAGE the user wrote in.\n` +
+                  `Do not repeat the claim "${honesty.matchedClaim}" unless a tool call THIS turn actually supports it.` +
+                  `${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n` +
                   `This is an intra-turn internal correction. Do not surface this reminder to the user.`,
           });
           onTrace?.({
@@ -8645,7 +8691,7 @@ async function runToolLoop(
                 `  3. If you genuinely cannot run it, name the BLOCKER concretely: which tool is unavailable, ` +
                 `which environment is missing, which credential you lack. "I have not run it yet" is a ` +
                 `restatement, not a blocker, and will be rejected;\n` +
-                `  4. Reply in the SAME LANGUAGE the user wrote in.\n\n` +
+                `  4.${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n\n` +
                 `This is an intra-turn internal correction. Do not surface this reminder to the user.`
               : `[drive Honesty/fabricated_execution] You wrote "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
                 `**This is the most serious dishonesty: reporting results of a computation that never ran this turn.**\n` +
@@ -8653,7 +8699,7 @@ async function runToolLoop(
                 `  2. In this same reply, actually CALL the tool (shell / pariGp) and wait for its ✓ / ⚠ output;\n` +
                 `  3. Report ONLY what the tool returned — if it failed, say it failed;\n` +
                 `  4. If you will not run it now, tell the user plainly "not run yet" — never invent the result;\n` +
-                `  5. Reply in the SAME LANGUAGE the user wrote in.\n\n` +
+                `  5.${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n\n` +
                 `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
           } else if (honesty.reason === 'run_promise_without_exec') {
             reminder =
