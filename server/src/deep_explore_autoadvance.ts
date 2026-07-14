@@ -13,6 +13,7 @@
  * advanceSession (not the tool dispatch), so it does not go through the interactive auth gate — the
  * per-session opt-in IS the authorization.
  */
+import type { PhraseLang } from './channel_phrases.js';
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 import type { ToolResult } from '@agent/policy';
 import {
@@ -65,6 +66,11 @@ export interface AutoAdvanceDeps {
   runInContext: <T>(sessionId: string, fn: () => Promise<T>) => Promise<T>;
   /** Proactively notify the user. `important` events (stuck/solved) also push to messaging channels. */
   notify: (text: string, opts?: { important?: boolean }) => void;
+  /**
+   * Language for the pause cards. These are the agent speaking FIRST — no user message, nothing to mirror —
+   * so the language has to be told. Resolved by the caller (AGENT_LANGUAGE → observed → mirror).
+   */
+  lang?: () => PhraseLang;
   /** ms between ticks. Rounds run sequentially regardless; this is the idle poll cadence. Default 30s. */
   intervalMs?: number;
   /**
@@ -78,6 +84,8 @@ export interface AutoAdvanceDeps {
 export interface AutoAdvanceLoop {
   start: () => void;
   stop: () => void;
+  /** Grant one session another batch of rounds — the owner replied "自动推进" to the pause card. */
+  rearm: (sessionId: string) => void;
   /** Exposed for tests: run one tick synchronously. */
   tickOnce: () => Promise<void>;
 }
@@ -119,7 +127,9 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           deps.reasoning.setAutoAdvance(s.id, false);
           roundsAdvanced.delete(s.id);
           deps.notify(
-            `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 跑满 ${MAX_ROUNDS} 轮预算。回复"自动推进"再加一批,或"停"。`,
+            (deps.lang?.() ?? 'zh') === 'en'
+              ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" used its ${MAX_ROUNDS}-round budget. Reply "auto advance" for another batch, or "stop".`
+              : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 跑满 ${MAX_ROUNDS} 轮预算。回复"自动推进"再加一批,或"停"。`,
             { important: true },
           );
           continue;
@@ -136,9 +146,13 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           deps.reasoning.setAutoAdvance(s.id, false);
           roundsAdvanced.delete(s.id);
           deps.notify(
-            decision === 'switch_engine'
-              ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 这条路连续 ${s.noProgressRounds} 轮没产出——换个角度/模式可能更有效。回复"继续"原路推进、或换个角度、或"停"。`
-              : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 连续 ${s.noProgressRounds} 轮无进展(卡住)。回复"继续"手动推进,或换个角度重启。`,
+            (deps.lang?.() ?? 'zh') === 'en'
+              ? decision === 'switch_engine'
+                ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" produced nothing for ${s.noProgressRounds} rounds — a different angle or mode may work better. Reply "continue" to push on as-is, try a new angle, or "stop".`
+                : `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" has made no progress for ${s.noProgressRounds} rounds (stuck). Reply "continue" to advance it by hand, or restart from a new angle.`
+              : decision === 'switch_engine'
+                ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 这条路连续 ${s.noProgressRounds} 轮没产出——换个角度/模式可能更有效。回复"继续"原路推进、或换个角度、或"停"。`
+                : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 连续 ${s.noProgressRounds} 轮无进展(卡住)。回复"继续"手动推进,或换个角度重启。`,
             { important: true },
           );
           continue;
@@ -207,6 +221,20 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
       stopped = true;
       if (timer) clearTimeout(timer);
       timer = null;
+    },
+    /**
+     * Re-arm auto-advance for one session — the owner replied "自动推进" / "auto advance" to the pause card
+     * ("跑满 N 轮预算。回复"自动推进"再加一批").
+     *
+     * MUST reset the per-session rounds counter, not just flip the flag. The pause fires on
+     * `rounds >= MAX_ROUNDS`, and that counter lives in this closure — so setting auto-advance back on
+     * WITHOUT clearing it means the very next tick re-reads the same over-budget count, pauses again, and
+     * sends the pause notice again. Granting another batch would have produced an infinite pause-and-notify
+     * loop in the owner's chat. "Another batch" means another BATCH.
+     */
+    rearm: (sessionId: string): void => {
+      roundsAdvanced.delete(sessionId);
+      deps.reasoning.setAutoAdvance(sessionId, true);
     },
     tickOnce,
   };

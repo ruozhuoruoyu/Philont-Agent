@@ -148,6 +148,7 @@ import {
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
 import { classifyAuthIntent } from './auth_intent.js';
+import { classifyExploreControlReply, resolveExploreTarget } from './explore_control.js';
 import {
   extractScheduleIdFromSession,
   summarizeTurnTrace,
@@ -2711,6 +2712,7 @@ export function autonomySelfhoodStatus() {
 // PHILONT_DEEP_EXPLORE_AUTO_ADVANCE gates the whole loop, and each session is opt-in via
 // deep_explore action=auto_on. When off, the loop never arms → zero behaviour change.
 export const deepExploreAutoAdvance = createAutoAdvanceLoop({
+  lang: () => resolvePhraseLang({ userLocale: readUserLanguage() }),
   reasoning: memory.reasoning,
   advanceSession: (s) =>
     deepExploreAdvanceSession
@@ -2744,6 +2746,7 @@ if (!UNDER_TEST) deepExploreAutoAdvance.start();
 // OPEN frontier nodes (the user stopped replying "继续"). Does NOT run the round — just surfaces + asks,
 // once per session. Default ON (PHILONT_DEEP_EXPLORE_FOLLOWUP=0 to disable). Reuses the same notify path.
 export const deepExploreFollowUp = createFollowUpLoop({
+  lang: () => resolvePhraseLang({ userLocale: readUserLanguage() }),
   reasoning: memory.reasoning,
   notify: (text, opts) => {
     // Route to the channel the session was STARTED in — a WeChat-started exploration must not spam the
@@ -5276,6 +5279,76 @@ export async function handleChatSend(
           lang === 'en'
             ? 'Proactive messages are back on. Reply "stop pushing" to turn them off again.'
             : '主动消息已恢复。想再关掉的话回复"取消推送"。';
+      }
+      onDelta(reply);
+      return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+    }
+  }
+
+  // deep_explore session control — the words the follow-up / auto-advance cards printed. 放弃 / 全清 /
+  // 自动推进 / 停 had NO listener anywhere: the phrases existed only in the cards that printed them, while
+  // the verbs they name (setSessionStatus('abandoned'), setAutoAdvance) sat fully built and unplumbed.
+  // Handled here, before the model, so the exact words we PRINTED always work. 继续 is deliberately left to
+  // the existing force-continue path — it already works, and a second owner of it is pure regression risk.
+  //
+  // HIJACK GUARD. This runs before the model on EVERY turn, and 停 / 放弃 / stop are ordinary words a person
+  // says for ordinary reasons ("stop what you're doing", "give up on that idea"). So a match is NOT enough:
+  // the world must also be in the state the card described. No open exploration → this was never about an
+  // exploration → fall through to the model SILENTLY, do not answer. 停 additionally requires that something
+  // is actually auto-advancing; otherwise "停" means whatever the person meant, and it is not ours to take.
+  {
+    const ec = classifyExploreControlReply(userMessage);
+    const openSessions = ec ? memory.reasoning.listActiveSessions(sessionId) : [];
+    const autoOn = openSessions.filter((x) => x.autoAdvance);
+    const applies =
+      !!ec &&
+      openSessions.length > 0 &&
+      (ec.kind !== 'stop_auto' || autoOn.length > 0);
+
+    if (ec && applies) {
+      const lang = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() });
+      const en = lang === 'en';
+      const focus = memory.reasoning.getMostRecentActiveSession(sessionId) ?? openSessions[0];
+      let reply: string;
+
+      if (ec.kind === 'stop_auto') {
+        for (const x of autoOn) memory.reasoning.setAutoAdvance(x.id, false);
+        console.log(`[explore-control] owner stopped auto-advance on ${autoOn.length} session(s)`);
+        reply = en
+          ? 'Stopped. I will not advance these on my own; they stay open — reply "auto advance" to resume, or "abandon" to archive.'
+          : '好的,不再自动推进了。会话仍开着——想恢复回"自动推进",想归档回"放弃"。';
+      } else if (ec.kind === 'auto_advance') {
+        deepExploreAutoAdvance.rearm(focus.id);
+        console.log(`[explore-control] owner granted another batch to ${focus.id}`);
+        reply = en
+          ? `Another batch granted — I will keep advancing "${focus.goal.slice(0, 40)}" in the background. Reply "stop" to pause.`
+          : `好的,再给「${focus.goal.slice(0, 40)}」加一批,我在后台接着推进。想停回"停"。`;
+      } else if (ec.kind === 'abandon_all') {
+        for (const x of openSessions) memory.reasoning.setSessionStatus(x.id, 'abandoned');
+        console.log(`[explore-control] owner abandoned ALL ${openSessions.length} session(s)`);
+        reply = en
+          ? `Archived all ${openSessions.length} open exploration(s).`
+          : `已归档全部 ${openSessions.length} 个探索。`;
+      } else {
+        const hit = resolveExploreTarget(openSessions, ec.target, focus);
+        if (hit && 'session' in hit) {
+          memory.reasoning.setSessionStatus(hit.session.id, 'abandoned');
+          console.log(`[explore-control] owner abandoned ${hit.session.id}`);
+          reply = en
+            ? `Archived "${hit.session.goal.slice(0, 50)}". Say the word and I will reopen it.`
+            : `已归档「${hit.session.goal.slice(0, 50)}」。要的话随时说一声,我给你重开。`;
+        } else if (hit && 'ambiguous' in hit) {
+          // Never guess: silently archiving the WRONG line of reasoning is far worse than asking again.
+          const list = hit.ambiguous.map((x) => `「${x.goal.slice(0, 40)}」`).join(' / ');
+          reply = en
+            ? `That matches more than one exploration (${list}) — which one?`
+            : `匹配到不止一个探索(${list})——是哪个?`;
+        } else {
+          const list = openSessions.map((x) => `「${x.goal.slice(0, 40)}」`).join(' / ');
+          reply = en
+            ? `No open exploration matches that. Currently open: ${list}`
+            : `没有匹配的探索。当前开着的:${list}`;
+        }
       }
       onDelta(reply);
       return { outcome: { outcomeType: 'response' }, auditEvents: 0 };

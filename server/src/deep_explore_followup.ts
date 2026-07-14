@@ -14,6 +14,7 @@
  * process — re-asking once after a restart is acceptable). Silence threshold
  * PHILONT_DEEP_EXPLORE_FOLLOWUP_SILENCE_HOURS (default 6).
  */
+import type { PhraseLang } from './channel_phrases.js';
 import type { ReasoningStore } from '@agent/memory';
 
 export function followUpEnabled(): boolean {
@@ -96,6 +97,11 @@ export interface FollowUpDeps {
   /** Proactively notify the user. `ownerSessionId` lets the caller route the ask to the channel the
    * session was started in (e.g. WeChat), instead of blasting every surface. */
   notify: (text: string, opts?: { important?: boolean; ownerSessionId?: string }) => void;
+  /**
+   * Language for the cards. These are the agent speaking FIRST (a follow-up on a session the owner has gone
+   * quiet on), so there is no user message to mirror — the language must be told. Resolved by the caller.
+   */
+  lang?: () => PhraseLang;
   /** ms between scans (silence is in hours, so a coarse cadence is fine). Default 10 min. */
   intervalMs?: number;
   /** Silence threshold ms. Default from env (6 h). */
@@ -157,7 +163,9 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
           const g = s.goal.length > 50 ? s.goal.slice(0, 50) + '…' : s.goal;
           console.log(`[deep-explore-followup] auto-archived stale stuck session ${s.id} ("${g}")`);
           deps.notify(
-            `🗂️ 卡住的探索「${g}」我先归档了——问过一次没推进、也一直没证出结果。要的话随时说一声,我给你重开。`,
+            (deps.lang?.() ?? 'zh') === 'en'
+              ? `🗂️ I archived the stalled exploration "${g}" — I asked once, it did not advance, and it never proved anything. Say the word and I will reopen it.`
+              : `🗂️ 卡住的探索「${g}」我先归档了——问过一次没推进、也一直没证出结果。要的话随时说一声,我给你重开。`,
             { important: false, ownerSessionId: s.ownerSessionId ?? undefined },
           );
         }
@@ -198,19 +206,29 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
     // (prod: a model-selection session whose 5 open nodes all need external real-time data can't advance by
     // reasoning). The user-facing text stays Chinese (WeChat convention).
     const stuck = primary.proved === 0;
+    // Every word offered below is matched deterministically by classifyExploreControlReply (放弃 / 全清 /
+    // abandon / clear all) or by the force-continue path (继续 / continue). Until 2026-07-14 放弃 and 全清
+    // were words nobody listened for — do not add an option here without teaching the matcher.
+    const en = (deps.lang?.() ?? 'zh') === 'en';
     let text: string;
     if (others > 0) {
-      text =
-        `🔬 你有 ${candidates.length} 个 deep_explore 探索挂着没推进,最近的:「${goal}」(${primary.open} 个开放节点)。` +
-        `要推进哪个回"继续";要清理某个说"放弃 <它>",或"全清"。`;
+      text = en
+        ? `🔬 You have ${candidates.length} deep_explore sessions sitting idle; the latest: "${goal}" (${primary.open} open nodes). ` +
+          `Reply "continue" to advance it; "abandon <name>" to drop one, or "clear all".`
+        : `🔬 你有 ${candidates.length} 个 deep_explore 探索挂着没推进,最近的:「${goal}」(${primary.open} 个开放节点)。` +
+          `要推进哪个回"继续";要清理某个说"放弃 <它>",或"全清"。`;
     } else if (stuck) {
-      text =
-        `🔬 探索「${goal}」挂了一阵,还没证出任何结果(${primary.open} 个开放节点还开着)。` +
-        `要我放弃它吗?回"放弃"我就归档;想换个角度接着推进就回"继续"。`;
+      text = en
+        ? `🔬 The exploration "${goal}" has been idle a while and has proved nothing yet (${primary.open} open nodes). ` +
+          `Want me to drop it? Reply "abandon" and I will archive it; reply "continue" to push on from a new angle.`
+        : `🔬 探索「${goal}」挂了一阵,还没证出任何结果(${primary.open} 个开放节点还开着)。` +
+          `要我放弃它吗?回"放弃"我就归档;想换个角度接着推进就回"继续"。`;
     } else {
-      text =
-        `🔬 探索「${goal}」还有 ${primary.open} 个开放节点没推进(你已有一段时间没回"继续")。` +
-        `要我接着推进(回"继续")、后台自动推进,还是放弃归档(回"放弃")?`;
+      text = en
+        ? `🔬 The exploration "${goal}" still has ${primary.open} open nodes (you have not replied "continue" in a while). ` +
+          `Shall I push on ("continue"), keep advancing it in the background ("auto advance"), or archive it ("abandon")?`
+        : `🔬 探索「${goal}」还有 ${primary.open} 个开放节点没推进(你已有一段时间没回"继续")。` +
+          `要我接着推进(回"继续")、后台自动推进(回"自动推进"),还是放弃归档(回"放弃")?`;
     }
     // Route to the channel the session was started in (e.g. WeChat) — don't blast every surface.
     deps.notify(text, { important: true, ownerSessionId: primary.owner ?? undefined });

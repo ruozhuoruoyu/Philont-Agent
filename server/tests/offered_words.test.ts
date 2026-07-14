@@ -22,6 +22,7 @@ import {
 import { renderCheckInText } from '../src/push/service_driver.js';
 import { classifyProposalReply, renderSelfhoodStatusText } from '../src/autonomy_status.js';
 import { matchOfferedAuthWord } from '../src/auth_intent.js';
+import { classifyExploreControlReply } from '../src/explore_control.js';
 
 test('the off-switch we promise in the auto-subscribe notice actually works', () => {
   // We opt the owner IN automatically. The notice is where we promise them a way out.
@@ -87,5 +88,26 @@ test('the auth card offers words the matcher accepts, in both languages', () => 
   // Rendered by renderResearchGrantPrompt / the channel auth cards: "回复「同意」/「拒绝」", "approve / reject".
   for (const w of ['同意', '拒绝', 'approve', 'reject']) {
     assert.ok(matchOfferedAuthWord(w), `we print "${w}" on the auth card — we must match it exactly`);
+  }
+});
+
+test('the deep_explore cards offer words the control layer accepts, in both languages', () => {
+  // The follow-up card: 「要清理某个说"放弃 <它>",或"全清"」 / 'abandon <name>' / 'clear all'.
+  // The auto-advance pause card: 「回复"自动推进"再加一批,或"停"」 / 'auto advance' / 'stop'.
+  // All four were words nobody listened for — the verbs behind them (setSessionStatus, setAutoAdvance) were
+  // fully built and simply never plumbed to the words.
+  for (const [word, kind] of [
+    ['放弃', 'abandon'],
+    ['abandon', 'abandon'],
+    ['全清', 'abandon_all'],
+    ['clear all', 'abandon_all'],
+    ['自动推进', 'auto_advance'],
+    ['auto advance', 'auto_advance'],
+    ['停', 'stop_auto'],
+    ['stop', 'stop_auto'],
+  ] as const) {
+    const r = classifyExploreControlReply(word);
+    assert.ok(r, `we print "${word}" on a card — we must listen for it`);
+    assert.equal(r!.kind, kind);
   }
 });
