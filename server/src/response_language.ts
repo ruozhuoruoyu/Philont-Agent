@@ -171,3 +171,30 @@ export function observeUserLanguage(text: string | null | undefined): ResponseLa
   if (cyrillic >= 4) return 'Russian';
   return null; // Latin script → cannot be decided by script; let the mirror directive handle it
 }
+
+
+// ── Ambient access, for code that cannot reach the memory store ──────────────────────────────────
+//
+// Channels deliberately do NOT import chat-handler (they take handleChatSend by injection to avoid a cycle),
+// so they cannot read the `user.locale` fact themselves. Rather than duplicate the resolution — which is how
+// a writer and a reader end up speaking different languages, a mistake made twice this week — chat-handler
+// installs the reader ONCE at startup and everyone else asks here.
+//
+// Unset (tests, headless) → no observed locale, so resolution falls to AGENT_LANGUAGE, then to mirroring.
+
+let userLocaleProvider: () => string | null = () => null;
+
+/** Called once by chat-handler at startup. */
+export function setUserLocaleProvider(fn: () => string | null): void {
+  userLocaleProvider = fn;
+}
+
+/** The language for code-authored templates, resolved from the one resolution. */
+export function currentPhraseLang(channel?: string | null): 'zh' | 'en' {
+  return resolvePhraseLang({ channel, userLocale: userLocaleProvider() });
+}
+
+/** The language for model-facing directives, resolved from the one resolution. */
+export function currentResponseLanguage(channel?: string | null): ResponseLanguage {
+  return resolveResponseLanguage({ channel, userLocale: userLocaleProvider() });
+}

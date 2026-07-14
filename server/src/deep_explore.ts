@@ -2960,7 +2960,12 @@ export function createDeepExploreTool(
         return {
           success: true,
           output:
-            `${report}\n\n---\n（已给出当前证据下的结论；会话仍保持打开——回复"继续"可继续深化，或用 action=abandon 收尾。session id: ${session.id}）`,
+            // Model-facing: the model relays this in the OWNER'S language (see buildLanguageDirective). Both
+            // words named here are now really matched — "continue" by the force-continue path, "abandon" by
+            // classifyExploreControlReply — so relaying them is a promise we can keep.
+            `${report}\n\n---\n(A conclusion has been given on the evidence so far. The session stays OPEN — ` +
+              `the owner can reply "continue" to go deeper, or "abandon" to archive it (you may also call ` +
+              `action=abandon yourself). session id: ${session.id})`,
         };
       }
     }

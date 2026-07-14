@@ -79,23 +79,23 @@ export function buildRoutingInjection(
  * Section heading: `## Historical Routing Hints (reference)`, consistent with K7 injection style.
  */
 function renderRulesSection(rules: RoutingRule[]): string {
-  const lines = ['', '## 历史经验路由(参考)'];
+  const lines = ['', '## Routing hints distilled from past tasks (advisory)'];
   for (const r of rules) {
     const caveat = confidenceCaveat(r.confidence);
-    const preferPart = r.preferSkill ? ` → 用 \`${r.preferSkill}\`` : '';
+    const preferPart = r.preferSkill ? ` → use \`${r.preferSkill}\`` : '';
     const avoidPart =
       r.avoidSkills.length > 0
-        ? ` (避免 \`${r.avoidSkills.join('`,`')}\`)`
+        ? ` (avoid \`${r.avoidSkills.join('`,`')}\`)`
         : '';
     lines.push(
       `  - ${caveat} **${r.taskSignature}**: ${r.triggerCondition}${preferPart}${avoidPart}`,
     );
     if (r.carveout) {
-      lines.push(`    · 不适用: ${r.carveout}`);
+      lines.push(`    · Does not apply when: ${r.carveout}`);
     }
   }
   lines.push(
-    '  (这是 agent 自身从过往任务蒸馏的决策建议;若与本次输入显著不符,忽略并按当前情况处理。)',
+    '  (These are your own decisions distilled from earlier tasks. If they clearly do not fit this input, ignore them and judge the situation in front of you.)',
   );
   return lines.join('\n');
 }

@@ -15,6 +15,21 @@ import {
   renderAuthPromptForWeChat,
 } from '../src/channels/wechat/wechat_render.js';
 
+// 2026-07-14: these renderers are now language-resolved (AGENT_LANGUAGE → observed → mirror), and with
+// nothing known about the owner they default to English — the neutral default for an open-source build.
+// Pin the language explicitly rather than depending on an ambient default, and never assign process.env
+// bare: a leaked AGENT_LANGUAGE silently retunes every later test in the process.
+function withLang<T>(lang: string, fn: () => T): T {
+  const prev = process.env.AGENT_LANGUAGE;
+  process.env.AGENT_LANGUAGE = lang;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_LANGUAGE;
+    else process.env.AGENT_LANGUAGE = prev;
+  }
+}
+
 // ── renderForWeChat ────────────────────────────────────────────────────
 
 test('renderForWeChat: **bold** stripped to plain text', () => {
@@ -105,10 +120,10 @@ test('renderForWeChat: fenced block 内不 strip markdown', () => {
 // ── formatToolForAuth ──────────────────────────────────────────────────
 
 test('formatToolForAuth: writeFile 展示路径 + 大小 + 内容预览', () => {
-  const out = formatToolForAuth('writeFile', {
+  const out = withLang('zh', () => formatToolForAuth('writeFile', {
     path: '/tmp/foo.txt',
     content: 'hello world',
-  });
+  }));
   assert.match(out, /📝 writeFile/);
   assert.match(out, /路径: \/tmp\/foo\.txt/);
   assert.match(out, /大小: 11 字节/);
@@ -116,10 +131,10 @@ test('formatToolForAuth: writeFile 展示路径 + 大小 + 内容预览', () => 
 });
 
 test('formatToolForAuth: shell 展示命令 + cwd', () => {
-  const out = formatToolForAuth('shell', {
+  const out = withLang('zh', () => formatToolForAuth('shell', {
     command: 'ls -la /etc',
     cwd: '/home/user',
-  });
+  }));
   assert.match(out, /💻 shell/);
   assert.match(out, /命令: ls -la \/etc/);
   assert.match(out, /目录: \/home\/user/);
@@ -127,68 +142,68 @@ test('formatToolForAuth: shell 展示命令 + cwd', () => {
 
 test('formatToolForAuth: shell 命令长字符串截断 200', () => {
   const longCmd = 'a'.repeat(500);
-  const out = formatToolForAuth('shell', { command: longCmd });
+  const out = withLang('zh', () => formatToolForAuth('shell', { command: longCmd }));
   // 截到 200 含 …
   assert.match(out, /命令: a{199}…/);
 });
 
 test('formatToolForAuth: readFile 展示路径', () => {
-  const out = formatToolForAuth('readFile', { path: '/etc/passwd' });
+  const out = withLang('zh', () => formatToolForAuth('readFile', { path: '/etc/passwd' }));
   assert.match(out, /📖 readFile/);
   assert.match(out, /路径: \/etc\/passwd/);
 });
 
 test('formatToolForAuth: glob 展示模式 + 目录', () => {
-  const out = formatToolForAuth('glob', { pattern: '*.ts', cwd: 'src' });
+  const out = withLang('zh', () => formatToolForAuth('glob', { pattern: '*.ts', cwd: 'src' }));
   assert.match(out, /🔍 glob/);
   assert.match(out, /模式: \*\.ts/);
   assert.match(out, /目录: src/);
 });
 
 test('formatToolForAuth: http 展示 method + url', () => {
-  const out = formatToolForAuth('http', {
+  const out = withLang('zh', () => formatToolForAuth('http', {
     url: 'https://api.example.com/v1/data',
     method: 'POST',
-  });
+  }));
   assert.match(out, /🌐 http/);
   assert.match(out, /POST https:\/\/api\.example\.com\/v1\/data/);
 });
 
 test('formatToolForAuth: http 默认 GET', () => {
-  const out = formatToolForAuth('http', { url: 'https://x.com' });
+  const out = withLang('zh', () => formatToolForAuth('http', { url: 'https://x.com' }));
   assert.match(out, /GET https:\/\/x\.com/);
 });
 
 test('formatToolForAuth: installSkill 展示技能名 + 来源', () => {
-  const out = formatToolForAuth('installSkill', {
+  const out = withLang('zh', () => formatToolForAuth('installSkill', {
     name: 'tesseract-image-ocr',
     source: 'clawhub:tesseract',
-  });
+  }));
   assert.match(out, /📦 installSkill/);
   assert.match(out, /技能: tesseract-image-ocr/);
   assert.match(out, /来源: clawhub:tesseract/);
 });
 
 test('formatToolForAuth: 未知工具 fallback JSON', () => {
-  const out = formatToolForAuth('mysteryTool', { foo: 'bar', baz: 42 });
+  const out = withLang('zh', () => formatToolForAuth('mysteryTool', { foo: 'bar', baz: 42 }));
   assert.match(out, /⚙️ mysteryTool/);
   assert.match(out, /参数: \{"foo":"bar","baz":42\}/);
 });
 
 test('formatToolForAuth: 空 input 不抛错', () => {
-  const out = formatToolForAuth('writeFile', null);
+  const out = withLang('zh', () => formatToolForAuth('writeFile', null));
   assert.match(out, /📝 writeFile/);
 });
 
 // ── renderAuthPromptForWeChat ──────────────────────────────────────────
 
 test('renderAuthPromptForWeChat: 完整消息含标题 / 工具详情 / 决策提示', () => {
-  const out = renderAuthPromptForWeChat({
+  const out = withLang('zh', () => renderAuthPromptForWeChat({
     toolName: 'writeFile',
     capability: 'write',
     domain: 'local',
     input: { path: '/tmp/x', content: 'data' },
-  });
+  }));
   assert.match(out, /^🔐 Agent 请求授权/);
   assert.match(out, /📝 writeFile/);
   assert.match(out, /权限: write\/local/);
@@ -198,12 +213,31 @@ test('renderAuthPromptForWeChat: 完整消息含标题 / 工具详情 / 决策�
 });
 
 test('renderAuthPromptForWeChat: clarification 非空时插入', () => {
-  const out = renderAuthPromptForWeChat({
+  const out = withLang('zh', () => renderAuthPromptForWeChat({
     toolName: 'shell',
     capability: 'execute',
     domain: 'local',
     input: { command: 'ls' },
     clarification: '没有理解您的意思',
-  });
+  }));
   assert.match(out, /没有理解您的意思/);
+});
+
+test('renderAuthPromptForWeChat: an English owner is offered words that exist', () => {
+  const out = withLang('en', () =>
+    renderAuthPromptForWeChat({
+      toolName: 'shell',
+      capability: 'execute',
+      domain: 'system',
+      input: { command: 'ls' },
+    }),
+  );
+  assert.match(out, /asking for permission/);
+  assert.match(out, /"approve"/);
+  assert.match(out, /"reject"/);
+  // The card must not tell an English owner to reply with a Chinese word — and the words it DOES offer are
+  // matched exactly by matchOfferedAuthWord before any classifier sees the reply.
+  assert.doesNotMatch(out, /同意/);
+  assert.doesNotMatch(out, /拒绝/);
+  assert.match(out, /command: ls/, 'field labels follow the language too');
 });

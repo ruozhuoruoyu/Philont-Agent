@@ -37,6 +37,8 @@
  * the LLM still writes `## Work Log` sections that need to be cut here.
  */
 
+import { currentPhraseLang } from './response_language.js';
+
 // Bilingual headings (i18n open-source transition): accept both the English headings used by the
 // English system prompt and the legacy Chinese headings, so the prompt can flip to
 // English without breaking the WeChat reply split. Keep both indefinitely — harmless,
@@ -98,12 +100,17 @@ export function extractUserSection(fullText: string): FilterResult {
     Number(process.env.PHILONT_OUTPUT_FALLBACK_TRUNCATE_KEEP) || 500;
   if (stripped.length > truncAt) {
     const tail = stripped.slice(-truncKeep);
+    const en = currentPhraseLang() === 'en';
+    // "细说" / "tell me more" is an ordinary request for elaboration, which the MODEL answers from context —
+    // it names no mechanism switch, so unlike 取消推送 / 放弃 it needs no deterministic matcher.
     return {
       text:
-        `[完整内容 ${stripped.length} 字已记录到 timeline。以下是结尾摘要]\n\n` +
+        (en
+          ? `[The full ${stripped.length} characters are in the timeline. Here is the tail]\n\n`
+          : `[完整内容 ${stripped.length} 字已记录到 timeline。以下是结尾摘要]\n\n`) +
         '...' +
         tail +
-        `\n\n[如需详细请回复"细说"]`,
+        (en ? `\n\n[reply "tell me more" for the details]` : `\n\n[如需详细请回复"细说"]`),
       usedSection: false,
     };
   }

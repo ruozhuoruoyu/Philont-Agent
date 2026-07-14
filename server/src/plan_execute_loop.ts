@@ -17,6 +17,8 @@
  * placeholder+gate path).
  */
 
+import { currentPhraseLang } from './response_language.js';
+
 import {
   runMiniAgentLoop,
   type MiniLoopLLMClient,
@@ -739,7 +741,11 @@ export async function runPlanExecuteLoop(
     deps.log(`[plan-loop] GUIDE_READ ${url} → ${text ? `${text.length} chars` : 'FAILED'}`);
   }
   if (guideTexts.length === 0) {
-    return fail(`无法读取任务指引(${guideUrls.join(', ')})——网络抓取失败。任务未开始,请稍后重试或贴出指引内容。`);
+    return fail(
+      currentPhraseLang() === 'en'
+        ? `Could not read the task guide (${guideUrls.join(', ')}) — the fetch failed. Nothing has been started; retry later or paste the guide contents.`
+        : `无法读取任务指引(${guideUrls.join(', ')})——网络抓取失败。任务未开始,请稍后重试或贴出指引内容。`,
+    );
   }
   const guideText = guideTexts.join('\n\n---\n\n').slice(0, 60_000);
   // Endpoint anchor (weak-model guarantee): the documented API surface + a host allowlist guard.
@@ -817,7 +823,7 @@ export async function runPlanExecuteLoop(
   let unresolvedGaps: string[] = [];
   let lastMandatoryGaps: SpecItem[] = [];
   for (let round = 0; round < maxVerifyRounds; round++) {
-    if (deps.abortSignal?.aborted) return fail('任务被中止。');
+    if (deps.abortSignal?.aborted) return fail((currentPhraseLang() === 'en' ? 'Task aborted.' : '任务被中止。'));
     // Budget check: with < 5 min left there is no room for verify churn AND execution — take the
     // current plan (or the mechanically-adopted one) straight to EXECUTE.
     if (plan && timeLeft() < 5 * 60_000) {
@@ -879,7 +885,9 @@ export async function runPlanExecuteLoop(
     gapsNote = gapTexts.map((g, i) => `${i + 1}. ${g}`).join('\n');
   }
   if (!plan) {
-    return fail('规划阶段失败:模型多轮都未能产出结构化 plan。任务未执行。');
+    return fail((currentPhraseLang() === 'en'
+        ? 'Planning failed: the model could not produce a structured plan across several attempts. Nothing was executed.'
+        : '规划阶段失败:模型多轮都未能产出结构化 plan。任务未执行。'));
   }
   if (unresolvedGaps.length > 0) {
     // Mechanical adoption: the model would not add the uncovered MANDATORY guide items after
@@ -1265,19 +1273,34 @@ export async function runPlanExecuteLoop(
   const gapLines = unresolvedGaps.length > 0
     ? `\n\n⚠️ ${unresolvedGaps.length} 项指引要求未纳入本次计划(多轮校验仍未覆盖,已如实报告):\n` +
       shownGaps.map((g) => `- ${trunc(g, 120)}`).join('\n') +
-      (unresolvedGaps.length > shownGaps.length ? `\n- …另 ${unresolvedGaps.length - shownGaps.length} 项` : '')
+      (unresolvedGaps.length > shownGaps.length
+        ? currentPhraseLang() === 'en'
+          ? `\n- …and ${unresolvedGaps.length - shownGaps.length} more`
+          : `\n- …另 ${unresolvedGaps.length - shownGaps.length} 项`
+        : '')
     : '';
+  const enR = currentPhraseLang() === 'en';
   const budgetNote = budgetExhausted
-    ? '\n\n⏱ 时间预算耗尽,余下步骤未执行(已如实标注 ⏸)。需要的话回复"继续",我接着做剩下的。'
+    ? enR
+      ? '\n\n⏱ Out of time budget; the remaining steps did not run (marked ⏸ honestly). Reply "continue" and I will finish them.'
+      : '\n\n⏱ 时间预算耗尽,余下步骤未执行(已如实标注 ⏸)。需要的话回复"继续",我接着做剩下的。'
     : '';
   const reply =
     (outcome === 'completed'
-      ? `任务完成(${done}/${list.length} 项交付,均有工具执行证据):\n`
+      ? enR
+        ? `Task complete (${done}/${list.length} deliverables, each backed by tool execution):\n`
+        : `任务完成(${done}/${list.length} 项交付,均有工具执行证据):\n`
       : outcome === 'partial'
         ? done === list.length
-          ? `${done}/${list.length} 项交付均完成(有工具证据),但部分指引要求未覆盖(见下):\n`
-          : `任务部分完成(${done}/${list.length} 项):\n`
-        : '任务未能执行:\n') +
+          ? enR
+            ? `All ${done}/${list.length} deliverables are done (with tool evidence), but some guide requirements were not covered (below):\n`
+            : `${done}/${list.length} 项交付均完成(有工具证据),但部分指引要求未覆盖(见下):\n`
+          : enR
+            ? `Task partly complete (${done}/${list.length}):\n`
+            : `任务部分完成(${done}/${list.length} 项):\n`
+        : enR
+          ? 'Task could not be executed:\n'
+          : '任务未能执行:\n') +
     lines.join('\n') +
     gapLines +
     emittedSkillNote +

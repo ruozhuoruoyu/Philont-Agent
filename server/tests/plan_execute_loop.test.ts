@@ -154,7 +154,9 @@ test('loop e2e: guide fetch hard-fail → aborted honestly, nothing executed', a
   const deps = makeDeps({ drafts: [GOOD_DRAFT], fetchGuide: async () => null });
   const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
   assert.equal(r.outcome, 'aborted');
-  assert.match(r.reply, /无法读取/);
+  // Language-agnostic: this reply is now resolved per-owner (AGENT_LANGUAGE → observed → mirror), so pin the
+  // MEANING — the guide could not be read and nothing was started — not one language's wording.
+  assert.match(r.reply, /无法读取|Could not read the task guide/);
   assert.equal(r.outcomes.length, 0);
 });
 
@@ -259,7 +261,7 @@ test('loop e2e: wall-clock budget exhausted mid-EXECUTE → stops, marks rest no
     deadlineMs: 150_000,
   };
   const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
-  assert.match(r.reply, /时间预算耗尽/);
+  assert.match(r.reply, /时间预算耗尽|Out of time budget/);
   const notAttempted = r.outcomes.filter((o) => o.status === 'not-attempted');
   assert.ok(notAttempted.length > 0, 'remaining deliverables honestly not-attempted');
   assert.ok(notAttempted.some((o) => /time budget/.test(o.evidence)));

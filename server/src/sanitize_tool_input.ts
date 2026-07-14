@@ -72,14 +72,14 @@ export function sanitizeToolInput(raw: unknown): SanitizeResult {
   return {
     input: null,
     path: 'reject',
-    reason: `tool input 不是合法对象(typeof=${raw === null ? 'null' : typeof raw}),已拒绝`,
+    reason: `tool input is not a valid object (typeof=${raw === null ? 'null' : typeof raw}) — rejected`,
   };
 }
 
 function sanitizeStringInput(s: string): SanitizeResult {
   const trimmed = s.trim();
   if (trimmed.length === 0) {
-    return { input: null, path: 'reject', reason: 'tool input 是空字符串' };
+    return { input: null, path: 'reject', reason: 'tool input is an empty string' };
   }
 
   // Try parsing the whole string first
@@ -91,7 +91,7 @@ function sanitizeStringInput(s: string): SanitizeResult {
     return {
       input: null,
       path: 'reject',
-      reason: 'tool input 是字符串但 parse 后不是对象(可能是数组/标量)',
+      reason: 'tool input parsed from a string but is not an object (array or scalar?)',
     };
   } catch {
     // Fall through to the multi-JSON concatenation path
@@ -100,14 +100,14 @@ function sanitizeStringInput(s: string): SanitizeResult {
   // Multi-JSON concatenation: use brace-balance to find the boundary of the first complete object
   const firstBrace = trimmed.indexOf('{');
   if (firstBrace < 0) {
-    return { input: null, path: 'reject', reason: 'tool input 字符串不含 JSON 对象' };
+    return { input: null, path: 'reject', reason: 'tool input string contains no JSON object' };
   }
   const firstEnd = findFirstObjectEnd(trimmed, firstBrace);
   if (firstEnd < 0) {
     return {
       input: null,
       path: 'reject',
-      reason: 'tool input 字符串括号未闭合',
+      reason: 'tool input string has unbalanced braces',
     };
   }
   const firstJson = trimmed.slice(firstBrace, firstEnd + 1);
@@ -118,21 +118,21 @@ function sanitizeStringInput(s: string): SanitizeResult {
     return {
       input: null,
       path: 'reject',
-      reason: '截取的首段也无法 parse',
+      reason: 'the first extracted segment could not be parsed either',
     };
   }
   if (!isPlainObject(parsed)) {
     return {
       input: null,
       path: 'reject',
-      reason: '截取的首段 parse 后不是对象',
+      reason: 'the first extracted segment parsed to something other than an object',
     };
   }
   const tailLen = trimmed.length - (firstEnd + 1);
   return {
     input: parsed as SanitizedInput,
     path: 'string-multi-json',
-    reason: `LLM 返了多 JSON 拼接,已取首段(尾段 ${tailLen} 字符已丢弃)`,
+    reason: `the model concatenated multiple JSON objects — took the first (${tailLen} trailing characters discarded)`,
     truncatedTailLen: tailLen,
   };
 }
@@ -176,7 +176,7 @@ function tryUnwrapWrappedArguments(
   return {
     input: parsed as SanitizedInput,
     path: 'unwrap-raw-arguments',
-    reason: `网关把 tool args 包在 \`${k}\` 字段里,已展开`,
+    reason: `the gateway wrapped the tool args inside a \`${k}\` field — unwrapped`,
   };
 }
 

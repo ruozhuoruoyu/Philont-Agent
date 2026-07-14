@@ -50,7 +50,7 @@ test('replyWithMedia: web-ui sid(无匹配 channel)→ 明确降级错', async (
     replyWithMediaTool.execute({ kind: 'image', path: '/tmp/x.jpg' }),
   );
   assert.equal(r.success, false);
-  assert.match(r.error ?? '', /不属于任何支持媒体发送的 channel/);
+  assert.match(r.error ?? '', /not on a media-capable channel/);
   // 提示 LLM 改用 writeFile
   assert.match(r.error ?? '', /writeFile/);
 });
@@ -66,7 +66,7 @@ test('replyWithMedia: wechat sid → channel.send 命中,参数透传', async ()
     }),
   );
   assert.equal(r.success, true);
-  assert.match(r.output, /✓ 已通过 wechat:acct/);
+  assert.match(r.output, /✓ Sent \w+ via wechat:acct/);
   assert.match(r.output, /messageId=mm-fake/);
   assert.deepEqual(ch.sent[0], {
     kind: 'file',

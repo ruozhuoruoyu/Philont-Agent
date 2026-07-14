@@ -43,7 +43,7 @@ test('inject: 关键词命中 validated 规则 → 注入含 caveat + prefer + c
 
   const r = buildRoutingInjection('帮我把扫描版 PDF 转成 Word', routingRules);
   assert.ok(r.matched >= 1, `期望至少 1 条命中,实际 ${r.matched}`);
-  assert.match(r.text, /历史经验路由/);
+  assert.match(r.text, /Routing hints distilled from past tasks/);
   assert.match(r.text, /pdf-to-word/);
   assert.match(r.text, /camscanner-pdf2office/);
   assert.match(r.text, /pdf2docx/);
@@ -171,6 +171,8 @@ test('inject: 注入文本含底部"agent 自身蒸馏"提示', () => {
     contextKeywords: ['pdf', 'transform'],
   });
   const r = buildRoutingInjection('我要做 pdf transform', routingRules);
-  assert.match(r.text, /agent 自身/);
-  assert.match(r.text, /忽略并按当前情况处理/);
+  // The prompt section is English now (it is model-facing), but the trigger still matches the Chinese the
+  // user actually types — the matcher's Chinese is functional and must not be swept up by an i18n pass.
+  assert.match(r.text, /your own decisions distilled from earlier tasks/);
+  assert.match(r.text, /ignore them and judge the situation in front of you/);
 });

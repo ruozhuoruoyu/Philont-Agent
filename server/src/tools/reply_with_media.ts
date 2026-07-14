@@ -27,22 +27,22 @@ const VALID_KINDS: MediaKind[] = ['image', 'file', 'voice', 'video'];
 export const replyWithMediaTool: Tool = {
   name: 'replyWithMedia',
   description:
-    '把本地文件作为媒体发回当前会话所在 channel 的 peer(微信里 = 当前对话用户;群里 = 群)。\n' +
-    'kind 选 image/file/voice/video 之一,path 是本地绝对路径。\n' +
-    '注意:仅当前会话来自支持媒体的 channel(如微信)时可用;web-ui 等不行,会返回明确错误,' +
-    '此时改用 writeFile 落到本地后在回答里把路径告诉用户。',
+    'Send a local file back to the peer of the current session\'s channel as media (on WeChat = the person you are talking to; in a group = the group).\n' +
+    'kind is one of image/file/voice/video; path is an absolute local path.\n' +
+    'Only works when the current session came from a media-capable channel (e.g. WeChat). On web-ui and ' +
+    'similar it returns an explicit error — in that case use writeFile and tell the user the path in your reply.',
   schema: {
     type: 'object',
     properties: {
       kind: {
         type: 'string',
         enum: VALID_KINDS,
-        description: 'image=图片(jpg/png/gif),video=视频(mp4),voice=语音(silk),file=任意文件',
+        description: 'image = picture (jpg/png/gif), video = mp4, voice = silk audio, file = any file',
       },
-      path: { type: 'string', description: '本地文件绝对路径' },
+      path: { type: 'string', description: 'absolute path to the local file' },
       fileName: {
         type: 'string',
-        description: '可选:接收端显示的文件名;省略则用 path 的 basename',
+        description: 'optional: the filename the recipient sees; defaults to the basename of path',
       },
     },
     required: ['kind', 'path'],
@@ -82,8 +82,8 @@ export const replyWithMediaTool: Tool = {
         success: false,
         output: '',
         error:
-          `当前会话(${sid})不属于任何支持媒体发送的 channel(典型如 web-ui)。` +
-          `若要把文件给用户,改用 writeFile 落到本地路径,在回答里把路径告诉用户。`,
+          `The current session (${sid}) is not on a media-capable channel (web-ui, typically). ` +
+          `To get the file to the user, write it with writeFile and tell them the path in your reply.`,
       };
     }
 
@@ -91,7 +91,7 @@ export const replyWithMediaTool: Tool = {
       const r = await channel.send(sid, { kind, path, fileName });
       return {
         success: true,
-        output: `✓ 已通过 ${channel.name} 发送 ${kind} (path=${path}${r.messageId ? `, messageId=${r.messageId}` : ''})`,
+        output: `✓ Sent ${kind} via ${channel.name} (path=${path}${r.messageId ? `, messageId=${r.messageId}` : ''})`,
       };
     } catch (e) {
       return {

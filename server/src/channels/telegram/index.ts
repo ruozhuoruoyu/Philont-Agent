@@ -16,6 +16,7 @@
  * Enable: TELEGRAM_ENABLED=1 TELEGRAM_BOT_TOKEN=<token> (see config.ts for details).
  */
 
+import { currentPhraseLang } from '../../response_language.js';
 import { TelegramClient } from './client.js';
 import { TelegramGateway, type InboundEvent, type GatewayLogger } from './gateway.js';
 import { renderForTelegram } from './render.js';
@@ -171,7 +172,12 @@ function makeDispatcher(opts: {
       await chatSend(sessionId, event.text, onDelta, onAuthRequest, onStatus);
     } catch (e) {
       logger.error(`chatSend threw: ${String(e)}`, { sessionId, from: event.fromUserId });
-      void outbound.sendText(replyTo, `抱歉,刚才出错了:${truncate(String((e as Error)?.message ?? e), 200)}`);
+      void outbound.sendText(
+        replyTo,
+        currentPhraseLang('telegram') === 'en'
+          ? `Sorry — something went wrong: ${truncate(String((e as Error)?.message ?? e), 200)}`
+          : `抱歉,刚才出错了:${truncate(String((e as Error)?.message ?? e), 200)}`,
+      );
       return;
     }
 
@@ -184,7 +190,10 @@ function makeDispatcher(opts: {
       const verdict = await runConscienceGate(sectioned);
       if (!verdict.allow) {
         logger.info('conscience_gate withheld outbound', { sessionId, reason: verdict.reason });
-        sectioned = '(本条回复被安全审查拦下,未发送。)';
+        sectioned =
+          currentPhraseLang('telegram') === 'en'
+            ? '(This reply was withheld by the safety review and not sent.)'
+            : '(本条回复被安全审查拦下,未发送。)';
       }
       const rendered = renderForTelegram(sectioned).trim();
       if (rendered.length > 0) {
@@ -214,10 +223,10 @@ function makeSessionId(botId: string, e: InboundEvent): string {
 
 /** AuthRequest → human-readable Telegram authorization prompt (plain text). */
 function renderAuthPrompt(req: AuthRequestPayload): string {
-  const lines = [
-    '🔐 需要你授权',
-    `工具:${req.toolName}（${req.capability} / ${req.domain}）`,
-  ];
+  const en = currentPhraseLang('telegram') === 'en';
+  const lines = en
+    ? ['🔐 I need your permission', `Tool: ${req.toolName} (${req.capability} / ${req.domain})`]
+    : ['🔐 需要你授权', `工具:${req.toolName}（${req.capability} / ${req.domain}）`];
   if (req.clarification) lines.push(req.clarification);
   let inputStr = '';
   try {
@@ -225,8 +234,15 @@ function renderAuthPrompt(req: AuthRequestPayload): string {
   } catch {
     inputStr = String(req.input);
   }
-  if (inputStr && inputStr !== '{}') lines.push(`参数:${truncate(inputStr, 300)}`);
-  lines.push('回复"同意/yes"放行,或"拒绝/no"取消。');
+  if (inputStr && inputStr !== '{}') {
+    lines.push(en ? `Args: ${truncate(inputStr, 300)}` : `参数:${truncate(inputStr, 300)}`);
+  }
+  // Matched exactly by matchOfferedAuthWord before any classifier sees the reply.
+  lines.push(
+    en
+      ? 'Reply "approve" / "yes" to allow, or "reject" / "no" to cancel.'
+      : '回复"同意/yes"放行,或"拒绝/no"取消。',
+  );
   return lines.join('\n');
 }
 

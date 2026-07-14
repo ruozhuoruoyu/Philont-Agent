@@ -13,15 +13,42 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderDeterministicMaxIterSummary } from '../src/max_iter_summary.js';
 
-test('summary: 基本结构 — 含给用户段 + 计数 + 建议', () => {
-  const text = renderDeterministicMaxIterSummary(20, [
-    { toolName: 'glob', content: '✓ Found 3 files' },
-    { toolName: 'shell', content: '⚠ command not found' },
-  ], 20);
+// 2026-07-14: this summary is now language-resolved (AGENT_LANGUAGE → observed → mirror). With nothing
+// known about the owner it renders ENGLISH — the neutral default for an open-source build — and a Chinese
+// owner is switched over as soon as their first message is observed. Pin BOTH, so neither can silently rot.
+function withLang<T>(lang: string, fn: () => T): T {
+  const prev = process.env.AGENT_LANGUAGE;
+  process.env.AGENT_LANGUAGE = lang;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_LANGUAGE;
+    else process.env.AGENT_LANGUAGE = prev;
+  }
+}
+
+test('summary: 基本结构 — 含给用户段 + 计数 + 建议 (zh)', () => {
+  const text = withLang('zh', () =>
+    renderDeterministicMaxIterSummary(20, [
+      { toolName: 'glob', content: '✓ Found 3 files' },
+      { toolName: 'shell', content: '⚠ command not found' },
+    ], 20),
+  );
   assert.match(text, /^## For User/);
   assert.match(text, /20 轮工具调用上限/);
   assert.match(text, /共调用 20 次工具/);
   assert.match(text, /换个思路重试/);
+});
+
+test('summary: same structure in English', () => {
+  const text = withLang('en', () =>
+    renderDeterministicMaxIterSummary(20, [{ toolName: 'glob', content: '✓ Found 3 files' }], 20),
+  );
+  assert.match(text, /^## For User/);
+  assert.match(text, /20-round tool-call limit/);
+  assert.match(text, /20 tool calls in total/);
+  assert.match(text, /retry with a different approach/);
+  assert.doesNotMatch(text, /轮工具调用/, 'an English summary must not carry Chinese');
 });
 
 test('summary: 工具结果 ✓/⚠ 自动加图标', () => {
@@ -49,7 +76,9 @@ test('summary: 多于 N 条只取最后 N(默认 5)', () => {
 });
 
 test('summary: 空 recentResults → 占位行', () => {
-  const text = renderDeterministicMaxIterSummary(0, [], 10);
+  // withLang, not a bare env assignment — a leaked AGENT_LANGUAGE would silently retune every later test
+  // in this process.
+  const text = withLang('zh', () => renderDeterministicMaxIterSummary(0, [], 10));
   assert.match(text, /\(无可用工具结果记录\)/);
 });
 

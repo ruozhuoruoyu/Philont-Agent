@@ -15,6 +15,8 @@
  * in this file; other channels (web-ui etc.) are unaffected.
  */
 
+import { currentPhraseLang } from '../../response_language.js';
+
 // ── 1. markdown → WeChat text ──────────────────────────────────────────────
 
 /**
@@ -166,16 +168,24 @@ export function formatToolForAuth(name: string, input: unknown): string {
   const head = `${iconFor(name)} ${name}`;
   lines.push(head);
 
+  // Field labels follow the owner's language (currentPhraseLang → AGENT_LANGUAGE → observed → mirror).
+  // These are code-authored strings the owner reads on WeChat; no LLM is involved, so no prompt directive
+  // reaches them. They were Chinese-only.
+  const L = currentPhraseLang('wechat') === 'en'
+    ? { path: 'path', size: 'size', bytes: 'bytes', preview: 'preview', cmd: 'command', cwd: 'cwd',
+        pattern: 'pattern', skill: 'skill', source: 'source', args: 'args' }
+    : { path: '路径', size: '大小', bytes: '字节', preview: '内容预览', cmd: '命令', cwd: '目录',
+        pattern: '模式', skill: '技能', source: '来源', args: '参数' };
   switch (name) {
     case 'writeFile':
     case 'appendFile': {
       const path = strField(safe, 'path');
       const content = strField(safe, 'content');
-      if (path) lines.push(`   路径: ${path}`);
+      if (path) lines.push(`   ${L.path}: ${path}`);
       if (content) {
         const bytes = Buffer.byteLength(content, 'utf8');
-        lines.push(`   大小: ${bytes} 字节`);
-        lines.push(`   内容预览: ${truncate(content, 120)}`);
+        lines.push(`   ${L.size}: ${bytes} ${L.bytes}`);
+        lines.push(`   ${L.preview}: ${truncate(content, 120)}`);
       }
       break;
     }
@@ -183,20 +193,20 @@ export function formatToolForAuth(name: string, input: unknown): string {
     case 'execute': {
       const cmd = strField(safe, 'command') || strField(safe, 'cmd');
       const cwd = strField(safe, 'cwd');
-      if (cmd) lines.push(`   命令: ${truncate(cmd, 200)}`);
-      if (cwd) lines.push(`   目录: ${cwd}`);
+      if (cmd) lines.push(`   ${L.cmd}: ${truncate(cmd, 200)}`);
+      if (cwd) lines.push(`   ${L.cwd}: ${cwd}`);
       break;
     }
     case 'readFile': {
       const path = strField(safe, 'path');
-      if (path) lines.push(`   路径: ${path}`);
+      if (path) lines.push(`   ${L.path}: ${path}`);
       break;
     }
     case 'glob': {
       const pattern = strField(safe, 'pattern');
       const cwd = strField(safe, 'cwd');
-      if (pattern) lines.push(`   模式: ${pattern}`);
-      if (cwd) lines.push(`   目录: ${cwd}`);
+      if (pattern) lines.push(`   ${L.pattern}: ${pattern}`);
+      if (cwd) lines.push(`   ${L.cwd}: ${cwd}`);
       break;
     }
     case 'http':
@@ -209,14 +219,14 @@ export function formatToolForAuth(name: string, input: unknown): string {
     case 'installSkill': {
       const skillName = strField(safe, 'name') || strField(safe, 'skill');
       const source = strField(safe, 'source') || strField(safe, 'url');
-      if (skillName) lines.push(`   技能: ${skillName}`);
-      if (source) lines.push(`   来源: ${source}`);
+      if (skillName) lines.push(`   ${L.skill}: ${skillName}`);
+      if (source) lines.push(`   ${L.source}: ${source}`);
       break;
     }
     default: {
       // Generic fallback: JSON truncated to 200 chars
       const dump = safeStringify(input);
-      if (dump) lines.push(`   参数: ${truncate(dump, 200)}`);
+      if (dump) lines.push(`   ${L.args}: ${truncate(dump, 200)}`);
     }
   }
 
@@ -279,17 +289,26 @@ export function renderAuthPromptForWeChat(req: {
   input: unknown;
   clarification?: string;
 }): string {
+  const en = currentPhraseLang('wechat') === 'en';
   const lines: string[] = [];
-  lines.push('🔐 Agent 请求授权');
+  lines.push(en ? '🔐 The agent is asking for permission' : '🔐 Agent 请求授权');
   if (req.clarification) {
     lines.push(req.clarification);
   }
   lines.push('');
   lines.push(formatToolForAuth(req.toolName, req.input));
   lines.push('');
-  lines.push(`权限: ${req.capability}/${req.domain}`);
+  lines.push(
+    en ? `Permission: ${req.capability}/${req.domain}` : `权限: ${req.capability}/${req.domain}`,
+  );
   lines.push('');
-  lines.push('回复 "同意" / "yes" 允许;回复 "拒绝" / "no" 拒绝');
-  lines.push('(10 分钟有效)');
+  // Every word offered here is matched exactly by matchOfferedAuthWord (auth_intent.ts) before any
+  // classifier sees it — reading back our own enum is parsing, not intent inference.
+  lines.push(
+    en
+      ? 'Reply "approve" / "yes" to allow; "reject" / "no" to refuse'
+      : '回复 "同意" / "yes" 允许;回复 "拒绝" / "no" 拒绝',
+  );
+  lines.push(en ? '(valid for 10 minutes)' : '(10 分钟有效)');
   return lines.join('\n');
 }

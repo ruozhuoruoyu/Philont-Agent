@@ -164,24 +164,24 @@ export function detectUserDissatisfaction(userMessage: string): boolean {
 
 function renderInjection(failures: FailureRecord[], sinceMin: number): string {
   const lines: string[] = [];
-  lines.push(`\n\n## ⚠️ 上轮任务失败,本轮调整策略`);
-  lines.push(`\n${sinceMin} 分钟内本会话遭遇:`);
+  lines.push(`\n\n## ⚠️ The last attempt failed — change approach this turn`);
+  lines.push(`\nIn the last ${sinceMin} minutes, this session hit:`);
   for (const f of failures) {
     const desc = KIND_DESCRIPTIONS[f.kind];
     const detail = f.detail ? `(${truncate(f.detail, 80)})` : '';
-    lines.push(`- ${desc} ${f.tsAgoMin} 分钟前 ${detail}`);
+    lines.push(`- ${desc}, ${f.tsAgoMin} min ago ${detail}`);
   }
-  lines.push(`\n**本轮务必**:`);
+  lines.push(`\n**This turn, do this**:`);
   lines.push(
-    `1. **复杂多步任务** → 优先 \`planAndExecute({task: "...", aggregateMode: "llm-summary"})\` 一次完成。父 turn 视角 1 iter,内部子 loop 跑工具不会撞主 cap。`,
+    `1. **Complex multi-step task** → prefer \`planAndExecute({task: "...", aggregateMode: "llm-summary"})\` and do it in one go. It costs the parent turn a single iteration; the inner loop's tool calls do not count against the main cap.`,
   );
   lines.push(
-    `2. 或先 \`search_skills\` + \`use_skill\` 找现成方案,避免从零摸索。`,
+    `2. Or run \`search_skills\` + \`use_skill\` first to find an existing solution instead of feeling your way from scratch.`,
   );
   lines.push(
-    `3. **不要**重复"writeFile 脚本 → shell 跑 → parse → ..."的逐步摸索路径,既往同样路径已撞墙。`,
+    `3. **Do NOT** repeat the "writeFile a script → shell → parse → ..." step-by-step probing path you already walked into a wall.`,
   );
-  lines.push(`\n这是数据驱动的提示(audit 记录到本会话最近撞墙),不是关键词触发。换策略。`);
+  lines.push(`\nThis hint is data-driven (the audit log records what this session actually hit), not keyword-triggered. Change strategy.`);
   return lines.join('\n');
 }
 

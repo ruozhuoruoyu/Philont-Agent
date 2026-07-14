@@ -49,7 +49,7 @@ test('multi: 两个 JSON 拼接 → 取首段', () => {
     pattern: '**/*2MW*.pdf',
     cwd: 'E:\\dev\\philont\\server',
   });
-  assert.match(r.reason ?? '', /多 JSON 拼接/);
+  assert.match(r.reason ?? '', /concatenated multiple JSON objects/);
   assert.ok((r.truncatedTailLen ?? 0) > 0);
 });
 
@@ -166,7 +166,7 @@ test('reject: undefined', () => {
 test('reject: array', () => {
   const r = sanitizeToolInput([1, 2, 3]);
   assert.equal(r.path, 'reject');
-  assert.match(r.reason ?? '', /对象/);
+  assert.match(r.reason ?? '', /object/);
 });
 
 test('reject: number', () => {
@@ -207,7 +207,7 @@ test('reject: 字符串无 { 字符', () => {
 test('reject: 字符串括号未闭合', () => {
   const r = sanitizeToolInput('{"a":1');
   assert.equal(r.path, 'reject');
-  assert.match(r.reason ?? '', /未闭合/);
+  assert.match(r.reason ?? '', /unbalanced/);
 });
 
 test('reject: 截取出来的首段也无法 parse', () => {

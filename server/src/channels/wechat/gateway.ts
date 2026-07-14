@@ -136,7 +136,14 @@ export interface GatewayOptions {
   onAttachment?: (att: InboundAttachmentInfo) => void;
 }
 
-const DEFAULT_BLOCKED_REPLY = '抱歉,当前账户未授权与本智能体对话。如需使用,请联系部署者将你加入 allowlist。';
+/**
+ * Auto-reply to a sender who is not on the allowlist. Deliberately NOT language-resolved: this person is a
+ * STRANGER — we have never seen them write anything, and the owner's AGENT_LANGUAGE says nothing about what
+ * language a random inbound sender reads. Give both, rather than guess and be wrong for half the world.
+ */
+const DEFAULT_BLOCKED_REPLY =
+  '抱歉,当前账户未授权与本智能体对话。如需使用,请联系部署者将你加入 allowlist。\n' +
+  'Sorry — this account is not authorized to talk to this agent. Ask the operator to add you to the allowlist.';
 
 /**
  * Long-poll gateway.

@@ -300,15 +300,36 @@ test('metric: 0 调用 → rate=0', () => {
 });
 
 // Phase 11(2026-05-14):fallback truncate
+// 2026-07-14: the truncation notice is language-resolved (AGENT_LANGUAGE → observed → mirror). Pin both, so
+// neither can silently rot — and use withLang, never a bare env assignment, which would leak into later tests.
+function withLang<T>(lang: string, fn: () => T): T {
+  const prev = process.env.AGENT_LANGUAGE;
+  process.env.AGENT_LANGUAGE = lang;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_LANGUAGE;
+    else process.env.AGENT_LANGUAGE = prev;
+  }
+}
+
 test('truncate: 完全无两段式 + 长文本 → 取末尾 + 提示', () => {
   const longText = 'a'.repeat(1500); // 远超默认 800 cap
-  const r = extractUserSection(longText);
+  const r = withLang('zh', () => extractUserSection(longText));
   assert.equal(r.usedSection, false);
   assert.match(r.text, /完整内容 1500 字已记录/);
   assert.match(r.text, /\.\.\./);
   assert.match(r.text, /细说/);
   // truncated text 应远小于原文
   assert.ok(r.text.length < 600);
+});
+
+test('truncate: the same notice in English', () => {
+  const r = withLang('en', () => extractUserSection('a'.repeat(1500)));
+  assert.equal(r.usedSection, false);
+  assert.match(r.text, /The full 1500 characters are in the timeline/);
+  assert.match(r.text, /tell me more/);
+  assert.doesNotMatch(r.text, /细说/, 'an English notice must not offer a Chinese word');
 });
 
 test('truncate: 无两段式 + 短文本(≤ 800)→ 不 truncate', () => {
@@ -323,7 +344,7 @@ test('truncate: env PHILONT_OUTPUT_FALLBACK_TRUNCATE_AT 调阈值', () => {
   const orig = process.env.PHILONT_OUTPUT_FALLBACK_TRUNCATE_AT;
   process.env.PHILONT_OUTPUT_FALLBACK_TRUNCATE_AT = '100';
   try {
-    const r = extractUserSection('a'.repeat(200));
+    const r = withLang('zh', () => extractUserSection('a'.repeat(200)));
     assert.equal(r.usedSection, false);
     assert.match(r.text, /完整内容 200 字/);
   } finally {

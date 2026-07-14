@@ -51,6 +51,7 @@ import { recordAttachment } from '../recent_attachments.js';
 import { extractUserSection, recordFilterCall } from '../../output_section_filter.js';
 import { runConscienceGate } from '../../conscience_gate.js';
 import { renderForWeChat, renderAuthPromptForWeChat } from './wechat_render.js';
+import { currentPhraseLang } from '../../response_language.js';
 
 /** AuthRequest structure from chat-handler (provided by handleChatSend) */
 export type AuthRequestPayload = {
@@ -270,7 +271,12 @@ function makeDispatcher(opts: {
       return;
     }
     try {
-      const r = await outbound.sendText(replyTo, '(续上条被微信限额截断的回复)\n\n' + pending.text);
+      const r = await outbound.sendText(
+        replyTo,
+        (currentPhraseLang('wechat') === 'en'
+          ? '(continued — the previous reply hit WeChat\'s length limit)\n\n'
+          : '(续上条被微信限额截断的回复)\n\n') + pending.text,
+      );
       logger.info('suspended tail resent', { replyTo, chunks: r.chunksSent, failed: r.chunksFailed });
       // Still quota-blocked? Park what's left again (fingerprints differ due to the prefix,
       // but the content is intact — better duplicated framing than lost content).
@@ -355,7 +361,9 @@ function makeDispatcher(opts: {
       // Send a fallback to the user to avoid a completely silent failure
       void outbound.sendText(
         replyTo,
-        `抱歉,刚才出错了:${truncate(String((e as any)?.message ?? e), 200)}`,
+        currentPhraseLang('wechat') === 'en'
+          ? `Sorry — something went wrong: ${truncate(String((e as any)?.message ?? e), 200)}`
+          : `抱歉,刚才出错了:${truncate(String((e as any)?.message ?? e), 200)}`,
       );
       return;
     }
@@ -388,7 +396,10 @@ function makeDispatcher(opts: {
       const verdict = await runConscienceGate(sectioned);
       if (!verdict.allow) {
         logger.info('conscience_gate withheld outbound', { sessionId, reason: verdict.reason });
-        sectioned = '(本条回复被安全审查拦下,未发送。)';
+        sectioned =
+          currentPhraseLang('wechat') === 'en'
+            ? '(This reply was withheld by the safety review and not sent.)'
+            : '(本条回复被安全审查拦下,未发送。)';
       }
 
       // WeChat markdown conversion: table → bullet, strip **bold** / ### h, inline `code` → 「code」

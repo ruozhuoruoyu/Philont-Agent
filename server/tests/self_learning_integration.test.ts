@@ -126,7 +126,7 @@ test('E2E: Task 2 — 扫描版 PDF 同类任务 → 命中 routing rule 注入'
   const inj = buildRoutingInjection(userMessage, memory.routingRules);
 
   assert.ok(inj.matched >= 1, '应该命中至少 1 条规则');
-  assert.match(inj.text, /历史经验路由/);
+  assert.match(inj.text, /Routing hints distilled from past tasks/);
   assert.match(inj.text, /pdf-to-word/);
   assert.match(inj.text, /camscanner-pdf2office/);
   assert.match(inj.text, /pdf2docx/);

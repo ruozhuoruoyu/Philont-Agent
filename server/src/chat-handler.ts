@@ -343,6 +343,7 @@ import {
   resolvePhraseLang,
   buildLanguageDirective,
   observeUserLanguage,
+  setUserLocaleProvider,
 } from './response_language.js';
 
 const llm = createLLMAdapter();
@@ -2303,6 +2304,10 @@ function readUserLanguage(): string | null {
     return null;
   }
 }
+
+// Install the reader once, so channels/renderers that cannot reach the memory store resolve from the SAME
+// source instead of re-deriving it.
+setUserLocaleProvider(readUserLanguage);
 
 function refreshUserLanguage(userMessage: string | null | undefined): void {
   const observed = observeUserLanguage(userMessage);
@@ -6355,7 +6360,10 @@ async function handleChatSendInner(
         onDelta(resp.content);
       } else {
         // LLM still wants to call tools; force terminate and give a hint
-        const fallback = '操作已被您取消。';
+        const fallback =
+      resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en'
+        ? 'Cancelled.'
+        : '操作已被您取消。';
         messages.push({ role: 'assistant', content: fallback });
         onDelta(fallback);
       }
@@ -7922,7 +7930,10 @@ async function runToolLoop(
   // sendLlmWithRescue); these boundary checks handle the "stalled between tool calls / before next LLM call" scenario.
   const stopped = () => turnAbortSignal(sessionId)?.aborted === true;
   const interruptedReturn = () => ({
-    outcome: { outcomeType: 'interrupted' as const, reason: 'user_stop', text: '已停止' },
+    outcome: { outcomeType: 'interrupted' as const, reason: 'user_stop', text:
+            resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en'
+              ? 'Stopped'
+              : '已停止' },
     auditEvents: audit.length,
   });
   if (stopped()) return interruptedReturn();

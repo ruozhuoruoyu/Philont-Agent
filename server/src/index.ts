@@ -75,6 +75,7 @@ import {
   type ReminderPayload,
   markWebuiUserActivity,
 } from './chat-handler.js';
+import { currentPhraseLang } from './response_language.js';
 import { readdirSync } from 'node:fs';
 import { utcDateString, groupFailures } from '@agent/memory';
 import {
@@ -805,7 +806,9 @@ wss.on('connection', (ws) => {
             type: 'final',
             outcome: {
               outcomeType: isTimeout ? 'timeout' : 'error',
-              text: `处理失败: ${errMessage ?? 'unknown error'}`,
+              text: currentPhraseLang() === 'en'
+            ? `Failed: ${errMessage ?? 'unknown error'}`
+            : `处理失败: ${errMessage ?? 'unknown error'}`,
             },
             auditEvents: 0,
           });
