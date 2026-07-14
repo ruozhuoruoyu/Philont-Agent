@@ -37,6 +37,21 @@ jobs:
             echo "::endgroup::"
           done
 
+      # The server is where most of the behaviour lives (chat-handler, the gates, the
+      # intent router, deep_explore) — and its ~950 tests were NOT running here at all.
+      # They were left out because `node --test` never EXITED: importing chat-handler
+      # starts the autonomous loop, skill watchers and follow-up timers at module load,
+      # so the runner sat on open handles forever. The tests themselves were green the
+      # whole time. `--test-force-exit` (in the server's own `npm test`) makes the run
+      # terminate, so the suite that guards the most-changed code finally gates merges.
+      # It runs LAST so a library break is still reported first.
+      - name: Test server
+        run: |
+          set -e
+          cd server
+          npm install --no-audit --no-fund
+          npm test
+
   smoke:
     # Cross-platform build + boot smoke test. macos-latest is Apple Silicon
     # (arm64) — this is how we verify macOS without owning a Mac: it exercises
