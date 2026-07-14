@@ -12,6 +12,7 @@ import {
   logFileName,
   stampTime,
   logTimeZone,
+  tzOffsetLabel,
   fileLoggingEnabled,
   logDir,
   initFileLogging,
@@ -52,15 +53,25 @@ test('dayStamp / logFileName: YYYYMMDD in the OWNER timezone, not UTC', () => {
   assert.equal(dayStamp(d, 'America/New_York'), '20260626');
 });
 
-test('stampTime: local wall clock + a real offset (the instant stays unambiguous)', () => {
+test('stampTime: plain local wall clock — no offset, no "T", no arithmetic for the reader', () => {
   const d = new Date(Date.UTC(2026, 6, 13, 1, 46, 46, 545)); // the UTC stamp from a real prod log
-  assert.equal(stampTime(d, 'UTC'), '2026-07-13T01:46:46.545Z');
+  assert.equal(stampTime(d, 'UTC'), '2026-07-13 01:46:46.545');
   // 01:46 UTC is 09:46 the same morning in Shanghai — which is what the owner's clock said.
-  assert.equal(stampTime(d, 'Asia/Shanghai'), '2026-07-13T09:46:46.545+08:00');
-  // Negative offset, and a zone whose date differs from UTC's.
-  assert.equal(stampTime(d, 'America/New_York'), '2026-07-12T21:46:46.545-04:00');
-  // Half-hour zone — the offset label must not assume whole hours.
-  assert.equal(stampTime(d, 'Asia/Kolkata'), '2026-07-13T07:16:46.545+05:30');
+  assert.equal(stampTime(d, 'Asia/Shanghai'), '2026-07-13 09:46:46.545');
+  // A zone whose DATE also differs from UTC's — the stamp must follow the local calendar.
+  assert.equal(stampTime(d, 'America/New_York'), '2026-07-12 21:46:46.545');
+  // Half-hour zone.
+  assert.equal(stampTime(d, 'Asia/Kolkata'), '2026-07-13 07:16:46.545');
+  // No timezone marker anywhere — a bare local clock is the whole point.
+  assert.doesNotMatch(stampTime(d, 'Asia/Shanghai'), /[TZ]|[+-]\d{2}:\d{2}/);
+});
+
+test('tzOffsetLabel: still exact (the banner records it, since the lines no longer do)', () => {
+  const d = new Date(Date.UTC(2026, 6, 13, 1, 46, 46, 545));
+  assert.equal(tzOffsetLabel(d, 'UTC'), 'Z');
+  assert.equal(tzOffsetLabel(d, 'Asia/Shanghai'), '+08:00');
+  assert.equal(tzOffsetLabel(d, 'America/New_York'), '-04:00');
+  assert.equal(tzOffsetLabel(d, 'Asia/Kolkata'), '+05:30', 'must not assume whole-hour offsets');
 });
 
 test('logTimeZone: AGENT_TIMEZONE drives it; unset / bogus → UTC (never throws)', () => {

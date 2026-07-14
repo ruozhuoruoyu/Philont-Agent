@@ -80,16 +80,19 @@ export function tzOffsetLabel(d: Date, tz: string): string {
 }
 
 /**
- * ISO-8601 timestamp in `tz`, e.g. "2026-07-14T09:31:02.417+08:00". Keeps the offset so a line is still
- * unambiguous (and machine-parseable) — the point is to spare the reader the arithmetic, not to discard
- * which instant it was.
+ * Plain local wall clock in `tz`, e.g. "2026-07-14 09:31:02.417" — exactly what the owner's clock said.
+ *
+ * Deliberately no offset and no "T": the log is a human artifact, and the whole point is that a line
+ * needs no arithmetic and no decoding. The space separator also makes it visibly NOT a UTC ISO stamp,
+ * so nobody mistakes 09:31 for Zulu. The instant is still recoverable — the zone is AGENT_TIMEZONE and
+ * is recorded in the startup banner (see initFileLogging).
  */
 export function stampTime(d: Date, tz: string = logTimeZone()): string {
   const p = partsIn(d, tz);
   const pad = (n: number, w = 2) => String(n).padStart(w, '0');
   return (
-    `${p.y}-${pad(p.mo)}-${pad(p.da)}T${pad(p.h)}:${pad(p.mi)}:${pad(p.s)}.` +
-    `${pad(d.getMilliseconds(), 3)}${tzOffsetLabel(d, tz)}`
+    `${p.y}-${pad(p.mo)}-${pad(p.da)} ${pad(p.h)}:${pad(p.mi)}:${pad(p.s)}.` +
+    `${pad(d.getMilliseconds(), 3)}`
   );
 }
 
@@ -219,7 +222,14 @@ export function initFileLogging(): void {
   }
 
   // Announce via the now-patched writer so this line is itself captured.
+  // The zone + offset go in the banner because the per-line stamps carry NEITHER: they are bare local
+  // wall clocks by design. Recording it once here is what keeps every timestamp in the file
+  // unambiguous — without it, a log read on another machine (or after a zone change) is undecodable.
+  const now = new Date();
+  const tz = logTimeZone();
   console.log(
-    `[file-logger] tee console → ${join(logDir(), logFileName(new Date()))} (set PHILONT_FILE_LOG=0 to disable)`,
+    `[file-logger] tee console → ${join(logDir(), logFileName(now, tz))} ` +
+      `(timestamps are LOCAL time — ${tz}, UTC${tzOffsetLabel(now, tz) === 'Z' ? '+00:00' : tzOffsetLabel(now, tz)}; ` +
+      `set PHILONT_FILE_LOG=0 to disable)`,
   );
 }
