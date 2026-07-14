@@ -220,3 +220,21 @@ test('autoClassify: mycox "read guide then register" is unambiguously slow (the 
   assert.ok(r.reasons.includes('heavy-keyword'));
   assert.ok(r.reasons.includes('multi-step-connector'));
 });
+
+test('GUIDE_HINT: an instruction to FOLLOW a guide — not the mere word 文档/spec (prod 2026-07-13)', async () => {
+  const { autoClassify } = await import('../src/task_mode_classifier.js');
+  const reasons = (t: string) => autoClassify({ userMessage: t, taskSignatureCandidate: 'sig' }).reasons;
+
+  // The prod message: "导出word文档" tripped 文档 → STRONG slow → placeholder plan →
+  // plan_protocol_gate rejected the very shell call the task needed.
+  for (const t of ['导出word文档', '帮我看下这个文档', '写个 spec', '把文档发我', '这份手册在哪']) {
+    assert.ok(!reasons(t).includes('guide-hint'), `a document NOUN must not be a guide hint: ${t}`);
+  }
+  // A real "follow the guide" instruction still trips it.
+  for (const t of [
+    '按文档要求把服务接入', '参考这个 guide 注册一下', '根据规范实现鉴权',
+    '依照手册配置心跳', 'follow the spec and register the service',
+  ]) {
+    assert.ok(reasons(t).includes('guide-hint'), `a real guide instruction must trip: ${t}`);
+  }
+});

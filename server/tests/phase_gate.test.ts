@@ -132,3 +132,25 @@ test('classifyGoal: domain + initial phase', () => {
   assert.deepEqual(classifyGoal('what are ways to reduce churn'), { mode: 'deliberate', initialPhase: 'diverge' });
   assert.deepEqual(classifyGoal('该不该接这个 offer'), { mode: 'deliberate', initialPhase: 'converge' });
 });
+
+test('looksDeductive: a proof REQUEST, not any message with a math noun (prod-shaped)', async () => {
+  const { looksDeductive } = await import('../src/phase_gate.js');
+  // Ordinary programming words that used to route into the formal proof engine.
+  for (const t of [
+    'how do I store integers in sqlite',
+    'the modulo operator in JS behaves oddly',
+    '素数筛法怎么写代码',
+    '这个整除运算符怎么用',
+    '不等式怎么在前端画出来',
+  ]) {
+    assert.equal(looksDeductive(t), false, `a math noun is not a proof request: ${t}`);
+  }
+  // Real deductive targets still route formal.
+  for (const t of [
+    'prove that every even n > 2 is a sum of two primes',
+    '证明这个引理', '求证：n 为素数时恒成立', 'the Goldbach conjecture', 'disprove the theorem',
+    '∀n ∃m such that…',
+  ]) {
+    assert.equal(looksDeductive(t), true, `must be deductive: ${t}`);
+  }
+});

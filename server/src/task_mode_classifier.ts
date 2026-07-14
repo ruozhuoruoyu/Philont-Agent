@@ -124,9 +124,32 @@ const MULTI_STEP_PATTERN =
 const HEAVY_KEYWORD_PATTERN =
   /(接入|对接|注册|onboarding|部署|deploy|集成|integrate|调研|实现|搭建|配置|迁移|重构|联调|心跳|鉴权|授权)|\b(register|onboard|deploy|integrate|investigate|implement|configure|migrate|refactor|webhook|heartbeat)\b/i;
 
-/** R5 explicit guide hint */
-const GUIDE_HINT_PATTERN =
-  /(指引|guide|文档|spec|手册|按.*要求|按.*文档|参考.*md|按.*md)/i;
+/**
+ * R5 explicit guide hint — "there is a guide/spec I must FOLLOW", which is what justifies a plan.
+ *
+ * 2026-07-13: the old pattern listed the bare NOUNS (指引|guide|文档|spec|手册), so merely MENTIONING a
+ * document tripped a STRONG slow signal. Prod: "导出word文档" (export a Word DOCUMENT) matched 文档,
+ * upgraded the turn to slow, auto-created a placeholder plan, and the plan protocol then rejected the
+ * shell call the task actually needed — the user asked for a file and got a gate. Same shape as the
+ * depth-keyword regression: a noun read as an instruction, and the failure direction points at ACTING
+ * (spin up the plan protocol and lock the tools).
+ *
+ * A guide hint is an INSTRUCTION SHAPE — 按/依照/根据/参考/遵循 + a document — not the word "文档".
+ * "帮我看下这个文档" / "写个 spec" / "把文档发我" are ordinary tasks and must stay fast.
+ */
+const GUIDE_HINT_PATTERN = new RegExp(
+  // (a) an imperative to FOLLOW a document: 按/依照/根据/参考/遵循 … 文档/指引/规范/guide/spec
+  /(?:按(?:照)?|依(?:照|据)?|根据|参照|参考|遵循|照着|依)\s*[^。！？\n]{0,12}?(?:指引|指南|文档|文件|规范|手册|说明|要求|guide|spec|readme|\.md\b|md\b)/i.source +
+  '|' +
+  /\b(?:follow|per|according\s+to|as\s+(?:specified|documented)\s+in)\b[^.!?\n]{0,20}\b(?:guide|spec|doc(?:ument)?|manual|readme)\b/i.source +
+  '|' +
+  // (b) being HANDED a guide document as the source to work from ("Read https://…/guide.md, then register").
+  // This is still an instruction shape — you are pointed AT a doc — as opposed to a document being the
+  // task's OUTPUT ("导出word文档"). A bare "写个 readme.md" trips (b) but stays fast: slow needs a
+  // strong signal PLUS a second reason, and that message has none.
+  /\b\S*(?:guide|spec|readme|manual|指引|手册)\S*\.md\b/i.source,
+  'i',
+);
 
 /** R2 URL */
 const URL_PATTERN = /https?:\/\/\S+/i;

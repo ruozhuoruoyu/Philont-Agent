@@ -142,11 +142,28 @@ export function goalNeedsDecision(goal: string, mode: 'formal' | 'deliberate'): 
  */
 export function looksDeductive(goal: string): boolean {
   const g = goal.toLowerCase();
+  // A PROOF REQUEST — a verb/quantifier/named-conjecture shape, never a bare math NOUN.
+  //
+  // 2026-07-13: the list used to carry 'integer(s)' / 'prime(s)' / 'modulo' / 'divisib' / 素数 / 整除 /
+  // 不等式. Those are ordinary PROGRAMMING words: "how do I store integers in sqlite", "the modulo
+  // operator in JS", "素数筛法怎么写" all read as formal-math proof targets and got the deductive
+  // engine (proof prompts + pariGp/Lean verifiers) instead of evidence-based deliberation. Same shape as
+  // the depth-keyword and guide-hint regressions: a noun mistaken for a request.
+  //
+  // Deliberate is the safe default here (it demands evidence, not a verifier), and the explicit `mode`
+  // param always overrides — so under-claiming deductive is cheap, over-claiming is not.
   const cues = [
-    'prove', 'proof of', 'conjecture', 'theorem', 'lemma', 'show that', 'p=np', 'p vs np', 'p versus np',
-    'for all n', 'for every n', 'there exists', 'integer', 'integers', 'prime', 'primes', 'divisib',
-    'modulo', 'q.e.d', 'riemann', 'goldbach', 'twin prime', 'irrational', 'inequality holds',
-    '证明', '求证', '试证', '猜想', '定理', '引理', '素数', '整除', '不等式', '恒成立',
+    // proof verbs / imperatives
+    'prove', 'proof of', 'disprove', 'show that', 'derive', 'q.e.d',
+    '证明', '求证', '试证', '反证', '归纳法', '推导', '恒成立',
+    // objects of proof
+    'conjecture', 'theorem', 'lemma', 'corollary', 'axiom',
+    '猜想', '定理', '引理', '公理',
+    // quantifier / statement shapes
+    'for all n', 'for every n', 'there exists', 'if and only if', 'inequality holds',
+    // named open problems (unambiguous)
+    'p=np', 'p vs np', 'p versus np', 'riemann', 'goldbach', 'twin prime', 'collatz', 'erdos',
+    '哥德巴赫', '黎曼',
   ];
   if (cues.some((c) => g.includes(c))) return true;
   // Math symbols are a strong deductive signal.

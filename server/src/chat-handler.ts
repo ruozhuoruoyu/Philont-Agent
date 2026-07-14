@@ -2574,7 +2574,20 @@ export const autonomousLoop: AutonomousLoopHandle = startAutonomousLoop({
     },
   },
 });
-autonomousLoop.start();
+/**
+ * Under `node --test`, module-load background work must not run: these loops (and their timers) keep the
+ * event loop alive, so the test runner finishes its assertions and then hangs forever on open handles.
+ *
+ * That hang is why the server's ~960 tests were excluded from CI entirely (8b1c29f). The first fix reached
+ * for `--test-force-exit`, but that kills the process mid-report and SILENTLY DROPS TESTS — measured 962
+ * stable vs 945-953 with force-exit, always reporting fail=0. A gate that can hide a failing test is worse
+ * than no gate. So the loops are simply not started under test, and the process exits on its own.
+ *
+ * NODE_TEST_CONTEXT is set by node itself in the test child process — nothing to remember to configure.
+ */
+const UNDER_TEST = !!process.env.NODE_TEST_CONTEXT;
+
+if (!UNDER_TEST) autonomousLoop.start();
 
 /**
  * Selfhood status snapshot (WS6 §8): one read-only composition consumed by the
@@ -2627,7 +2640,7 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
     }
   },
 });
-deepExploreAutoAdvance.start();
+if (!UNDER_TEST) deepExploreAutoAdvance.start();
 
 // Proactive follow-up (S2 REPORT slice): ask the user about a quiet deep_explore session that still has
 // OPEN frontier nodes (the user stopped replying "继续"). Does NOT run the round — just surfaces + asks,
@@ -2652,7 +2665,7 @@ export const deepExploreFollowUp = createFollowUpLoop({
     }
   },
 });
-deepExploreFollowUp.start();
+if (!UNDER_TEST) deepExploreFollowUp.start();
 
 const intentClassifier = process.env.LLM_PROVIDER === 'anthropic'
   ? new LLMIntentClassifier(async (prompt) => {
@@ -2925,14 +2938,16 @@ for (const dir of [workspaceSkillsDir, globalSkillsDir]) {
   }
 }
 
-// Start watchers for two directories; if a directory does not exist, no-op (in theory should not happen after ensureDir)
-const workspaceWatcher = watchSkillDir(workspaceSkillsDir, reloadSkillsFromDisk);
-const globalWatcher = watchSkillDir(globalSkillsDir, reloadSkillsFromDisk);
+// Start watchers for two directories; if a directory does not exist, no-op (in theory should not happen after ensureDir).
+// Not under test: an fs.watch handle keeps the event loop alive forever, and these two were the reason the
+// test process never exited (measured: ACTIVE_HANDLES = 2x FSWatcher). See UNDER_TEST.
+const workspaceWatcher = UNDER_TEST ? null : watchSkillDir(workspaceSkillsDir, reloadSkillsFromDisk);
+const globalWatcher = UNDER_TEST ? null : watchSkillDir(globalSkillsDir, reloadSkillsFromDisk);
 
 /** Release watchers on process exit (for testing or lifecycle management) */
 export function closeSkillWatchers(): void {
-  workspaceWatcher.close();
-  globalWatcher.close();
+  workspaceWatcher?.close();
+  globalWatcher?.close();
 }
 
 // ── Scheduler: proactive time-driven behavior ────────────────────────────────────
