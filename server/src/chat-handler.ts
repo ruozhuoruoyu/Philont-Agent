@@ -252,6 +252,7 @@ import {
   buildSelfhoodStatus,
   renderSelfhoodStatusText,
   isAutonomyStatusCommand,
+  classifyProposalReply,
 } from './autonomy_status.js';
 import {
   renderCapabilityManifest,
@@ -5219,12 +5220,62 @@ export async function handleChatSend(
   // telemetry about the agent, not conversation).
   if (isAutonomyStatusCommand(userMessage)) {
     try {
-      onDelta(renderSelfhoodStatusText(autonomySelfhoodStatus()));
+      onDelta(
+        renderSelfhoodStatusText(
+          autonomySelfhoodStatus(),
+          Date.now(),
+          resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }),
+        ),
+      );
     } catch (e) {
       console.error('[autonomy] status command failed', e);
       onDelta('autonomy status unavailable: ' + (e as Error).message);
     }
     return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+  }
+
+  // The owner answering the /autonomy panel's amendment card. Handled HERE, deterministically, rather than
+  // hoping the model notices and calls decide_constitution_proposal: nothing in the repo matched these words
+  // at all until 2026-07-14, and the model could not have supplied the id anyway — the panel prints 8 chars
+  // and the store did exact-id lookup. An owner following our own printed instructions could never approve a
+  // constitution amendment. We printed the words; we listen for them.
+  {
+    const pr = classifyProposalReply(userMessage);
+    if (pr) {
+      const lang = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() });
+      let reply: string;
+      try {
+        if (pr.decision === 'approve') {
+          const applied = approveAndApply(
+            constitutionProposals,
+            memory.pursuits,
+            pr.idPrefix,
+            internalAudit,
+          );
+          reply =
+            lang === 'en'
+              ? `Constitution amended per proposal ${applied.id.slice(0, 8)} (${applied.kind}). Append-only and hash-audited.`
+              : `已按提案 ${applied.id.slice(0, 8)} (${applied.kind}) 修正宪法。修正是只追加、带哈希审计的。`;
+        } else {
+          const rejected = constitutionProposals.decide(pr.idPrefix, 'rejected');
+          reply = rejected
+            ? lang === 'en'
+              ? `Proposal ${rejected.id.slice(0, 8)} rejected. I will not amend the constitution.`
+              : `已拒绝提案 ${rejected.id.slice(0, 8)}。宪法不作修改。`
+            : lang === 'en'
+              ? `No pending proposal matches "${pr.idPrefix}" (it may be ambiguous or already decided). Run /autonomy to see the open ones.`
+              : `没有匹配「${pr.idPrefix}」的待决提案(可能不唯一或已决定)。发 /autonomy 看当前待决列表。`;
+        }
+      } catch (e) {
+        reply =
+          lang === 'en'
+            ? `Could not apply that decision: ${(e as Error).message}`
+            : `无法执行该决定: ${(e as Error).message}`;
+      }
+      console.log(`[autonomy] proposal ${pr.decision} via owner reply (prefix=${pr.idPrefix})`);
+      onDelta(reply);
+      return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+    }
   }
   const grants = globalGrants;
 

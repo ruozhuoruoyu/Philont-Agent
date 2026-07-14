@@ -141,6 +141,31 @@ export class ConstitutionProposalStore {
     return row ? rowToProposal(row) : null;
   }
 
+  /**
+   * Resolve a full id OR an unambiguous PREFIX of one (2026-07-14).
+   *
+   * The /autonomy panel prints `id.slice(0, 8)` and then tells the owner to reply "approve proposal
+   * <first 8 chars>". Lookup was `WHERE id = ?` — exact — so the identifier we PRINT could never be used to
+   * do the thing we PRINTED INSTRUCTIONS FOR. The constitution-amendment approval path, the capstone of the
+   * selfhood design, could not be completed by a human following our own on-screen directions.
+   *
+   * Nobody can be asked to retype a 36-char UUID (an LLM demonstrably cannot either — it transposes hex
+   * digits), so the id we show has to be the id we accept. Ambiguity returns null rather than guessing:
+   * silently amending the WRONG constitution proposal is far worse than asking again.
+   */
+  getByIdOrPrefix(idOrPrefix: string): ConstitutionProposal | null {
+    const key = (idOrPrefix ?? '').trim().toLowerCase();
+    if (key.length < 4) return null; // too short to be unambiguous; refuse rather than guess
+    const exact = this.get(key);
+    if (exact) return exact;
+    const rows = this.db
+      .prepare<[string]>(
+        `SELECT * FROM constitution_proposals WHERE id LIKE ? || '%' AND status = 'pending' LIMIT 2`,
+      )
+      .all(key) as Row[];
+    return rows.length === 1 ? rowToProposal(rows[0]) : null; // 0 = none, 2 = ambiguous
+  }
+
   listPending(rootPursuitId: string, limit = 5): ConstitutionProposal[] {
     const rows = this.db
       .prepare<[string, number]>(
@@ -181,20 +206,27 @@ export class ConstitutionProposalStore {
       .run(at, id);
   }
 
-  /** pending → approved/rejected. Returns the updated proposal; null if missing or already decided. */
+  /**
+   * pending → approved/rejected. Returns the updated proposal; null if missing, ambiguous, or already decided.
+   *
+   * Accepts an unambiguous PREFIX as well as a full id — the reject path had the same exact-match defect as
+   * approve: we print 8 chars and then ask the owner to reply with them. See getByIdOrPrefix.
+   */
   decide(
     id: string,
     decision: 'approved' | 'rejected',
     at: number = Date.now(),
   ): ConstitutionProposal | null {
+    const target = this.getByIdOrPrefix(id);
+    if (!target) return null;
     const r = this.db
       .prepare<[string, number, string]>(
         `UPDATE constitution_proposals SET status = ?, decided_at = ?
          WHERE id = ? AND status = 'pending'`,
       )
-      .run(decision, at, id);
+      .run(decision, at, target.id);
     if (r.changes === 0) return null;
-    return this.get(id);
+    return this.get(target.id);
   }
 }
 
@@ -222,7 +254,7 @@ export function approveAndApply(
   auditHook?: MemoryAuditHook,
   now: number = Date.now(),
 ): ConstitutionProposal {
-  const p = store.get(proposalId);
+  const p = store.getByIdOrPrefix(proposalId);
   if (!p) throw new Error(`constitution proposal ${proposalId} not found`);
   if (p.status !== 'pending') throw new Error(`constitution proposal ${proposalId} already ${p.status}`);
 

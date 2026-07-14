@@ -171,3 +171,44 @@ test('WS3: with NO configured driveBounds, the built-in 30min cap applies and ov
   assert.equal(pending[0].kind, 'drive_bounds');
   handle.close();
 });
+
+// ── the id we PRINT must be the id we ACCEPT (2026-07-14) ────────────────────────────────────────
+//
+// The /autonomy panel prints `id.slice(0, 8)` and tells the owner to reply "approve proposal <first 8
+// chars>". Lookup was `WHERE id = ?` — exact. So an owner following our own on-screen instructions could
+// NEVER approve a constitution amendment: the identifier we showed them was not one the store would accept,
+// and nobody (human or LLM — it transposes hex digits) can retype a 36-char UUID from memory.
+test('getByIdOrPrefix: the 8-char prefix we print on screen actually resolves', () => {
+  const handle = openMemoryDb(':memory:');
+  const store = new ConstitutionProposalStore(handle.db);
+  const p = store.propose(annotationInput())!;
+
+  const printed = p.id.slice(0, 8); // exactly what the /autonomy panel shows the owner
+  assert.equal(store.get(printed), null, 'exact lookup cannot resolve the printed prefix — this was the bug');
+  assert.equal(store.getByIdOrPrefix(printed)?.id, p.id, 'the printed prefix must resolve');
+  assert.equal(store.getByIdOrPrefix(p.id)?.id, p.id, 'a full id still resolves');
+});
+
+test('getByIdOrPrefix: refuses to guess rather than amend the wrong constitution', () => {
+  const handle = openMemoryDb(':memory:');
+  const store = new ConstitutionProposalStore(handle.db);
+  const p = store.propose(annotationInput())!;
+
+  assert.equal(store.getByIdOrPrefix('zzzzzzzz'), null, 'no match → null');
+  assert.equal(store.getByIdOrPrefix('a'), null, 'too short to be unambiguous → refuse, do not guess');
+  assert.equal(store.getByIdOrPrefix(''), null);
+  // Silently amending the WRONG proposal is far worse than asking the owner again.
+  assert.ok(store.getByIdOrPrefix(p.id.slice(0, 8)), 'sanity: the unambiguous case still works');
+});
+
+test('decide: the reject path accepts the printed prefix too', () => {
+  const handle = openMemoryDb(':memory:');
+  const store = new ConstitutionProposalStore(handle.db);
+  const p = store.propose(annotationInput())!;
+
+  const rejected = store.decide(p.id.slice(0, 8), 'rejected');
+  assert.equal(rejected?.id, p.id, 'reject had the same exact-match defect as approve');
+  assert.equal(store.get(p.id)?.status, 'rejected');
+  // A decided proposal is no longer pending, so the prefix no longer resolves — no double-decide.
+  assert.equal(store.decide(p.id.slice(0, 8), 'approved'), null);
+});
