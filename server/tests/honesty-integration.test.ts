@@ -10,6 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { HonestySessionStore } from '../src/honesty_session_state.js';
 import { extractRecentToolResults } from '../src/chat-handler.js';
 import type { NativeMessage } from '../src/llm-adapter.js';
 
@@ -135,4 +136,30 @@ test('extractRecentToolResults: 没有 tool_result(纯文本对话) → 空数�
     { role: 'assistant', content: '你好,有什么可以帮你?' } as any,
   ];
   assert.deepEqual(extractRecentToolResults(msgs), []);
+});
+
+// ── the sticky exec-fabrication latch (prod 2026-07-14) ──────────────────────────────────────────
+test('HonestySessionStore: fabricatedExecClaim is sticky across turns and survives an honest turn', () => {
+  const store = new HonestySessionStore();
+  const sid = 'sticky-latch';
+
+  assert.equal(store.get(sid).fabricatedExecClaim, false, 'clean session starts unarmed');
+
+  // Turn 1: the model narrates an experiment it never ran.
+  store.update(sid, { promisedRun: false, didExecute: false, fired: true, fabricatedExec: true });
+  assert.equal(store.get(sid).fabricatedExecClaim, true, 'the fabrication arms the latch');
+
+  // Turn 2: it apologises, runs nothing, and the gate does not fire. The latch must NOT be cleared by an
+  // apology — that is exactly the free exit that let the fabrication recur in production.
+  store.update(sid, { promisedRun: false, didExecute: false, fired: false });
+  assert.equal(store.get(sid).fabricatedExecClaim, true, 'an apology must not disarm the latch');
+
+  // Turn 3: it actually executes. The latch stays armed (it is a trust state, not a counter) — this costs
+  // an honest turn nothing, because a turn that really executes never reaches the gate's branch at all.
+  store.update(sid, { promisedRun: false, didExecute: true, fired: false });
+  assert.equal(store.get(sid).fabricatedExecClaim, true, 'sticky for the life of the session');
+  assert.equal(store.get(sid).unkeptRunPromise, false, 'but the say-do latch DOES clear on a real execution');
+
+  // Sessions are isolated: one liar does not arm everyone else.
+  assert.equal(store.get('other-session').fabricatedExecClaim, false);
 });

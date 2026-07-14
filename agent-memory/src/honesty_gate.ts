@@ -339,6 +339,13 @@ export interface HonestyEvaluation {
     | 'announced_action_without_doing';
   /** Matched claim phrase (used as reference in reminder message) */
   matchedClaim: string;
+  /**
+   * The session has committed this same violation before (sticky latch). Severity is already 'high' and
+   * cannot escalate, so the caller escalates the CONTRACT instead: on a repeat it must NOT offer the free
+   * "just apologise and say you haven't done it" exit, because that exit is exactly what the model took
+   * last time — it satisfies the gate at zero cost and changes nothing, so the fabrication recurs.
+   */
+  repeatOffense?: boolean;
   /** tool_result counts for this turn */
   okCount: number;
   failCount: number;
@@ -420,6 +427,14 @@ export interface EvaluateOptions {
 export interface HonestySessionSnapshot {
   unkeptRunPromise: boolean;
   priorViolations: number;
+  /**
+   * STICKY: this session has already fabricated an execution RESULT once (see HonestySessionState).
+   * The fabricated_execution_claim branch below is the only P0 branch, and it was the ONE branch that
+   * never read this session state — so a repeat offence looked identical to a first offence and got the
+   * identical (already-proven-ineffective) nudge. In prod the model fabricated, apologised, and fabricated
+   * again inside one session.
+   */
+  fabricatedExecClaim?: boolean;
 }
 
 /**
@@ -898,17 +913,29 @@ export function evaluateHonesty(
   const ranExecution = turnDidExecute(records);
   const execClaim = findExecutionClaim(assistantText);
   if (execClaim && !ranExecution) {
+    // Repeat within the session: this is already the second experiment narrated without being run. Severity
+    // is already 'high' and cannot escalate, so the escalation has to change the CONTRACT instead — the
+    // caller drops the free "just apologise" exit (see repeatOffense).
+    const repeat = opts.session?.fabricatedExecClaim === true;
     return {
       severity: 'high',
       reason: 'fabricated_execution_claim',
+      repeatOffense: repeat,
       matchedClaim: execClaim,
       okCount: ok,
       failCount: fail,
       unknownCount: unknown,
-      evidence:
-        `You claimed an execution/computation result ("${execClaim}"), but this turn issued ZERO ` +
-        `execution tool calls (no shell / pariGp / z3Verify / deep_explore). The computation never ran — ` +
-        `those numbers were not produced this turn. Actually run it, or tell the user plainly it has not run yet.`,
+      evidence: repeat
+        ? `AGAIN: you claimed an execution/computation result ("${execClaim}") on a turn that issued ZERO ` +
+          `execution tool calls. You already did this earlier in THIS session, acknowledged it, and have now ` +
+          `done it a second time — so an apology is demonstrably not the fix and is no longer an acceptable ` +
+          `reply. The numbers do not exist: no process ran, no output was produced, no exit code was seen. ` +
+          `Either CALL an execution tool in this reply, or state concretely WHY you cannot run it here (what ` +
+          `is missing — the tool, the environment, the credentials). "Sorry, I have not run it yet" is not a ` +
+          `reason and will not be accepted.`
+        : `You claimed an execution/computation result ("${execClaim}"), but this turn issued ZERO ` +
+          `execution tool calls (no shell / pariGp / z3Verify / deep_explore). The computation never ran — ` +
+          `those numbers were not produced this turn. Actually run it, or tell the user plainly it has not run yet.`,
     };
   }
 

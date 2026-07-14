@@ -6802,9 +6802,22 @@ async function handleChatSendInner(
             ? {
                 unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,
                 priorViolations: honestySessionStore.get(sessionId).violationCount,
+                fabricatedExecClaim: honestySessionStore.get(sessionId).fabricatedExecClaim,
               }
             : undefined,
         });
+        // Fold this turn into the session latch. This site (the zero-tool first response) evaluated the gate
+        // but NEVER wrote back — so a fabrication caught here armed nothing and did not even bump the
+        // violation counter. The latch had a reader in one place and a writer in another, and they were not
+        // connected: the same shape as every other defect this week.
+        if (honestySessionEnabled) {
+          honestySessionStore.update(sessionId, {
+            promisedRun: !!findRunPromise(firstTextContent),
+            didExecute: turnDidExecute(recentToolResults),
+            fired: !!honesty,
+            fabricatedExec: honesty?.reason === 'fabricated_execution_claim',
+          });
+        }
         if (honesty && honesty.severity === 'high') {
           signalBus.honesty = { evaluation: honesty, toolResults: recentToolResults, assistantText: firstTextContent };
           audit.append('self_domain_write', {
@@ -6826,13 +6839,32 @@ async function handleChatSendInner(
           messages.push({
             role: 'user',
             content:
-              `[drive Honesty/${honesty.reason}] ${honesty.evidence}\n\n` +
-              `**Do ONE of these in your reply — do not straddle**:\n` +
-              `  A · Actually perform it NOW by CALLING the tool (e.g. forget_skill / store_fact / shell) — ` +
-              `writing the call in a Work Log / prose is NOT calling it;\n` +
-              `  B · Correct yourself: tell the user honestly you have NOT done it yet.\n` +
-              `Do not repeat the claim "${honesty.matchedClaim}" unless a tool call THIS turn actually supports it.\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`,
+              honesty.repeatOffense
+                ? // REPEAT. The menu below is the mechanism that TAUGHT apologise-and-move-on: option B is a
+                  // free exit — it costs nothing, satisfies the gate, and changes no behaviour, while the
+                  // pressure that produced the fabrication (the user still wants a verified answer, nothing
+                  // has run) is untouched. Same state next turn → same output. So on a repeat, B is removed:
+                  // the only honest non-execution reply is a CONCRETE statement of incapacity, which an
+                  // apology cannot satisfy.
+                  `[drive Honesty/${honesty.reason}] ${honesty.evidence}\n\n` +
+                  `**An apology is NOT an acceptable reply this time.** You already apologised for exactly this ` +
+                  `earlier in this session and then did it again. Do ONE of these:\n` +
+                  `  A · CALL an execution tool NOW in this reply (shell / pariGp / …) and report what it ` +
+                  `actually returned — writing the command in prose or a Work Log is NOT calling it;\n` +
+                  `  B · State CONCRETELY that you cannot run it, and WHAT is missing (which tool, which ` +
+                  `environment, which credential). Name the blocker. "Sorry, I have not run it yet" is not a ` +
+                  `blocker and will be rejected.\n` +
+                  `Do not repeat the claim "${honesty.matchedClaim}" — no process ran, so there is no result to ` +
+                  `report. Reply in the SAME LANGUAGE the user wrote in.\n` +
+                  `This is an intra-turn internal correction. Do not surface this reminder to the user.`
+                : `[drive Honesty/${honesty.reason}] ${honesty.evidence}\n\n` +
+                  `**Do ONE of these in your reply — do not straddle**:\n` +
+                  `  A · Actually perform it NOW by CALLING the tool (e.g. forget_skill / store_fact / shell) — ` +
+                  `writing the call in a Work Log / prose is NOT calling it;\n` +
+                  `  B · Correct yourself: tell the user honestly you have NOT done it yet.\n` +
+                  `Do not repeat the claim "${honesty.matchedClaim}" unless a tool call THIS turn actually supports it.\n` +
+                  `Reply in the SAME LANGUAGE the user wrote in.\n` +
+                  `This is an intra-turn internal correction. Do not surface this reminder to the user.`,
           });
           onTrace?.({
             kind: 'internal-gate', tier: 4,
@@ -8524,6 +8556,7 @@ async function runToolLoop(
             ? {
                 unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,
                 priorViolations: honestySessionStore.get(sessionId).violationCount,
+                fabricatedExecClaim: honestySessionStore.get(sessionId).fabricatedExecClaim,
               }
             : undefined,
         });
@@ -8538,6 +8571,9 @@ async function runToolLoop(
             promisedRun: !!findRunPromise(response.content) || announcedStall,
             didExecute: turnDidExecute(recentToolResults),
             fired: !!honesty,
+            // Arms the sticky latch: from here on, an execution claim with zero execution tools gets no
+            // free "sorry, I have not run it" exit — that exit is what it took last time.
+            fabricatedExec: honesty?.reason === 'fabricated_execution_claim',
           });
         }
         if (!honesty) {
@@ -8592,14 +8628,33 @@ async function runToolLoop(
               `     tell the user honestly "this looks wrong — the API may have returned an error response" — **do not pretend success**.\n\n` +
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
           } else if (honesty.reason === 'fabricated_execution_claim') {
-            reminder =
-              `[drive Honesty/fabricated_execution] You wrote "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
-              `**This is the most serious dishonesty: reporting results of a computation that never ran this turn.**\n` +
-              `  1. Do NOT narrate numbers / eigenvalues / ratios / "shell 返回" you did not get from a tool THIS turn;\n` +
-              `  2. In this same reply, actually CALL the tool (shell / pariGp) and wait for its ✓ / ⚠ output;\n` +
-              `  3. Report ONLY what the tool returned — if it failed, say it failed;\n` +
-              `  4. If you will not run it now, tell the user plainly "not run yet" — never invent the result.\n\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+            // This is the branch that actually fired in prod (07-14), twice in one session — fabricate,
+            // apologise, fabricate again. Step 4 below WAS the mechanism: "if you will not run it, say 'not
+            // run yet'" is a free exit that costs nothing, satisfies the gate, and changes nothing, while the
+            // pressure that produced the fabrication survives intact into the next turn. On a repeat the exit
+            // is removed: the only non-execution reply that counts is a NAMED blocker, which an apology
+            // cannot fake.
+            reminder = honesty.repeatOffense
+              ? `[drive Honesty/fabricated_execution · REPEAT] You wrote "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
+                `**You already did this once in THIS session, acknowledged it, and have now done it again. ` +
+                `An apology is therefore not an acceptable reply — it did not work last time.**\n` +
+                `  1. There is no result to report. No process started, no output was produced, no exit code was ` +
+                `seen. Numbers you write down now would be invented;\n` +
+                `  2. In THIS reply, CALL the execution tool (shell / pariGp) and report ONLY its ✓ / ⚠ output — ` +
+                `writing the command in prose is not calling it;\n` +
+                `  3. If you genuinely cannot run it, name the BLOCKER concretely: which tool is unavailable, ` +
+                `which environment is missing, which credential you lack. "I have not run it yet" is a ` +
+                `restatement, not a blocker, and will be rejected;\n` +
+                `  4. Reply in the SAME LANGUAGE the user wrote in.\n\n` +
+                `This is an intra-turn internal correction. Do not surface this reminder to the user.`
+              : `[drive Honesty/fabricated_execution] You wrote "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
+                `**This is the most serious dishonesty: reporting results of a computation that never ran this turn.**\n` +
+                `  1. Do NOT narrate numbers / eigenvalues / ratios / "shell 返回" you did not get from a tool THIS turn;\n` +
+                `  2. In this same reply, actually CALL the tool (shell / pariGp) and wait for its ✓ / ⚠ output;\n` +
+                `  3. Report ONLY what the tool returned — if it failed, say it failed;\n` +
+                `  4. If you will not run it now, tell the user plainly "not run yet" — never invent the result;\n` +
+                `  5. Reply in the SAME LANGUAGE the user wrote in.\n\n` +
+                `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
           } else if (honesty.reason === 'run_promise_without_exec') {
             reminder =
               `[drive Honesty/say_do_gap] You said "${honesty.matchedClaim}" but issued no tool call — ${honesty.evidence}\n\n` +

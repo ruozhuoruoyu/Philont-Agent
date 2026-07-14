@@ -15,9 +15,30 @@ export interface HonestySessionState {
   unkeptRunPromise: boolean;
   /** Honesty fires so far this session (drives reminder hardening). */
   violationCount: number;
+  /**
+   * STICKY (2026-07-14): this session has already claimed an execution/computation RESULT on a turn that
+   * ran zero execution tools — i.e. it did not overstate a failure, it narrated an experiment that never
+   * happened, results included.
+   *
+   * Prod (07-14): it did this TWICE in one session. The gate caught both, the model apologised both times,
+   * and fabricated again immediately. The mechanism made that inevitable: the fabricated_execution_claim
+   * branch never read this store, and the correction it pushed offered a free exit ("just tell the user you
+   * haven't run it") that costs nothing, satisfies the gate, and changes no behaviour — so apologise-and-
+   * move-on was the cheapest winning strategy. Meanwhile the pressure that produced the fabrication (the
+   * user still wants a verified answer; nothing has been run) was untouched, so the next turn reproduced it.
+   *
+   * Sticky for the life of the session and NEVER cleared: it is a trust state, not a counter. It costs
+   * nothing when the agent behaves — a turn that really executes never reaches the branch at all. It only
+   * bites on a REPEAT fabrication, where it removes the free exit.
+   */
+  fabricatedExecClaim: boolean;
 }
 
-const EMPTY: HonestySessionState = { unkeptRunPromise: false, violationCount: 0 };
+const EMPTY: HonestySessionState = {
+  unkeptRunPromise: false,
+  violationCount: 0,
+  fabricatedExecClaim: false,
+};
 
 export class HonestySessionStore {
   private readonly map = new Map<string, HonestySessionState>();
@@ -34,7 +55,13 @@ export class HonestySessionStore {
    */
   update(
     sessionId: string,
-    outcome: { promisedRun: boolean; didExecute: boolean; fired: boolean },
+    outcome: {
+      promisedRun: boolean;
+      didExecute: boolean;
+      fired: boolean;
+      /** This turn's fire was a fabricated_execution_claim — arms the sticky latch. */
+      fabricatedExec?: boolean;
+    },
   ): void {
     const cur = this.get(sessionId);
     this.map.set(sessionId, {
@@ -42,6 +69,8 @@ export class HonestySessionStore {
         ? false
         : outcome.promisedRun || cur.unkeptRunPromise,
       violationCount: cur.violationCount + (outcome.fired ? 1 : 0),
+      // Sticky: once armed, stays armed for the session.
+      fabricatedExecClaim: cur.fabricatedExecClaim || outcome.fabricatedExec === true,
     });
   }
 }
