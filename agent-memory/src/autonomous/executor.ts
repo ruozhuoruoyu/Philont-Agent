@@ -97,6 +97,17 @@ export interface InitiativeExecutorOptions {
   tokenEstimator?: (text: string) => number;
   /** Max tokens for single-turn LLM output. Default 600 — forces brief summaries. */
   maxLlmOutputTokens?: number;
+  /**
+   * The language the `summary` must be written in — `summary` is the ONLY field of this output the owner
+   * ever reads (it becomes the proactive push), and a push is the agent speaking FIRST, on a turn with no
+   * user message, so there is nothing for the model to mirror. Without this the language of every proactive
+   * message was simply whatever the executor felt like.
+   *
+   * A callback resolved by the caller (not read from env here), because the resolution lives in one place
+   * — server/src/response_language.ts — and duplicating it in this package is how a writer and a reader end
+   * up speaking different languages.
+   */
+  responseLanguage?: () => string;
   logger?: { log: (m: string) => void; error: (m: string, e?: unknown) => void };
 }
 
@@ -109,6 +120,8 @@ export class StandardExecutor implements InitiativeExecutor {
   private readonly isToolGranted: (tool: string) => boolean;
   private readonly skillRepairContext: (skillName: string) => SkillRepairContext | null;
   private readonly factNs: string;
+  /** Resolves the language for `summary` — the one field of this output the owner reads. See options. */
+  private readonly responseLanguage: () => string | undefined;
   private readonly estimate: (t: string) => number;
   private readonly maxOut: number;
   private readonly log: { log: (m: string) => void; error: (m: string, e?: unknown) => void };
@@ -122,6 +135,7 @@ export class StandardExecutor implements InitiativeExecutor {
     this.isToolGranted = opts.isToolGranted ?? (() => false);
     this.skillRepairContext = opts.skillRepairContext ?? (() => null);
     this.factNs = opts.factNamespace ?? 'autonomous';
+    this.responseLanguage = opts.responseLanguage ?? (() => undefined);
     this.estimate =
       opts.tokenEstimator ?? ((t: string) => Math.max(1, Math.ceil(t.length * 0.3)));
     this.maxOut = opts.maxLlmOutputTokens ?? 600;
@@ -190,7 +204,12 @@ export class StandardExecutor implements InitiativeExecutor {
     }
 
     // 2) Build prompt → single-turn LLM
-    const prompt = renderExecutorPrompt(initiative, toolResults, repair);
+    const prompt = renderExecutorPrompt(
+      initiative,
+      toolResults,
+      repair,
+      this.responseLanguage(),
+    );
     let llmText: string;
     let llmTokens: number;
     try {
@@ -375,6 +394,7 @@ function renderExecutorPrompt(
   init: Initiative,
   toolResults: Array<{ tool: string; output: string; ok: boolean }>,
   repair?: SkillRepairContext | null,
+  responseLanguage?: string,
 ): string {
   if (repair) return renderSkillRepairPrompt(init, repair);
 
@@ -423,6 +443,14 @@ function renderExecutorPrompt(
     '```',
     '',
     '## Hard constraints',
+    // `summary` is the only field the owner ever reads — it becomes the proactive push. A push is the agent
+    // speaking FIRST, so there is no user message to mirror and the language must be told, not inferred.
+    ...(responseLanguage
+      ? [
+          `- **Write \`summary\` in ${responseLanguage}** — it is pushed to the owner and is the only field they read. ` +
+            'Every other field (facts, notes, body) stays English: they are internal memory, not a message.',
+        ]
+      : []),
     '- sourceRefs for each fact entry must not be empty; empty arrays will be silently discarded (to prevent fabrication)',
     '- If a tool fails, do not fabricate; honestly note "tool returned no result" in summary, and record "to retry" in notes',
     '- Do not reproduce tool raw output in summary; only write "distilled conclusion + recommended next step"',

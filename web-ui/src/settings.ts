@@ -153,6 +153,13 @@ const FIELDS: Field[] = [
   { key: 'PHILONT_PROXY', label: { zh: '全局代理', en: 'Global Proxy' }, type: 'text', group: '网络与时区',
     placeholder: 'http://127.0.0.1:7890',
     help: { zh: '开启后所有出网(模型 / 搜索 / 抓取 / 通道)都走它。无 NO_PROXY 白名单,国内网关也会走代理。', en: 'When on, ALL outbound traffic (model / search / fetch / channels) routes through it. No NO_PROXY allowlist.' } },
+  { key: 'AGENT_LANGUAGE', label: { zh: '回复语言', en: 'Reply Language' }, type: 'select', group: '网络与时区',
+    options: [
+      { value: '', label: { zh: '自动(跟随你说的语言)', en: 'Auto (follow the language you write in)' } },
+      { value: 'zh', label: { zh: '中文', en: 'Chinese' } },
+      { value: 'en', label: { zh: 'English', en: 'English' } },
+    ],
+    help: { zh: '给你的回复用什么语言(代码和日志始终是英文)。主动推送发生在你没说话的时候,没有语言可跟随——这个设置就是那时的答案。留空=自动:按你写的语言判断,判不出就跟随你。', en: 'The language of replies TO YOU (code and logs are always English). A proactive push happens when you have not said anything, so there is nothing to follow — this setting is the answer for those. Empty = auto: inferred from what you write, falling back to mirroring you.' } },
   { key: 'AGENT_TIMEZONE', label: { zh: '时区', en: 'Timezone' }, type: 'text', group: '网络与时区', placeholder: 'Asia/Shanghai',
     help: { zh: '日历 / 定时任务用。已按浏览器自动识别本地时区,可下拉搜索改选。', en: 'For calendar / scheduling. Auto-detected from your browser; type to search and override.' } },
 

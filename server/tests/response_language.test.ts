@@ -12,6 +12,7 @@ import {
   resolveResponseLanguage,
   buildLanguageDirective,
   observeUserLanguage,
+  resolvePhraseLang,
 } from '../src/response_language.js';
 
 test('channelOf:取 sessionId 的渠道前缀', () => {
@@ -97,4 +98,42 @@ test('resolveResponseLanguage: the user\'s observed language beats the channel, 
   assert.equal(resolveResponseLanguage({ channel: 'wechat:acct:user' }), "the user's own language");
   // The observed language is what survives a turn with no user message — i.e. a proactive push.
   assert.equal(resolveResponseLanguage({ channel: 'wechat:acct:user', userLocale: 'Chinese' }), 'Chinese');
+});
+
+// ── AGENT_LANGUAGE: the owner's declaration (web-ui) outranks any inference ──────────────────────
+test('resolveResponseLanguage: AGENT_LANGUAGE beats the observed language', () => {
+  const prev = process.env.AGENT_LANGUAGE;
+  try {
+    // The owner declared English in the web-ui. Even though we observed them writing Chinese, a declaration
+    // beats an inference — they told us, we guessed.
+    process.env.AGENT_LANGUAGE = 'en';
+    assert.equal(resolveResponseLanguage({ channel: 'wechat:a:b', userLocale: 'Chinese' }), 'English');
+    assert.equal(resolvePhraseLang({ userLocale: 'Chinese' }), 'en');
+
+    process.env.AGENT_LANGUAGE = 'zh';
+    assert.equal(resolveResponseLanguage({ channel: 'webui', userLocale: 'English' }), 'Chinese');
+    assert.equal(resolvePhraseLang({ userLocale: 'English' }), 'zh');
+
+    // Unset / 'auto' → fall through to the observed language, then to mirroring.
+    process.env.AGENT_LANGUAGE = '';
+    assert.equal(resolveResponseLanguage({ userLocale: 'Chinese' }), 'Chinese');
+    assert.equal(resolveResponseLanguage({}), "the user's own language");
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_LANGUAGE;
+    else process.env.AGENT_LANGUAGE = prev;
+  }
+});
+
+test('resolvePhraseLang: we ship two template languages — anything not Chinese renders English', () => {
+  const prev = process.env.AGENT_LANGUAGE;
+  try {
+    process.env.AGENT_LANGUAGE = '';
+    // An observed Japanese user gets English cards today. That is a real ceiling, not full i18n — templates
+    // are code strings, and we only wrote two.
+    assert.equal(resolvePhraseLang({ userLocale: 'Japanese' }), 'en');
+    assert.equal(resolvePhraseLang({ userLocale: 'Chinese' }), 'zh');
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_LANGUAGE;
+    else process.env.AGENT_LANGUAGE = prev;
+  }
 });

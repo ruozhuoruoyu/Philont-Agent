@@ -237,6 +237,7 @@ import {
 import { createDeepExploreTool } from './deep_explore.js';
 import { selectSkillsToForget } from './forget_skill.js';
 import {
+  classifyGrantReply,
   renderResearchGrantPrompt,
   reconstructDmSessionId,
   decideResearchGrantAction,
@@ -332,6 +333,7 @@ import { detectUngroundedComputation, buildNumericGroundingDirective } from './n
 import { detectHandRolledParser, buildSkillReflexNudge } from './skill_reflex.js';
 import {
   resolveResponseLanguage,
+  resolvePhraseLang,
   buildLanguageDirective,
   observeUserLanguage,
 } from './response_language.js';
@@ -2383,7 +2385,13 @@ function enqueueResearchGrantPush(
       severity: 'urgent',
       kind: 'research_grant_request',
       targetRef: `research-grant:${parsed.pursuitId}:${tool}`,
-      text: renderResearchGrantPrompt(title, tool, why, RESEARCH_GRANT_PENDING_TTL_MS),
+      text: renderResearchGrantPrompt(
+        title,
+        tool,
+        why,
+        RESEARCH_GRANT_PENDING_TTL_MS,
+        resolvePhraseLang({ userLocale: readUserLanguage() }),
+      ),
     })
     .catch((e) => console.warn('[research-grant] push enqueue failed', e));
 }
@@ -2549,6 +2557,10 @@ const autonomousExecutor = new StandardExecutor({
   notes: memory.notes,
   llm: extractorLlm,
   tools: autonomousToolRunner,
+  // The push this produces is the agent speaking FIRST — there is no user message to mirror, so the language
+  // has to be resolved and told. Resolved HERE, from the one resolver, rather than re-derived inside
+  // agent-memory: two copies of a resolution is how a writer and a reader end up disagreeing.
+  responseLanguage: () => resolveResponseLanguage({ userLocale: readUserLanguage() }),
   // Proactive research "request permission": let executor include user-authorized gated tools in the effective whitelist.
   isToolGranted: (tool) => globalGrants.isGranted(tool),
   // H3: a skill_repair initiative's evidence is local ledger state, not something to fetch with a tool.
@@ -5941,10 +5953,7 @@ async function handleChatSendInner(
 
   // Resolve the language for user-facing status phrases (onStatus).
   // WeChat channel uses Chinese; all other channels use English.
-  const statusLang: PhraseLang =
-    resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }) === 'Chinese'
-      ? 'zh'
-      : 'en';
+  const statusLang: PhraseLang = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() });
 
   // B (2026-06-28): flag a deep_explore STATUS/COUNT query so force-continue can't hijack it into a 6-min
   // advancing round and the fabrication gate doesn't block the snapshot answer (read by both downstream).
@@ -6185,12 +6194,18 @@ async function handleChatSendInner(
   if (rg) {
     // Quick-check for expiry first (avoids unnecessary LLM intent calls); only classify intent if not expired.
     const expired = Date.now() - rg.ts > RESEARCH_GRANT_PENDING_TTL_MS;
+    // The card handed the user a closed enum ("reply 同意 / 拒绝", or approve / reject). Reading our OWN
+    // vocabulary back is an exact match, not a semantic-classification problem — we have already shipped a
+    // bug where the user replied with one of our own offered words and the general classifier read it as the
+    // opposite. Only genuinely open language reaches the classifier.
+    const offered = expired ? null : classifyGrantReply(userMessage);
     const intent = expired
       ? 'unclear'
-      : await intentClassifier.classify(
+      : (offered ??
+        (await intentClassifier.classify(
           userMessage,
           `Background research requests use of tool "${rg.tool}" (execute/system)`,
-        );
+        )));
     const action = decideResearchGrantAction(rg, intent, Date.now(), RESEARCH_GRANT_PENDING_TTL_MS);
 
     if (action === 'grant') {

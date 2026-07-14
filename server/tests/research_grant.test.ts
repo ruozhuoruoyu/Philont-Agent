@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  classifyGrantReply,
   renderResearchGrantPrompt,
   reconstructDmSessionId,
   decideResearchGrantAction,
@@ -79,4 +80,43 @@ test('decide: 超 TTL → expired(即便 intent=grant 也不消费)', () => {
 
 test('decide: 恰好 TTL 边界内 → 仍按 intent', () => {
   assert.equal(decideResearchGrantAction(pending(), 'grant', NOW + TTL, TTL), 'grant');
+});
+
+// ── bilingual card + deterministic matching of the words WE offered (2026-07-14) ──────────────────
+test('renderResearchGrantPrompt: renders in the resolved language, offering that language\'s reply words', () => {
+  const zh = renderResearchGrantPrompt('素数分布', 'pariGp', '需要计算', 30 * 60_000, 'zh');
+  assert.match(zh, /同意/);
+  assert.match(zh, /拒绝/);
+
+  const en = renderResearchGrantPrompt('prime distribution', 'pariGp', 'needs computation', 30 * 60_000, 'en');
+  assert.match(en, /approve/);
+  assert.match(en, /reject/);
+  assert.doesNotMatch(en, /同意/, 'an English card must not tell the owner to reply with a Chinese word');
+  assert.match(en, /30 minutes/);
+});
+
+test('classifyGrantReply: our own offered words are matched exactly, in BOTH languages', () => {
+  // The card handed the user a closed enum. Reading our own vocabulary back is an exact match, not a
+  // semantic-classification problem — we have already shipped a bug where a user replied with one of OUR
+  // OWN offered words and the general classifier read it as the opposite.
+  assert.equal(classifyGrantReply('同意'), 'grant');
+  assert.equal(classifyGrantReply('批准'), 'grant');
+  assert.equal(classifyGrantReply('approve'), 'grant');
+  assert.equal(classifyGrantReply('Approve.'), 'grant');
+  assert.equal(classifyGrantReply('拒绝'), 'deny');
+  assert.equal(classifyGrantReply('reject'), 'deny');
+  assert.equal(classifyGrantReply('「拒绝」'), 'deny');
+
+  // Both vocabularies are accepted regardless of which language the card was rendered in: a bilingual owner
+  // will type 同意 at an English card, and being strict there punishes them for a setting they never saw.
+  assert.equal(classifyGrantReply('同意'), 'grant');
+  assert.equal(classifyGrantReply('no'), 'deny');
+});
+
+test('classifyGrantReply: genuinely open language falls through to the semantic classifier', () => {
+  // Only OUR enum is matched here. Anything else is real natural language and belongs to the classifier —
+  // the rule is "keywords are right when the vocabulary is ours, wrong when it is theirs".
+  assert.equal(classifyGrantReply('嗯你先跑吧，我看看结果再说'), null);
+  assert.equal(classifyGrantReply('what does pariGp even do?'), null);
+  assert.equal(classifyGrantReply(''), null);
 });

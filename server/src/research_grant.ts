@@ -23,19 +23,59 @@ export interface PendingResearchGrant {
   ts: number;
 }
 
-/** Render the WeChat authorization card text (aligned with the existing 🔐 auth request style). */
+/**
+ * Render the authorization card (aligned with the existing 🔐 auth request style).
+ *
+ * A code-authored template — no LLM is involved, so no prompt directive can affect it. It used to be
+ * hardcoded Chinese, which meant an English-speaking owner got a Chinese card AND was told to reply with a
+ * Chinese word. The language comes from resolvePhraseLang (AGENT_LANGUAGE → observed → mirror), the same
+ * resolution the model's own directive uses, so the card and the reply after it cannot disagree.
+ */
 export function renderResearchGrantPrompt(
   title: string,
   tool: string,
   why: string,
   ttlMs: number,
+  lang: 'zh' | 'en' = 'zh',
 ): string {
+  const mins = Math.round(ttlMs / 60000);
+  if (lang === 'en') {
+    return [
+      '🔐 Background research needs your approval',
+      `Researching "${title}" cannot continue without \`${tool}\`${why ? ` (${why})` : ''}.`,
+      `Permission: execute/system · valid for about ${mins} minutes`,
+      'Reply "approve" to allow / "reject" to decline.',
+    ].join('\n');
+  }
   return [
     '🔐 后台研究请求授权',
     `研究「${title}」需要用 \`${tool}\` 才能继续${why ? `(${why})` : ''}。`,
-    `权限:execute/system · 约 ${Math.round(ttlMs / 60000)} 分钟内有效`,
+    `权限:execute/system · 约 ${mins} 分钟内有效`,
     '回复「同意」批准 / 「拒绝」拒绝。',
   ].join('\n');
+}
+
+/**
+ * Deterministic match on the words THE CARD ITSELF OFFERED — in BOTH languages, always, regardless of which
+ * language the card was rendered in.
+ *
+ * This is not defensive padding, it is the whole point. The moment we hand the user a closed enum ("reply
+ * approve / reject"), their reply is no longer open natural language — it is us reading back our own
+ * vocabulary, and it must be matched exactly, not shipped to a semantic classifier. We have already been
+ * bitten by precisely this: a user replied with one of OUR OWN offered words and the general-purpose intent
+ * classifier read it as the opposite. Widening a classifier's jurisdiction promotes its false positives from
+ * harmless to harmful.
+ *
+ * Both vocabularies are always accepted because the rendered language does not constrain the human: a
+ * bilingual owner will type 同意 at an English card, and being strict there would punish them for a setting.
+ * Anything NOT in our enum falls through to the classifier, where open language belongs.
+ */
+export function classifyGrantReply(reply: string): 'grant' | 'deny' | null {
+  const r = (reply ?? '').trim().toLowerCase().replace(/[。！？，,!?.\s"'「」]+/g, '');
+  if (!r) return null;
+  if (/^(同意|批准|授权|允许|可以|好|approve|approved|allow|grant|granted|yes|ok|okay)$/.test(r)) return 'grant';
+  if (/^(拒绝|不同意|不批准|不允许|不要|不|别|reject|rejected|deny|denied|decline|no|nope)$/.test(r)) return 'deny';
+  return null; // open language → the semantic classifier
 }
 
 /**

@@ -66,21 +66,52 @@ export function localeToLanguage(locale: string | null | undefined): ResponseLan
 }
 
 /**
+ * The owner's declared language (AGENT_LANGUAGE, set in the web-ui). Empty / unset = auto.
+ *
+ * A declaration outranks an inference: this is the owner telling us, not us guessing from their script or
+ * their choice of messaging app. It is also the only source that is available on a turn with NO user message
+ * — which is exactly what a proactive push is, the agent speaking first with nothing to mirror.
+ */
+export function configuredLanguage(): ResponseLanguage | null {
+  return localeToLanguage(process.env.AGENT_LANGUAGE ?? '');
+}
+
+/**
  * Resolve the response language. Priority:
- *   1. the user's OBSERVED language (the `user.locale` fact, written by observeUserLanguage) — this is the
- *      only tier that survives a turn with NO user message, which is exactly what a proactive push is;
- *   2. per-channel default (currently empty — see above);
- *   3. mirror the user's own language (works whenever the model can see their text in context).
+ *   1. AGENT_LANGUAGE — the owner DECLARED it in the web-ui. A declaration beats any inference;
+ *   2. the user's OBSERVED language (the `user.locale` fact, written by observeUserLanguage);
+ *   3. per-channel default (currently empty — a channel is not evidence of a language);
+ *   4. mirror the user's own language (works whenever the model can see their text in context).
+ *
+ * Tiers 1 and 2 are the ones that survive a turn with no user message. Tier 4 cannot: there is nothing to
+ * mirror when we speak first.
  */
 export function resolveResponseLanguage(opts: {
   channel?: string | null;
   userLocale?: string | null;
 }): ResponseLanguage {
+  const declared = configuredLanguage();
+  if (declared) return declared;
   const fromLocale = localeToLanguage(opts.userLocale);
   if (fromLocale) return fromLocale;
   const ch = channelOf(opts.channel);
   if (ch && CHANNEL_DEFAULT_LANGUAGE[ch]) return CHANNEL_DEFAULT_LANGUAGE[ch];
   return MIRROR_USER_LANGUAGE;
+}
+
+/**
+ * The language for CODE-AUTHORED template strings (push cards, status phrases) — the half of the output a
+ * prompt directive can do nothing about, because no LLM is involved: they are literals in the source.
+ *
+ * Derived from the SAME resolution as the model's directive, so a push card and the reply that follows it
+ * can never disagree. We ship two template languages, so anything not Chinese renders in English — that is
+ * a real ceiling, not a claim of full i18n: an observed Japanese user gets English cards today.
+ */
+export function resolvePhraseLang(opts: {
+  channel?: string | null;
+  userLocale?: string | null;
+}): 'zh' | 'en' {
+  return resolveResponseLanguage(opts) === 'Chinese' ? 'zh' : 'en';
 }
 
 /**
