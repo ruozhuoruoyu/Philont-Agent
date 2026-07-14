@@ -10,7 +10,7 @@ import {
   AuditLog,
   createReadOnlyMatrix, checkPermission,
   createToolChecker,
-  GrantStore, LLMIntentClassifier, KeywordIntentClassifier,
+  GrantStore,
   SecretStore,
   createDefaultChain,
   createPathAclValidator,
@@ -147,6 +147,7 @@ import {
   turnDidExecute,
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
+import { classifyAuthIntent } from './auth_intent.js';
 import {
   extractScheduleIdFromSession,
   summarizeTurnTrace,
@@ -2758,12 +2759,17 @@ export const deepExploreFollowUp = createFollowUpLoop({
 });
 if (!UNDER_TEST) deepExploreFollowUp.start();
 
-const intentClassifier = process.env.LLM_PROVIDER === 'anthropic'
-  ? new LLMIntentClassifier(async (prompt) => {
-      const resp = await llm.send([{ role: 'user', content: prompt }]);
-      return resp.type === 'text' ? resp.content : 'unclear';
-    })
-  : new KeywordIntentClassifier();
+// Authorization-reply intent is now classified by the AUX model, for EVERY provider — see auth_intent.ts.
+//
+// This used to fork on `LLM_PROVIDER === 'anthropic'`, so a DeepSeek deployment (i.e. the actual one) fell
+// through to KeywordIntentClassifier for every authorization decision in front of every execute/system tool.
+// That classifier substring-matches a bag of words, so it graded three of the most natural things a cautious
+// owner says at an auth prompt as CONSENT (measured, not supposed):
+//     "我可以再想想吗" → grant · "这个工具可以干什么？" → grant · "你确认一下这是安全的吗" → grant
+// A keyword list cannot represent a question, a negation, or a hedge, so it fails in the direction of ACTING.
+// classifyAuthIntent exact-matches only the words WE offered on the card (reading back our own closed enum
+// is parsing, not inference) and sends everything else — all open language — to the aux LLM, failing CLOSED:
+// unconfigured / error / anything unexpected → 'unclear', which re-asks. Re-asking is free.
 
 // ── Session state ──────────────────────────────────────────────────────────────────
 //
@@ -5307,7 +5313,7 @@ export async function handleChatSend(
         // (prod 2026-07-13). See classifyExploreAskReply.
         const askIntent =
           classifyExploreAskReply(userMessage) ??
-          (await intentClassifier.classify(
+          (await classifyAuthIntent(
             userMessage,
             'Enter the deep reasoning engine (deep_explore) for the research goal just proposed',
           ));
@@ -6137,7 +6143,7 @@ async function handleChatSendInner(
     // the allow/deny classifier.
     const expired = Date.now() - pending.ts > PENDING_AUTH_TTL_MS;
     const context = `Tool "${pending.toolName}" (${pending.capability}/${pending.domain})`;
-    const intent  = expired ? 'unclear' : await intentClassifier.classify(userMessage, context);
+    const intent = expired ? 'unclear' : await classifyAuthIntent(userMessage, context);
 
     if (intent === 'grant') {
       // deep_explore runs multi-round sessions where a single round can outlast the default
@@ -6239,7 +6245,7 @@ async function handleChatSendInner(
 
   // ── Proactive research "request permission": user replies "agree/deny" on WeChat against a background-pushed auth card ──────
   // Mirrors pendingAuth but lighter: no tool-chain resume (continuation is done automatically by the next autonomous tick's driver replay);
-  // only needs to write a grant / revoke request. Deterministic (reuses intentClassifier), no LLM involved.
+  // only needs to write a grant / revoke request.
   // unclear / expired → pass through to normal turn (pending-approval prompt section + grant_research_tool fallback).
   const rg = pendingResearchGrants.get(sessionId);
   if (rg) {
@@ -6253,7 +6259,7 @@ async function handleChatSendInner(
     const intent = expired
       ? 'unclear'
       : (offered ??
-        (await intentClassifier.classify(
+        (await classifyAuthIntent(
           userMessage,
           `Background research requests use of tool "${rg.tool}" (execute/system)`,
         )));
