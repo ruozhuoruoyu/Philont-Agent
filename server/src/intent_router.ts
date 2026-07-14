@@ -197,8 +197,25 @@ export async function classifyIntent(
 // depth/commitment (深入/深度/系统/彻底…) or the classifier is highly confident. plan-route reuses the
 // existing slow→plan protocol; deep_explore-route injects a nudge into the system prefix.
 
+/**
+ * A depth REQUEST — not merely a message that happens to contain a depth-ish morpheme.
+ *
+ * 2026-07-13 regression: the old pattern had bare `深度` and `系统(?:地|性)?` (suffix OPTIONAL), so the
+ * NOUNS matched. Prod: "…Sakana Fugu: 完整多智能体编排系统…" tripped on 系统 ("orchestration SYSTEM"),
+ * the ask tier was skipped, and the turn was force-started into the engine — the owner never got the
+ * choice. `深度` was worse: it matches 深度学习 / 深度神经网络 / 深度强化学习, so for an AI-focused owner
+ * merely MENTIONING deep learning force-starts a 6-minute reasoning session.
+ *
+ * This only became load-bearing when userSignaledDepth was made the sole bypass of the ask tier (7a34cec):
+ * before that it just picked between two force paths, so a false positive was invisible. Widening what a
+ * signal CONTROLS turns its false positives from harmless into harmful — the same trap as the ask-reply
+ * classifier.
+ *
+ * So: 系统 must carry its adverbial suffix (系统地/系统性), and 深度 must be followed by a research verb
+ * (深度调研/深度分析/…) — never by a model architecture.
+ */
 const DEPTH_SIGNAL_RE =
-  /深入|深度|系统(?:地|性)?|彻底|全面|仔细|认真|好好(?:地)?|详细|深挖|钻研|逐一|逐条|严谨|\bin[-\s]?depth\b|\bthorough|\bsystematic|\brigorous|\bdeep[-\s]?dive\b/i;
+  /深入|深挖|钻研|彻底|全面|仔细|认真|好好(?:地)?|详细|逐一|逐条|严谨|系统(?:地|性)|深度\s*(?:调研|调查|研究|分析|思考|推理|探索|挖掘|梳理|评估|论证|复盘|剖析)|\bin[-\s]?depth\b|\bthorough|\bsystematic|\brigorous|\bdeep[-\s]?dive\b/i;
 
 /** Did the user explicitly ask for depth/thoroughness → start the engine directly instead of offering. */
 export function userSignaledDepth(msg: string): boolean {

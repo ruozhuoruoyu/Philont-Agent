@@ -369,3 +369,28 @@ test('buildIntentPrompt: carries the "debugging our own artifact is NOT deep_exp
   // The prod misroutes it must now steer: a bug report on a file we wrote is a work item.
   assert.match(p, /work item, not an investigation/i);
 });
+
+test('userSignaledDepth: a depth REQUEST, not any message containing a depth-ish noun (prod 2026-07-13)', async () => {
+  const { userSignaledDepth } = await import('../src/intent_router.js');
+
+  // ── FALSE POSITIVES that used to force-start a session and skip the ask ──
+  // The exact prod message: 系统 here is "orchestration SYSTEM", a noun.
+  assert.equal(
+    userSignaledDepth('调研分析以下两篇开源论文：Sakana Fugu — 支持通过单一API调用的完整多智能体编排系统'),
+    false,
+    '"编排系统" is a noun — it is not a request for depth',
+  );
+  // 深度 as part of a model-architecture noun — lethal for an AI-focused owner.
+  for (const t of ['深度学习模型怎么选', '深度神经网络的梯度消失', '深度强化学习入门', '这个推荐系统怎么优化', '操作系统内核']) {
+    assert.equal(userSignaledDepth(t), false, `must not trip: ${t}`);
+  }
+
+  // ── Real depth requests still work ──
+  for (const t of [
+    '深入分析一下', '深度调研这个方向', '深度分析可行性', '系统地梳理一遍', '系统性复盘',
+    '彻底搞清楚', '全面评估', '仔细检查', '详细说明', '深挖一下',
+    'do a thorough investigation', 'deep dive into this', 'an in-depth review', 'be systematic',
+  ]) {
+    assert.equal(userSignaledDepth(t), true, `must trip: ${t}`);
+  }
+});
