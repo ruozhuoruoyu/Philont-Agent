@@ -31,6 +31,7 @@ interface SkillRow {
   trigger_keywords: string;
   action_template: string;
   use_count: number;
+  offered_count: number | null;
   last_used_at: number | null;
   created_at: number;
   success_count: number;
@@ -102,6 +103,7 @@ function rowToSkill(row: SkillRow): Skill {
     triggerKeywords: JSON.parse(row.trigger_keywords),
     actionTemplate: row.action_template,
     useCount: row.use_count,
+    offeredCount: row.offered_count ?? 0,
     lastUsedAt: row.last_used_at,
     createdAt: row.created_at,
     successCount: row.success_count,
@@ -165,6 +167,7 @@ export class SkillStore extends EventEmitter {
       name: input.name,
       description: input.description,
       whenToUse,
+      offeredCount: 0,
       triggerKeywords: input.triggerKeywords,
       actionTemplate: input.actionTemplate,
       useCount: 0,
@@ -599,12 +602,61 @@ export class SkillStore extends EventEmitter {
     ).map(rowToSkill);
     if (drafts.length <= maxDrafts) return 0;
     const now = Date.now();
-    // ascending by score → lowest-value (unused/old/failing) drafts first
-    const sorted = drafts.slice().sort((a, b) => scoreSkill(a, now) - scoreSkill(b, now));
+    // Evidence-ordered eviction (v36). scoreSkill alone cannot rank these: in production EVERY draft has
+    // useCount 0 (use_skill fired 10 times in 462 turns), so the score collapsed to pure age and the cap
+    // became a FIFO conveyor — mint a draft, never try it, delete it when it gets old, forever. draft sat
+    // pinned at exactly the cap (40) for a week with validated=0.
+    //
+    // A skill that was OFFERED many times and never chosen has earned its deletion — that is real negative
+    // evidence. A skill that was NEVER OFFERED has no evidence against it at all; deleting it is discarding
+    // an untested hypothesis for losing a race it was never entered in. So: evict the declined ones FIRST,
+    // and only fall back to the score once the declined pool is exhausted.
+    const sorted = drafts.slice().sort((a, b) => {
+      const aDeclined = a.offeredCount > 0 && a.useCount === 0;
+      const bDeclined = b.offeredCount > 0 && b.useCount === 0;
+      if (aDeclined !== bDeclined) return aDeclined ? -1 : 1;
+      // Within the declined pool, the most-declined goes first (strongest evidence of uselessness).
+      if (aDeclined && bDeclined && a.offeredCount !== b.offeredCount) {
+        return b.offeredCount - a.offeredCount;
+      }
+      return scoreSkill(a, now) - scoreSkill(b, now);
+    });
     const toDelete = sorted.slice(0, drafts.length - maxDrafts);
     let deleted = 0;
-    for (const s of toDelete) if (this.deleteSkill(s.name)) deleted++;
+    for (const s of toDelete) {
+      const why = s.offeredCount > 0 && s.useCount === 0
+        ? `offered ${s.offeredCount}x, never chosen`
+        : s.offeredCount === 0
+          ? 'NEVER OFFERED (no evidence — pruned only because the declined pool was exhausted)'
+          : `score ${scoreSkill(s, now).toFixed(3)}`;
+      if (this.deleteSkill(s.name)) {
+        deleted++;
+        console.log(`[skill-funnel] pruned draft '${s.name}' (${why})`);
+      }
+    }
     return deleted;
+  }
+
+  /**
+   * Record that these skills were OFFERED to the model in this turn's recall index (v36).
+   *
+   * The counterpart to recordSkillOutcome. The maturity ladder only ever observed ACCEPTANCE, so a skill
+   * the model never picked was indistinguishable from a skill the model never saw — and the loop could
+   * neither promote nor honestly reject anything. Best-effort: never throw into the prompt-build path.
+   */
+  recordSkillsOffered(names: string[]): void {
+    if (!names.length) return;
+    try {
+      const stmt = this.db.prepare<[string]>(
+        `UPDATE memory_skills SET offered_count = offered_count + 1 WHERE name = ?`,
+      );
+      const tx = this.db.transaction((ns: string[]) => {
+        for (const n of ns) stmt.run(n);
+      });
+      tx(names);
+    } catch {
+      // Instrumentation must never break the turn.
+    }
   }
 
   /**

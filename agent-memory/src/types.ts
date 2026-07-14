@@ -178,6 +178,11 @@ export interface Skill {
   actionTemplate: string;
   /** Number of times used */
   useCount: number;
+  /**
+   * v36: times this skill was OFFERED to the model in the recall index (vs useCount = times accepted).
+   * The gap between the two IS the learning loop's real conversion rate — and it was previously invisible.
+   */
+  offeredCount: number;
   /** Most recent use time */
   lastUsedAt: number | null;
   createdAt: number;

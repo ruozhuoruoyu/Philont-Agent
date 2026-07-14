@@ -567,19 +567,19 @@ test('scoreSkill: frequent success > rare success > frequent failure', () => {
 
   const winner = {
     id: '1', name: 'winner', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 10, lastUsedAt: recent, createdAt: 0,
+    useCount: 10, offeredCount: 0, lastUsedAt: recent, createdAt: 0,
     successCount: 10, failureCount: 0, lastFailureAt: null, lastSuccessAt: recent,
     consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const rare = {
     id: '2', name: 'rare', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 1, lastUsedAt: recent, createdAt: 0,
+    useCount: 1, offeredCount: 0, lastUsedAt: recent, createdAt: 0,
     successCount: 1, failureCount: 0, lastFailureAt: null, lastSuccessAt: recent,
     consecutiveFailures: 0, whenToUse: '', maturity: 'draft' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const loser = {
     id: '3', name: 'loser', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 10, lastUsedAt: recent, createdAt: 0,
+    useCount: 10, offeredCount: 0, lastUsedAt: recent, createdAt: 0,
     successCount: 2, failureCount: 8, lastFailureAt: recent, lastSuccessAt: recent,
     consecutiveFailures: 0, whenToUse: '', maturity: 'deprecated' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
@@ -593,13 +593,13 @@ test('scoreSkill: recency decay discounts long-unused skills', () => {
   const now = Date.parse('2026-04-17T12:00:00Z');
   const old = {
     id: '1', name: 'old', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 5, lastUsedAt: now - 90 * 86_400_000, createdAt: 0,
+    useCount: 5, offeredCount: 0, lastUsedAt: now - 90 * 86_400_000, createdAt: 0,
     successCount: 5, failureCount: 0, lastFailureAt: null, lastSuccessAt: now - 90 * 86_400_000,
     consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const fresh = {
     id: '2', name: 'fresh', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 2, lastUsedAt: now, createdAt: 0,
+    useCount: 2, offeredCount: 0, lastUsedAt: now, createdAt: 0,
     successCount: 2, failureCount: 0, lastFailureAt: null, lastSuccessAt: now,
     consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
@@ -802,7 +802,7 @@ test('scoreSkill: negative 比 positive 衰减更慢(同参数下分数更高)',
   const daysAgo60 = now - 60 * 86_400_000;
   const positive = {
     id: '1', name: 'p', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 3, lastUsedAt: daysAgo60, createdAt: 0,
+    useCount: 3, offeredCount: 0, lastUsedAt: daysAgo60, createdAt: 0,
     successCount: 3, failureCount: 0, lastFailureAt: null, lastSuccessAt: daysAgo60,
     consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
@@ -1242,4 +1242,51 @@ test('reviseRecipe: emits changed event like other mutators', () => {
   store.once('changed', (ev) => { fired = ev; });
   store.reviseRecipe(name, { actionTemplate: 'v2', reason: 'skill_repair:sess-1' });
   assert.deepEqual(fired, { type: 'updated', name });
+});
+
+// ── v36: offer tracking + evidence-ordered draft eviction ────────────────────────────────────────
+//
+// Production (7 days, 462 turns): 64 skills, use_skill called 10 times, validated=0, and `draft` sat
+// pinned at EXACTLY the prune cap (40) the whole week. Every draft had useCount 0, so scoreSkill
+// degenerated to age and the cap became a FIFO conveyor: mint, never try, delete when old. The loop
+// could not tell "the model saw this and passed on it" from "the model never saw this at all".
+test('pruneDraftsToCap evicts declined drafts before never-offered ones', () => {
+  const { skills } = openMemoryDb(':memory:');
+
+  const mk = (name: string) =>
+    skills.createSkill({ name, description: name, triggerKeywords: [], actionTemplate: 'x' });
+
+  const declined = mk('declined-often');
+  const untried = mk('never-offered');
+  const alsoDeclined = mk('declined-once');
+
+  // The model was shown these and did not pick them — real negative evidence.
+  for (let i = 0; i < 5; i++) skills.recordSkillsOffered([declined.name]);
+  skills.recordSkillsOffered([alsoDeclined.name]);
+  // `untried` was never offered: no evidence for OR against it.
+
+  assert.equal(skills.getByName(declined.name)!.offeredCount, 5);
+  assert.equal(skills.getByName(untried.name)!.offeredCount, 0);
+
+  // Cap to 1 → the two declined drafts must die first, most-declined first.
+  const pruned = skills.pruneDraftsToCap(1);
+  assert.equal(pruned, 2);
+  assert.equal(skills.getByName(declined.name), null);
+  assert.equal(skills.getByName(alsoDeclined.name), null);
+  // The untried hypothesis survives: it never lost a race, it was never entered in one.
+  assert.ok(skills.getByName(untried.name), 'a never-offered draft must not be pruned while declined drafts remain');
+});
+
+test('recordSkillsOffered counts offers separately from uses', () => {
+  const { skills } = openMemoryDb(':memory:');
+  const s = skills.createSkill({ name: 'offered-then-used', description: 'd', triggerKeywords: [], actionTemplate: 'x' });
+
+  skills.recordSkillsOffered([s.name, 'no-such-skill']); // unknown names are a no-op, not a throw
+  skills.recordSkillsOffered([s.name]);
+  skills.recordSkillOutcome(s.name, true);
+
+  const after = skills.getByName(s.name)!;
+  assert.equal(after.offeredCount, 2, 'offered twice');
+  assert.equal(after.useCount, 1, 'accepted once');
+  // offered:used is the learning loop's conversion rate — in production it was invisible.
 });

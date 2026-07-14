@@ -36,7 +36,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 35);
+  assert.equal(SCHEMA_VERSION, 36);
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
   assert.ok(tableExists(db, 'reasoning_sessions'));
@@ -324,7 +324,6 @@ test('migration v34 → v35: memory_skills gets revision_history, existing H2 re
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 35);
   assert.ok(hasColumn(db, 'memory_skills', 'revision_history'), 'v35 迁移后必须补回 revision_history 列');
 
   const row = db
@@ -426,4 +425,31 @@ test('memory_schedules: default enabled=1, required next_run_at', () => {
   };
   assert.equal(row.enabled, 1);
   assert.equal(row.action_type, 'reflect');
+});
+
+// v36: offered_count. A pre-v36 DB must gain the column without losing skill rows — the column is what
+// lets the draft-cap prune tell "offered and declined" apart from "never offered", so a botched migration
+// would silently resume the FIFO conveyor that deleted untried skills for a week.
+test('migration v35 → v36: memory_skills gets offered_count, existing skills intact', () => {
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.exec(`ALTER TABLE memory_skills DROP COLUMN offered_count;`);
+  db.prepare(`UPDATE memory_meta SET value = '35' WHERE key = 'schema_version'`).run();
+  assert.ok(!hasColumn(db, 'memory_skills', 'offered_count'), 'degraded state must really lack the column');
+
+  db.prepare(
+    `INSERT INTO memory_skills
+     (id, name, description, trigger_keywords, action_template, created_at, kind, maturity, use_count)
+     VALUES ('sk-old', 'pre-v36-skill', 'existed before v36', '["x"]', 'do x', 1000, 'positive', 'draft', 7)`
+  ).run();
+
+  initSchema(db);
+
+  assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 36);
+  assert.ok(hasColumn(db, 'memory_skills', 'offered_count'), 'v36 must add offered_count');
+  const row = db.prepare(`SELECT use_count, offered_count FROM memory_skills WHERE id = 'sk-old'`).get() as
+    { use_count: number; offered_count: number };
+  assert.equal(row.use_count, 7, 'pre-existing skill data must survive the migration');
+  assert.equal(row.offered_count, 0, 'a skill migrated in has no offer history — it backfills to 0, not to its use_count');
 });

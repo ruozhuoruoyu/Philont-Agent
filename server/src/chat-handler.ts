@@ -2271,6 +2271,24 @@ export interface WebuiProactiveMessage {
 }
 const webuiClients = new Map<string, (msg: WebuiProactiveMessage) => void>();
 
+/**
+ * Last time a REAL user action arrived from a web-ui session (a chat message — not a socket connect).
+ *
+ * The launcher auto-opens a browser tab at startup, so "a web-ui client is connected" says nothing about
+ * whether anyone is looking. The double-disturbance guard read that connection as "the owner already saw
+ * it" and suppressed the WeChat push — permanently, for an owner who lives in WeChat. The finding was
+ * delivered to an unattended tab, and the one channel they actually read was silenced BECAUSE that tab
+ * was open. A connection is not a pair of eyes.
+ */
+let webuiLastUserActivityAt = 0;
+export const WEBUI_ACTIVE_WINDOW_MS = 10 * 60_000;
+export function markWebuiUserActivity(): void {
+  webuiLastUserActivityAt = Date.now();
+}
+function webuiRecentlyActive(): boolean {
+  return webuiClients.size > 0 && Date.now() - webuiLastUserActivityAt < WEBUI_ACTIVE_WINDOW_MS;
+}
+
 /** Register a connected web-ui session to receive proactive pushes. Returns an unregister fn. */
 export function registerWebuiClient(
   sessionId: string,
@@ -2346,7 +2364,21 @@ const autonomousInterruptSink: InterruptSink = {
         ? payload.summary.slice(0, 200) + '…'
         : payload.summary;
     const text = `[autonomous:${payload.kind}] ${summary} (initiative=${payload.initiativeId})`;
+    // FUNNEL VISIBILITY (2026-07-14). Reaching the owner requires NINE independent conditions to hold
+    // (escalate + new-facts + no-webui + not-disabled + subscribed + channel-ready + not-rate-limited +
+    // not-quiet + not-duplicate). Each was written and reviewed on its own merits; nobody multiplied them.
+    // The owner's report was "I don't perceive the autonomy at all" — and every one of those gates wrote
+    // its decision to the audit DB and NOTHING to the console, so neither they nor I could see where the
+    // findings were dying. A funnel you cannot watch is a funnel you cannot fix.
+    if (severity !== 'high') {
+      console.log(
+        `[autonomy-funnel] initiative=${payload.initiativeId} kind=${payload.kind} DROPPED at gate 1/9 ` +
+          `(severity=normal — needs executor escalate=true AND >=1 new fact). Owner will NOT see this; ` +
+          `it is only injected into the next turn's prompt.`,
+      );
+    }
     if (severity === 'high') {
+      console.log(`[autonomy-funnel] initiative=${payload.initiativeId} passed gate 1/9 (severity=high)`);
       interruptController.sendHigh({ signalType: 'AutonomousFinding', payload: text });
       // Web-ui: surface the finding to any connected web-ui session (no subscription/rate-limit;
       // the user is actively looking at the chat). WeChat/Telegram still go through pushDispatcher below.
@@ -2358,7 +2390,17 @@ const autonomousInterruptSink: InterruptSink = {
       // Double-disturbance guard (2026-07-08): when a web-ui client is CONNECTED the user already
       // saw the finding above — don't also spend the hourly urgent budget on WeChat/Telegram.
       // Grant requests and service digests keep their own paths (they fire when the user is away).
-      if (webuiClients.size > 0) {
+      // Gate 3/9 — the "don't double-disturb" guard. It used to suppress on a web-ui CONNECTION, but the
+      // launcher AUTO-OPENS a browser tab, so `webuiClients.size > 0` was permanently true for an owner who
+      // actually lives in WeChat: the finding went to a tab nobody was looking at, and the WeChat push was
+      // killed BECAUSE that tab was open. Suppress only when the web-ui has seen REAL USER ACTIVITY
+      // recently — a connection is not a pair of eyes.
+      if (webuiRecentlyActive()) {
+        console.log(
+          `[autonomy-funnel] initiative=${payload.initiativeId} DROPPED at gate 3/9 ` +
+            `(web-ui had user activity in the last ${Math.round(WEBUI_ACTIVE_WINDOW_MS / 60000)}min — ` +
+            `the finding was shown there instead)`,
+        );
         internalAudit.append('self_domain_write', {
           source: 'push_dispatcher',
           origin: 'Internal',
@@ -3924,6 +3966,20 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
       }).filter((s) => !META_SKILL_NAMES.has(s.name))
     : positiveFallback().slice(0, SKILL_INDEX_MAX_LINES);
   if (positives.length > 0) {
+    // SKILL FUNNEL VISIBILITY (2026-07-14). Measured over 7 days / 462 turns: 64 skills, use_skill called
+    // 10 times, validated=0, draft pinned at exactly the prune cap (40). The maturity ladder's ONLY rung is
+    // recordSkillOutcome, which fires only for actions tagged linkedSkill, which is set only after a
+    // use_skill call. So a skill that is never CHOSEN can never be credited, never promoted, and is
+    // eventually pruned for the low score of a race it never ran. Nobody could see which half of that was
+    // failing, because the offer (this index) was never logged — only the (rare) acceptance was.
+    // Log what we OFFER, so the next production log can answer "does it not see them, or not want them?"
+    // Persist the offer (v36). Without it, "shown and declined" and "never shown" both look like zero.
+    memory.skills.recordSkillsOffered(positives.map((s) => s.name));
+    console.log(
+      `[skill-funnel] offered ${positives.length} skill(s) ` +
+        `(pool=${memory.skills.count()}, relevance=${relevanceOn ? 'on' : 'off'}): ` +
+        positives.map((s) => `${s.name}(${s.maturity})`).join(', '),
+    );
     lines.push('Available skills (use use_skill(name) to get details):');
     for (const s of positives) {
       // Source label: source looks like 'clawhub:foo@1.0.0' / 'github:owner/repo@sha' /
@@ -8021,6 +8077,10 @@ async function runToolLoop(
       const skillName = (sanitized.input as { name?: unknown } | null)?.name;
       if (typeof skillName === 'string' && skillName.trim()) {
         signalBus.activeSkillName = skillName.trim();
+        // The acceptance side of [skill-funnel]. This is the ONE event that lets a skill be credited
+        // (linkedSkill → recordLinkedSkillOutcomes → recordSkillOutcome → maturity). It fired 10 times in
+        // 462 turns. Log it so offers and acceptances can be counted against each other in one log file.
+        console.log(`[skill-funnel] ACCEPTED use_skill('${skillName.trim()}') — subsequent actions will be credited to it`);
       }
     }
     // Layer 0.5: action persisted to global timeline; selected by time window during reflection

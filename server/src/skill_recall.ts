@@ -5,8 +5,10 @@
  * Background: self-learned skills were recalled by GLOBAL top-N (use_count / recency), not by
  * relevance to the current task. This module adds a single selector that re-ranks the FTS hit set
  * by jaccard relevance to the current task signal, keeping caps SMALL (context-bloat is a hard
- * constraint). The whole behavior is gated behind PHILONT_SKILL_RECALL_RELEVANCE (default OFF);
- * when OFF, callers must run their original code verbatim (byte-identical output).
+ * constraint). Gated behind PHILONT_SKILL_RECALL_RELEVANCE, which is **default ON** (this header used to
+ * say OFF — it was stale, and that stale line was still being cited as a to-do a month later. Relevance
+ * recall is NOT the skill loop's bottleneck; the ladder is: see SkillStore.pruneDraftsToCap).
+ * When explicitly OFF, callers run their original code verbatim (byte-identical output).
  *
  * See docs/design/skill_recall_consolidation.md.
  */

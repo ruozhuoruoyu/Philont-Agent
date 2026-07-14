@@ -84,7 +84,7 @@ function skill(over: Partial<Skill> = {}): Skill {
     whenToUse: '',
     triggerKeywords: [],
     actionTemplate: '',
-    useCount: 0,
+    useCount: 0, offeredCount: 0,
     lastUsedAt: null,
     createdAt: NOW - 86_400_000,
     successCount: 0,

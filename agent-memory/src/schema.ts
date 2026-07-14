@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 35;
+export const SCHEMA_VERSION = 36;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -159,6 +159,11 @@ CREATE TABLE IF NOT EXISTS memory_skills (
   action_template  TEXT NOT NULL,
   use_count        INTEGER NOT NULL DEFAULT 0,
   last_used_at     INTEGER,
+  -- v36: how many times this skill was OFFERED to the model in the recall index. use_count records
+  -- acceptance; without the offer count the two indistinguishable cases "shown and declined" (real
+  -- negative evidence) and "never shown" (no evidence at all) both score identically at zero, and the
+  -- draft-cap prune deletes them alike. It was deleting skills for losing a race they never ran.
+  offered_count    INTEGER NOT NULL DEFAULT 0,
   created_at       INTEGER NOT NULL,
   -- v3: feedback loop fields
   success_count    INTEGER NOT NULL DEFAULT 0,
@@ -1173,6 +1178,10 @@ function migrateV34ToV35(db: Database.Database): void {
   addColumnIfMissing(db, 'memory_skills', 'revision_history', 'TEXT');
 }
 
+function migrateV35ToV36(db: Database.Database): void {
+  addColumnIfMissing(db, 'memory_skills', 'offered_count', 'INTEGER NOT NULL DEFAULT 0');
+}
+
 function migrateV19ToV20(db: Database.Database): void {
   if (!tableExists(db, 'memory_plans')) return; // guard: fresh init already has the column
   const cols = db.prepare(`PRAGMA table_info(memory_plans)`).all() as Array<{
@@ -1423,6 +1432,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 35) {
     migrateV34ToV35(db);
+  }
+  if (current < 36) {
+    migrateV35ToV36(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

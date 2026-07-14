@@ -73,6 +73,7 @@ import {
   autonomySelfhoodStatus,
   internalAudit,
   type ReminderPayload,
+  markWebuiUserActivity,
 } from './chat-handler.js';
 import { readdirSync } from 'node:fs';
 import { utcDateString, groupFailures } from '@agent/memory';
@@ -747,6 +748,9 @@ wss.on('connection', (ws) => {
     console.log('Received:', msg);
 
     if (msg?.type === 'chat.send') {
+      // A real user action from the web-ui — this, not the socket connection, is what "the owner is
+      // looking at the web-ui" means. Gates the proactive-push double-disturbance guard.
+      markWebuiUserActivity();
       // Invariant: each chat.send corresponds to exactly one 'final'. The frontend only
       // unlocks input on 'final'. Whether handleChatSend succeeds, throws, or times out,
       // finally must emit one.
