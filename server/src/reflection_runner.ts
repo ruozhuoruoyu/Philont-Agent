@@ -408,10 +408,16 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
         }
       }
       if (promotedCount > 0) {
+        // Visible in the production log, matching the [skill-funnel]/[autonomy-funnel] instrumentation —
+        // retirement was previously silent (self_learning_redesign Phase 0.3).
+        console.log(
+          `[learning] retired ${promotedCount} superseded playbook(s) for sig="${reflection.taskSignature}" ` +
+            `(now encoded in a routing_rule/skill from reflection#${reflectionId})`,
+        );
         opts.appendAudit?.('self_domain_write', {
           source: 'reflection',
           origin: 'Internal',
-          toolName: 'playbook_promoted',
+          toolName: 'playbook_retired',
           sessionId: opts.sessionId,
           reflectionId,
           taskSignature: reflection.taskSignature,
