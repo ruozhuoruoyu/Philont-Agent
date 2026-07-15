@@ -149,6 +149,7 @@ import {
 import { honestySessionStore } from './honesty_session_state.js';
 import { classifyAuthIntent } from './auth_intent.js';
 import { classifyExploreControlReply, resolveExploreTarget } from './explore_control.js';
+import { judgeRun, type JudgeToolRecord } from './learning_judge.js';
 import {
   extractScheduleIdFromSession,
   summarizeTurnTrace,
@@ -5177,6 +5178,51 @@ export interface ChannelTraceEvent {
 /** onTrace callback type. Optional — if the channel does not pass it, no trace overhead is incurred. */
 export type TraceFn = (ev: ChannelTraceEvent) => void;
 
+/**
+ * Learning judge — Phase 1 SHADOW wiring (self_learning_redesign). Scores the turn and LOGS the verdict;
+ * drives NOTHING. Its whole purpose right now is to accumulate a real production distribution so the
+ * Phase-2 kill gate can decide whether the judge is trustworthy (agrees with honesty_gate on clear cases,
+ * not ~100% could_not_verify) before it is ever wired to promotion/crystallization. Default on — shadow is
+ * safe because it only logs. PHILONT_LEARNING_JUDGE=0/off disables it.
+ */
+function learningJudgeEnabled(): boolean {
+  const v = (process.env.PHILONT_LEARNING_JUDGE ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+function shadowLearningJudge(
+  sessionId: string,
+  userMessage: string | undefined,
+  messages: ReadonlyArray<{ role: string; content: unknown }>,
+  bus: { inTurnRecords?: Array<{ toolName: string; success: boolean; resultText?: string }>; honesty?: unknown } | undefined,
+): void {
+  if (!learningJudgeEnabled()) return;
+  try {
+    const records = bus?.inTurnRecords ?? [];
+    if (records.length === 0) return; // nothing ran this turn — no verdict worth logging
+    const trace: JudgeToolRecord[] = records.map((r) => ({
+      toolName: r.toolName,
+      ok: r.success,
+      summary: (r.resultText ?? '').replace(/\s+/g, ' ').slice(0, 200),
+    }));
+    const claim = lastAssistantText(messages as unknown as NativeMessage[]).slice(0, 1000);
+    void judgeRun({
+      goal: userMessage ?? '',
+      trace,
+      assistantClaim: claim,
+      honestyFired: bus?.honesty !== undefined,
+    })
+      .then((v) =>
+        console.log(
+          `[learning-judge] shadow session=${sessionId} verdict=${v.outcome} basis=${v.basis} "${v.evidence}"`,
+        ),
+      )
+      .catch(() => {});
+  } catch {
+    // Shadow must never affect the turn.
+  }
+}
+
 export async function handleChatSend(
   sessionId: string,
   userMessage: string,
@@ -6080,6 +6126,9 @@ export async function handleChatSend(
         },
       });
     }
+
+    // Phase 1 shadow: score this turn, log only. See shadowLearningJudge.
+    shadowLearningJudge(sessionId, userMessage, messages, signalBus);
 
     return result;
   } catch (e) {
