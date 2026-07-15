@@ -137,3 +137,33 @@ test('collectState: signals 各字段独立(只设 honesty 不影响 interrupt)'
   assert.equal(s.interruptDrained, false);
   assert.equal(s.taskDurationMin, 0);
 });
+
+// self_learning_redesign Phase 0.2: a lesson-playbook whose advice is now encoded in an executable
+// artifact (same task_signature) is superseded and must be RETIRED. The old code only appended a note and
+// left it injected forever alongside the rule that superseded it — detected, marked, never acted on.
+import { playbooksSupersededBy } from '../src/reflection_runner.js';
+
+test('playbooksSupersededBy: retires same-signature lesson playbooks', () => {
+  const pbs = [
+    { name: 'playbook-mycox-abc123', maturity: 'playbook' },
+    { name: 'playbook-other-def456', maturity: 'playbook' },
+  ];
+  const hit = playbooksSupersededBy(pbs, 'mycox');
+  assert.equal(hit.length, 1);
+  assert.equal(hit[0].name, 'playbook-mycox-abc123');
+});
+
+test('playbooksSupersededBy: does NOT touch plan-failure playbooks (stronger signal)', () => {
+  // A plan-failure playbook is named playbook-<sig>-fail-<hash>; the sig regex extracts "<sig>-fail", so a
+  // reflection for "mycox" never matches "mycox-fail". These curated failure lessons are not auto-retired.
+  const pbs = [{ name: 'playbook-mycox-fail-abc123', maturity: 'playbook' }];
+  assert.equal(playbooksSupersededBy(pbs, 'mycox').length, 0);
+});
+
+test('playbooksSupersededBy: skips already-deprecated and non-matching signatures', () => {
+  const pbs = [
+    { name: 'playbook-mycox-abc123', maturity: 'deprecated' }, // already retired
+    { name: 'playbook-payments-xyz789', maturity: 'playbook' }, // different sig
+  ];
+  assert.equal(playbooksSupersededBy(pbs, 'mycox').length, 0);
+});

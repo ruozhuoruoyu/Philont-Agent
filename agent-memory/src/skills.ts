@@ -465,12 +465,34 @@ export class SkillStore extends EventEmitter {
   }
 
   /**
-   * Increment use count (backward compatibility; equivalent to recordSkillOutcome(name, true)).
+   * Record that a skill was RETRIEVED (use_skill fetched its body). Bumps use_count + last_used_at ONLY —
+   * for recency/usage ranking in scoreSkill — and deliberately touches neither success_count/failure_count
+   * nor the maturity state machine.
    *
-   * @deprecated New code should use recordSkillOutcome to carry success/failure signal
+   * 2026-07-15 (self_learning_redesign Phase 0.1): retrieval used to route through
+   * recordSkillOutcome(name, true), so merely fetching a skill's body twice credited two "successes" and
+   * climbed draft→confirmed. "confirmed" therefore meant "fetched twice", not "worked twice" — a fabricated
+   * efficacy signal. Efficacy is now credited ONLY by the reflector's linkedSkill outcome attribution
+   * (recordLinkedSkillOutcomes → recordSkillOutcome), which observes whether the actions AFTER the retrieval
+   * actually succeeded. Fetching is usage, not proof.
+   */
+  recordUsage(name: string, at: number = Date.now()): Skill | null {
+    const result = this.db
+      .prepare<[number, string]>(
+        `UPDATE memory_skills SET use_count = use_count + 1, last_used_at = ? WHERE name = ?`,
+      )
+      .run(at, name);
+    if (result.changes === 0) return null;
+    return this.getByName(name);
+  }
+
+  /**
+   * @deprecated Retrieval must not credit efficacy. Kept as an alias for recordUsage so external callers do
+   * not break, but it no longer records a success or moves maturity (see recordUsage). Prefer recordUsage
+   * for retrieval and recordSkillOutcome for a real observed outcome.
    */
   incrementUseCount(name: string): Skill | null {
-    return this.recordSkillOutcome(name, true);
+    return this.recordUsage(name);
   }
 
   /**

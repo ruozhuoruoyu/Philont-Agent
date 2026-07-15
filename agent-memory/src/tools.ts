@@ -672,7 +672,10 @@ export function createMemoryTools(
           if (!skill) {
             return { success: false, error: `Skill '${name}' does not exist` };
           }
-          skills.incrementUseCount(name);
+          // Retrieval bumps usage/recency for ranking, but does NOT credit efficacy — a skill is
+          // proven by whether the actions AFTER this retrieval succeed (reflector attribution), not by
+          // being fetched. See SkillStore.recordUsage (self_learning_redesign Phase 0.1).
+          skills.recordUsage(name);
           return {
             success: true,
             output:

@@ -270,6 +270,46 @@ test('SkillStore: incrementUseCount', () => {
   assert.ok(after?.lastUsedAt);
 });
 
+// self_learning_redesign Phase 0.1: retrieving a skill (use_skill → recordUsage) must record USAGE only.
+// It used to route through recordSkillOutcome(true), so fetching a body twice credited two "successes" and
+// climbed draft→confirmed — "confirmed" meaning "fetched twice", not "worked twice". Efficacy is credited
+// ONLY by the reflector's linkedSkill attribution now.
+test('SkillStore: recordUsage bumps usage but NEVER credits efficacy or climbs maturity', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill({ name: 'fetch-me', description: 'd', triggerKeywords: [], actionTemplate: 'x' });
+
+  // Two retrievals — under the old code this would have hit successCount>=2 → draft→confirmed.
+  skills.recordUsage('fetch-me');
+  skills.recordUsage('fetch-me');
+
+  const after = skills.getByName('fetch-me')!;
+  assert.equal(after.useCount, 2, 'usage IS counted (for recency/ranking)');
+  assert.ok(after.lastUsedAt, 'last_used_at IS set');
+  assert.equal(after.successCount, 0, 'retrieval must NOT credit a success');
+  assert.equal(after.maturity, 'draft', 'retrieval must NOT climb the maturity ladder');
+});
+
+test('SkillStore: incrementUseCount is now an alias for recordUsage (no efficacy credit)', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill({ name: 'legacy', description: 'd', triggerKeywords: [], actionTemplate: 'x' });
+  skills.incrementUseCount('legacy');
+  skills.incrementUseCount('legacy');
+  const after = skills.getByName('legacy')!;
+  assert.equal(after.successCount, 0, 'the deprecated alias must not credit success either');
+  assert.equal(after.maturity, 'draft');
+});
+
+// Contrast: a REAL observed outcome (the reflector path) still moves the ladder.
+test('SkillStore: recordSkillOutcome (real outcome) still climbs the ladder', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill({ name: 'worked', description: 'd', triggerKeywords: [], actionTemplate: 'x' });
+  skills.recordSkillOutcome('worked', true);
+  skills.recordSkillOutcome('worked', true);
+  const after = skills.getByName('worked')!;
+  assert.equal(after.successCount, 2);
+  assert.equal(after.maturity, 'confirmed', 'two real successes, zero failures → draft climbs to confirmed');
+});
+
 test('SkillStore: updateSkill preserves use_count', () => {
   const { skills } = openMemoryDb(':memory:');
 

@@ -41,6 +41,29 @@ const TASK_CLOSING_RE =
  * Additional turn-local signals for reflection triggering.
  * chat-handler fills these in at turn close time and passes them in.
  */
+/**
+ * Which recent lesson-playbooks are superseded by an executable artifact just produced for `taskSignature`.
+ *
+ * A playbook name is `playbook-<sig>-<hash>`; the sig regex extracts "<sig>-fail" for plan-failure
+ * playbooks, so those (a stronger, curated signal) are intentionally NOT matched here and are never
+ * auto-retired. Already-deprecated playbooks are skipped. Pure + unit-testable (the retirement itself —
+ * setMaturity('deprecated') — is done by the caller). See self_learning_redesign Phase 0.2.
+ */
+export function playbooksSupersededBy<T extends { name: string; maturity: string }>(
+  recentPlaybooks: ReadonlyArray<T>,
+  taskSignature: string,
+): T[] {
+  const out: T[] = [];
+  for (const pb of recentPlaybooks) {
+    if (pb.maturity === 'deprecated') continue;
+    const sigMatch = pb.name.match(/^playbook-(.+?)-[a-z0-9]+$/);
+    if (!sigMatch) continue;
+    if (sigMatch[1] !== taskSignature) continue;
+    out.push(pb);
+  }
+  return out;
+}
+
 export interface ReflectionTurnSignals {
   /** Whether HonestyGate fired this turn (any reason counts) */
   honestyFired?: boolean;
@@ -354,28 +377,34 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
       errorCount: result.errors.length,
     });
 
-    // 2026-05-11: If this reflection produced routing_rule / new_skill / skill_refine, scan
-    // existing playbooks and mark those with the same task_signature as promoted
-    // (append a line to their description for traceability). The next prefix render can filter
-    // out already-promoted ones to avoid re-exposing them.
+    // 2026-05-11 / retired 2026-07-15 (self_learning_redesign Phase 0.2): if this reflection produced an
+    // executable artifact (routing_rule / new_skill / skill_refine) with the SAME task_signature as an
+    // existing lesson-playbook, that playbook's advice is now encoded in something actionable — so RETIRE
+    // it (maturity → 'deprecated', terminal, excluded from both playbook injection paths which select via
+    // listByMaturity('playbook', …)).
+    //
+    // The original code only appended a "[已纳入 reflection]" note to the description and left a comment
+    // saying "the next prefix render can filter out already-promoted ones" — but the render never
+    // implemented that filter, so a superseded playbook was injected forever alongside the rule that
+    // superseded it. Detected, marked, and never acted on: the exact "never retired" hole. Scope note: the
+    // sig regex extracts "<sig>-fail" for plan-failure playbooks, so those (a stronger signal) are never
+    // matched here and are not auto-retired.
     const producedExecutable =
       result.stats.routingRulesCreated > 0 ||
       result.stats.newSkillsCreated > 0 ||
       result.stats.skillsRefined > 0;
     if (producedExecutable && recentPlaybooks.length > 0) {
       let promotedCount = 0;
-      for (const pb of recentPlaybooks) {
-        const sigMatch = pb.name.match(/^playbook-(.+?)-[a-z0-9]+$/);
-        if (!sigMatch) continue;
-        if (sigMatch[1] !== reflection.taskSignature) continue;
-        // Do not re-mark if already marked
-        if (pb.description.includes('[已纳入 reflection')) continue;
-        const newDesc = `${pb.description}\n[已纳入 reflection#${reflectionId} 升级,可参考新规则]`;
+      for (const pb of playbooksSupersededBy(recentPlaybooks, reflection.taskSignature)) {
         try {
-          opts.skills.updateSkill(pb.name, { description: newDesc });
+          // Retire it, and leave a one-line trace of why on the description.
+          opts.skills.updateSkill(pb.name, {
+            description: `${pb.description}\n[superseded by reflection#${reflectionId} — retired]`,
+          });
+          opts.skills.setMaturity(pb.name, 'deprecated');
           promotedCount++;
         } catch {
-          // updateSkill failure does not affect main flow
+          // updateSkill/setMaturity failure does not affect main flow
         }
       }
       if (promotedCount > 0) {
