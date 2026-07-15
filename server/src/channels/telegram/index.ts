@@ -27,6 +27,7 @@ import { registerMediaChannel, unregisterMediaChannel } from '../registry.js';
 import { registerPushChannel, unregisterPushChannel, type PushChannel } from '../../push/channel.js';
 import { extractUserSection, recordFilterCall } from '../../output_section_filter.js';
 import { runConscienceGate } from '../../conscience_gate.js';
+import { recordControllerFire } from '../../controller_registry.js';
 
 /** AuthRequest structure from chat-handler. */
 export type AuthRequestPayload = {
@@ -189,6 +190,7 @@ function makeDispatcher(opts: {
       // Conscience gate (L3 send-to-human exit; no-op unless PHILONT_CONSCIENCE_GATE is on, fail-open).
       const verdict = await runConscienceGate(sectioned);
       if (!verdict.allow) {
+        recordControllerFire('conscience');
         logger.info('conscience_gate withheld outbound', { sessionId, reason: verdict.reason });
         sectioned =
           currentPhraseLang('telegram') === 'en'

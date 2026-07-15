@@ -50,6 +50,7 @@ import {
 import { recordAttachment } from '../recent_attachments.js';
 import { extractUserSection, recordFilterCall } from '../../output_section_filter.js';
 import { runConscienceGate } from '../../conscience_gate.js';
+import { recordControllerFire } from '../../controller_registry.js';
 import { renderForWeChat, renderAuthPromptForWeChat } from './wechat_render.js';
 import { currentPhraseLang } from '../../response_language.js';
 
@@ -395,6 +396,7 @@ function makeDispatcher(opts: {
       // Conscience gate (L3 send-to-human exit; no-op unless PHILONT_CONSCIENCE_GATE is on, fail-open).
       const verdict = await runConscienceGate(sectioned);
       if (!verdict.allow) {
+        recordControllerFire('conscience');
         logger.info('conscience_gate withheld outbound', { sessionId, reason: verdict.reason });
         sectioned =
           currentPhraseLang('wechat') === 'en'

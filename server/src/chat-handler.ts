@@ -199,6 +199,11 @@ import {
 } from './cleanup_scope.js';
 import { replyWithMediaTool } from './tools/reply_with_media.js';
 import { setConscienceLlm } from './conscience_gate.js';
+import {
+  recordControllerFire,
+  setControllerMetrics,
+  logRegisteredControllers,
+} from './controller_registry.js';
 import { writeServiceSkill } from './service_skill.js';
 import { findSpecForHost, findServiceSkillForText } from './service_spec_registry.js';
 import { specBodyGuardReject } from './spec_compile.js';
@@ -578,6 +583,12 @@ const extractorLlm: ExtractorLlmClient = {
 
 // Wire the conscience gate's judge LLM (the gate stays a no-op unless PHILONT_CONSCIENCE_GATE is on).
 setConscienceLlm(extractorLlm);
+
+// Self-learning Phase 3a: wire the controller registry's persisted fire counter to the MetricsStore
+// and log the registered L3-guard controllers so the whole layer is visible as one system at startup.
+// Purely observational — the registry sits on no control-flow path.
+setControllerMetrics(memory.metrics);
+logRegisteredControllers();
 
 // Intrinsic-drive audit log: all cross-session self-domain internal writes (extractor/reflector/compactor)
 // are recorded through this AuditLog. SHA-256 chain covers all Internal-origin events.
@@ -7140,6 +7151,7 @@ async function handleChatSendInner(
             okCount: honesty.okCount,
             matchedClaim: honesty.matchedClaim,
           });
+          recordControllerFire('honesty');
           console.warn(
             `[honesty] session=${sessionId} fired severity=${honesty.severity} reason=${honesty.reason} ` +
             `failCount=${honesty.failCount} okCount=${honesty.okCount} claim="${honesty.matchedClaim}" (zero-tool first response)`,
@@ -8909,6 +8921,7 @@ async function runToolLoop(
             okCount: honesty.okCount,
             matchedClaim: honesty.matchedClaim,
           });
+          recordControllerFire('honesty');
           console.warn(
             `[honesty] session=${sessionId} fired severity=${honesty.severity} reason=${honesty.reason} failCount=${honesty.failCount} okCount=${honesty.okCount} claim="${honesty.matchedClaim}"`,
           );
@@ -9065,6 +9078,7 @@ async function runToolLoop(
             toolCallsThisTurn: totalToolCallsThisTurn,
             finalTextLength: empty.detail?.finalTextLength ?? 0,
           });
+          recordControllerFire('empty_conclusion');
           console.warn(
             `[empty-conclusion] session=${sessionId} fired reason=${empty.reason} toolCalls=${totalToolCallsThisTurn} finalLen=${empty.detail?.finalTextLength}`,
           );
@@ -9129,6 +9143,7 @@ async function runToolLoop(
               planUpdateStepOk,
               activePlanId: activePlanHF?.id ?? null,
             });
+            recordControllerFire('half_finished');
             console.warn(
               `[half-finished] session=${sessionId} fired reason=${hf.reason} phrase="${hf.matchedPhrase}" planUpdateOk=${planUpdateStepOk}`,
             );
@@ -9259,6 +9274,7 @@ async function runToolLoop(
             reason: fmt.reason,
             finalTextLength: fmt.detail?.finalTextLength ?? 0,
           });
+          recordControllerFire('output_format');
           console.warn(
             `[output-format] session=${sessionId} fired reason=${fmt.reason} finalLen=${fmt.detail?.finalTextLength}`,
           );
@@ -9392,6 +9408,7 @@ async function runToolLoop(
               score: v.score,
               reasons: v.reasons.join(','),
             });
+            recordControllerFire('viability');
             console.warn(
               `[viability] session=${sessionId} fired verdict=${v.verdict} score=${v.score} reasons=${v.reasons.join(',')} hasSession=${!!ownerSession}`,
             );
@@ -9442,6 +9459,7 @@ async function runToolLoop(
             sessionId,
             arxivId: ungroundedId,
           });
+          recordControllerFire('citation_grounding');
           console.warn(
             `[citation-grounding] session=${sessionId} fired: cited arXiv:${ungroundedId} with no retrieved/user-supplied source`,
           );
@@ -9480,6 +9498,7 @@ async function runToolLoop(
             claim: ungroundedCompute.claim,
             okCompute: ungroundedCompute.okCompute,
           });
+          recordControllerFire('numeric_grounding');
           console.warn(
             `[numeric-grounding] session=${sessionId} fired: computation claim "${ungroundedCompute.claim}" with 0 successful compute/exec tools`,
           );
