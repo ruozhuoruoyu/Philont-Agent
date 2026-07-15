@@ -122,7 +122,9 @@ test('iter cap:LLM 死循环调工具 → 撞 cap 返回 hitCap=true,无 throw',
     userMessage: 'go',
     llm,
     toolDefs: NO_TOOLS,
-    toolRunner: async () => ({ ok: true, output: 'ok' }),
+    // Substantive output each round → the no-progress early exit does NOT fire, so this still exercises the
+    // raw maxIters cap (a distinct no-progress test is added below).
+    toolRunner: async () => ({ ok: true, output: 'a real, substantive result with plenty of information here' }),
     maxIters: 3,
   });
 
@@ -132,6 +134,61 @@ test('iter cap:LLM 死循环调工具 → 撞 cap 返回 hitCap=true,无 throw',
   assert.equal(r.toolCallHistory.length, 3);
   assert.equal(r.toolCallsSpent, 3);
   assert.equal(r.error, undefined); // hitCap 不算 error
+});
+
+// ── no-progress early exit (2026-07-15): consecutive empty tool rounds → stop before the cap ──────────
+test('no-progress: repeated empty memory lookups stop early instead of burning the full budget', async () => {
+  // The production churn: a deliberate deep_explore skeptic on a fresh topic calls memory tools that return
+  // "no results" every round, and the loop ran its whole 6-iter budget in circles. It must now stop early.
+  const isSalvage = (msgs: MiniLoopMessage[]) => {
+    const last = msgs[msgs.length - 1];
+    return typeof last?.content === 'string' && /FINAL answer/.test(last.content);
+  };
+  const llm: MiniLoopLLMClient = {
+    async send(_sys, msgs) {
+      if (isSalvage(msgs)) return textResponse('nothing found, concluding');
+      return toolCallResponse([{ id: 'tc-' + Math.random(), name: 'search_notes', input: { q: 'x' } }]);
+    },
+  };
+  const r = await runMiniAgentLoop({
+    systemPrompt: 'sys',
+    userMessage: 'research a brand-new topic with nothing in memory',
+    llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: async () => ({ ok: true, output: 'No matching notes found.' }), // ok, but empty
+    maxIters: 6,
+    synthesizeOnCap: true,
+  });
+  // Default NO_PROGRESS_ROUNDS=2 → stops after 2 unproductive rounds, well before maxIters=6.
+  assert.ok(r.toolCallsSpent <= 2, `stopped early (spent ${r.toolCallsSpent}, not the full 6)`);
+  assert.equal(r.finalText, 'nothing found, concluding', 'salvage synthesizes from what it has');
+});
+
+test('no-progress: a productive round resets the counter (does not stop on a single empty round)', async () => {
+  let round = 0;
+  const llm: MiniLoopLLMClient = {
+    async send() {
+      round++;
+      if (round >= 5) return textResponse('finished after gathering enough');
+      return toolCallResponse([{ id: 'tc-' + round, name: 'search_notes', input: {} }]);
+    },
+  };
+  let call = 0;
+  const r = await runMiniAgentLoop({
+    systemPrompt: 'sys',
+    userMessage: 'go',
+    llm,
+    toolDefs: NO_TOOLS,
+    // empty, substantive, empty, substantive — never 2 empties in a row → never stops early.
+    toolRunner: async () => {
+      call++;
+      return call % 2 === 1
+        ? { ok: true, output: 'no results' }
+        : { ok: true, output: 'a substantive finding with real content to report back' };
+    },
+    maxIters: 8,
+  });
+  assert.equal(r.finalText, 'finished after gathering enough', 'alternating empty/productive never trips early stop');
 });
 
 // ── 测试 4:whitelist 拦截 ──────────────────────────────────────────────

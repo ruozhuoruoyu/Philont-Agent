@@ -5054,6 +5054,7 @@ function buildFreshMessages(
       role: 'user',
       content:
         `You are philont — a persistent, self-directed AI agent, not a stateless assistant.` +
+        ` "philont" is YOUR OWN NAME: when the user refers to philont — its capabilities, how it would score on a benchmark, its behavior, its code, or "run philont" — they mean YOU and this very system you are running in. Answer from self-knowledge (your underlying model, your tools, this codebase and its docs); do NOT web-search "philont" as if it were an unknown external tool.` +
         ` You carry long-term memory across conversations and days — a timeline of what happened, plus facts, notes, and skills you have learned —` +
         ` and you act on your own initiative: pursuing research and deep exploration over many turns, and resuming unfinished work even days later.` +
         ` What sets you apart is that you learn from your own work, especially your failures, distilling reusable skills and rules so you don't repeat mistakes.` +
@@ -5356,16 +5357,19 @@ export async function handleChatSend(
   // HIJACK GUARD. This runs before the model on EVERY turn, and 停 / 放弃 / stop are ordinary words a person
   // says for ordinary reasons ("stop what you're doing", "give up on that idea"). So a match is NOT enough:
   // the world must also be in the state the card described. No open exploration → this was never about an
-  // exploration → fall through to the model SILENTLY, do not answer. 停 additionally requires that something
-  // is actually auto-advancing; otherwise "停" means whatever the person meant, and it is not ours to take.
+  // exploration → fall through to the model SILENTLY, do not answer.
+  //
+  // 2026-07-15: "停/暂停" applies to ANY open exploration, auto-advancing OR manual. It used to require an
+  // auto-advancing session; production showed a user say "暂停" to a MANUAL deep_explore, which fell through
+  // to the model — which then ran a whole 400s round and fabricated a citation instead of pausing. If there
+  // is an open exploration and the owner says stop, pause it deterministically and acknowledge; nothing
+  // advances a manual session until "继续" anyway, so "pausing" it is just an honest acknowledgment + the
+  // resume word.
   {
     const ec = classifyExploreControlReply(userMessage);
     const openSessions = ec ? memory.reasoning.listActiveSessions(sessionId) : [];
     const autoOn = openSessions.filter((x) => x.autoAdvance);
-    const applies =
-      !!ec &&
-      openSessions.length > 0 &&
-      (ec.kind !== 'stop_auto' || autoOn.length > 0);
+    const applies = !!ec && openSessions.length > 0;
 
     if (ec && applies) {
       const lang = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() });
@@ -5374,11 +5378,15 @@ export async function handleChatSend(
       let reply: string;
 
       if (ec.kind === 'stop_auto') {
+        // Turn off any auto-advance, and acknowledge the pause for manual sessions too (they were never
+        // going to advance without "继续", so this is an honest ack, not a state change).
         for (const x of autoOn) memory.reasoning.setAutoAdvance(x.id, false);
-        console.log(`[explore-control] owner stopped auto-advance on ${autoOn.length} session(s)`);
+        console.log(
+          `[explore-control] owner paused exploration (auto-off ${autoOn.length} of ${openSessions.length} open)`,
+        );
         reply = en
-          ? 'Stopped. I will not advance these on my own; they stay open — reply "auto advance" to resume, or "abandon" to archive.'
-          : '好的,不再自动推进了。会话仍开着——想恢复回"自动推进",想归档回"放弃"。';
+          ? `Paused. I won't advance ${openSessions.length > 1 ? 'them' : 'it'} on my own — reply "continue" to resume, or "abandon" to archive.`
+          : `好的,已暂停。我不会自己往下推了——想继续回"继续",想归档回"放弃"。`;
       } else if (ec.kind === 'auto_advance') {
         deepExploreAutoAdvance.rearm(focus.id);
         console.log(`[explore-control] owner granted another batch to ${focus.id}`);

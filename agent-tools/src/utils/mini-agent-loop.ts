@@ -160,6 +160,39 @@ const PREVIEW_MAX = 200;
 const TOOL_RESULT_MAX = 16_000;
 
 /**
+ * No-progress early exit (2026-07-15). The loop otherwise runs its FULL iteration budget whenever the LLM
+ * keeps calling tools, with no notion of whether those calls returned anything. In production a deliberate
+ * deep_explore on a fresh external topic (Hodge conjecture, "benchmark philont") spent all 6 iterations of
+ * every skeptic / grounding mini-loop calling MEMORY tools (get_fact / search_notes / search_skills /
+ * readFile) that return empty — the agent's private memory has nothing about a brand-new research subject —
+ * then salvaged at the cap. Many such loops run in parallel, so a single turn burned 10+ minutes going in
+ * circles on empty lookups. The prompt already asks the model to "output by round N-1"; it does not comply,
+ * so this is a mechanism-level backstop that does not depend on the model's cooperation.
+ *
+ * After this many CONSECUTIVE rounds that produced no substantive tool result, stop and go straight to the
+ * synthesize-from-what-you-have salvage. Default 2; env PHILONT_MINI_LOOP_NO_PROGRESS_ROUNDS, 0 disables.
+ */
+const NO_PROGRESS_ROUNDS = (() => {
+  const raw = process.env.PHILONT_MINI_LOOP_NO_PROGRESS_ROUNDS;
+  if (raw === undefined || raw.trim() === '') return 2;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 20 ? n : 2;
+})();
+
+/** A memory/search tool that returned "nothing found" — ok, but no information. Efficiency heuristic only:
+ * a false positive just triggers an early synthesize (mild); a false negative keeps the status-quo behavior. */
+const EMPTY_RESULT_RE =
+  /\bno\s+(?:results?|match(?:es|ing)?|notes?|facts?|skills?|files?|past sessions|open|hits)\b|\bnot found\b|\b0\s+hits\b|\bnothing (?:found|matching)\b|没有(?:找到|匹配|记录|结果)|未找到|无(?:匹配|结果|记录)/i;
+
+/** Whether a tool result carried substantive new information (drives the no-progress counter). */
+function isProductiveResult(ok: boolean, output: string | undefined): boolean {
+  if (!ok) return false;
+  const t = (output ?? '').trim();
+  if (t.length < 24) return false; // "(no output)" and the like
+  return !EMPTY_RESULT_RE.test(t);
+}
+
+/**
  * Format a tool execution result into tool_result text that is clear to the LLM.
  * Aligned with chat-handler.formatToolResultContent: ✓ TOOL OK / ⚠ TOOL FAILED.
  */
@@ -225,6 +258,8 @@ export async function runMiniAgentLoop(
   const toolCallHistory: MiniLoopToolCallRecord[] = [];
   let llmTokensSpent = 0;
   let toolCallsSpent = 0;
+  let unproductiveRounds = 0;
+  let stoppedNoProgress = false;
 
   for (let i = 0; i < maxIters; i++) {
     if (abortSignal?.aborted) {
@@ -290,6 +325,7 @@ export async function runMiniAgentLoop(
     messages.push(response.assistantMessage);
 
     const toolResultBlocks: MiniLoopContentBlock[] = [];
+    let roundProductive = false;
     for (const call of response.calls) {
       // Stop launching new tool runs once the deadline has fired; the tree is already
       // persisted incrementally, so returning 'aborted' here is resumable.
@@ -321,6 +357,7 @@ export async function runMiniAgentLoop(
       }
 
       toolCallsSpent += 1;
+      if (isProductiveResult(runResult.ok, runResult.output)) roundProductive = true;
       toolCallHistory.push({
         name: call.name,
         input: call.input,
@@ -340,17 +377,30 @@ export async function runMiniAgentLoop(
     }
 
     messages.push({ role: 'user', content: toolResultBlocks });
+
+    // No-progress early exit: if the last NO_PROGRESS_ROUNDS rounds all returned nothing substantive, the
+    // loop is spinning on empty lookups — stop and synthesize from what it has instead of burning the rest
+    // of the budget. Only after ≥1 round (never pre-empts a productive first round).
+    unproductiveRounds = roundProductive ? 0 : unproductiveRounds + 1;
+    if (NO_PROGRESS_ROUNDS > 0 && unproductiveRounds >= NO_PROGRESS_ROUNDS && i + 1 < maxIters) {
+      onStatus?.(`⚠ no progress ${unproductiveRounds} round(s) — stopping early (iter ${i + 1}/${maxIters})`);
+      stoppedNoProgress = true;
+      break;
+    }
   }
 
-  // Hit maxIters
-  onStatus?.(`⚠ hit max iters (${maxIters})`);
+  // Hit maxIters (or stopped early for no progress)
+  onStatus?.(stoppedNoProgress ? `⚠ stopped early: no progress` : `⚠ hit max iters (${maxIters})`);
   // Optional salvage: one text-only call so the gathered tool results aren't wasted (see synthesizeOnCap).
   if (opts.synthesizeOnCap && !abortSignal?.aborted) {
     messages.push({
       role: 'user',
       content:
-        'Tool budget exhausted — do NOT request more tools. Produce your FINAL answer now, in the exact ' +
-        'output format the instructions require, using only what you have already gathered above.',
+        (stoppedNoProgress
+          ? 'The last few tool calls returned nothing new — more searching will not help. '
+          : 'Tool budget exhausted. ') +
+        'Do NOT request more tools. Produce your FINAL answer now, in the exact output format the ' +
+        'instructions require, using only what you have already gathered above.',
     });
     try {
       const final = await llm.send(systemPrompt, messages, [], { signal: abortSignal, reasoning });
