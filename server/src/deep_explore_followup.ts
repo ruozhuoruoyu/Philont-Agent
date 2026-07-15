@@ -197,41 +197,53 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
     }
     if (candidates.length === 0) return;
 
-    candidates.sort((a, b) => b.createdAt - a.createdAt); // most recently started first = current focus
-    const primary = candidates[0];
-    for (const c of candidates) asked.set(c.id, nowMs); // silence the whole batch — one ask per batch
-    const goal = primary.goal.length > 50 ? primary.goal.slice(0, 50) + '…' : primary.goal;
-    const others = candidates.length - 1;
-    // A session with ZERO proofs is stuck — lead with the "abandon" option instead of pitching "continue"
-    // (prod: a model-selection session whose 5 open nodes all need external real-time data can't advance by
-    // reasoning). The user-facing text stays Chinese (WeChat convention).
-    const stuck = primary.proved === 0;
-    // Every word offered below is matched deterministically by classifyExploreControlReply (放弃 / 全清 /
-    // abandon / clear all) or by the force-continue path (继续 / continue). Until 2026-07-14 放弃 and 全清
-    // were words nobody listened for — do not add an option here without teaching the matcher.
+    // 2026-07-15: enumerate + card PER OWNER, not globally. The old code counted candidates GLOBALLY
+    // (all owners/channels) and sent one card, with that global count, to a single primary owner. So a
+    // WeChat user was told "you have 10 explorations" when 9 belonged to other sessions they cannot see —
+    // and the offered actions (继续/放弃/全清, handled owner-scoped in chat-handler) only touch their own.
+    // The card's count and the count deep_explore(action=list) returns in that channel disagreed, which
+    // read to the user as the agent contradicting itself ("你刚才说有10个" / list says none). Each owner
+    // now gets a card counting ONLY the sessions they can act on — mirroring listActiveSessions(owner):
+    // the owner's own sessions PLUS legacy NULL-owner ones (resumable by any channel).
     const en = (deps.lang?.() ?? 'zh') === 'en';
-    let text: string;
-    if (others > 0) {
-      text = en
-        ? `🔬 You have ${candidates.length} deep_explore sessions sitting idle; the latest: "${goal}" (${primary.open} open nodes). ` +
-          `Reply "continue" to advance it; "abandon <name>" to drop one, or "clear all".`
-        : `🔬 你有 ${candidates.length} 个 deep_explore 探索挂着没推进,最近的:「${goal}」(${primary.open} 个开放节点)。` +
-          `要推进哪个回"继续";要清理某个说"放弃 <它>",或"全清"。`;
-    } else if (stuck) {
-      text = en
-        ? `🔬 The exploration "${goal}" has been idle a while and has proved nothing yet (${primary.open} open nodes). ` +
-          `Want me to drop it? Reply "abandon" and I will archive it; reply "continue" to push on from a new angle.`
-        : `🔬 探索「${goal}」挂了一阵,还没证出任何结果(${primary.open} 个开放节点还开着)。` +
-          `要我放弃它吗?回"放弃"我就归档;想换个角度接着推进就回"继续"。`;
-    } else {
-      text = en
-        ? `🔬 The exploration "${goal}" still has ${primary.open} open nodes (you have not replied "continue" in a while). ` +
-          `Shall I push on ("continue"), keep advancing it in the background ("auto advance"), or archive it ("abandon")?`
-        : `🔬 探索「${goal}」还有 ${primary.open} 个开放节点没推进(你已有一段时间没回"继续")。` +
-          `要我接着推进(回"继续")、后台自动推进(回"自动推进"),还是放弃归档(回"放弃")?`;
+    const realOwners = [...new Set(candidates.map((c) => c.owner).filter((o): o is string => o != null))];
+    for (const owner of realOwners) {
+      const ownSet = candidates
+        .filter((c) => c.owner === owner || c.owner === null)
+        .sort((a, b) => b.createdAt - a.createdAt); // most recently started first = current focus
+      if (ownSet.length === 0) continue;
+      const primary = ownSet[0];
+      for (const c of ownSet) asked.set(c.id, nowMs); // silence this owner's batch — one ask per batch
+      const goal = primary.goal.length > 50 ? primary.goal.slice(0, 50) + '…' : primary.goal;
+      const others = ownSet.length - 1;
+      // A session with ZERO proofs is stuck — lead with "abandon" instead of pitching "continue".
+      const stuck = primary.proved === 0;
+      // Every word offered below is matched deterministically by classifyExploreControlReply (放弃 / 全清 /
+      // abandon / clear all) or by the force-continue path (继续 / continue). Until 2026-07-14 放弃 and 全清
+      // were words nobody listened for — do not add an option here without teaching the matcher.
+      let text: string;
+      if (others > 0) {
+        text = en
+          ? `🔬 You have ${ownSet.length} deep_explore sessions sitting idle; the latest: "${goal}" (${primary.open} open nodes). ` +
+            `Reply "continue" to advance it; "abandon <name>" to drop one, or "clear all".`
+          : `🔬 你有 ${ownSet.length} 个 deep_explore 探索挂着没推进,最近的:「${goal}」(${primary.open} 个开放节点)。` +
+            `要推进哪个回"继续";要清理某个说"放弃 <它>",或"全清"。`;
+      } else if (stuck) {
+        text = en
+          ? `🔬 The exploration "${goal}" has been idle a while and has proved nothing yet (${primary.open} open nodes). ` +
+            `Want me to drop it? Reply "abandon" and I will archive it; reply "continue" to push on from a new angle.`
+          : `🔬 探索「${goal}」挂了一阵,还没证出任何结果(${primary.open} 个开放节点还开着)。` +
+            `要我放弃它吗?回"放弃"我就归档;想换个角度接着推进就回"继续"。`;
+      } else {
+        text = en
+          ? `🔬 The exploration "${goal}" still has ${primary.open} open nodes (you have not replied "continue" in a while). ` +
+            `Shall I push on ("continue"), keep advancing it in the background ("auto advance"), or archive it ("abandon")?`
+          : `🔬 探索「${goal}」还有 ${primary.open} 个开放节点没推进(你已有一段时间没回"继续")。` +
+            `要我接着推进(回"继续")、后台自动推进(回"自动推进"),还是放弃归档(回"放弃")?`;
+      }
+      // Route to the owner's channel — its count now matches what deep_explore(list) returns there.
+      deps.notify(text, { important: true, ownerSessionId: owner });
     }
-    // Route to the channel the session was started in (e.g. WeChat) — don't blast every surface.
-    deps.notify(text, { important: true, ownerSessionId: primary.owner ?? undefined });
   }
 
   function scheduleNext(): void {

@@ -169,3 +169,79 @@ test('createFollowUpLoop: re-engagement after the ask cancels auto-archive', () 
     if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP; else process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP = prev;
   }
 });
+
+// 2026-07-15 regression: the card is enumerated + counted PER OWNER, not globally. The old code counted
+// candidates across ALL owners and sent one card with that global count to a single owner — so a WeChat
+// user was told "you have N explorations" where most belonged to other channels they cannot see or act on,
+// and the count disagreed with what deep_explore(list) returns in their channel (which is owner-scoped).
+test('createFollowUpLoop: each owner is carded with ONLY their own session count (not the global count)', () => {
+  const prev = process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  try {
+    const sessions = [
+      // owner A: 2 quiet open sessions
+      { id: 'a1', goal: 'A first exploration', updatedAt: 0, createdAt: 10, ownerSessionId: 'wechat:A' },
+      { id: 'a2', goal: 'A second exploration', updatedAt: 0, createdAt: 20, ownerSessionId: 'wechat:A' },
+      // owner B: 1 quiet open session
+      { id: 'b1', goal: 'B only exploration', updatedAt: 0, createdAt: 30, ownerSessionId: 'webui:B' },
+    ];
+    const reasoning = {
+      listActiveSessions: () => sessions,
+      summarizeSession: () => ({ status: 'active', provedCount: 1, deadCount: 0, openFrontierCount: 3 }),
+    } as unknown as Reasoning;
+
+    const asks: Array<{ text: string; owner?: string }> = [];
+    const loop = createFollowUpLoop({
+      reasoning,
+      notify: (text, opts) => asks.push({ text, owner: opts?.ownerSessionId }),
+      silenceMs: SIX_H,
+      now: () => SIX_H,
+    });
+    loop.tickOnce();
+
+    assert.equal(asks.length, 2, 'one card per owner, not one global card');
+    const a = asks.find((x) => x.owner === 'wechat:A')!;
+    const b = asks.find((x) => x.owner === 'webui:B')!;
+    assert.ok(a && b, 'both owners were carded on their own channel');
+    // Owner A hears "2" (its own), NOT "3" (the global count) — this is the whole bug.
+    assert.match(a.text, /你有 2 个 deep_explore/);
+    assert.doesNotMatch(a.text, /你有 3 个/, 'must NOT leak the global count to a single owner');
+    // Owner B has exactly one → the singular card shape (no "N sessions"), about its own session.
+    assert.match(b.text, /B only exploration/);
+    assert.doesNotMatch(b.text, /A (first|second) exploration/, "B must not hear about A's sessions");
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+    else process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP = prev;
+  }
+});
+
+test('createFollowUpLoop: legacy NULL-owner session appears in an owner card (mirrors list(owner))', () => {
+  const prev = process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  try {
+    const sessions = [
+      { id: 'own', goal: 'owned exploration', updatedAt: 0, createdAt: 10, ownerSessionId: 'wechat:A' },
+      // legacy pre-owner session: resumable by any channel, so list(A) includes it → card must too
+      { id: 'legacy', goal: 'legacy exploration', updatedAt: 0, createdAt: 20, ownerSessionId: null },
+    ];
+    const reasoning = {
+      listActiveSessions: () => sessions,
+      summarizeSession: () => ({ status: 'active', provedCount: 1, deadCount: 0, openFrontierCount: 3 }),
+    } as unknown as Reasoning;
+    const asks: Array<{ text: string; owner?: string }> = [];
+    const loop = createFollowUpLoop({
+      reasoning,
+      notify: (text, opts) => asks.push({ text, owner: opts?.ownerSessionId }),
+      silenceMs: SIX_H,
+      now: () => SIX_H,
+    });
+    loop.tickOnce();
+    // Only the real owner gets a card; a NULL-owner session cannot be routed on its own.
+    assert.equal(asks.length, 1);
+    assert.equal(asks[0].owner, 'wechat:A');
+    assert.match(asks[0].text, /你有 2 个 deep_explore/, 'owner card counts own + legacy null-owner (as list does)');
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+    else process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP = prev;
+  }
+});
