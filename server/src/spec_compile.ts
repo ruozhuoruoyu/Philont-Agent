@@ -194,6 +194,73 @@ export function clearSpecCache(): void {
  * endpoint; endpoints without requiredFields only get the JSON-object check. Generic — everything
  * comes from the SpecDoc.
  */
+/**
+ * Does a documented endpoint match this method + concrete path? Param segments (:id / $VAR / {id}) match
+ * any single path segment. Shared by every spec guard so they agree on what "documented" means.
+ */
+export function endpointMatches(ep: SpecEndpoint, method: string, pathname: string): boolean {
+  if (ep.method !== method.toUpperCase()) return false;
+  const pattern = ep.path
+    .split('/')
+    .map((seg) => (/^[:$]|^\{/.test(seg) ? '[^/]+' : seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    .join('/');
+  return new RegExp(`^${pattern}/?$`).test(pathname);
+}
+
+/**
+ * Generic contract guard for a request to a host the SpecDoc governs — the companion to the body guard,
+ * covering the dimensions a weaker model breaks that body-shape checks miss (observed with a small model:
+ * it hit an undocumented endpoint → server 404, and omitted the documented auth header). Reads ONLY
+ * generic SpecDoc fields (service.hosts, auth.header, endpoints), so it protects EVERY installed service
+ * spec identically — nothing is service-specific. Returns a blocking error, or null to allow.
+ *
+ * Deliberately conservative on false positives:
+ *   - auth header: only fires when the contract documents auth.header AND the request omits it entirely.
+ *   - endpoint:    only fires when the host is governed AND the method+path matches no documented endpoint;
+ *                  the message names the documented endpoints and says the contract may be incomplete, so
+ *                  a genuinely-missing endpoint is a spec-recompile signal, not a permanent wall.
+ */
+export function specRequestGuard(
+  input: Record<string, unknown>,
+  spec: SpecDoc,
+): { error: string } | null {
+  let u: URL;
+  try {
+    u = new URL(String(input.url ?? ''));
+  } catch {
+    return null;
+  }
+  if (!spec.service.hosts.includes(u.host.toLowerCase())) return null; // not this service's host
+  const method = String(input.method ?? 'GET').toUpperCase();
+
+  // (1) Documented auth header omitted.
+  const authHeader = spec.auth?.header?.trim();
+  if (authHeader) {
+    const keys = Object.keys((input.headers as Record<string, unknown>) || {}).map((k) => k.toLowerCase());
+    if (!keys.includes(authHeader.toLowerCase())) {
+      return {
+        error:
+          `[spec contract guard] ${spec.service.name} authenticates via the "${authHeader}" header` +
+          `${spec.auth?.scheme ? ` (scheme: ${spec.auth.scheme})` : ''}, but this request has no such header. ` +
+          `Add it before sending — an unauthenticated call will be rejected by the service.`,
+      };
+    }
+  }
+
+  // (2) Undocumented endpoint (only when the service documents any endpoints at all).
+  if (spec.endpoints.length > 0 && !spec.endpoints.some((e) => endpointMatches(e, method, u.pathname))) {
+    const list = spec.endpoints.slice(0, 12).map((e) => `${e.method} ${e.path}`).join(', ');
+    return {
+      error:
+        `[spec contract guard] ${method} ${u.pathname} is not a documented endpoint of ${spec.service.name}. ` +
+        `Documented endpoints: ${list}. Use one of these. If you are certain this endpoint exists, the ` +
+        `compiled contract may be incomplete — re-read the guide and recompile the spec rather than guessing.`,
+    };
+  }
+
+  return null;
+}
+
 export function specBodyGuardReject(
   toolName: string,
   input: Record<string, unknown>,
@@ -209,15 +276,7 @@ export function specBodyGuardReject(
     return null;
   }
   if (!spec.service.hosts.includes(u.host.toLowerCase())) return null;
-  const ep = spec.endpoints.find((e) => {
-    if (e.method !== method) return false;
-    // Param segments (:id / $VAR / {id}) match any one path segment.
-    const pattern = e.path
-      .split('/')
-      .map((seg) => (/^[:$]|^\{/.test(seg) ? '[^/]+' : seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-      .join('/');
-    return new RegExp(`^${pattern}/?$`).test(u.pathname);
-  });
+  const ep = spec.endpoints.find((e) => endpointMatches(e, method, u.pathname));
   if (!ep) return null;
   const raw = input.body;
   let parsed: Record<string, unknown> | null = null;

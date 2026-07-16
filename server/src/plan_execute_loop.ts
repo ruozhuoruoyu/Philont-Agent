@@ -25,7 +25,7 @@ import {
   type MiniLoopToolRunResult,
 } from '@agent/tools';
 import type { ToolDefinition } from '@agent/policy';
-import { compileSpec, specToGuideApi, specBodyGuardReject, type SpecDoc } from './spec_compile.js';
+import { compileSpec, specToGuideApi, specBodyGuardReject, specRequestGuard, type SpecDoc } from './spec_compile.js';
 
 // ── Flag ────────────────────────────────────────────────────────────────────
 
@@ -788,6 +788,7 @@ export async function runPlanExecuteLoop(
       // Spec body guard: a write to a documented endpoint with a non-JSON body or missing
       // documented required fields is corrected BEFORE sending (prod: raw-markdown string body
       // -> server 500 "Failed to create post").
+      (compiledSpec && name === 'http' ? specRequestGuard(input, compiledSpec) : null) ??
       (compiledSpec ? specBodyGuardReject(name, input, compiledSpec) : null) ??
       (name === 'schedule_reminder' ? scheduleInstructionReject(input, guideApi) : null);
     if (rej) {

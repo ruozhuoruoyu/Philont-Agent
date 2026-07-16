@@ -20,6 +20,22 @@ import type { Tool, SecretStore } from '@agent/policy';
 import { createInjectingFetch, redactOutput } from '@agent/policy';
 import { credentialCaptureEnabled, extractCapturableCredential } from './credential_capture.js';
 
+/**
+ * Normalize an LLM-supplied HTTP header NAME. Weaker models copy a header token straight out of a
+ * doc's markdown code span and keep the wrapping — `` `X-Actor-Id` `` or `"X-Actor-Id"` — which native
+ * fetch rejects with the cryptic `Headers.append: "…" is an invalid header name`; the model can't read
+ * that and blindly retries the same broken shape (prod 2026-07-16, gemma-4-31B on mycox: the verify /
+ * posts calls crashed on the header name for turn after turn). We SELF-HEAL by stripping wrapping
+ * quotes/backticks/whitespace (a real header name never starts or ends with them), then validate the
+ * result against the RFC 7230 token grammar. Returns the cleaned name, or null if it is still not a
+ * valid token so the caller can fail fast with a readable message instead of the native error.
+ */
+export function normalizeHeaderName(raw: string): string | null {
+  const stripped = raw.trim().replace(/^[`'"\s]+|[`'"\s]+$/g, '');
+  // RFC 7230 token = 1*tchar; if it survives cleaning as a valid token, use it.
+  return stripped && /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(stripped) ? stripped : null;
+}
+
 export interface SecuredHttpOptions {
   /** Whitelist of secret IDs allowed for injection; if not provided, all secrets in the store are allowed */
   allowedSecrets?: string[];
@@ -150,7 +166,25 @@ export function createSecuredHttpTool(
             `Fix: the method field takes only the verb word; headers / body go in their own parameters — don't splice in template text.`,
         };
       }
-      const headers = { ...((params.headers as Record<string, string>) || {}) };
+      // Normalize header names before they reach native fetch: weak models wrap the name in markdown
+      // backticks / quotes copied from the doc (`` `X-Actor-Id` ``), which fetch rejects cryptically.
+      // Self-heal by stripping the wrapping; fail fast with a clear message only if it is still invalid.
+      const headers: Record<string, string> = {};
+      for (const [rawKey, rawVal] of Object.entries((params.headers as Record<string, unknown>) || {})) {
+        const key = normalizeHeaderName(rawKey);
+        if (!key) {
+          return {
+            success: false,
+            output: '',
+            error:
+              `http tool: "${rawKey}" is not a valid header name. A header name is a bare token like ` +
+              `X-Actor-Id or Authorization — no surrounding quotes, backticks, or spaces. ` +
+              `Common cause: the name was copied from a doc's markdown code span (\`X-Actor-Id\`) with the ` +
+              `backticks kept. Pass just the token.`,
+          };
+        }
+        headers[key] = typeof rawVal === 'string' ? rawVal : String(rawVal);
+      }
       // 2026-05-11: body object compatibility — LLMs often pass object literals; old code cast them to
       // string, causing fetch to call toString() and send "[object Object]"; the target service then
       // reports "JSON Parse error: Unexpected identifier 'object'". Here, if we receive an object,

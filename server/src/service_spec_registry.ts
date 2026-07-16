@@ -12,7 +12,7 @@
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { SpecDoc } from './spec_compile.js';
+import { endpointMatches, type SpecDoc } from './spec_compile.js';
 
 const SCAN_TTL_MS = 60_000;
 
@@ -86,6 +86,55 @@ export function findServiceSkillForText(text: string, skillsRoot: string): Insta
       return { spec: inst.spec, skillName: inst.dir, markdown };
     } catch {
       return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Cross-spec host-drift guard: the call went to a host with NO installed spec, but some OTHER installed
+ * service documents this exact method+path under a host it DOES own → the model almost certainly used the
+ * wrong host (observed: registration worked on the documented host, then follow-up calls were sent to a
+ * sibling `api.` host that simply `fetch failed` forever). Generic — driven by every installed spec's
+ * hosts+endpoints, not any one service. Returns a blocking error naming the documented host(s), or null.
+ */
+export function specHostDriftGuard(
+  method: string,
+  url: string,
+  skillsRoot: string,
+): { error: string } | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const callHost = u.host.toLowerCase();
+  const st = state(skillsRoot);
+  if (st.byHost.has(callHost)) return null; // host IS governed — the per-spec guard handles it
+  const seen = new Set<SpecDoc>();
+  for (const { spec } of st.byHost.values()) {
+    if (seen.has(spec)) continue;
+    seen.add(spec);
+    // Two independent wrong-host signals, either is enough:
+    //  (a) same-domain family — the call host is a sub/parent-domain of a documented host (e.g. the model
+    //      prepended `api.` to the documented host). Fires regardless of method/path, so it still catches a
+    //      call whose method or path is ALSO wrong. Legit sibling hosts belong in the spec's host list, so
+    //      this only fires on an undocumented sibling.
+    //  (b) exact endpoint documented elsewhere — this method+path is a documented endpoint of a service
+    //      whose host the call missed.
+    const govHosts = spec.service.hosts.map((h) => h.toLowerCase()).filter(Boolean);
+    const family = govHosts.some((gh) => callHost.endsWith(`.${gh}`) || gh.endsWith(`.${callHost}`));
+    const pathDoc = spec.endpoints.some((e) => endpointMatches(e, method, u.pathname));
+    if (family || pathDoc) {
+      return {
+        error:
+          `[spec host guard] you called host "${callHost}", but ${spec.service.name}'s documented host is ` +
+          `${spec.service.hosts.join(', ')}` +
+          `${pathDoc ? ` and ${method.toUpperCase()} ${u.pathname} is a documented endpoint there` : ''}. ` +
+          `You are very likely using the wrong host — resend to the documented host, not a guessed sibling ` +
+          `like "${callHost}".`,
+      };
     }
   }
   return null;

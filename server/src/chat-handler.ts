@@ -211,8 +211,8 @@ import {
   logRegisteredControllers,
 } from './controller_registry.js';
 import { writeServiceSkill } from './service_skill.js';
-import { findSpecForHost, findServiceSkillForText } from './service_spec_registry.js';
-import { specBodyGuardReject } from './spec_compile.js';
+import { findSpecForHost, findServiceSkillForText, specHostDriftGuard } from './service_spec_registry.js';
+import { specBodyGuardReject, specRequestGuard } from './spec_compile.js';
 import { createAutoAdvanceLoop } from './deep_explore_autoadvance.js';
 import { createFollowUpLoop } from './deep_explore_followup.js';
 import { semanticToolPhrase, semanticToolFailPhrase, summarizingPhrase, type PhraseLang } from './channel_phrases.js';
@@ -9891,19 +9891,33 @@ async function runToolLoop(
       // never saw it because scheduled turns run the legacy pipeline.
       if (call.name === 'http') {
         try {
+          const skillsRoot = join(process.cwd(), '.philont', 'skills');
+          const method = String(call.input.method ?? 'GET').toUpperCase();
           const specHost = new URL(String(call.input.url ?? '')).host.toLowerCase();
-          const installedSpec = findSpecForHost(specHost, join(process.cwd(), '.philont', 'skills'));
-          const bodyRej = installedSpec ? specBodyGuardReject(call.name, call.input, installedSpec) : null;
-          if (bodyRej) {
-            console.warn(`[spec-body-guard] session=${sessionId} corrected ${String(call.input.method ?? 'GET').toUpperCase()} ${specHost} (installed service spec)`);
-            nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: bodyRej.error });
+          const installedSpec = findSpecForHost(specHost, skillsRoot);
+          // Full generic contract guard, driven only by the installed SpecDoc (host/auth/endpoints/body) so
+          // every service spec is protected the same way. When the host is governed we check auth-header +
+          // endpoint + body; when it is NOT, we check for host-drift against every other installed spec.
+          let rej: { error: string; reason: string } | null = null;
+          if (installedSpec) {
+            const reqRej = specRequestGuard(call.input, installedSpec);
+            const bodyRej = reqRej ? null : specBodyGuardReject(call.name, call.input, installedSpec);
+            if (reqRej) rej = { ...reqRej, reason: 'rejected_by_spec_request_guard' };
+            else if (bodyRej) rej = { ...bodyRej, reason: 'rejected_by_spec_body_guard' };
+          } else {
+            const driftRej = specHostDriftGuard(method, String(call.input.url ?? ''), skillsRoot);
+            if (driftRej) rej = { ...driftRej, reason: 'rejected_by_spec_host_guard' };
+          }
+          if (rej) {
+            console.warn(`[spec-contract-guard] session=${sessionId} blocked ${method} ${specHost} (${rej.reason})`);
+            nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: rej.error });
             totalToolCallsThisTurn++;
-            inTurnRecords.push({ toolName: call.name, success: false, resultText: bodyRej.error });
+            inTurnRecords.push({ toolName: call.name, success: false, resultText: rej.error });
             memory.actions.log({
               sessionId: GLOBAL_TIMELINE_SESSION_ID,
               toolName: call.name,
               params: call.input,
-              result: 'rejected_by_spec_body_guard',
+              result: rej.reason,
               success: false,
             });
             continue;
