@@ -87,6 +87,8 @@ import {
   readLock,
   removeLock,
   uninstallSkillTool,
+  probeAuxLLM,
+  isAuxLLMConfigured,
 } from '@agent/tools';
 import { listRegisteredPushChannels } from './push/channel.js';
 
@@ -858,6 +860,29 @@ server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`  HTTP API:  http://localhost:${PORT}/api/memory/stats`);
   console.log(`  WebSocket: ws://localhost:${PORT}`);
+
+  // Aux-LLM health probe. The aux model is shared by reflection, the learning judge, auth-intent and the
+  // intent router; when its endpoint is misconfigured it fails SILENTLY (each caller degrades gracefully,
+  // the main agent keeps working) so a 404 goes unnoticed while learning + the judge quietly do nothing.
+  // Probe once at startup and warn LOUDLY if it is configured but not answering.
+  if (isAuxLLMConfigured()) {
+    void probeAuxLLM().then((r) => {
+      if (r.ok) {
+        console.log('[aux-llm] ✅ health probe ok');
+      } else {
+        console.error(
+          [
+            `[aux-llm] ⚠️  AUX LLM IS CONFIGURED BUT NOT ANSWERING: ${r.error}`,
+            '           → reflection (self-learning), the learning judge, auth-intent classification and the',
+            '             intent router are ALL DEGRADED (they fail safe, so the main agent still works and you',
+            "             won't otherwise see this). Check AUX_LLM_BASE_URL / AUX_LLM_MODEL / AUX_LLM_API_KEY.",
+          ].join('\n'),
+        );
+      }
+    });
+  } else {
+    console.log('[aux-llm] not configured — reflection/judge/auth-intent fall back to the main LLM or degrade');
+  }
 });
 
 // ── WeChat channel (optional; enabled with WECHAT_ENABLED=1) ──────────────

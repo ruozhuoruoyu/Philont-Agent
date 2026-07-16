@@ -63,6 +63,8 @@ export {
   clearMainLLMRegistration,
   hasMainLLMRegistered,
   isAuxLLMConfigured,
+  probeAuxLLM,
+  auxLLMHealth,
   AuxLLMError,
 } from './utils/aux-llm.js';
 export type { AuxLLMRequest, AuxLLMCaller } from './utils/aux-llm.js';

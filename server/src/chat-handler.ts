@@ -223,6 +223,7 @@ import { persistToolResultIfFetched, parseWebFetchOutput } from './fetched_resou
 import { planLoopEnabled, runPlanExecuteLoop } from './plan_execute_loop.js';
 import {
   detectUnclosedQuestion,
+  isConversationOpener,
   findLastAssistantText,
   findLastUserText,
   renderBindingContext,
@@ -4811,7 +4812,12 @@ function withTimeout<T>(p: Promise<T>, ms: number, makeError: () => Error): Prom
  * let stale reasoning_content leak back into the request). Tunable via PHILONT_CHAT_REASONING ∈
  * {off,low,medium,high,max}; default `high` preserves the prior implicit-on quality. Cheap channels can set `off`.
  */
-function mainTurnReasoning(): ReasoningConfig {
+function mainTurnReasoning(userText?: string | null): ReasoningConfig {
+  // Trivial turn downshift (2026-07-16): a bare greeting/opener ("hi", "你好") does not need deep thinking —
+  // prod: a single "hi" took 48s of high-effort reasoning to produce "Hi!". Give openers 'low' effort so a
+  // greeting is fast. Only the unambiguous opener case is downshifted; every real message keeps full effort,
+  // so quality is untouched. PHILONT_CHAT_REASONING still sets the ceiling for real turns.
+  if (userText && isConversationOpener(userText)) return { enabled: true, effort: 'low' };
   const raw = (process.env.PHILONT_CHAT_REASONING ?? 'high').trim().toLowerCase();
   if (raw === 'off') return { enabled: false };
   if (raw === 'low' || raw === 'medium' || raw === 'high' || raw === 'max') {
@@ -4844,7 +4850,7 @@ async function sendLlmWithRescue(
   const signal = turnAbortSignal(sessionId);
   // 2026-06-07: send an explicit per-turn reasoning config (see mainTurnReasoning) instead of relying on the
   // provider's implicit always-on thinking; tunable via PHILONT_CHAT_REASONING.
-  const reasoning = mainTurnReasoning();
+  const reasoning = mainTurnReasoning(findLastUserText(messages));
   const call = () =>
     withTimeout(llm.send(messages, tools, { signal, reasoning }), LLM_CALL_TIMEOUT_MS, () => new LlmTimeoutError(LLM_CALL_TIMEOUT_MS));
   try {
@@ -6757,7 +6763,9 @@ async function handleChatSendInner(
   // "llm适配好了吗？" was bound to a prior "…GL(2) spectral theory?" math question. If the user
   // message is itself a question (ends with ?/？), it cannot be a short answer → skip binding.
   const userIsItselfAQuestion = /[?？]\s*$/.test(userMessage.trim());
-  if (priorAssistant && messages[0] && !userIsItselfAQuestion) {
+  // A bare greeting/opener ("hi", "你好") resets the conversation — it is not answering the prior question
+  // (prod: "hi" bound to a stale deep_explore "回复继续"). Skip binding for it.
+  if (priorAssistant && messages[0] && !userIsItselfAQuestion && !isConversationOpener(userMessage)) {
     const detected = detectUnclosedQuestion(priorAssistant);
     if (detected.hasQuestion) {
       messages[0] = {

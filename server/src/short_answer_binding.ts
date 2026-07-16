@@ -92,6 +92,20 @@ export function detectUnclosedQuestion(text: unknown): QuestionDetectResult {
 }
 
 /**
+ * A bare greeting / conversation-opener ("hi", "你好", "在吗") is the user RESETTING the conversation, not
+ * answering a pending question. Binding such a message to a stale prior question (prod 2026-07-16: "hi" bound
+ * to a days-old deep_explore "回复继续" prompt across many turns) is wrong. Anchored + short: only the WHOLE
+ * message being an opener counts, so "hi, did the build pass?" is NOT treated as a mere greeting. A heuristic
+ * — a false positive just skips binding (the model handles the message normally), which is safe.
+ */
+export function isConversationOpener(text: unknown): boolean {
+  if (typeof text !== 'string') return false;
+  const m = text.trim().toLowerCase().replace(/[!！。.~、,，\s]+/g, '');
+  if (!m || m.length > 14) return false;
+  return /^(hi|hii+|hello+|hey+|yo|hiya|嗨+|你好+|您好|哈喽|哈啰|在|在吗|在不在|在么|早|早上好|早安|晚上好|下午好|good(morning|afternoon|evening)|halo|hola)$/.test(m);
+}
+
+/**
  * Walk messages[] in reverse to find the most recent "natural language assistant" message
  * (skipping tool_use array-form messages). Returns its string content, or null if absent.
  *

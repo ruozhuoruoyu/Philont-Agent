@@ -169,3 +169,17 @@ test('renderAskGuardRejection: 包含原问 + user 答 + 拒绝指引', () => {
   assert.match(out, /先消化/);
   assert.match(out, /不要二次追问/);
 });
+
+import { isConversationOpener } from '../src/short_answer_binding.js';
+
+test('isConversationOpener: bare greetings reset the conversation (not answers)', () => {
+  for (const g of ['hi', 'Hi!', 'hello', 'hey', '你好', '您好', '在吗', 'yo', '早上好', 'good morning']) {
+    assert.equal(isConversationOpener(g), true, `"${g}" is an opener`);
+  }
+});
+
+test('isConversationOpener: real answers and greeting+content are NOT bare openers', () => {
+  for (const a of ['继续', '同意', '1', 'yes', 'hi, did the build pass?', '你好，帮我转个pdf', 'high priority', 'history']) {
+    assert.equal(isConversationOpener(a), false, `"${a}" is not a bare opener`);
+  }
+});

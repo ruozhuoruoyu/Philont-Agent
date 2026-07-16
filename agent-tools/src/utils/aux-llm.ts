@@ -132,22 +132,57 @@ function auxThinkingDisabled(model: string): boolean {
  * Prefers the small model configured via environment variables; otherwise falls back to the caller
  * registered via registerMainLLM. Throws AuxLLMError(kind='not_configured') when neither is available.
  */
+// ── Health tracking (2026-07-16) ──────────────────────────────────────────────────────────────────
+// The aux LLM is shared by reflection, the learning judge, auth-intent and the intent router. When its
+// endpoint is misconfigured (prod: AUX_LLM_* returning HTTP 404) it fails SILENTLY: each caller degrades
+// gracefully (judge → could_not_verify, auth → unclear, reflection → skip), the MAIN agent keeps working,
+// and the owner never notices that learning + the judge are quietly dead. These counters + probeAuxLLM make
+// that visible.
+let auxCallCount = 0;
+let auxErrorCount = 0;
+let lastAuxError: string | null = null;
+
+export function auxLLMHealth(): { configured: boolean; calls: number; errors: number; lastError: string | null } {
+  return { configured: isAuxLLMConfigured(), calls: auxCallCount, errors: auxErrorCount, lastError: lastAuxError };
+}
+
+/**
+ * One lightweight round-trip to check the aux endpoint actually answers. Returns ok/error WITHOUT throwing,
+ * so a caller (server startup) can warn loudly on misconfiguration. When aux is not configured it reports
+ * ok:false with a 'not configured' note — the caller decides whether that matters.
+ */
+export async function probeAuxLLM(signal?: AbortSignal): Promise<{ ok: boolean; error?: string }> {
+  if (!isAuxLLMConfigured()) return { ok: false, error: 'not configured (AUX_LLM_* unset)' };
+  try {
+    const out = await callAuxLLM({ system: 'Reply with the single word: ok', user: 'ping', maxTokens: 4, signal });
+    return out && out.trim().length > 0 ? { ok: true } : { ok: false, error: 'empty response' };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function callAuxLLM(req: AuxLLMRequest): Promise<string> {
   const envConfig = readAuxLLMEnv();
-  if (envConfig) {
-    if (envConfig.protocol === 'anthropic') {
-      return callAnthropicCompatible(envConfig, req);
+  auxCallCount++;
+  try {
+    if (envConfig) {
+      return envConfig.protocol === 'anthropic'
+        ? await callAnthropicCompatible(envConfig, req)
+        : await callOpenAICompatible(envConfig, req);
     }
-    return callOpenAICompatible(envConfig, req);
+    if (mainLLMCaller) {
+      return await mainLLMCaller(req);
+    }
+    throw new AuxLLMError(
+      'Aux LLM not configured: set AUX_LLM_BASE_URL/AUX_LLM_API_KEY/AUX_LLM_MODEL, ' +
+        'or call registerMainLLM() at application startup.',
+      'not_configured',
+    );
+  } catch (e) {
+    auxErrorCount++;
+    lastAuxError = e instanceof Error ? e.message : String(e);
+    throw e;
   }
-  if (mainLLMCaller) {
-    return mainLLMCaller(req);
-  }
-  throw new AuxLLMError(
-    'Aux LLM not configured: set AUX_LLM_BASE_URL/AUX_LLM_API_KEY/AUX_LLM_MODEL, ' +
-      'or call registerMainLLM() at application startup.',
-    'not_configured',
-  );
 }
 
 interface OpenAIChatResponse {
