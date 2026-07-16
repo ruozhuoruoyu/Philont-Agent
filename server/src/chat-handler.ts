@@ -115,7 +115,7 @@ import {
 import type { Tool } from '@agent/policy';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, copyFileSync } from 'node:fs';
 import { dirname as pathDirname, join as pathJoin } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
@@ -576,12 +576,41 @@ export const memory = openMemoryDb(MEMORY_DB_PATH, {
 });
 
 // ── compass.md — the owner-authored source that orients the intrinsic drives + declares the self-drive's
-// focus (see agent-memory/src/compass.ts). Lives beside the DB (or PHILONT_COMPASS_PATH). Absent = neutral
-// defaults: drives auto-tune unbounded and there is no declared focus. Loaded once at startup; editing it
-// is a restart (Phase 2 will hot-reload + learn).
-const COMPASS_PATH = process.env.PHILONT_COMPASS_PATH || pathJoin(pathDirname(MEMORY_DB_PATH), 'compass.md');
+// focus (see agent-memory/src/compass.ts).
+//
+// Location: philont's OWN install directory (next to the tracked compass.example.md), NOT the data dir —
+// there is always an initialized compass. The active compass.md is git-ignored and, on first start, copied
+// from compass.example.md, so `git pull` never clobbers the owner's edits (or Phase 2's learned updates).
+// PHILONT_COMPASS_PATH overrides the location.
+function resolveCompassPaths(): { active: string; example: string | null } {
+  if (process.env.PHILONT_COMPASS_PATH) {
+    return { active: process.env.PHILONT_COMPASS_PATH, example: null };
+  }
+  // Walk up from cwd (server is started from within the install tree) to the dir holding compass.example.md.
+  let dir = process.cwd();
+  for (let i = 0; i < 8; i++) {
+    const ex = pathJoin(dir, 'compass.example.md');
+    if (existsSync(ex)) return { active: pathJoin(dir, 'compass.md'), example: ex };
+    const up = pathDirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  // Fallback: alongside the DB (keeps working even if the example can't be located).
+  return { active: pathJoin(pathDirname(MEMORY_DB_PATH), 'compass.md'), example: null };
+}
+
 let loadedCompass: CompassConfig | null = null;
 try {
+  const { active: COMPASS_PATH, example } = resolveCompassPaths();
+  // First-run init: no active compass yet → seed it from the shipped template so there is always one.
+  if (!existsSync(COMPASS_PATH) && example && existsSync(example)) {
+    try {
+      copyFileSync(example, COMPASS_PATH);
+      console.log(`[compass] initialized ${COMPASS_PATH} from ${example} (first run) — edit it to make it yours`);
+    } catch (e) {
+      console.warn('[compass] could not initialize from the template', e);
+    }
+  }
   if (existsSync(COMPASS_PATH)) {
     loadedCompass = parseCompass(readFileSync(COMPASS_PATH, 'utf8'));
     console.log(

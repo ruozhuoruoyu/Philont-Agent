@@ -54,3 +54,6 @@ agent-node/.napi-generated.d.ts
 # Local-only files
 /CLAUDE.md
 dist-app/
+
+# Active compass (owner-edited + Phase-2-learned); the tracked template is compass.example.md
+/compass.md
