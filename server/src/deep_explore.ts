@@ -84,6 +84,7 @@ import {
   type ReasoningSessionStatus,
   type ActionLog,
   type SkillStore,
+  AGENT_SELF_REFERENCE_NOTE,
 } from '@agent/memory';
 import { currentSessionId } from './channels/turn_context.js';
 import { decidePhaseTransition, goalNeedsDecision, classifyGoal } from './phase_gate.js';
@@ -2660,7 +2661,9 @@ export function createDeepExploreTool(
       const provedClaims = all
         .filter((n) => n.status === 'proved' && n.id !== node.id)
         .map((n) => n.claim);
-      const sys = profile.buildSkepticPrompt(node.claim, argument, session.goal, session.assumptions, provedClaims, basis);
+      const sys =
+        AGENT_SELF_REFERENCE_NOTE + '\n\n' +
+        profile.buildSkepticPrompt(node.claim, argument, session.goal, session.assumptions, provedClaims, basis);
       // Skeptics get the profile's research tools minus pariGp.
       // 2026-06-08: pariGp is excluded — skeptics burned their whole budget retrying malformed PARI/GP
       // scripts instead of reviewing; z3 covers rigorous formal refutation.
@@ -2716,6 +2719,7 @@ export function createDeepExploreTool(
         const tasks = angles.map((angle, i) => ({
           id: `ground-${i}`,
           systemPrompt:
+            AGENT_SELF_REFERENCE_NOTE + '\n\n' +
             profile.buildGroundingPrompt(session.goal, session.assumptions) +
             `\n\nThis pass FOCUSES specifically on: ${angle}. Cover that angle well; let sibling passes cover the rest.` +
             baseBudget,
@@ -2756,6 +2760,7 @@ export function createDeepExploreTool(
     try {
       const result = await runMiniAgentLoop({
         systemPrompt:
+          AGENT_SELF_REFERENCE_NOTE + '\n\n' +
           profile.buildGroundingPrompt(session.goal, session.assumptions) +
           `\n\nBUDGET: you have at most ${LIT_GROUNDING_MAX_ITERS} tool round-trips. Search broadly in the first ` +
           `1-2 rounds, read selectively, and OUTPUT THE JSON ARRAY no later than round ${Math.max(2, LIT_GROUNDING_MAX_ITERS - 1)} — ` +
@@ -2847,7 +2852,9 @@ export function createDeepExploreTool(
     // record the starting frontier ids for UCB visit accounting.
     const before = reasoning.getNodes(session.id);
     const frontierStartIds = new Set(computeFrontier(before).map((n) => n.id));
-    const systemPrompt = profile.buildConvergePrompt(session, before, collectComputeLessons(skills, session.goal));
+    const systemPrompt =
+      AGENT_SELF_REFERENCE_NOTE + '\n\n' +
+      profile.buildConvergePrompt(session, before, collectComputeLessons(skills, session.goal));
     const userMessage =
       profile.buildUserMessage(session, before.length <= 1) + buildStuckDirective(session.noProgressRounds ?? 0);
 
@@ -3020,7 +3027,9 @@ export function createDeepExploreTool(
     const candKinds = new Set<ReasoningNodeKind>(profile.divergeNodeKinds);
     const before = reasoning.getNodes(session.id);
     const beforeCandidates = before.filter((n) => candKinds.has(n.kind)).length;
-    const systemPrompt = profile.buildDivergePrompt(session, before, collectComputeLessons(skills, session.goal), seed);
+    const systemPrompt =
+      AGENT_SELF_REFERENCE_NOTE + '\n\n' +
+      profile.buildDivergePrompt(session, before, collectComputeLessons(skills, session.goal), seed);
     const userMessage = profile.buildDivergeUserMessage(session, seed);
 
     const ctrl = new AbortController();

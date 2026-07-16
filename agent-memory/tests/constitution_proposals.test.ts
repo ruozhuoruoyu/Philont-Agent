@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AGENT_SELF_REFERENCE_NOTE,
   openMemoryDb,
   ConstitutionProposalStore,
   approveAndApply,
@@ -211,4 +212,15 @@ test('decide: the reject path accepts the printed prefix too', () => {
   assert.equal(store.get(p.id)?.status, 'rejected');
   // A decided proposal is no longer pending, so the prefix no longer resolves — no double-decide.
   assert.equal(store.decide(p.id.slice(0, 8), 'approved'), null);
+});
+
+// 2026-07-15: the shared self-reference note that sub-agent prompts (deep_explore rounds, skeptics,
+// grounding) prepend so a research sub-agent knows "philont" is its own name, not an external tool to search.
+test('AGENT_SELF_REFERENCE_NOTE: states that philont means this agent itself', () => {
+  const note = AGENT_SELF_REFERENCE_NOTE;
+  assert.equal(typeof note, 'string');
+  assert.match(note, /philont/);
+  assert.match(note, /this agent itself|this very system/i);
+  // General, not a symptom-enumerating patch — it must NOT list specific triggers like "benchmark".
+  assert.doesNotMatch(note, /benchmark/i);
 });
