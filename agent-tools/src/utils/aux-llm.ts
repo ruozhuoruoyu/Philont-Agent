@@ -197,7 +197,7 @@ async function callOpenAICompatible(
   cfg: AuxLLMEnvConfig,
   req: AuxLLMRequest,
 ): Promise<string> {
-  const endpoint = joinUrl(cfg.baseUrl, '/chat/completions');
+  const endpoint = resolveEndpoint(cfg.baseUrl, 'chat/completions');
   const messages: Array<{ role: 'system' | 'user'; content: string }> = [];
   if (req.system) messages.push({ role: 'system', content: req.system });
   messages.push({ role: 'user', content: req.user });
@@ -312,7 +312,7 @@ async function callAnthropicCompatible(
   cfg: AuxLLMEnvConfig,
   req: AuxLLMRequest,
 ): Promise<string> {
-  const endpoint = joinUrl(cfg.baseUrl, '/v1/messages');
+  const endpoint = resolveEndpoint(cfg.baseUrl, 'messages');
 
   // Anthropic protocol: system is a top-level field and does not go into the messages array
   const body: {
@@ -416,17 +416,33 @@ async function callAnthropicCompatible(
   return text;
 }
 
-function joinUrl(base: string, path: string): string {
-  const trimmedBase = base.replace(/\/+$/, '');
-  const trimmedPath = path.replace(/^\/+/, '');
-  // If base already contains /chat/completions or /v1/messages, use it as-is
-  if (/\/chat\/completions\/?$/.test(trimmedBase)) {
-    return trimmedBase;
+/**
+ * Build the endpoint from a possibly-partial base URL, tolerating every way people fill AUX_LLM_BASE_URL:
+ *   - bare host          (https://api.deepseek.com)                   → add /v1/<method> (matches the MAIN
+ *                                                                       adapter: bare-host base + provider path)
+ *   - host + version     (https://api.deepseek.com/v1, /api/paas/v4)  → add /<method>   (don't double the version)
+ *   - host + non-version (https://neolink.vnet.com/api)               → add /v1/<method> (version still missing)
+ *   - full endpoint      (https://api.deepseek.com/v1/chat/completions) → use as-is
+ *
+ * The historical bug: aux appended only /chat/completions, so a bare-host base (the same value as the main
+ * model's) dropped the /v1 → HTTP 404, silently killing reflection / the learning judge / auth-intent
+ * (prod 2026-07, "configured same as main, different key"). The discriminator is whether the base path
+ * already ENDS in a version segment (/v1, /v4, /v1beta …) — not merely whether it has a path. `method` is
+ * 'chat/completions' (OpenAI) or 'messages' (Anthropic); the same tolerance applies to both — an anthropic
+ * base ending in /v1 previously double-appended to /v1/v1/messages.
+ */
+function resolveEndpoint(baseUrl: string, method: 'chat/completions' | 'messages'): string {
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  // Already the full endpoint (…/chat/completions or …/messages) → use verbatim.
+  if (new RegExp(`/${method}$`).test(trimmed)) return trimmed;
+  let pathname = '';
+  try {
+    pathname = new URL(trimmed).pathname.replace(/\/+$/, '');
+  } catch {
+    /* unparseable — treat as bare host */
   }
-  if (/\/v1\/messages\/?$/.test(trimmedBase)) {
-    return trimmedBase;
-  }
-  return `${trimmedBase}/${trimmedPath}`;
+  // Path already ends in a version segment → just append the method; otherwise supply the /v1 prefix.
+  return /\/v\d+[a-z]*$/.test(pathname) ? `${trimmed}/${method}` : `${trimmed}/v1/${method}`;
 }
 
 /**
