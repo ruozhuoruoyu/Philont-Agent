@@ -632,7 +632,7 @@ export type PursuitStatus = 'active' | 'paused' | 'shadow' | 'achieved' | 'archi
  *   - 'reflector'      Proposed by SessionReflector (Internal, defaults to shadow state)
  *   - 'llm_proposed'   Actively proposed by LLM during runtime (Internal, must enter shadow state)
  */
-export type PursuitOrigin = 'user' | 'system' | 'extractor' | 'reflector' | 'llm_proposed';
+export type PursuitOrigin = 'user' | 'system' | 'extractor' | 'reflector' | 'llm_proposed' | 'compass';
 
 /** Pursuit priority weight tier (stake × ... calculation used in arbitration) */
 export type PursuitStake = 'low' | 'medium' | 'high';

@@ -29,6 +29,8 @@
  * malformed file yields whatever could be read plus an empty rest — never a throw.
  */
 
+import { createHash } from 'node:crypto';
+
 export type CompassTrait = 'curiosity' | 'competitiveness' | 'conscientiousness';
 
 export interface CompassDrive {
@@ -168,4 +170,89 @@ export function renderCompassForPrompt(compass: CompassConfig | null): string {
     }
   }
   return lines.join('\n');
+}
+
+// ── Focus → pursuits (Phase 1b) ─────────────────────────────────────────────────────────────────
+//
+// The compass focus areas become pursuit rows so BOTH self-drive channels anchor to them: the in-turn
+// drives (which read active pursuits every user turn → proactive DURING work) and the background autonomous
+// loop (curiosity/pursuit drivers → work between turns). Without this the drivers have nothing of the
+// owner's to draw on (prod: in-turn "0 fired", background wandered on free curiosity).
+
+/** A pursuit the compass wants to exist. id is deterministic (compass:<slug>) for idempotency. */
+export interface DesiredCompassPursuit {
+  id: string;
+  title: string;
+  intent: string;
+  stakeWeight: number;
+  mode: 'active' | 'survey';
+}
+
+/** Minimal shape of an existing pursuit needed to reconcile (decouples this from the full Pursuit type). */
+export interface ExistingPursuitLite {
+  id: string;
+  origin: string;
+  stakeWeight: number;
+}
+
+export interface CompassPursuitReconcile {
+  create: DesiredCompassPursuit[];
+  updateStake: Array<{ id: string; stakeWeight: number }>;
+  archive: string[];
+}
+
+/**
+ * Deterministic, VALID pursuit id for a compass focus area. The pursuit id grammar is
+ * ^[a-z0-9][a-z0-9_-]{0,63}$ (no ':' , no non-ascii), so a Chinese focus name cannot go in raw. Form:
+ * `compass-<ascii-slug>-<hash8>` — the ascii slug aids readability when the name is latin, and the hash of
+ * the FULL name guarantees a unique, stable id for any name (idempotency: same name → same id). Exported so
+ * the reconcile and its tests share one source of truth.
+ */
+export function compassPursuitId(name: string): string {
+  const ascii = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  const h = createHash('sha256').update(name).digest('hex').slice(0, 8);
+  return ascii ? `compass-${ascii}-${h}` : `compass-${h}`;
+}
+
+function focusIntent(f: CompassFocus): string {
+  return f.mode === 'active'
+    ? `A focus area my owner declared in their compass. Advance it: make real, verifiable progress and report what moved.`
+    : `A focus area my owner declared in their compass, SURVEY-ONLY: track and summarize recent, real ` +
+        `developments — do NOT attempt to solve, prove, or "crack" it (that guards against doomed attacks).`;
+}
+
+/**
+ * Compute the idempotent reconcile between the compass focus and the currently-seeded compass pursuits.
+ * Pure + unit-testable; the caller applies it against the PursuitStore.
+ *   - create:  focus areas with no pursuit yet
+ *   - updateStake: existing compass pursuit whose stake drifted from the compass
+ *   - archive: compass-origin pursuits whose focus was removed from the compass (owner edited it out)
+ */
+export function reconcileCompassPursuits(
+  compass: CompassConfig | null,
+  existing: ReadonlyArray<ExistingPursuitLite>,
+): CompassPursuitReconcile {
+  const desired = new Map<string, DesiredCompassPursuit>();
+  for (const f of compass?.focus ?? []) {
+    const id = compassPursuitId(f.name);
+    // On a slug collision the last focus wins (rare; keeps the map 1:1 with ids).
+    desired.set(id, { id, title: f.name, intent: focusIntent(f), stakeWeight: f.stake, mode: f.mode });
+  }
+  const existingCompass = existing.filter((p) => p.origin === 'compass');
+  const existingIds = new Set(existingCompass.map((p) => p.id));
+
+  const create: DesiredCompassPursuit[] = [];
+  const updateStake: Array<{ id: string; stakeWeight: number }> = [];
+  for (const d of desired.values()) {
+    const cur = existingCompass.find((p) => p.id === d.id);
+    if (!cur) create.push(d);
+    else if (cur.stakeWeight !== d.stakeWeight) updateStake.push({ id: d.id, stakeWeight: d.stakeWeight });
+  }
+  const archive = existingCompass.filter((p) => !desired.has(p.id)).map((p) => p.id);
+
+  return { create, updateStake, archive };
 }

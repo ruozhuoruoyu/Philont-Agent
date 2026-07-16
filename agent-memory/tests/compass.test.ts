@@ -66,3 +66,106 @@ test('renderCompassForPrompt: prose + focus with survey/active tags', () => {
   assert.match(out, /survey only — track, do not try to solve\] number theory/);
   assert.equal(renderCompassForPrompt(null), '');
 });
+
+import { reconcileCompassPursuits, compassPursuitId } from '../src/compass.js';
+
+test('reconcileCompassPursuits: create missing, update drifted stake, archive removed', () => {
+  const compass = parseCompass(`---
+focus: 8 active philont itself
+focus: 6 survey AI agent field
+---
+p`)!;
+  // existing: one matching compass pursuit (stake drifted), one compass pursuit no longer in focus, one non-compass.
+  const existing = [
+    { id: compassPursuitId('philont itself'), origin: 'compass', stakeWeight: 5 }, // drifted 5 → 8
+    { id: 'compass-old-removed-abc12345', origin: 'compass', stakeWeight: 7 }, // removed from compass → archive
+    { id: 'some-user-pursuit', origin: 'user', stakeWeight: 9 }, // not compass → untouched
+  ];
+  const r = reconcileCompassPursuits(compass, existing);
+
+  // create: the survey focus has no pursuit yet
+  assert.equal(r.create.length, 1);
+  assert.equal(r.create[0].id, compassPursuitId('AI agent field'));
+  assert.equal(r.create[0].mode, 'survey');
+  assert.match(r.create[0].intent, /SURVEY-ONLY/);
+  assert.equal(r.create[0].stakeWeight, 6);
+  // active focus intent frames it to advance, not survey
+  // updateStake: philont-itself drifted 5 → 8
+  assert.deepEqual(r.updateStake, [{ id: compassPursuitId('philont itself'), stakeWeight: 8 }]);
+  // archive: the removed compass pursuit (never the user pursuit)
+  assert.deepEqual(r.archive, ['compass-old-removed-abc12345']);
+});
+
+test('reconcileCompassPursuits: no compass → archive all previously-seeded compass pursuits', () => {
+  const existing = [
+    { id: 'compass-a-deadbeef', origin: 'compass', stakeWeight: 8 },
+    { id: 'keep-me', origin: 'user', stakeWeight: 5 },
+  ];
+  const r = reconcileCompassPursuits(null, existing);
+  assert.deepEqual(r.archive, ['compass-a-deadbeef']);
+  assert.equal(r.create.length, 0);
+});
+
+test('reconcileCompassPursuits: active focus intent says advance, survey says do-not-solve', () => {
+  const c = parseCompass(`---
+focus: 9 active build the thing
+focus: 4 survey some field
+---
+p`)!;
+  const r = reconcileCompassPursuits(c, []);
+  const active = r.create.find((d) => d.id === compassPursuitId('build the thing'))!;
+  const survey = r.create.find((d) => d.id === compassPursuitId('some field'))!;
+  assert.match(active.intent, /Advance it/);
+  assert.doesNotMatch(active.intent, /do NOT attempt/);
+  assert.match(survey.intent, /do NOT attempt to solve/);
+});
+
+import { openMemoryDb } from '../src/index.js';
+import { BOOTSTRAP_ROOT_PURSUIT_ID } from '../src/schema.js';
+
+test('compass focus → real seeded pursuits, idempotent + reconciled against a live store', () => {
+  const { pursuits } = openMemoryDb(':memory:');
+  const apply = (compass: ReturnType<typeof parseCompass>) => {
+    const existing = pursuits.listActive(BOOTSTRAP_ROOT_PURSUIT_ID).map((p) => ({ id: p.id, origin: p.origin, stakeWeight: p.stakeWeight }));
+    const plan = reconcileCompassPursuits(compass, existing);
+    for (const d of plan.create) pursuits.createChild({ parentPursuitId: BOOTSTRAP_ROOT_PURSUIT_ID, id: d.id, title: d.title, intent: d.intent, stakeWeight: d.stakeWeight, origin: 'compass', status: 'active' });
+    for (const u of plan.updateStake) pursuits.setStakeWeight(u.id, u.stakeWeight);
+    for (const id of plan.archive) pursuits.updateStatus(id, 'archived');
+  };
+  const compassPursuits = () => pursuits.listActive(BOOTSTRAP_ROOT_PURSUIT_ID).filter((p) => p.origin === 'compass');
+
+  // First load: two focus areas → two active compass pursuits the drivers' listActive can see.
+  apply(parseCompass(`---
+focus: 8 active philont itself
+focus: 6 survey the field
+---
+p`));
+  let seeded = compassPursuits();
+  assert.equal(seeded.length, 2);
+  assert.equal(seeded.find((p) => p.id === compassPursuitId('philont itself'))!.stakeWeight, 8);
+
+  // Re-apply the SAME compass (a restart): idempotent — still exactly two, no duplicates.
+  apply(parseCompass(`---
+focus: 8 active philont itself
+focus: 6 survey the field
+---
+p`));
+  assert.equal(compassPursuits().length, 2, 'idempotent across restarts — no duplicate seeding');
+
+  // Owner edits: drops "the field", bumps philont stake to 9. → one archived, one stake-synced.
+  apply(parseCompass(`---
+focus: 9 active philont itself
+---
+p`));
+  const after = compassPursuits();
+  assert.equal(after.length, 1, 'removed focus is archived out of active');
+  assert.equal(after[0].id, compassPursuitId('philont itself'));
+  assert.equal(after[0].stakeWeight, 9, 'stake edit synced');
+});
+
+test('compassPursuitId: a Chinese focus name still yields a valid, stable id', () => {
+  const id = compassPursuitId('自演进 agent 研究');
+  assert.match(id, /^[a-z0-9][a-z0-9_-]{0,63}$/, 'must satisfy the pursuit id grammar');
+  assert.equal(compassPursuitId('自演进 agent 研究'), id, 'deterministic — same name → same id');
+  assert.notEqual(compassPursuitId('自演进 agent 研究'), compassPursuitId('another topic'), 'distinct names → distinct ids');
+});

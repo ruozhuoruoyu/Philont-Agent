@@ -62,6 +62,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
   parseCompass,
   renderCompassForPrompt,
+  reconcileCompassPursuits,
   type CompassConfig,
   TsDriveRuntime,
   TsTaskCommitmentDrive,
@@ -626,6 +627,41 @@ try {
 /** The owner's compass (null when there is no compass.md). */
 export function currentCompass(): CompassConfig | null {
   return loadedCompass;
+}
+
+// Focus → pursuits (Phase 1b): seed the compass focus areas as pursuit rows so BOTH self-drive channels
+// anchor to them — the in-turn drives (read active pursuits every user turn → proactive DURING work) and the
+// background autonomous loop (curiosity/pursuit drivers → work between turns). Idempotent (deterministic
+// compass:<slug> ids) + reconciling: a focus removed from the compass archives its pursuit; a stake edit
+// syncs. Runs even when the compass is null, so removing compass.md cleans up its seeded pursuits.
+try {
+  const existing = memory.pursuits.listActive(BOOTSTRAP_ROOT_PURSUIT_ID).map((p) => ({
+    id: p.id,
+    origin: p.origin,
+    stakeWeight: p.stakeWeight,
+  }));
+  const plan = reconcileCompassPursuits(loadedCompass, existing);
+  for (const d of plan.create) {
+    memory.pursuits.createChild({
+      parentPursuitId: BOOTSTRAP_ROOT_PURSUIT_ID,
+      id: d.id,
+      title: d.title,
+      intent: d.intent,
+      stakeWeight: d.stakeWeight,
+      origin: 'compass',
+      status: 'active',
+    });
+  }
+  for (const u of plan.updateStake) memory.pursuits.setStakeWeight(u.id, u.stakeWeight);
+  for (const id of plan.archive) memory.pursuits.updateStatus(id, 'archived');
+  if (plan.create.length || plan.updateStake.length || plan.archive.length) {
+    console.log(
+      `[compass] pursuits reconciled: +${plan.create.length} created, ` +
+        `~${plan.updateStake.length} stake-synced, -${plan.archive.length} archived`,
+    );
+  }
+} catch (e) {
+  console.warn('[compass] pursuit reconcile failed, ignoring', e);
 }
 
 // Adapt LLM to the ExtractorLlmClient interface

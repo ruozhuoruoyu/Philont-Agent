@@ -321,6 +321,17 @@ export class PursuitStore {
     if (r.changes === 0) throw new PursuitNotFoundError(id);
   }
 
+  /** Set the numeric stake weight (1-10). Used to keep a compass-seeded pursuit in sync with the compass.
+   * Deliberately does NOT touch last_touched_ts (a stake edit is not "working on" the pursuit). */
+  setStakeWeight(id: string, stakeWeight: number): void {
+    const w = Math.max(1, Math.min(10, Math.round(stakeWeight)));
+    this.db
+      .prepare<[number, number, string]>(
+        `UPDATE memory_pursuits SET stake_weight = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(w, Date.now(), id);
+  }
+
   /**
    * v24: mark/unmark "active research". on=true lets the autonomous loop advance it every tick
    * without waiting for staleness; on=false converges and stops (falls back to ordinary pursuit).
