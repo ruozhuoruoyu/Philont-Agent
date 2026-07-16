@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 36;
+export const SCHEMA_VERSION = 37;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -1019,6 +1019,11 @@ function migrateV24ToV25(db: Database.Database): void {
       phase             TEXT NOT NULL DEFAULT 'converge',
       diverge_idle_rounds INTEGER NOT NULL DEFAULT 0,
       rounds_run        INTEGER NOT NULL DEFAULT 0,
+      -- v37: when the followup loop last ASKED the owner about this idle session. Persisted (not in-memory)
+      -- so the "asked once, then quiet for the grace period → auto-archive" lifecycle survives a server
+      -- restart. Without this the in-memory ask log was cleared on every restart, so a stalled/unproven
+      -- exploration was re-asked forever and never auto-abandoned (it just nagged the owner each restart).
+      followup_asked_at INTEGER,
       created_at        INTEGER NOT NULL,
       updated_at        INTEGER NOT NULL
     );
@@ -1180,6 +1185,10 @@ function migrateV34ToV35(db: Database.Database): void {
 
 function migrateV35ToV36(db: Database.Database): void {
   addColumnIfMissing(db, 'memory_skills', 'offered_count', 'INTEGER NOT NULL DEFAULT 0');
+}
+
+function migrateV36ToV37(db: Database.Database): void {
+  addColumnIfMissing(db, 'reasoning_sessions', 'followup_asked_at', 'INTEGER');
 }
 
 function migrateV19ToV20(db: Database.Database): void {
@@ -1435,6 +1444,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 36) {
     migrateV35ToV36(db);
+  }
+  if (current < 37) {
+    migrateV36ToV37(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

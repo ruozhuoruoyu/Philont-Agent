@@ -64,6 +64,8 @@ export interface ReasoningSession {
   noProgressRounds: number;
   /** Per-session opt-in: when true, the background loop auto-advances this session round-by-round. */
   autoAdvance: boolean;
+  /** When the followup loop last asked the owner about this idle session (persisted; null = never asked). */
+  followupAskedAt: number | null;
   /** Which reasoning profile this session runs (formal proof vs general evidence-based deliberation). Default 'formal'. */
   mode: ReasoningSessionMode;
   /** Exploration phase: 'converge' (eliminative, default) vs 'diverge' (generative). Ratchets diverge→converge. */
@@ -110,6 +112,7 @@ interface SessionRow {
   budget_spent: number;
   no_progress_rounds: number;
   auto_advance: number;
+  followup_asked_at: number | null;
   mode: string | null;
   phase: string | null;
   diverge_idle_rounds: number;
@@ -148,6 +151,7 @@ function rowToSession(r: SessionRow): ReasoningSession {
     budgetSpent: r.budget_spent,
     noProgressRounds: r.no_progress_rounds ?? 0,
     autoAdvance: !!r.auto_advance,
+    followupAskedAt: r.followup_asked_at ?? null,
     mode: (r.mode === 'deliberate' ? 'deliberate' : 'formal') as ReasoningSessionMode,
     phase: (r.phase === 'diverge' ? 'diverge' : 'converge') as ReasoningPhase,
     divergeIdleRounds: r.diverge_idle_rounds ?? 0,
@@ -522,6 +526,18 @@ export class ReasoningStore {
         `UPDATE reasoning_sessions SET auto_advance = ?, updated_at = ? WHERE id = ?`,
       )
       .run(on ? 1 : 0, Date.now(), id);
+  }
+
+  /**
+   * Record that the followup loop just asked the owner about this idle session. Persisted so the
+   * "asked once → quiet for the grace period → auto-archive" lifecycle survives a server restart.
+   * Deliberately does NOT bump updated_at (that would look like the session was worked on, defeating the
+   * quiet-since-ask check).
+   */
+  setFollowupAskedAt(id: string, at: number = Date.now()): void {
+    this.db
+      .prepare<[number, string]>(`UPDATE reasoning_sessions SET followup_asked_at = ? WHERE id = ?`)
+      .run(at, id);
   }
 
   /** Active sessions opted into background auto-advance (most recently updated first). */

@@ -36,7 +36,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 36);
+  assert.equal(SCHEMA_VERSION, 37);
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
   assert.ok(tableExists(db, 'reasoning_sessions'));
@@ -446,10 +446,35 @@ test('migration v35 → v36: memory_skills gets offered_count, existing skills i
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 36);
   assert.ok(hasColumn(db, 'memory_skills', 'offered_count'), 'v36 must add offered_count');
   const row = db.prepare(`SELECT use_count, offered_count FROM memory_skills WHERE id = 'sk-old'`).get() as
     { use_count: number; offered_count: number };
   assert.equal(row.use_count, 7, 'pre-existing skill data must survive the migration');
   assert.equal(row.offered_count, 0, 'a skill migrated in has no offer history — it backfills to 0, not to its use_count');
+});
+
+// v37: reasoning_sessions.followup_asked_at. Persists the followup ask so the ask-once + auto-archive
+// lifecycle survives a restart (the in-memory version was cleared on every restart → stale explorations
+// re-asked forever, never auto-archived).
+test('migration v36 → v37: reasoning_sessions gets followup_asked_at, existing sessions intact', () => {
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.exec(`ALTER TABLE reasoning_sessions DROP COLUMN followup_asked_at;`);
+  db.prepare(`UPDATE memory_meta SET value = '36' WHERE key = 'schema_version'`).run();
+  assert.ok(!hasColumn(db, 'reasoning_sessions', 'followup_asked_at'), 'degraded state must really lack the column');
+
+  db.prepare(
+    `INSERT INTO reasoning_sessions (id, goal, status, created_at, updated_at)
+     VALUES ('rs-old', 'an old exploration', 'active', 1000, 2000)`
+  ).run();
+
+  initSchema(db);
+
+  assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 37);
+  assert.ok(hasColumn(db, 'reasoning_sessions', 'followup_asked_at'), 'v37 must add followup_asked_at');
+  const row = db.prepare(`SELECT goal, followup_asked_at FROM reasoning_sessions WHERE id = 'rs-old'`).get() as
+    { goal: string; followup_asked_at: number | null };
+  assert.equal(row.goal, 'an old exploration', 'pre-existing session survives the migration');
+  assert.equal(row.followup_asked_at, null, 'backfills to null — a migrated session was never asked');
 });

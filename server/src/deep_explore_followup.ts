@@ -10,8 +10,8 @@
  * It deliberately does NOT run the round unsupervised (deep_explore is walled off from the background
  * whitelist by design) — it surfaces the open thread and asks; on "继续" the normal turn advances it.
  * Reuses the same notify path as deep_explore_autoadvance. Default ON;
- * PHILONT_DEEP_EXPLORE_FOLLOWUP=0/off/false/no disables. In-memory "asked" dedup (ask once per session per
- * process — re-asking once after a restart is acceptable). Silence threshold
+ * PHILONT_DEEP_EXPLORE_FOLLOWUP=0/off/false/no disables. The "asked" state is PERSISTED on the session
+ * (followupAskedAt) so the ask-once + auto-archive lifecycle survives restarts. Silence threshold
  * PHILONT_DEEP_EXPLORE_FOLLOWUP_SILENCE_HOURS (default 6).
  */
 import type { PhraseLang } from './channel_phrases.js';
@@ -121,9 +121,11 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
   const intervalMs = deps.intervalMs ?? 10 * 60_000;
   const silenceMs = deps.silenceMs ?? silenceMsFromEnv();
   const now = deps.now ?? (() => Date.now());
-  // id → askedAt (ms). Map (not Set) so the auto-archive pass knows WHEN we asked, and can tell a
-  // re-engagement (updatedAt advanced past askedAt) from prolonged silence.
-  const asked = new Map<string, number>();
+  // 2026-07-16: the "have we asked, and when?" state is PERSISTED on the session (followupAskedAt), not an
+  // in-memory Map. The in-memory version was cleared on every server restart, so a stalled/unproven
+  // exploration was re-asked forever and never accumulated the quiet-since-ask period auto-archive needs —
+  // it just nagged the owner again after each restart (prod 2026-07-15: three stale explorations re-asked
+  // every morning). Persisted state makes the "asked once → quiet → auto-archive" lifecycle survive restarts.
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
 
@@ -145,9 +147,9 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
     const archivedThisTick = new Set<string>();
     if (autoArchiveEnabled()) {
       for (const s of sessions) {
-        const askedAt = asked.get(s.id);
+        const askedAt = s.followupAskedAt ?? undefined;
         if (askedAt === undefined) continue;
-        if (s.updatedAt > askedAt) { asked.delete(s.id); continue; } // re-engaged → leave it alone
+        if (s.updatedAt > askedAt) continue; // re-engaged after the ask → leave it alone
         let snap;
         try { snap = deps.reasoning.summarizeSession(s.id); } catch { continue; }
         if (!snap) continue;
@@ -158,7 +160,6 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
           )
         ) {
           try { deps.reasoning.setSessionStatus(s.id, 'abandoned'); } catch { continue; }
-          asked.delete(s.id);
           archivedThisTick.add(s.id);
           const g = s.goal.length > 50 ? s.goal.slice(0, 50) + '…' : s.goal;
           console.log(`[deep-explore-followup] auto-archived stale stuck session ${s.id} ("${g}")`);
@@ -175,7 +176,9 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
     // ── Pass 2: ask ONCE about the most recently-started newly-quiet open session ─────────────────
     // Collect ALL newly-quiet open sessions, ask about exactly ONE (most recently STARTED = current focus,
     // what "继续" targets), and mark the WHOLE batch as asked (anti-spam: no one-message-per-session drip).
-    const alreadyAsked = new Set(asked.keys());
+    const alreadyAsked = new Set(
+      sessions.filter((s) => s.followupAskedAt != null && s.updatedAt <= s.followupAskedAt).map((s) => s.id),
+    );
     const candidates: Array<{ id: string; goal: string; createdAt: number; owner: string | null; open: number; proved: number }> = [];
     for (const s of sessions) {
       if (archivedThisTick.has(s.id)) continue; // just archived from the stale snapshot — do not re-ask
@@ -213,7 +216,8 @@ export function createFollowUpLoop(deps: FollowUpDeps): FollowUpLoop {
         .sort((a, b) => b.createdAt - a.createdAt); // most recently started first = current focus
       if (ownSet.length === 0) continue;
       const primary = ownSet[0];
-      for (const c of ownSet) asked.set(c.id, nowMs); // silence this owner's batch — one ask per batch
+      // Persist the ask so it survives a restart (the whole point of this fix).
+      for (const c of ownSet) deps.reasoning.setFollowupAskedAt(c.id, nowMs);
       const goal = primary.goal.length > 50 ? primary.goal.slice(0, 50) + '…' : primary.goal;
       const others = ownSet.length - 1;
       // A session with ZERO proofs is stuck — lead with "abandon" instead of pitching "continue".

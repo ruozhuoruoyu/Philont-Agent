@@ -30,6 +30,12 @@ test('createFollowUpLoop: asks once per quiet open session; skips fresh / no-ope
     const snaps: Record<string, number> = { 'open-quiet': 4, 'open-fresh': 2, 'no-open': 0 };
     const reasoning = {
       listActiveSessions: () => sessions,
+      // Persist the ask onto the fixture, mirroring the real store — so re-ask suppression and
+      // auto-archive read followupAskedAt back on the next tick (the restart-survival fix).
+      setFollowupAskedAt: (id: string, at: number) => {
+        const t = sessions.find((x) => x.id === id);
+        if (t) (t as { followupAskedAt?: number }).followupAskedAt = at;
+      },
       summarizeSession: (id: string) => ({
         status: 'active',
         provedCount: 0,
@@ -72,6 +78,12 @@ test('createFollowUpLoop: many quiet open sessions → ONE batched ask (most rec
     ];
     const reasoning = {
       listActiveSessions: () => sessions,
+      // Persist the ask onto the fixture, mirroring the real store — so re-ask suppression and
+      // auto-archive read followupAskedAt back on the next tick (the restart-survival fix).
+      setFollowupAskedAt: (id: string, at: number) => {
+        const t = sessions.find((x) => x.id === id);
+        if (t) (t as { followupAskedAt?: number }).followupAskedAt = at;
+      },
       summarizeSession: () => ({ status: 'active', provedCount: 0, deadCount: 0, openFrontierCount: 5 }),
     } as unknown as Reasoning;
     const asks: Array<{ text: string; owner?: string }> = [];
@@ -119,6 +131,12 @@ test('createFollowUpLoop: stuck session → ask leads with abandon option; auto-
     const abandoned: string[] = [];
     const reasoning = {
       listActiveSessions: () => sessions,
+      // Persist the ask onto the fixture, mirroring the real store — so re-ask suppression and
+      // auto-archive read followupAskedAt back on the next tick (the restart-survival fix).
+      setFollowupAskedAt: (id: string, at: number) => {
+        const t = sessions.find((x) => x.id === id);
+        if (t) (t as { followupAskedAt?: number }).followupAskedAt = at;
+      },
       summarizeSession: () => ({ status: 'stuck', provedCount: 0, deadCount: 0, openFrontierCount: 5 }),
       setSessionStatus: (id: string, st: string) => { if (st === 'abandoned') abandoned.push(id); },
     } as unknown as Reasoning;
@@ -154,6 +172,12 @@ test('createFollowUpLoop: re-engagement after the ask cancels auto-archive', () 
     const abandoned: string[] = [];
     const reasoning = {
       listActiveSessions: () => sessions,
+      // Persist the ask onto the fixture, mirroring the real store — so re-ask suppression and
+      // auto-archive read followupAskedAt back on the next tick (the restart-survival fix).
+      setFollowupAskedAt: (id: string, at: number) => {
+        const t = sessions.find((x) => x.id === id);
+        if (t) (t as { followupAskedAt?: number }).followupAskedAt = at;
+      },
       summarizeSession: () => ({ status: 'active', provedCount: 0, deadCount: 0, openFrontierCount: 3 }),
       setSessionStatus: (id: string, st: string) => { if (st === 'abandoned') abandoned.push(id); },
     } as unknown as Reasoning;
@@ -187,6 +211,12 @@ test('createFollowUpLoop: each owner is carded with ONLY their own session count
     ];
     const reasoning = {
       listActiveSessions: () => sessions,
+      // Persist the ask onto the fixture, mirroring the real store — so re-ask suppression and
+      // auto-archive read followupAskedAt back on the next tick (the restart-survival fix).
+      setFollowupAskedAt: (id: string, at: number) => {
+        const t = sessions.find((x) => x.id === id);
+        if (t) (t as { followupAskedAt?: number }).followupAskedAt = at;
+      },
       summarizeSession: () => ({ status: 'active', provedCount: 1, deadCount: 0, openFrontierCount: 3 }),
     } as unknown as Reasoning;
 
@@ -226,6 +256,12 @@ test('createFollowUpLoop: legacy NULL-owner session appears in an owner card (mi
     ];
     const reasoning = {
       listActiveSessions: () => sessions,
+      // Persist the ask onto the fixture, mirroring the real store — so re-ask suppression and
+      // auto-archive read followupAskedAt back on the next tick (the restart-survival fix).
+      setFollowupAskedAt: (id: string, at: number) => {
+        const t = sessions.find((x) => x.id === id);
+        if (t) (t as { followupAskedAt?: number }).followupAskedAt = at;
+      },
       summarizeSession: () => ({ status: 'active', provedCount: 1, deadCount: 0, openFrontierCount: 3 }),
     } as unknown as Reasoning;
     const asks: Array<{ text: string; owner?: string }> = [];
@@ -243,5 +279,55 @@ test('createFollowUpLoop: legacy NULL-owner session appears in an owner card (mi
   } finally {
     if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
     else process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP = prev;
+  }
+});
+
+// 2026-07-16 regression: the ask state is PERSISTED (followupAskedAt), so it survives a server restart.
+// The bug: the in-memory ask log was cleared on every restart, so a stalled/unproven exploration was
+// re-asked forever and never accumulated the quiet-since-ask period auto-archive needs — it just nagged the
+// owner again after each restart (prod: three stale explorations re-asked every morning).
+test('createFollowUpLoop: a persisted ask survives a "restart" (new loop) — no re-ask, and grace still counts', () => {
+  const prev = process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  const prevA = process.env.PHILONT_DEEP_EXPLORE_AUTOARCHIVE;
+  delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP;
+  delete process.env.PHILONT_DEEP_EXPLORE_AUTOARCHIVE;
+  try {
+    // The session already carries followupAskedAt from a PREVIOUS process (asked at t=0), never re-engaged.
+    const sessions = [
+      { id: 'stale', goal: 'Prove Goldbach by contradiction', updatedAt: 0, createdAt: 0, ownerSessionId: 'wechat:u', followupAskedAt: 0 },
+    ];
+    const reasoning = {
+      listActiveSessions: () => sessions,
+      summarizeSession: () => ({ status: 'stuck', provedCount: 0, deadCount: 0, openFrontierCount: 1 }),
+      setFollowupAskedAt: (id: string, at: number) => {
+        const t = sessions.find((x) => x.id === id);
+        if (t) (t as { followupAskedAt?: number }).followupAskedAt = at;
+      },
+      setSessionStatus: (id: string, st: string) => {
+        const t = sessions.find((x) => x.id === id);
+        if (t) (t as { status?: string }).status = st;
+      },
+    } as unknown as Reasoning;
+
+    const asks: Array<{ text: string }> = [];
+    // Fresh loop object = a new process after restart. Its in-memory state is empty; only the persisted
+    // followupAskedAt remains.
+    const GRACE = 24 * 3_600_000;
+    const loop = createFollowUpLoop({
+      reasoning,
+      notify: (t) => asks.push({ text: t }),
+      silenceMs: SIX_H,
+      now: () => GRACE + 1, // well past the ask (t=0) + grace
+    });
+    loop.tickOnce();
+
+    // It must NOT re-ask (persisted ask suppresses it), and — because the persisted ask is old enough — it
+    // auto-archives the hopeless stall instead of nagging again.
+    assert.equal(sessions[0].status, 'abandoned', 'the long-stale unproven exploration is finally archived across the restart');
+    assert.ok(!asks.some((a) => /要我放弃它吗|继续/.test(a.text)), 'must NOT re-ask the stale exploration after restart');
+    assert.ok(asks.some((a) => /归档/.test(a.text)), 'notifies about the archive');
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP; else process.env.PHILONT_DEEP_EXPLORE_FOLLOWUP = prev;
+    if (prevA === undefined) delete process.env.PHILONT_DEEP_EXPLORE_AUTOARCHIVE; else process.env.PHILONT_DEEP_EXPLORE_AUTOARCHIVE = prevA;
   }
 });
