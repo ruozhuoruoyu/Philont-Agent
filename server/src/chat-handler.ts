@@ -60,6 +60,9 @@ import {
   BOOTSTRAP_ROOT_PURSUIT_ID,
   DEFAULT_CONSTITUTION_VALUES,
   DEFAULT_CONSTITUTION_RED_LINES,
+  parseCompass,
+  renderCompassForPrompt,
+  type CompassConfig,
   TsDriveRuntime,
   TsTaskCommitmentDrive,
   startAutonomousLoop,
@@ -112,6 +115,8 @@ import {
 import type { Tool } from '@agent/policy';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { readFileSync, existsSync } from 'node:fs';
+import { dirname as pathDirname, join as pathJoin } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
@@ -569,6 +574,30 @@ export const memory = openMemoryDb(MEMORY_DB_PATH, {
     // dir defaults to <dbDir>/backups
   },
 });
+
+// ── compass.md — the owner-authored source that orients the intrinsic drives + declares the self-drive's
+// focus (see agent-memory/src/compass.ts). Lives beside the DB (or PHILONT_COMPASS_PATH). Absent = neutral
+// defaults: drives auto-tune unbounded and there is no declared focus. Loaded once at startup; editing it
+// is a restart (Phase 2 will hot-reload + learn).
+const COMPASS_PATH = process.env.PHILONT_COMPASS_PATH || pathJoin(pathDirname(MEMORY_DB_PATH), 'compass.md');
+let loadedCompass: CompassConfig | null = null;
+try {
+  if (existsSync(COMPASS_PATH)) {
+    loadedCompass = parseCompass(readFileSync(COMPASS_PATH, 'utf8'));
+    console.log(
+      `[compass] loaded ${COMPASS_PATH}: ${loadedCompass?.focus.length ?? 0} focus area(s), ` +
+        `drives=[${Object.keys(loadedCompass?.drives ?? {}).join(',') || 'none'}]`,
+    );
+  } else {
+    console.log(`[compass] none at ${COMPASS_PATH} — neutral defaults (drives auto-tune unbounded, no declared focus)`);
+  }
+} catch (e) {
+  console.warn('[compass] failed to load, ignoring', e);
+}
+/** The owner's compass (null when there is no compass.md). */
+export function currentCompass(): CompassConfig | null {
+  return loadedCompass;
+}
 
 // Adapt LLM to the ExtractorLlmClient interface
 const extractorLlm: ExtractorLlmClient = {
@@ -2229,7 +2258,7 @@ const AUTONOMOUS_DRIVERS = [
       } catch {
         initiatives = undefined;
       }
-      return currentTraitProfile({ driveOutcomes: memory.driveOutcomes, initiatives });
+      return currentTraitProfile({ driveOutcomes: memory.driveOutcomes, initiatives }, process.env, Date.now(), loadedCompass);
     },
     isSystemStuck: () => {
       // Same "high" tier as the ViabilityGate's same_root_cause weighting — a constant, no env knob.
@@ -2712,10 +2741,12 @@ if (!UNDER_TEST) autonomousLoop.start();
 export function autonomySelfhoodStatus() {
   return buildSelfhoodStatus({
     traits: () =>
-      currentTraitProfile({
-        driveOutcomes: memory.driveOutcomes,
-        initiatives: autonomousLoop.initiatives,
-      }),
+      currentTraitProfile(
+        { driveOutcomes: memory.driveOutcomes, initiatives: autonomousLoop.initiatives },
+        process.env,
+        Date.now(),
+        loadedCompass,
+      ),
     traitsLive: traitsLiveEnabled(),
     facts: memory.facts,
     pursuits: memory.pursuits,
@@ -2739,10 +2770,12 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
   // WS1 (selfhood_closure): trait-tuned stuck threshold — competitiveness earned from lived
   // history buys more no-progress rounds before the loop declares stuck.
   traits: () =>
-    currentTraitProfile({
-      driveOutcomes: memory.driveOutcomes,
-      initiatives: autonomousLoop.initiatives,
-    }),
+    currentTraitProfile(
+      { driveOutcomes: memory.driveOutcomes, initiatives: autonomousLoop.initiatives },
+      process.env,
+      Date.now(),
+      loadedCompass,
+    ),
   notify: (text, opts) => {
     for (const [, send] of webuiClients) send({ type: 'milestone', text });
     if (opts?.important) {
@@ -5049,6 +5082,11 @@ function buildFreshMessages(
     ? '\n\n' + renderCapabilityManifest(buildCapabilityState(tools.list().length))
     : '';
 
+  // The owner's compass — their authored voice + declared focus areas. This is how "what I care about"
+  // reaches the model (Phase 1). Empty when there is no compass.md.
+  const compassRendered = renderCompassForPrompt(loadedCompass);
+  const compassBlock = compassRendered ? `\n\n## From my owner (compass)\n${compassRendered}` : '';
+
   const init: NativeMessage[] = [
     {
       role: 'user',
@@ -5061,6 +5099,7 @@ function buildFreshMessages(
         ` You stay with one user across channels (WeChat, Telegram, web) and act through a broad, permission-gated toolset` +
         ` — files, shell, web, persistent memory, skills, vision, and mounted MCP servers. Working directory: ${process.cwd()}.` +
         charterBlock +
+        compassBlock +
         capabilityBlock +
         `\n\nTool-use principles:` +
         `\n- Do not call tools for ordinary chit-chat. (Exception: persisting a durable fact the user just revealed is never "chit-chat" — store_fact it even mid-conversation; see the proactive-memory principle below.)` +

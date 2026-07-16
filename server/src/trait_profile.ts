@@ -25,6 +25,9 @@ import {
   type DriveOutcomeStore,
   type InitiativeStore,
   type TraitProfile,
+  clampTraitsToCompass,
+  compassBaselineTraits,
+  type CompassConfig,
 } from '@agent/memory';
 
 /** driveId of the kernel task-commitment drive as registered in chat-handler. */
@@ -53,8 +56,11 @@ export function currentTraitProfile(
   deps: TraitProfileDeps,
   env: NodeJS.ProcessEnv = process.env,
   now: number = Date.now(),
+  compass: CompassConfig | null = null,
 ): TraitProfile {
-  if (!traitsLiveEnabled(env)) return DEFAULT_TRAITS;
+  // The owner's compass is the leash: when live tuning is off, sit at the compass baseline (0.5 if none);
+  // when on, the behavior-derived traits move freely but are clamped INSIDE the compass bounds.
+  if (!traitsLiveEnabled(env)) return compassBaselineTraits(compass);
   try {
     // listByDrive returns fired_at DESC; EWMA wants chronological order.
     const scores = deps.driveOutcomes
@@ -70,9 +76,15 @@ export function currentTraitProfile(
       curiosity = ratioWithShrinkage(c.done, c.failed);
     }
 
-    return deriveTraitProfile({ competitiveness, curiosity });
+    // Unset traits (conscientiousness has no live signal yet) fall back to the compass baseline, not 0.5.
+    const derived = deriveTraitProfile({
+      competitiveness,
+      curiosity,
+      conscientiousness: compass?.drives.conscientiousness?.baseline,
+    });
+    return clampTraitsToCompass(derived, compass);
   } catch (e) {
-    console.warn('[traits] currentTraitProfile failed, falling back to defaults', e);
-    return DEFAULT_TRAITS;
+    console.warn('[traits] currentTraitProfile failed, falling back to compass baseline', e);
+    return compassBaselineTraits(compass);
   }
 }
