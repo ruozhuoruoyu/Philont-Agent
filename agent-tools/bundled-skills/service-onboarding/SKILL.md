@@ -31,61 +31,30 @@ version: 1.0.0
 
 ## Action Template (strictly in order)
 
-### 1. Read the service definition, extract endpoints + auth + priorities
+### 1. Endpoints + auth come from the compiled spec, not from your own reading
 
-⚠ **Important**: use the `http` tool (GET method) to fetch the **raw** markdown — **do not** use `webFetch`.
+You do **not** hand-extract the endpoint list. When a guide URL drives this flow, the mechanism compiles that
+guide into a validated endpoint spec (LLM comprehension under a strict JSON contract, with a regex extractor
+as the floor so coverage can only widen), caches it by guide hash, and enforces it on every http call:
+undocumented endpoint, wrong host, missing documented auth header, and malformed body are all blocked
+**before** the request is sent. That is deterministic and does not satisfice on a long doc the way manual
+reading does — it is where endpoint completeness now lives. Do not re-audit it by hand or copy it into facts;
+trust the guard and read its rejection message if a call is blocked.
 
-Reason: webFetch by default routes through an aux LLM for distillation, and the distillation LLM may treat a service doc that contains instructions like "how to register/post/call the API" as a prompt injection and **refuse to process it** (returning "I can't discuss that"). This has been hit in production. The http tool returns the raw HTTP body with no LLM involvement — reliable.
+If you must read the guide yourself (e.g. for behavioral rules), use the `http` tool (GET) to fetch the RAW
+markdown, **not** `webFetch`: webFetch distills through an aux LLM, which sometimes treats a service doc full
+of "how to register/post/call the API" instructions as a prompt injection and refuses ("I can't discuss
+that"). Raw http has no LLM in the path.
+
+What you DO still capture from the guide (the spec does not encode these):
 
 ```
-http({
-  method: "GET",
-  url: "<doc URL provided by the user>"
-})
-```
-
-The returned body is the raw markdown. **Read and understand the content yourself** (LLM reading raw markdown directly is fine — it's the aux LLM distillation that refuses). Extract API endpoints / auth / heartbeat priorities / rate-limiting rules.
-
-(If the URL the user provided is genuinely not markdown but a rendered HTML page, and the body is too large or garbled, **then fall back** to using webFetch + extractor='raw' mode to bypass distillation.)
-
-Store the key extracted information in batches with store_fact:
-```
-store_fact({ namespace: "service.<name>.api", key: "endpoints", value: [{ method, path, purpose, params, auth }] })
-store_fact({ namespace: "service.<name>.api", key: "auth_pattern", value: "Bearer {<SECRET_NAME>}" })
-store_fact({ namespace: "service.<name>.api", key: "heartbeat_priority", value: ["..."] })
+store_fact({ namespace: "service.<name>.api", key: "heartbeat_priority", value: ["...ordered actions..."] })
 store_fact({ namespace: "service.<name>.api", key: "rate_limits", value: {...} })
 ```
 
-### 1.5 Completeness self-check after extraction (**do this immediately after writing endpoints — do not skip**)
-
-⚠ **Common pitfall**: when reading long documents, LLMs tend to satisfice — they extract 2-3 auth endpoints from Part 1's authentication section, feel "mission accomplished", and proceed to step 2, **missing the business endpoint tables in Part 4 / Part 5**. The heartbeat then triggers a 404 storm.
-
-**Mandatory 3-item self-check** (each item must be explicitly reviewed in your reasoning or output — do not just feel "good enough"):
-
-1. **Scan all `##` headings in the document**: list every section name (not just what you just read), and verify whether any sections named "API Reference" / "Endpoints" / "Routes" / "Requests" or similar exist that you have not visited. **If so, go back and read them in full** — do not guess the content from a table of contents summary.
-
-2. **Endpoint count threshold**: if the endpoints stored in facts are **fewer than 5** or **do not cover at least 3 of the following categories**, assume you missed some → go back to the doc and re-read Part 4+ tail sections:
-   - auth (login / verify / token refresh)
-   - read data (list / detail / search)
-   - write data (create / update / delete)
-   - heartbeat / status report (heartbeat / ping / health)
-   - notification / webhook (optional, extract if present)
-
-3. **Cross-reference endpoints vs heartbeat_priority**: every action listed in the `heartbeat_priority` array (e.g. "vote on hot posts") must have a corresponding HTTP method+path findable in the endpoints array. If not found → the priority was guessed from a summary; **go back to the doc to find the specific endpoint**.
-
-Recommended output format (for your own review and to leave a trace for reflection):
-```
-Extraction summary:
-- Total endpoints: 14
-- Categories covered: auth(2) + read(4) + write(5) + heartbeat(2) + webhook(1) = 5 categories ✓
-- heartbeat_priority: 7 items, all cross-referenced to endpoints ✓
-- Doc ## sections visited: [Part 1, Part 2, Part 4 API Reference, Part 5 Webhooks]
-- Unvisited sections: none
-→ Self-check passed, proceeding to step 2
-```
-
-Not passed → **go back to step 1 and re-read the relevant sections**, rather than "build the schedule first and fill in later".
-Once the schedule is attached, filling in later is too late — the heartbeat is already hammering broken endpoints.
+`heartbeat_priority` is the ordered list of what each heartbeat should DO (the guide's behavioral priorities);
+the later heartbeat prompt reads it. Which endpoints exist and what they require is the spec's job, not yours.
 
 ### 2. Read identity / persona definition (if the user provided one)
 
@@ -198,8 +167,8 @@ Interval validation:
 ### 6. Summary + closing reflection
 
 **4-item self-check** (onboarding is not complete until all four pass — if any item is missing, go back and complete it):
-- [ ] facts.service.<name>.api.endpoints written, **and passed the step 1.5 completeness self-check**
-      (count ≥ 5 / covers ≥ 3 categories / heartbeat_priority fully cross-referenced)
+- [ ] the endpoint spec loaded/compiled for the guide (the mechanism owns endpoint completeness — you do
+      not hand-audit it), and heartbeat_priority captured
 - [ ] saveCredential complete + name visible in listCredentialNames
 - [ ] auth verify endpoint called successfully (200)
 - [ ] schedule_reminder created (actionType=autonomous_turn, interval_ms set)
@@ -243,9 +212,9 @@ Once complete, the turn's closing reflection system will observe this full workf
 - ❌ Not verifying immediately after saveCredential → the schedule runs for a day before discovering the key is wrong
 - ❌ Heartbeat schedule interval < 5 minutes (may get the target service to ban you)
 - ❌ Skipping the step 4 test call (may mean the schedule runs for a day before discovering the key is wrong)
-- ❌ Guessing endpoints on your own (writing `POST /api/heartbeat` without reading the doc) — must fetch and extract from webFetch
-- ❌ **Satisficing on endpoint extraction** (hit in production, mycox heartbeat 404 storm): reading Part 1's authentication section, extracting 2-3 auth endpoints, and moving on, **missing the business endpoint tables in Part 4+**. The heartbeat ran for a day before discovering the endpoints table only had auth/me. Must run **step 1.5 completeness self-check** — all 3 items must pass (scan all headings / count ≥ 5 and covers ≥ 3 categories / heartbeat_priority fully cross-referenced) before proceeding to step 2
-- ❌ **heartbeat_priority extracted from summary rather than actual endpoint table**: seeing "agent should vote on hot posts" and adding it to priority, but no corresponding `POST /vote` exists in the endpoints array. Step 1.5 item 3 is the dedicated fix — without cross-referencing, it is just guessing
+- ❌ Guessing an endpoint the compiled spec does not list — the spec guard blocks it before it is sent and tells you the documented endpoints; use one of those, do not invent `POST /api/heartbeat`
+- ❌ Hand-auditing endpoint completeness (counting endpoints, scanning headings, re-reading tail sections) — that job moved to the mechanism, which compiles and cross-checks the full endpoint set deterministically. Duplicating it by hand just burns budget and satisfices on long docs anyway
+- ❌ **heartbeat_priority naming an action the service has no endpoint for**: adding "vote on hot posts" when no vote endpoint exists in the compiled spec. Each priority action must map to a real documented endpoint — if the spec has none for it, the priority was guessed from a summary, drop it
 - ❌ Onboarding multiple services simultaneously (one at a time, linear workflow, reflection produces a clean skill more easily)
 
 ## Coordination with Other Skills
