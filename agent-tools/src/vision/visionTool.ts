@@ -22,6 +22,7 @@
 
 import { readFile } from 'node:fs/promises';
 import type { Tool } from '@agent/policy';
+import { resolveEndpoint } from '../utils/aux-llm.js';
 
 const DEFAULT_MAX_TOKENS = 1024;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -224,7 +225,10 @@ export const visionTool: Tool = {
     //    openai /chat/completions + image_url data URL)
     const b64 = bytes.toString('base64');
     const isAnthropic = cfg.protocol === 'anthropic';
-    const endpoint = cfg.baseUrl.replace(/\/+$/, '') + (isAnthropic ? '/v1/messages' : '/chat/completions');
+    // Same base-URL tolerance as the aux client (bare host / +/v1 / +non-version prefix / full endpoint):
+    // VISION_LLM_BASE_URL carried the identical footgun — a bare host dropped the /v1 → 404, and an
+    // anthropic base ending in /v1 double-appended to /v1/v1/messages.
+    const endpoint = resolveEndpoint(cfg.baseUrl, isAnthropic ? 'messages' : 'chat/completions');
     const body = isAnthropic
       ? {
           model: cfg.model,

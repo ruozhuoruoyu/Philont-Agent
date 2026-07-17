@@ -431,7 +431,7 @@ async function callAnthropicCompatible(
  * 'chat/completions' (OpenAI) or 'messages' (Anthropic); the same tolerance applies to both — an anthropic
  * base ending in /v1 previously double-appended to /v1/v1/messages.
  */
-function resolveEndpoint(baseUrl: string, method: 'chat/completions' | 'messages'): string {
+export function resolveEndpoint(baseUrl: string, method: 'chat/completions' | 'messages'): string {
   const trimmed = baseUrl.replace(/\/+$/, '');
   // Already the full endpoint (…/chat/completions or …/messages) → use verbatim.
   if (new RegExp(`/${method}$`).test(trimmed)) return trimmed;

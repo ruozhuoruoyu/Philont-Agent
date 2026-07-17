@@ -192,7 +192,8 @@ const FIELDS: Field[] = [
   { key: 'AUX_LLM_PROTOCOL', label: { zh: '协议', en: 'Protocol' }, type: 'select', group: '辅助小模型',
     options: [{ value: 'openai', label: { zh: 'openai', en: 'openai' } }, { value: 'anthropic', label: { zh: 'anthropic', en: 'anthropic' } }],
     help: { zh: '可选。配齐协议/端点/Key/模型后,webFetch 蒸馏等杂活走便宜小模型。默认 openai。', en: 'Optional. Once all four are set, chores (webFetch distillation, etc.) use a cheap small model. Defaults to openai.' } },
-  { key: 'AUX_LLM_BASE_URL', label: { zh: 'Base URL', en: 'Base URL' }, type: 'text', group: '辅助小模型', placeholder: 'https://api.deepseek.com' },
+  { key: 'AUX_LLM_BASE_URL', label: { zh: 'Base URL', en: 'Base URL' }, type: 'text', group: '辅助小模型', placeholder: 'https://api.deepseek.com',
+    help: { zh: '可直接填主模型同款地址。光主机名、带 /v1、或完整端点都能识别。', en: 'The same address as the main model works. Bare host, with /v1, or the full endpoint are all accepted.' } },
   { key: 'AUX_LLM_API_KEY', label: { zh: 'Key', en: 'Key' }, type: 'secret', group: '辅助小模型' },
   { key: 'AUX_LLM_MODEL', label: { zh: '模型', en: 'Model' }, type: 'text', group: '辅助小模型', placeholder: 'deepseek-chat' },
 
@@ -201,7 +202,8 @@ const FIELDS: Field[] = [
     options: [{ value: 'openai', label: { zh: 'openai(通义千问-VL / GLM-4V / GPT-4o 等)', en: 'openai (Qwen-VL / GLM-4V / GPT-4o, etc.)' } }, { value: 'anthropic', label: { zh: 'anthropic(Claude)', en: 'anthropic (Claude)' } }],
     help: { zh: '主模型(如 DeepSeek)不多模态时配这个。留空按端点 URL 启发式(默认 openai)。', en: 'Set when the main model (e.g. DeepSeek) is not multimodal. Empty = heuristic by URL (defaults openai).' } },
   { key: 'VISION_LLM_BASE_URL', label: { zh: 'Base URL', en: 'Base URL' }, type: 'text', group: '视觉模型 · 多模态',
-    placeholder: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+    placeholder: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    help: { zh: '光主机名、带 /v1、或完整端点都能识别。', en: 'Bare host, with /v1, or the full endpoint are all accepted.' } },
   { key: 'VISION_LLM_API_KEY', label: { zh: 'Key', en: 'Key' }, type: 'secret', group: '视觉模型 · 多模态' },
   { key: 'VISION_LLM_MODEL', label: { zh: '模型', en: 'Model' }, type: 'text', group: '视觉模型 · 多模态', placeholder: 'qwen-vl-max' },
 
