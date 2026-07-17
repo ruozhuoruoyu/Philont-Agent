@@ -1893,6 +1893,26 @@ const PLAN_EXEC_BLACKLIST: ReadonlySet<string> = new Set([
 //  - shell / writeFile / patch / editFile: heavy side-effects; if autonomous errs
 //    there is no user rescue; read-only tools (http / readFile / listDir, etc.) suffice
 //  - forgetFact: prevent losing user memory
+/**
+ * Tool blacklist for the MECHANISM plan-loop (runPlanExecuteLoop) — PLAN_EXEC_BLACKLIST minus
+ * saveCredential. The plan-loop is USER-DRIVEN and mechanism-owned, unlike planAndExecute sub-loops /
+ * autonomous turns, so persisting a credential here is legitimate (prod: register obtained the API key but
+ * could not save it, so later posting steps had no auth and attempted 0 actions). Everything else in the
+ * blacklist still applies.
+ *
+ * This MUST be the single source for BOTH the model's tool defs and the runner blacklist. They used to be
+ * computed separately and disagreed: the runner allowed saveCredential while the defs filter still used the
+ * unmodified PLAN_EXEC_BLACKLIST (which contains it), so the model never saw the tool and could not call it
+ * — the allowance silently did nothing, and the plan protocol's mandated "MUST have a saveCredential
+ * deliverable" was unsatisfiable (prod 2026-07-17: `EXECUTE save-creds: tools=5 ok=2 actions=1/3` was the
+ * model flailing at a deliverable it had no tool for, then reporting done).
+ */
+export const PLAN_LOOP_BLACKLIST: ReadonlySet<string> = (() => {
+  const b = new Set(PLAN_EXEC_BLACKLIST);
+  b.delete('saveCredential');
+  return b;
+})();
+
 //  - planAndExecute: prevent nested unbounded budget
 const AUTONOMOUS_TURN_BLACKLIST_HARDCODED: ReadonlySet<string> = new Set([
   'askUserQuestion',
@@ -7069,13 +7089,9 @@ async function handleChatSendInner(
           llm: miniLoopLLM,
           toolRunner: subTurnToolRunner,
           toolDefs: tools.list()
-            .filter((t) => !PLAN_EXEC_BLACKLIST.has(t.name))
+            .filter((t) => !PLAN_LOOP_BLACKLIST.has(t.name))
             .map((t) => ({ name: t.name, description: t.description, parameters: JSON.stringify(t.schema) })),
-          // The plan-loop is USER-DRIVEN and mechanism-owned — unlike planAndExecute sub-loops /
-          // autonomous turns, persisting a credential here is legitimate (prod: register obtained
-          // the API key but could not save it, so later posting steps had no auth and attempted 0
-          // actions). Everything else in the blacklist still applies.
-          toolBlacklist: (() => { const b = new Set(PLAN_EXEC_BLACKLIST); b.delete('saveCredential'); return b; })(),
+          toolBlacklist: PLAN_LOOP_BLACKLIST,
           // Input-aware classification (http POST → write:network) so the evidence criterion can
           // distinguish EXTERNAL actions from memory bookkeeping and reads.
           classifyCall: (name, input) => tools.classify(name, input) ?? undefined,

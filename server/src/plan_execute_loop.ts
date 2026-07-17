@@ -782,20 +782,37 @@ export async function runPlanExecuteLoop(
   // stored it (see agent-tools credential_capture). Proof for credential-save deliverables.
   let credentialCaptured = false;
   const stepToolRunner: PlanLoopDeps['toolRunner'] = async (name, input) => {
-    const rej =
-      endpointGuardReject(name, input, guideApi) ??
-      authPathGuardReject(name, input, guideApi) ??
+    // Guards run in order, first match wins. Each is named so the log says WHICH one blocked: they all
+    // used to print "endpoint-guard BLOCKED" regardless, which mislabels a spec/schedule block and makes
+    // a blocked step impossible to attribute from the log.
+    const guards: ReadonlyArray<readonly [string, () => { error: string } | null]> = [
+      ['endpoint', () => endpointGuardReject(name, input, guideApi)],
+      ['auth-path', () => authPathGuardReject(name, input, guideApi)],
+      // Spec contract guard: undocumented endpoint / missing documented auth header.
+      ['spec-request', () => (compiledSpec && name === 'http' ? specRequestGuard(input, compiledSpec) : null)],
       // Spec body guard: a write to a documented endpoint with a non-JSON body or missing
       // documented required fields is corrected BEFORE sending (prod: raw-markdown string body
       // -> server 500 "Failed to create post").
-      (compiledSpec && name === 'http' ? specRequestGuard(input, compiledSpec) : null) ??
-      (compiledSpec ? specBodyGuardReject(name, input, compiledSpec) : null) ??
-      (name === 'schedule_reminder' ? scheduleInstructionReject(input, guideApi) : null);
-    if (rej) {
-      deps.log(`[plan-loop] endpoint-guard BLOCKED ${name} → ${String(input.url ?? input.message ?? '').slice(0, 80)}`);
-      return { ok: false, output: '', error: rej.error };
+      ['spec-body', () => (compiledSpec ? specBodyGuardReject(name, input, compiledSpec) : null)],
+      ['schedule-instruction', () => (name === 'schedule_reminder' ? scheduleInstructionReject(input, guideApi) : null)],
+    ];
+    for (const [guardName, run] of guards) {
+      const rej = run();
+      if (rej) {
+        deps.log(
+          `[plan-loop] ${guardName}-guard BLOCKED ${name} → ${String(input.url ?? input.message ?? '').slice(0, 80)}`,
+        );
+        return { ok: false, output: '', error: rej.error };
+      }
     }
     const res = await deps.toolRunner(name, input);
+    // Per-tool outcome. The step summary only aggregates ("tools=5 ok=2"), which makes a failing step
+    // undiagnosable from logs — prod 2026-07-17: a save-creds step reported ok=2/5 and there was no way to
+    // see WHICH tool failed or why, so the root cause could not be pinned from the log at all. Name +
+    // outcome only: never the args, which carry credentials.
+    deps.log(
+      `[plan-loop] tool ${name} → ${res.ok ? 'ok' : `FAIL ${String(res.error ?? '').replace(/\s+/g, ' ').slice(0, 140)}`}`,
+    );
     if (name === 'http') {
       const diag = describeAuthCall(input, res);
       if (diag) deps.log(`[plan-loop] auth-call: ${diag}`);
