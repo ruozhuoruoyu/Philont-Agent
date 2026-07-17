@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { specRequestGuard, type SpecDoc } from '../src/spec_compile.js';
+import { specRequestGuard, isCredentialBootstrapPath, type SpecDoc } from '../src/spec_compile.js';
 
 // A synthetic contract for an arbitrary service — proves the guard is spec-driven, not service-specific.
 const SPEC: SpecDoc = {
@@ -49,4 +49,31 @@ test('specRequestGuard: blocks an undocumented endpoint and names the documented
 test('specRequestGuard: ignores a host the spec does not govern (no false block)', () => {
   const rej = specRequestGuard({ method: 'GET', url: 'https://other.test/anything', headers: {} }, SPEC);
   assert.equal(rej, null);
+});
+
+test('specRequestGuard: NEVER demands auth on the endpoint that mints the credential (prod regression)', () => {
+  // The bootstrap paradox: this guard blocked POST /api/auth/register-agent — the call you make precisely
+  // because you have no key yet — so registration could not start at all.
+  const rej = specRequestGuard(
+    { method: 'POST', url: 'https://api.acme.test/v1/auth/register-agent', headers: {}, body: { invite: 'x' } },
+    { ...SPEC, endpoints: [...SPEC.endpoints, { method: 'POST', path: '/v1/auth/register-agent' }] },
+  );
+  assert.equal(rej, null, 'a credential-minting endpoint must never require the credential');
+});
+
+test('specRequestGuard: still demands auth on a non-bootstrap endpoint under the same /auth prefix', () => {
+  const rej = specRequestGuard(
+    { method: 'POST', url: 'https://api.acme.test/v1/auth/verify', headers: {} },
+    { ...SPEC, endpoints: [...SPEC.endpoints, { method: 'POST', path: '/v1/auth/verify' }] },
+  );
+  assert.ok(rej && /X-Acme-Key/.test(rej.error), '/auth/verify does need the header — check must survive');
+});
+
+test('isCredentialBootstrapPath: credential-minting segments vs everything else', () => {
+  for (const p of ['/api/auth/register-agent', '/v1/signup', '/api/sign-up', '/auth/login', '/oauth/token', '/api/sessions']) {
+    assert.equal(isCredentialBootstrapPath(p), true, `${p} mints a credential`);
+  }
+  for (const p of ['/api/auth/verify', '/api/posts', '/api/agents/123/identity', '/api/health']) {
+    assert.equal(isCredentialBootstrapPath(p), false, `${p} does not mint a credential`);
+  }
 });

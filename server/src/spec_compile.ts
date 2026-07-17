@@ -208,6 +208,20 @@ export function endpointMatches(ep: SpecEndpoint, method: string, pathname: stri
 }
 
 /**
+ * Is this the endpoint that ISSUES a credential (register / signup / login / token / session)? Such an
+ * endpoint is public by definition — you call it precisely because you have no credential yet — so no auth
+ * requirement may be imposed on it. Matched per path SEGMENT with a prefix test, so `register-agent`,
+ * `sign-up`, and `token` all count while `verify` (which does need the header) does not.
+ */
+export function isCredentialBootstrapPath(pathname: string): boolean {
+  const BOOTSTRAP = ['register', 'signup', 'sign-up', 'login', 'signin', 'sign-in', 'token', 'session'];
+  return pathname
+    .split('/')
+    .filter(Boolean)
+    .some((seg) => BOOTSTRAP.some((b) => seg.toLowerCase().startsWith(b)));
+}
+
+/**
  * Generic contract guard for a request to a host the SpecDoc governs — the companion to the body guard,
  * covering the dimensions a weaker model breaks that body-shape checks miss (observed with a small model:
  * it hit an undocumented endpoint → server 404, and omitted the documented auth header). Reads ONLY
@@ -235,7 +249,13 @@ export function specRequestGuard(
 
   // (1) Documented auth header omitted.
   const authHeader = spec.auth?.header?.trim();
-  if (authHeader) {
+  // Never demand the credential on the call that MINTS the credential — a register/login/token endpoint is
+  // public by definition, and requiring auth there is a bootstrap paradox (prod 2026-07-17: this guard
+  // blocked POST /api/auth/register-agent outright, so registration could not even start; the agent then
+  // retried with a stale credential, tripped the repeated-failure breaker, and lost http for the rest of the
+  // turn). Matched per path SEGMENT so `/auth/register-agent` is exempt while `/auth/verify` — which does
+  // require the header — is still checked.
+  if (authHeader && !isCredentialBootstrapPath(u.pathname)) {
     const keys = Object.keys((input.headers as Record<string, unknown>) || {}).map((k) => k.toLowerCase());
     if (!keys.includes(authHeader.toLowerCase())) {
       return {
