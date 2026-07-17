@@ -27,6 +27,21 @@ export interface SpecEndpoint {
   purpose?: string;
   /** Required body/query field names, when the guide documents them. */
   requiredFields?: string[];
+  /**
+   * Whether THIS endpoint carries the service's auth credential, per the guide's own examples.
+   *
+   * Auth is a per-endpoint fact, not a service-wide one: the endpoint that ISSUES the credential is public
+   * by definition — you call it because you have no credential yet. A guide states this plainly (its
+   * register example shows no auth header while every other example carries one), so the contract is the
+   * only place worth reading it from. Guessing it instead — "is the path named register/login/token?" —
+   * hard-codes one service's URL vocabulary, and a service that mints credentials at /onboard or
+   * /provision then has its registration blocked outright (prod 2026-07-17: exactly that, on the very
+   * first call of the flow).
+   *
+   * Absent = unknown: the guard then demands nothing. An older spec compiled before this field existed
+   * degrades to no auth check rather than to a wrong one.
+   */
+  auth?: 'required' | 'none';
 }
 
 export interface SpecDoc {
@@ -62,9 +77,13 @@ function buildCompilePrompt(guideText: string): string {
     '{"service":{"name":"<short-slug>","hosts":["host.tld"]},',
     ' "basePath":"/api",',
     ' "auth":{"scheme":"bearer","header":"Authorization"},',
-    ' "endpoints":[{"method":"POST","path":"/api/comments","purpose":"create comment","requiredFields":["post_id","body"]}],',
+    ' "endpoints":[{"method":"POST","path":"/api/comments","purpose":"create comment","requiredFields":["post_id","body"],"auth":"required"}],',
     ' "preconditions":["..."], "rules":["..."]}',
     'Hard requirements:',
+    '- auth: per endpoint, "required" or "none" — read it off the guide\'s OWN examples for THAT endpoint:',
+    '  if its example/prose carries the auth header, "required"; if it plainly does not (typically the',
+    '  endpoint that ISSUES the credential, which callers reach before they have one), "none". Do not guess',
+    '  from the path name. Omit the field entirely when the guide does not make it clear.',
     '- paths must be ABSOLUTE and base-resolved: if the guide defines BASE_URL="https://host/api" and',
     '  documents `/comments`, the path is `/api/comments`. Every path starts with "/".',
     '- hosts: bare hostnames only, no scheme, no placeholder/example hosts.',
@@ -98,6 +117,7 @@ function validateCompiled(raw: unknown, contentHash: string): SpecDoc | null {
       const method = String(e.method ?? '').toUpperCase();
       const path = String(e.path ?? '').trim();
       if (!METHODS.has(method) || !path.startsWith('/') || path.length < 2 || /\s/.test(path)) continue;
+      const epAuth = String(e.auth ?? '').toLowerCase();
       endpoints.push({
         method: method as SpecEndpoint['method'],
         path: path.slice(0, 120),
@@ -105,6 +125,10 @@ function validateCompiled(raw: unknown, contentHash: string): SpecDoc | null {
         requiredFields: Array.isArray(e.requiredFields)
           ? (e.requiredFields as unknown[]).filter((f): f is string => typeof f === 'string').slice(0, 12)
           : undefined,
+        // Anything the model did not state as a clean required/none stays UNKNOWN — the key is genuinely
+        // absent, not present-and-undefined — so the guard demands nothing rather than inventing a
+        // requirement.
+        ...(epAuth === 'required' || epAuth === 'none' ? { auth: epAuth as 'required' | 'none' } : {}),
       });
     }
   }
@@ -231,20 +255,6 @@ export function endpointMatches(ep: SpecEndpoint, method: string, pathname: stri
 }
 
 /**
- * Is this the endpoint that ISSUES a credential (register / signup / login / token / session)? Such an
- * endpoint is public by definition — you call it precisely because you have no credential yet — so no auth
- * requirement may be imposed on it. Matched per path SEGMENT with a prefix test, so `register-agent`,
- * `sign-up`, and `token` all count while `verify` (which does need the header) does not.
- */
-export function isCredentialBootstrapPath(pathname: string): boolean {
-  const BOOTSTRAP = ['register', 'signup', 'sign-up', 'login', 'signin', 'sign-in', 'token', 'session'];
-  return pathname
-    .split('/')
-    .filter(Boolean)
-    .some((seg) => BOOTSTRAP.some((b) => seg.toLowerCase().startsWith(b)));
-}
-
-/**
  * Generic contract guard for a request to a host the SpecDoc governs — the companion to the body guard,
  * covering the dimensions a weaker model breaks that body-shape checks miss (observed with a small model:
  * it hit an undocumented endpoint → server 404, and omitted the documented auth header). Reads ONLY
@@ -272,26 +282,10 @@ export function specRequestGuard(
 
   // (1) Documented auth header omitted.
   const authHeader = spec.auth?.header?.trim();
-  // Never demand the credential on the call that MINTS the credential — a register/login/token endpoint is
-  // public by definition, and requiring auth there is a bootstrap paradox (prod 2026-07-17: this guard
-  // blocked POST /api/auth/register-agent outright, so registration could not even start; the agent then
-  // retried with a stale credential, tripped the repeated-failure breaker, and lost http for the rest of the
-  // turn). Matched per path SEGMENT so `/auth/register-agent` is exempt while `/auth/verify` — which does
-  // require the header — is still checked.
-  if (authHeader && !isCredentialBootstrapPath(u.pathname)) {
-    const keys = Object.keys((input.headers as Record<string, unknown>) || {}).map((k) => k.toLowerCase());
-    if (!keys.includes(authHeader.toLowerCase())) {
-      return {
-        error:
-          `[spec contract guard] ${spec.service.name} authenticates via the "${authHeader}" header` +
-          `${spec.auth?.scheme ? ` (scheme: ${spec.auth.scheme})` : ''}, but this request has no such header. ` +
-          `Add it before sending — an unauthenticated call will be rejected by the service.`,
-      };
-    }
-  }
+  const ep = spec.endpoints.find((e) => endpointMatches(e, method, u.pathname));
 
-  // (2) Undocumented endpoint (only when the service documents any endpoints at all).
-  if (spec.endpoints.length > 0 && !spec.endpoints.some((e) => endpointMatches(e, method, u.pathname))) {
+  // (1) Undocumented endpoint (only when the service documents any endpoints at all).
+  if (!ep && spec.endpoints.length > 0) {
     const list = spec.endpoints.slice(0, 12).map((e) => `${e.method} ${e.path}`).join(', ');
     return {
       error:
@@ -299,6 +293,21 @@ export function specRequestGuard(
         `Documented endpoints: ${list}. Use one of these. If you are certain this endpoint exists, the ` +
         `compiled contract may be incomplete — re-read the guide and recompile the spec rather than guessing.`,
     };
+  }
+
+  // (2) Missing auth — but ONLY where THIS endpoint's contract says it carries the credential. Auth is a
+  // per-endpoint fact; demanding it service-wide blocks the very call that issues the credential. Unknown
+  // (an older spec with no per-endpoint marks) demands nothing: no check beats a wrong one.
+  if (ep?.auth === 'required' && authHeader) {
+    const keys = Object.keys((input.headers as Record<string, unknown>) || {}).map((k) => k.toLowerCase());
+    if (!keys.includes(authHeader.toLowerCase())) {
+      return {
+        error:
+          `[spec contract guard] ${method} ${ep.path} is documented as requiring the "${authHeader}" header` +
+          `${spec.auth?.scheme ? ` (scheme: ${spec.auth.scheme})` : ''}, but this request has no such header. ` +
+          `Add it before sending — an unauthenticated call will be rejected by the service.`,
+      };
+    }
   }
 
   return null;

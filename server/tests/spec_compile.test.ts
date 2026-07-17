@@ -164,3 +164,26 @@ test('specBodyGuardReject: corrects non-JSON and incomplete write bodies on docu
   assert.equal(specBodyGuardReject('http', { url: 'https://other.io/api/posts', method: 'POST', body: 'x' }, spec), null);
   assert.equal(specBodyGuardReject('http', { url: 'https://mycox.ai/api/unknown', method: 'POST', body: 'x' }, spec), null);
 });
+
+test('compileSpec: per-endpoint auth is read from the contract; unclear stays absent', async () => {
+  clearSpecCache();
+  const spec = await compileSpec(GUIDE, REGEX_API, {
+    call: async () => JSON.stringify({
+      service: { name: 'acme', hosts: ['acme.test'] },
+      auth: { scheme: 'bearer', header: 'Authorization' },
+      endpoints: [
+        // The credential-issuing endpoint: its guide example carries no auth header.
+        { method: 'POST', path: '/api/onboard', auth: 'none' },
+        { method: 'POST', path: '/api/things', auth: 'required' },
+        { method: 'GET', path: '/api/unclear' }, // guide says nothing → must stay unknown
+        { method: 'GET', path: '/api/garbage', auth: 'sort-of' }, // unusable value → unknown
+      ],
+      preconditions: [], rules: [],
+    }),
+  });
+  const by = (p: string) => spec!.endpoints.find((e) => e.path === p)!;
+  assert.equal(by('/api/onboard').auth, 'none');
+  assert.equal(by('/api/things').auth, 'required');
+  assert.ok(!('auth' in by('/api/unclear')), 'unstated auth must be absent, not guessed');
+  assert.ok(!('auth' in by('/api/garbage')), 'an unusable auth value must be absent, not coerced');
+});

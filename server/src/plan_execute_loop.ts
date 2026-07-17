@@ -832,6 +832,13 @@ export async function runPlanExecuteLoop(
       '[plan-loop] spec: NONE (no installed spec.json, and the compile failed/was unavailable) — ' +
         'rule filter + spec guards are INERT this run; only the regex anchor applies',
     );
+  } else if (!compiledSpec.endpoints.some((e) => e.auth)) {
+    // Same reason: a spec compiled before per-endpoint auth existed carries no auth facts, so the missing-
+    // credential check cannot fire. That is deliberate (no check beats a wrong one) but must not be silent.
+    deps.log(
+      `[plan-loop] spec: ${compiledSpec.service.name} has no per-endpoint auth marks (older spec) — ` +
+        'the missing-credential check is DORMANT; recompile the spec to enable it',
+    );
   }
   const endpointRegistry = buildEndpointRegistry(guideApi);
   if (guideApi.hosts.length) {

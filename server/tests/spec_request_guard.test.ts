@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { specRequestGuard, isCredentialBootstrapPath, type SpecDoc } from '../src/spec_compile.js';
+import { specRequestGuard, type SpecDoc } from '../src/spec_compile.js';
 
 // A synthetic contract for an arbitrary service — proves the guard is spec-driven, not service-specific.
 const SPEC: SpecDoc = {
@@ -8,16 +8,16 @@ const SPEC: SpecDoc = {
   service: { name: 'AcmeAPI', hosts: ['api.acme.test'] },
   auth: { scheme: 'bearer', header: 'X-Acme-Key' },
   endpoints: [
-    { method: 'GET', path: '/v1/items' },
-    { method: 'POST', path: '/v1/items', requiredFields: ['title'] },
-    { method: 'GET', path: '/v1/items/:id' },
+    { method: 'GET', path: '/v1/items', auth: 'required' },
+    { method: 'POST', path: '/v1/items', requiredFields: ['title'], auth: 'required' },
+    { method: 'GET', path: '/v1/items/:id', auth: 'required' },
   ],
   preconditions: [],
   rules: [],
   confidence: 0.9,
 };
 
-test('specRequestGuard: blocks a call missing the documented auth header', () => {
+test('specRequestGuard: blocks a call missing the auth header its endpoint contract requires', () => {
   const rej = specRequestGuard({ method: 'GET', url: 'https://api.acme.test/v1/items', headers: {} }, SPEC);
   assert.ok(rej && /X-Acme-Key/.test(rej.error));
 });
@@ -51,29 +51,36 @@ test('specRequestGuard: ignores a host the spec does not govern (no false block)
   assert.equal(rej, null);
 });
 
-test('specRequestGuard: NEVER demands auth on the endpoint that mints the credential (prod regression)', () => {
-  // The bootstrap paradox: this guard blocked POST /api/auth/register-agent — the call you make precisely
-  // because you have no key yet — so registration could not start at all.
+
+
+
+
+
+
+// The contract, not the path name, decides whether an endpoint carries the credential.
+test('specRequestGuard: an endpoint the contract marks auth:none is never asked for a credential', () => {
+  // The endpoint that ISSUES the credential — its guide example shows no auth header. Its PATH is
+  // deliberately not register/login/token-shaped: the guard must read the contract, not the vocabulary.
   const rej = specRequestGuard(
-    { method: 'POST', url: 'https://api.acme.test/v1/auth/register-agent', headers: {}, body: { invite: 'x' } },
-    { ...SPEC, endpoints: [...SPEC.endpoints, { method: 'POST', path: '/v1/auth/register-agent' }] },
+    { method: 'POST', url: 'https://api.acme.test/v1/provisioning/onboard', headers: {}, body: { invite: 'x' } },
+    { ...SPEC, endpoints: [...SPEC.endpoints, { method: 'POST', path: '/v1/provisioning/onboard', auth: 'none' }] },
   );
-  assert.equal(rej, null, 'a credential-minting endpoint must never require the credential');
+  assert.equal(rej, null, 'a contract that says auth:none must never be second-guessed by path vocabulary');
 });
 
-test('specRequestGuard: still demands auth on a non-bootstrap endpoint under the same /auth prefix', () => {
+test('specRequestGuard: an endpoint the contract marks auth:required IS asked for the credential', () => {
   const rej = specRequestGuard(
-    { method: 'POST', url: 'https://api.acme.test/v1/auth/verify', headers: {} },
-    { ...SPEC, endpoints: [...SPEC.endpoints, { method: 'POST', path: '/v1/auth/verify' }] },
+    { method: 'POST', url: 'https://api.acme.test/v1/items', headers: {}, body: { title: 't' } },
+    SPEC,
   );
-  assert.ok(rej && /X-Acme-Key/.test(rej.error), '/auth/verify does need the header — check must survive');
+  assert.ok(rej && /X-Acme-Key/.test(rej.error) && /documented as requiring/.test(rej.error));
 });
 
-test('isCredentialBootstrapPath: credential-minting segments vs everything else', () => {
-  for (const p of ['/api/auth/register-agent', '/v1/signup', '/api/sign-up', '/auth/login', '/oauth/token', '/api/sessions']) {
-    assert.equal(isCredentialBootstrapPath(p), true, `${p} mints a credential`);
-  }
-  for (const p of ['/api/auth/verify', '/api/posts', '/api/agents/123/identity', '/api/health']) {
-    assert.equal(isCredentialBootstrapPath(p), false, `${p} does not mint a credential`);
-  }
+test('specRequestGuard: an UNKNOWN auth mark (older spec) demands nothing — no check beats a wrong one', () => {
+  const noMarks = { ...SPEC, endpoints: SPEC.endpoints.map(({ auth, ...e }) => e) };
+  const rej = specRequestGuard(
+    { method: 'POST', url: 'https://api.acme.test/v1/items', headers: {}, body: { title: 't' } },
+    noMarks,
+  );
+  assert.equal(rej, null, 'without contract auth facts the guard must not invent a requirement');
 });
