@@ -132,11 +132,34 @@ function validateCompiled(raw: unknown, contentHash: string): SpecDoc | null {
   };
 }
 
+/** A path segment that stands for a parameter rather than a literal: :id / $VAR / {id}. */
+function isParamSegment(seg: string): boolean {
+  return /^[:$]/.test(seg) || seg.startsWith('{');
+}
+
+/**
+ * Canonical identity of an endpoint. Parameter segments collapse to one form, so the SAME endpoint written
+ * two ways is one endpoint. A guide states paths both in prose (`/posts/:public_id/upvote`) and in curl
+ * examples (`/posts/$PUBLIC_ID/upvote`); keying on the raw string made the regex floor "discover" endpoints
+ * the LLM had already captured, tag them "regex-extracted (LLM missed)", and drive confidence down 0.15 per
+ * phantom — observed in prod: 11 phantoms took a complete, correct service spec from 1.0 to the 0.3 floor
+ * and left 11 duplicate entries in it. Collapsing is also what the matcher already does (both forms match
+ * any single segment), so two paths with the same canonical form are indistinguishable to every guard.
+ */
+function endpointKey(method: string, path: string): string {
+  const p = path
+    .split('/')
+    .map((seg) => (isParamSegment(seg) ? ':p' : seg.toLowerCase()))
+    .join('/')
+    .replace(/\/+$/, '');
+  return `${method.toUpperCase()} ${p}`;
+}
+
 function dedupeEndpoints(eps: SpecEndpoint[]): SpecEndpoint[] {
   const seen = new Set<string>();
   const out: SpecEndpoint[] = [];
   for (const e of eps) {
-    const k = `${e.method} ${e.path}`;
+    const k = endpointKey(e.method, e.path);
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(e);
@@ -150,13 +173,13 @@ function dedupeEndpoints(eps: SpecEndpoint[]): SpecEndpoint[] {
  * missed documented calls may have missed more.
  */
 export function mergeRegexFloor(spec: SpecDoc, regexApi: GuideApi): SpecDoc {
-  const have = new Set(spec.endpoints.map((e) => `${e.method} ${e.path}`));
+  const have = new Set(spec.endpoints.map((e) => endpointKey(e.method, e.path)));
   let merged = 0;
   const extra: SpecEndpoint[] = [];
   for (const entry of regexApi.endpoints) {
     const m = entry.match(/^(GET|POST|PUT|PATCH|DELETE)\s+(\/\S+)$/);
     if (!m) continue; // bare paths without a method stay in the GuideApi union below
-    if (have.has(`${m[1]} ${m[2]}`)) continue;
+    if (have.has(endpointKey(m[1], m[2]))) continue;
     extra.push({ method: m[1] as SpecEndpoint['method'], path: m[2], purpose: 'regex-extracted (LLM missed)' });
     merged++;
   }
@@ -202,7 +225,7 @@ export function endpointMatches(ep: SpecEndpoint, method: string, pathname: stri
   if (ep.method !== method.toUpperCase()) return false;
   const pattern = ep.path
     .split('/')
-    .map((seg) => (/^[:$]|^\{/.test(seg) ? '[^/]+' : seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    .map((seg) => (isParamSegment(seg) ? '[^/]+' : seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     .join('/');
   return new RegExp(`^${pattern}/?$`).test(pathname);
 }
