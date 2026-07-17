@@ -647,9 +647,46 @@ interface OpenAIMessage {
   tool_call_id?: string;
 }
 
-function safeJsonParse(s: string): Record<string, unknown> {
+/**
+ * Chat-template quote artifact. Weaker / quantized models sometimes render a double quote as the literal
+ * token `<|"|>` INSIDE the JSON strings of a tool call, so the arguments parse cleanly but every string
+ * carries junk (prod 2026-07-17, gemma-4-31B: a header name arrived as `<|"|>Content-Type<|"|>`).
+ *
+ * Deliberately NARROW — only the quote-token form. A general `<|...|>` strip would corrupt legitimate
+ * payloads (a post body that genuinely discusses such tokens).
+ */
+const TEMPLATE_QUOTE_ARTIFACT = /<\|["']\|>/g;
+
+/**
+ * Recursively strip template quote artifacts from a parsed tool-call argument tree — keys included, since
+ * the artifact lands in object keys (that is how a polluted header NAME arises).
+ *
+ * Done once here, at the single point where an OpenAI-compatible tool call's arguments become the tool
+ * input, so it covers every tool and every field. The alternative is whack-a-mole: this codebase already
+ * carries a per-field guard for the same class leaking into the `method` field, and the http tool now has
+ * one for header names — but a polluted header VALUE (e.g. `Authorization: <|"|>Bearer {key}<|"|>`) is
+ * still shipped to the server, which sees a malformed token.
+ */
+function stripTemplateArtifacts(v: unknown): unknown {
+  if (typeof v === 'string') return v.replace(TEMPLATE_QUOTE_ARTIFACT, '');
+  if (Array.isArray(v)) return v.map(stripTemplateArtifacts);
+  if (v && typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      out[k.replace(TEMPLATE_QUOTE_ARTIFACT, '')] = stripTemplateArtifacts(val);
+    }
+    return out;
+  }
+  return v;
+}
+
+export function safeJsonParse(s: string): Record<string, unknown> {
   if (!s) return {};
-  try { return JSON.parse(s); } catch { return {}; }
+  try {
+    return stripTemplateArtifacts(JSON.parse(s)) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
 }
 
 /** Anthropic NativeMessage[] → OpenAI messages[] */
