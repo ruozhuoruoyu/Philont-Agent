@@ -16,7 +16,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { AuxLLMCaller } from '@agent/tools';
+import { AuxLLMError, type AuxLLMCaller } from '@agent/tools';
 import type { GuideApi } from './plan_execute_loop.js';
 
 export interface SpecEndpoint {
@@ -323,10 +323,14 @@ export interface CompileSpecDeps {
   signal?: AbortSignal;
 }
 
+/** A guide → 4000 JSON tokens is a long generation; well beyond the aux client's 60s chat default. */
+const SPEC_COMPILE_TIMEOUT_MS = 180_000;
+
 /**
  * Compile a guide into a SpecDoc. Null on ANY failure (disabled / LLM error / unparseable /
- * fails validation) — the caller keeps the regex anchor. Results (including null) are cached by
- * content hash so a broken compile is not retried every round within a process lifetime.
+ * fails validation) — the caller keeps the regex anchor. DETERMINISTIC outcomes (success, or output that
+ * failed validation) are cached by content hash so a hopeless compile is not retried every round within a
+ * process lifetime; a THROWN error is not cached, so a transient aux failure can recover on the next read.
  */
 export async function compileSpec(
   guideText: string,
@@ -343,6 +347,10 @@ export async function compileSpec(
       system: COMPILE_SYSTEM,
       user: buildCompilePrompt(guideText),
       maxTokens: 4000,
+      // A whole guide → up to 4000 JSON tokens does not fit the aux client's 60s chat default on a
+      // small/slow model (prod: every compile of a 17k-char guide timed out at exactly 60s, so the spec
+      // was never built and every spec guard ran inert). This is a once-per-guide, cached call.
+      timeoutMs: SPEC_COMPILE_TIMEOUT_MS,
       signal: deps.signal,
     });
     const jsonText = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -359,7 +367,20 @@ export async function compileSpec(
       log(`[spec-compile] hash=${hash} compile output failed validation — keeping regex anchor`);
     }
   } catch (e) {
-    log(`[spec-compile] hash=${hash} failed (${(e as Error)?.message ?? String(e)}) — keeping regex anchor`);
+    // Classify INFRA-transient vs MODEL-OUTPUT failure — they need opposite caching.
+    //   transient (aux timeout / network / 5xx): must NOT be cached. Caching null here poisons this
+    //     guide's spec for the whole process lifetime — every spec guard then runs inert against a null
+    //     spec for the rest of the run, recoverable only by restart (prod 2026-07-17: one 60s aux timeout
+    //     disabled the spec guards for the entire session). Retrying can genuinely succeed.
+    //   model-output (unparseable/refusal → JSON.parse throws): same guide gives the same bad output, so
+    //     cache it and stop — retrying every round just burns the aux budget.
+    const transient =
+      e instanceof AuxLLMError && (e.kind === 'timeout' || e.kind === 'aborted' || e.kind === 'http_error');
+    log(
+      `[spec-compile] hash=${hash} failed (${(e as Error)?.message ?? String(e)}) — keeping regex anchor` +
+        (transient ? ', will retry' : ''),
+    );
+    if (transient) return null; // uncached → next guide read retries
   }
   specCache.set(hash, result);
   return result;

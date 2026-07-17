@@ -28,6 +28,14 @@ export interface AuxLLMRequest {
   user: string;
   /** Maximum output tokens, default 4096 */
   maxTokens?: number;
+  /**
+   * Per-call timeout override in ms (default DEFAULT_TIMEOUT_MS = 60s). The 60s default suits short
+   * chores (classification, distillation), but a compile-style call — e.g. turning a whole API guide into
+   * a spec — generates thousands of JSON tokens and legitimately needs longer on a small/slow model
+   * (prod 2026-07-17: spec-compile of a 17k-char guide hit the 60s wall every time, so the service spec
+   * was never compiled and the spec guards ran inert against a null spec).
+   */
+  timeoutMs?: number;
   /** Abort signal */
   signal?: AbortSignal;
 }
@@ -213,7 +221,8 @@ async function callOpenAICompatible(
     ...(auxThinkingDisabled(cfg.model) ? { thinking: { type: 'disabled' } } : {}),
   };
 
-  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = req.signal
     ? anySignal([req.signal, timeoutSignal])
     : timeoutSignal;
@@ -233,7 +242,7 @@ async function callOpenAICompatible(
     const err = e as Error;
     if (err.name === 'AbortError' || err.name === 'TimeoutError') {
       throw new AuxLLMError(
-        `Aux LLM request timed out after ${DEFAULT_TIMEOUT_MS}ms`,
+        `Aux LLM request timed out after ${timeoutMs}ms`,
         req.signal?.aborted ? 'aborted' : 'timeout',
       );
     }
@@ -330,7 +339,8 @@ async function callAnthropicCompatible(
   // Disable thinking on thinking-capable models — see auxThinkingDisabled (fixes empty content).
   if (auxThinkingDisabled(cfg.model)) body.thinking = { type: 'disabled' };
 
-  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = req.signal
     ? anySignal([req.signal, timeoutSignal])
     : timeoutSignal;
@@ -351,7 +361,7 @@ async function callAnthropicCompatible(
     const err = e as Error;
     if (err.name === 'AbortError' || err.name === 'TimeoutError') {
       throw new AuxLLMError(
-        `Aux LLM (anthropic) request timed out after ${DEFAULT_TIMEOUT_MS}ms`,
+        `Aux LLM (anthropic) request timed out after ${timeoutMs}ms`,
         req.signal?.aborted ? 'aborted' : 'timeout',
       );
     }
