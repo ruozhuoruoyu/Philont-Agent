@@ -901,3 +901,46 @@ test('adoption filter: spec rules and $VAR snippets never become deliverables', 
   assert.ok(logs.some((l) => l.includes('adoption skipped (spec rule')), 'rule must be skipped');
   assert.ok(!r.outcomes.some((o) => /webhook|content-free/i.test(o.id)), 'neither lands as a deliverable');
 });
+
+// ── A: reuse an already-installed spec instead of recompiling ────────────────────────────────────
+// The aux model could not finish the compile (timed out at 60s AND 180s), leaving compiledSpec null —
+// which silently disabled the isSpecRule adoption filter AND the spec request/body guards.
+
+const INSTALLED_SPEC = {
+  source: { contentHash: 'h' },
+  service: { name: 'Xsvc', hosts: ['x'] },
+  auth: { scheme: 'bearer', header: 'Authorization' },
+  endpoints: [{ method: 'POST' as const, path: '/api/register' }],
+  preconditions: [],
+  rules: ['posting must include title and community'],
+  confidence: 0.9,
+};
+
+test('spec: an installed spec.json is reused and the LLM compile is NOT called', async () => {
+  let compiles = 0;
+  const logs: string[] = [];
+  const deps = makeDeps({
+    drafts: [GOOD_DRAFT],
+    specCall: async () => { compiles++; return '{}'; },
+    installedSpecFor: () => INSTALLED_SPEC,
+    log: (m: string) => logs.push(m),
+  });
+  await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.equal(compiles, 0, 'must not recompile when the spec is already installed');
+  assert.ok(logs.some((l) => /reusing installed spec\.json/.test(l)), 'reuse must be visible in the log');
+});
+
+test('spec: with no installed spec and a failing compile, the loop says so LOUDLY', async () => {
+  const logs: string[] = [];
+  const deps = makeDeps({
+    drafts: [GOOD_DRAFT],
+    specCall: async () => { throw new Error('Aux LLM request timed out after 180000ms'); },
+    installedSpecFor: () => null,
+    log: (m: string) => logs.push(m),
+  });
+  await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.ok(
+    logs.some((l) => /spec: NONE/.test(l) && /INERT/.test(l)),
+    'silent degradation is the bug — a missing spec must be stated outright',
+  );
+});

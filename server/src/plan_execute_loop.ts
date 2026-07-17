@@ -91,6 +91,32 @@ export const SCHEDULE_REQ_RE =
 /** Deliverables that require an EXTERNAL action (post/register/vote/… — an http write, not a read). */
 export const ACTION_REQ_RE =
   /\b(?:post|publish|register|sign\s*up|vote|comment|reply|submit|send|create|upload|delete)\b|发帖|发布|注册|投票|评论|回复|提交|发送|创建|上传|删除/i;
+/**
+ * Does the text COMMAND an action, rather than merely mention one?
+ *
+ * ACTION_REQ_RE above is a bare keyword match, and deliberately so: as a PROOF classifier, over-matching is
+ * the safe side (a wrong 'action' verdict reports ❌ honestly, it never lies ✅). But adoption needs the
+ * opposite bias — there, over-matching turns documentation into an executable step. Prod 2026-07-17: the
+ * guide sentence "Required fields: community_id, title, body … you can post directly" contains the word
+ * "post", so adoption promoted it to a plan step carrying the imperative "DO IT NOW — this is an action to
+ * PERFORM … use http POST". The model then flailed at a sentence describing FIELD NAMES for 8 iterations;
+ * several such pseudo-steps together burned the entire execute budget, so the real remaining work never ran.
+ *
+ * The discriminator is grammatical POSITION, not vocabulary: an instruction leads with its verb ("Publish at
+ * least one post…", "Register the check-in routine…"), while prose about an action buries it in a clause
+ * ("The platform enforces a cap on new posts…"). Leading list markers and a "you must/should" preamble are
+ * tolerated. Read-type verbs are included so a genuine "Read SOUL.md" item still adopts.
+ *
+ * Failing this test is SAFE: the item is not silently dropped, it stays in the reported gaps — the owner is
+ * told it was not covered, which beats a fake step that burns budget and then reports ❌.
+ */
+const IMPERATIVE_HEAD_RE =
+  /^[-*\d.)\s]*(?:(?:you|agents?)\s+(?:must|should|need\s+to)\s+|please\s+)?(?:post|publish|register|sign[\s-]*up|vote|comment|reply|submit|send|create|upload|delete|schedule|set\s+up|read|review|fetch|发帖|发布|注册|投票|评论|回复|提交|发送|创建|上传|删除|阅读|读)\b/i;
+
+export function isActionableInstruction(text: string): boolean {
+  return IMPERATIVE_HEAD_RE.test(text.trim());
+}
+
 /** Deliverable-keyword → endpoint-path fragment the successful action must match (prod: the
  * comment deliverable passed off 2 ok actions that were NOT the comment POST — nothing on the site). */
 export const ENDPOINT_HINTS: ReadonlyArray<[RegExp, RegExp]> = [
@@ -598,6 +624,19 @@ export interface PlanLoopDeps {
    */
   specCall?: (req: { system?: string; user: string; maxTokens?: number; signal?: AbortSignal }) => Promise<string>;
   /**
+   * Optional lookup of an ALREADY-INSTALLED compiled spec for one of the guide's hosts. Tried BEFORE
+   * paying for an LLM compile: a previous run already compiled this service and wrote its spec.json, so
+   * recompiling burns the aux model on work whose answer is on disk.
+   *
+   * This matters far beyond a latency saving. When the compile fails, compiledSpec is null and everything
+   * hanging off it dies SILENTLY: the isSpecRule() adoption filter (which exists precisely to keep guide
+   * prose out of the plan) degrades to an empty rule list and never fires, and the spec request/body guards
+   * never run. Prod 2026-07-17: the aux model could not finish this compile at 60s OR at 180s, so guide
+   * sentences ("The platform enforces a hard server-side cap…") were adopted as plan steps and burned the
+   * whole execute budget — the exact failure the filter's own comment records as already fixed once.
+   */
+  installedSpecFor?: (hosts: readonly string[]) => SpecDoc | null;
+  /**
    * Optional service-skill emitter (spec_regime.md increment 3). Called at CLOSE when the guide
    * compiled into a SpecDoc, with this run's verified calls. Best-effort — failures are logged.
    */
@@ -755,13 +794,32 @@ export async function runPlanExecuteLoop(
   const regexApi = planEndpointGuardEnabled() ? extractGuideEndpoints(guideText) : { hosts: [], endpoints: [] };
   let guideApi = regexApi;
   let compiledSpec: SpecDoc | null = null;
-  if (deps.specCall && planEndpointGuardEnabled()) {
-    compiledSpec = await compileSpec(guideText, regexApi, {
-      call: deps.specCall,
-      log: deps.log,
-      signal: budgetSignal(60_000),
-    });
+  if (planEndpointGuardEnabled()) {
+    // Prefer a spec this service already has on disk — the answer is already compiled, and it keeps the
+    // slow aux model off the critical path of everything that depends on compiledSpec (see installedSpecFor).
+    const installed = deps.installedSpecFor?.(regexApi.hosts) ?? null;
+    if (installed) {
+      compiledSpec = installed;
+      deps.log(
+        `[plan-loop] spec: reusing installed spec.json for ${installed.service.name} ` +
+          `(${installed.endpoints.length} endpoints, ${installed.rules.length} rules) — no recompile`,
+      );
+    } else if (deps.specCall) {
+      compiledSpec = await compileSpec(guideText, regexApi, {
+        call: deps.specCall,
+        log: deps.log,
+        signal: budgetSignal(60_000),
+      });
+    }
     if (compiledSpec) guideApi = specToGuideApi(compiledSpec);
+  }
+  if (!compiledSpec) {
+    // Loud, because the silent-degradation is the whole problem: no spec ⇒ the adoption rule filter and the
+    // spec guards are inert, and the plan can fill with guide prose.
+    deps.log(
+      '[plan-loop] spec: NONE (no installed spec.json, and the compile failed/was unavailable) — ' +
+        'rule filter + spec guards are INERT this run; only the regex anchor applies',
+    );
   }
   const endpointRegistry = buildEndpointRegistry(guideApi);
   if (guideApi.hosts.length) {
@@ -935,6 +993,13 @@ export async function runPlanExecuteLoop(
       }
       if (isSpecRule(g.text)) {
         deps.log(`[plan-loop] adoption skipped (spec rule, injected as constraint instead): ${g.text.slice(0, 80)}`);
+        return false;
+      }
+      // Prose that DESCRIBES an action is not an instruction to perform one. Without this, a sentence
+      // documenting field names becomes a step told to "DO IT NOW — http POST" (see isActionableInstruction).
+      // This is the filter that survives when isSpecRule cannot run — it needs no compiled spec.
+      if (!isActionableInstruction(g.text)) {
+        deps.log(`[plan-loop] adoption skipped (describes, does not command — reported as a gap): ${g.text.slice(0, 80)}`);
         return false;
       }
       return true;

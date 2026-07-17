@@ -7180,6 +7180,15 @@ async function handleChatSendInner(
           // Spec compiler (spec_regime.md increment 1): guide → validated SpecDoc via the aux LLM,
           // regex anchor as floor/fallback. Absent aux config → pure regex path, unchanged.
           specCall: isAuxLLMConfigured() ? (req) => callAuxLLM(req) : undefined,
+          // Reuse a spec this service already compiled and installed, instead of recompiling every run.
+          installedSpecFor: (hosts) => {
+            const root = join(process.cwd(), '.philont', 'skills');
+            for (const h of hosts) {
+              const s = findSpecForHost(h, root);
+              if (s) return s;
+            }
+            return null;
+          },
           // Increment 3: the compiled contract lands as a normal FS skill (hot-reloaded by the
           // skills watcher; removed by the same uninstall/cleanup path as any other skill).
           emitServiceSkill: (spec, verifiedCalls) => {
