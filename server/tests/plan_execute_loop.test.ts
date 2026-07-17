@@ -22,6 +22,7 @@ import {
   planLoopEnabled,
   type PlanLoopDeps,
 } from '../src/plan_execute_loop.js';
+import { guideContentHash, clearSpecCache } from '../src/spec_compile.js';
 
 const GUIDE = [
   '# MycoX Agent Guide',
@@ -907,7 +908,7 @@ test('adoption filter: spec rules and $VAR snippets never become deliverables', 
 // which silently disabled the isSpecRule adoption filter AND the spec request/body guards.
 
 const INSTALLED_SPEC = {
-  source: { contentHash: 'h' },
+  source: { contentHash: guideContentHash(GUIDE) },
   service: { name: 'Xsvc', hosts: ['x'] },
   auth: { scheme: 'bearer', header: 'Authorization' },
   endpoints: [{ method: 'POST' as const, path: '/api/register' }],
@@ -917,6 +918,7 @@ const INSTALLED_SPEC = {
 };
 
 test('spec: an installed spec.json is reused and the LLM compile is NOT called', async () => {
+  clearSpecCache();
   let compiles = 0;
   const logs: string[] = [];
   const deps = makeDeps({
@@ -931,6 +933,7 @@ test('spec: an installed spec.json is reused and the LLM compile is NOT called',
 });
 
 test('spec: with no installed spec and a failing compile, the loop says so LOUDLY', async () => {
+  clearSpecCache();
   const logs: string[] = [];
   const deps = makeDeps({
     drafts: [GOOD_DRAFT],
@@ -943,4 +946,20 @@ test('spec: with no installed spec and a failing compile, the loop says so LOUDL
     logs.some((l) => /spec: NONE/.test(l) && /INERT/.test(l)),
     'silent degradation is the bug — a missing spec must be stated outright',
   );
+});
+
+test('spec: a STALE installed spec.json (built from another guide revision) is NOT trusted', async () => {
+  clearSpecCache();
+  let compiles = 0;
+  const logs: string[] = [];
+  const deps = makeDeps({
+    drafts: [GOOD_DRAFT],
+    specCall: async () => { compiles++; throw new Error('aux down'); },
+    installedSpecFor: () => ({ ...INSTALLED_SPEC, source: { contentHash: 'from-an-older-guide' } }),
+    log: (m: string) => logs.push(m),
+  });
+  await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.ok(logs.some((l) => /is STALE/.test(l)), 'a mismatched hash must be called out, not silently trusted');
+  assert.equal(compiles, 1, 'a stale spec must fall through to a recompile attempt');
+  assert.ok(logs.some((l) => /spec: NONE/.test(l)), 'and with the compile down, degrade loudly');
 });

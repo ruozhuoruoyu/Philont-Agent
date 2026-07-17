@@ -25,7 +25,7 @@ import {
   type MiniLoopToolRunResult,
 } from '@agent/tools';
 import type { ToolDefinition } from '@agent/policy';
-import { compileSpec, specToGuideApi, specBodyGuardReject, specRequestGuard, type SpecDoc } from './spec_compile.js';
+import { compileSpec, specToGuideApi, specBodyGuardReject, specRequestGuard, guideContentHash, type SpecDoc } from './spec_compile.js';
 
 // ── Flag ────────────────────────────────────────────────────────────────────
 
@@ -798,13 +798,25 @@ export async function runPlanExecuteLoop(
     // Prefer a spec this service already has on disk — the answer is already compiled, and it keeps the
     // slow aux model off the critical path of everything that depends on compiledSpec (see installedSpecFor).
     const installed = deps.installedSpecFor?.(regexApi.hosts) ?? null;
-    if (installed) {
+    // Only trust an installed spec that was compiled from THIS guide. source.contentHash exists exactly for
+    // this: a spec compiled from an older revision is a contract for a service that may have moved, and
+    // enforcing it would block legitimate calls — the same way requiring auth on the register endpoint did.
+    // spec.json is only written when a compile SUCCEEDS, so while the compile is failing the disk copy keeps
+    // whatever an older run left there; it must prove it still matches before it may drive the guards.
+    const guideHash = guideContentHash(guideText);
+    if (installed && installed.source?.contentHash === guideHash) {
       compiledSpec = installed;
       deps.log(
         `[plan-loop] spec: reusing installed spec.json for ${installed.service.name} ` +
-          `(${installed.endpoints.length} endpoints, ${installed.rules.length} rules) — no recompile`,
+          `(${installed.endpoints.length} endpoints, ${installed.rules.length} rules, hash=${guideHash}) — no recompile`,
       );
-    } else if (deps.specCall) {
+    } else if (installed) {
+      deps.log(
+        `[plan-loop] spec: installed spec.json for ${installed.service.name} is STALE ` +
+          `(built from hash=${installed.source?.contentHash ?? 'none'}, guide is now ${guideHash}) — not trusting it`,
+      );
+    }
+    if (!compiledSpec && deps.specCall) {
       compiledSpec = await compileSpec(guideText, regexApi, {
         call: deps.specCall,
         log: deps.log,
