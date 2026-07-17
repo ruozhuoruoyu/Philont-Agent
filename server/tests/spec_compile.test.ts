@@ -5,6 +5,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildCompilePrompt,
   compileSpec,
   mergeRegexFloor,
   specToGuideApi,
@@ -186,4 +187,19 @@ test('compileSpec: per-endpoint auth is read from the contract; unclear stays ab
   assert.equal(by('/api/things').auth, 'required');
   assert.ok(!('auth' in by('/api/unclear')), 'unstated auth must be absent, not guessed');
   assert.ok(!('auth' in by('/api/garbage')), 'an unusable auth value must be absent, not coerced');
+});
+
+test('universality: the compile prompt gives a SHAPE, never one service\'s values', () => {
+  // The existing universality test greps these modules for a concrete service NAME — which is why it
+  // stayed green while this prompt shipped a real service's own endpoint (path, purpose and field names),
+  // basePath and auth scheme as its example. A few-shot carrying real values teaches the shape of whichever
+  // service it came from, and a small model copies it. So test the SHAPE, not the word: every slot must be
+  // a placeholder the model can only fill by reading the guide in front of it.
+  const p = buildCompilePrompt('<<THE-GUIDE>>');
+  assert.ok(!/"scheme"\s*:\s*"(?!<)/.test(p), 'auth scheme must be a placeholder, not a real scheme');
+  assert.ok(!/"header"\s*:\s*"(?!<)/.test(p), 'auth header must be a placeholder, not a real header name');
+  assert.ok(!/"path"\s*:\s*"\//.test(p), 'endpoint path must be a placeholder, not a real path');
+  assert.ok(!/"basePath"\s*:\s*"\//.test(p), 'basePath must be a placeholder, not a real prefix');
+  assert.ok(!/"requiredFields"\s*:\s*\["(?!<)/.test(p), 'requiredFields must be placeholders, not real field names');
+  assert.ok(p.includes('<<THE-GUIDE>>'), 'the guide under compilation must actually be included');
 });

@@ -70,22 +70,30 @@ export function guideContentHash(guideText: string): string {
 const COMPILE_SYSTEM =
   'You are a precise API-spec extractor. Output ONLY a JSON object, no markdown fences, no prose.';
 
-function buildCompilePrompt(guideText: string): string {
+export function buildCompilePrompt(guideText: string): string {
   return [
     'Extract the machine-actionable spec from this service guide.',
-    'Output JSON exactly in this shape:',
-    '{"service":{"name":"<short-slug>","hosts":["host.tld"]},',
-    ' "basePath":"/api",',
-    ' "auth":{"scheme":"bearer","header":"Authorization"},',
-    ' "endpoints":[{"method":"POST","path":"/api/comments","purpose":"create comment","requiredFields":["post_id","body"],"auth":"required"}],',
+    // Every slot below is a TYPED PLACEHOLDER, never a sample value. An example carrying real values is a
+    // few-shot: it teaches the shape of whichever service it was taken from, and a small model copies it —
+    // this prompt used to ship one concrete service's own basePath, auth scheme and endpoint (down to its
+    // field names), so a guide that looked different got pulled toward that service's shape. Placeholders
+    // can only be filled by reading THIS guide.
+    'Output JSON exactly in this shape (every <...> is a slot you fill from THIS guide — never copy these):',
+    '{"service":{"name":"<short-slug>","hosts":["<host.tld>"]},',
+    ' "basePath":"<common path prefix, or omit if the guide has none>",',
+    ' "auth":{"scheme":"<auth scheme the guide names>","header":"<header name the guide names>"},',
+    ' "endpoints":[{"method":"<GET|POST|PUT|PATCH|DELETE>","path":"<absolute path>","purpose":"<short>",',
+    '   "requiredFields":["<field the guide names>"],"auth":"<required|none>"}],',
     ' "preconditions":["..."], "rules":["..."]}',
     'Hard requirements:',
+    '- Take every value from THIS guide. If the guide never states something, omit it — never carry over a',
+    '  value from the shape above, and never fill a gap from what other APIs usually do.',
     '- auth: per endpoint, "required" or "none" — read it off the guide\'s OWN examples for THAT endpoint:',
     '  if its example/prose carries the auth header, "required"; if it plainly does not (typically the',
     '  endpoint that ISSUES the credential, which callers reach before they have one), "none". Do not guess',
     '  from the path name. Omit the field entirely when the guide does not make it clear.',
-    '- paths must be ABSOLUTE and base-resolved: if the guide defines BASE_URL="https://host/api" and',
-    '  documents `/comments`, the path is `/api/comments`. Every path starts with "/".',
+    '- paths must be ABSOLUTE and base-resolved: if the guide defines a base URL ending in a prefix and',
+    '  documents a path relative to it, prepend that prefix. Every path starts with "/".',
     '- hosts: bare hostnames only, no scheme, no placeholder/example hosts.',
     '- include EVERY documented endpoint (tables, curl examples, prose).',
     '- requiredFields: only when the guide names them; field names verbatim.',
