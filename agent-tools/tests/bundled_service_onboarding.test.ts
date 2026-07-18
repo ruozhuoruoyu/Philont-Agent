@@ -1,11 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ACTION_TEMPLATE_WARN_SIZE } from '../src/skills/loader.js';
 
-const SKILL = fileURLToPath(new URL('../bundled-skills/service-onboarding/SKILL.md', import.meta.url));
-const src = readFileSync(SKILL, 'utf8');
+// This test runs both from source (tsx, cwd tests/) and COMPILED (node --test dist/tests/, how CI runs it),
+// so the depth up to the package root differs. bundled-skills/ lives at the package root and is NOT copied
+// into dist — walk up from this file until we find it rather than assuming a fixed relative depth.
+function findBundledSkill(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i++) {
+    const candidate = join(dir, 'bundled-skills', 'service-onboarding', 'SKILL.md');
+    if (existsSync(candidate)) return candidate;
+    dir = dirname(dir);
+  }
+  throw new Error('could not locate bundled-skills/service-onboarding/SKILL.md from ' + import.meta.url);
+}
+const src = readFileSync(findBundledSkill(), 'utf8');
 
 test('service-onboarding carries no concrete-service shape (endpoint completeness moved to the spec mechanism)', () => {
   // The skill used to teach one service's document structure — "Part 1 / Part 4 / Part 5", counts tuned to
