@@ -29,11 +29,12 @@ export interface AuxLLMRequest {
   /** Maximum output tokens, default 4096 */
   maxTokens?: number;
   /**
-   * Per-call timeout override in ms (default DEFAULT_TIMEOUT_MS = 60s). The 60s default suits short
-   * chores (classification, distillation), but a compile-style call — e.g. turning a whole API guide into
-   * a spec — generates thousands of JSON tokens and legitimately needs longer on a small/slow model
-   * (prod 2026-07-17: spec-compile of a 17k-char guide hit the 60s wall every time, so the service spec
-   * was never compiled and the spec guards ran inert against a null spec).
+   * Per-call timeout override in ms. When omitted the timeout is derived from `maxTokens` (see
+   * auxTimeoutFor), so a small classifier does not wait as long as a full-page distillation. Set this only
+   * for a call that legitimately needs longer than the adaptive ceiling — e.g. compiling a whole API guide
+   * into a spec generates thousands of JSON tokens and needs minutes on a small model (prod 2026-07-17:
+   * that compile hit the old flat 60s wall every time, so the spec was never built and the spec guards ran
+   * inert against a null spec).
    */
   timeoutMs?: number;
   /** Abort signal */
@@ -115,6 +116,32 @@ export function isAuxLLMConfigured(): boolean {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_TOKENS = 4096;
+
+/**
+ * Per-call timeout sized to the output the CALLER asked for, instead of one flat ceiling for every aux
+ * workload. Aux serves jobs spanning 20x in output size — a 4-token health probe, ~200-token classifiers
+ * that block the user's turn (intent router, auth intent), a 2048-token reflection, a 4096-token page
+ * distillation — and a flat 60s meant a tiny classifier still SQUATTED a queue slot for a full minute when
+ * the endpoint was struggling.
+ *
+ * That matters because main and aux typically share one endpoint: prod 2026-07-18 saw the shared endpoint
+ * answering `Request waiting timeout reached` (its queue full) while philont's own background aux chores
+ * each held a slot for 60s, competing with the user's foreground turn. Same shape as the main adapter's
+ * adaptive timeout, so both layers reason about latency the same way.
+ *
+ * Clamped to [8s, DEFAULT_TIMEOUT_MS] so this can only ever SHORTEN a call relative to the old flat value —
+ * a 4096-token job still gets the same 60s it always had. An explicit req.timeoutMs overrides entirely
+ * (spec compilation legitimately needs minutes).
+ */
+const AUX_TIMEOUT_BASE_MS = 8_000; // connect + prompt ingest + time to first token
+const AUX_TIMEOUT_MS_PER_TOKEN = 15;
+const AUX_TIMEOUT_MIN_MS = 8_000;
+
+export function auxTimeoutFor(maxTokens: number | undefined): number {
+  const tokens = maxTokens ?? DEFAULT_MAX_TOKENS;
+  const computed = AUX_TIMEOUT_BASE_MS + tokens * AUX_TIMEOUT_MS_PER_TOKEN;
+  return Math.max(AUX_TIMEOUT_MIN_MS, Math.min(DEFAULT_TIMEOUT_MS, computed));
+}
 
 /**
  * Aux thinking policy. 2026-06-07: aux is the cheap small-model path (summaries /
@@ -221,7 +248,7 @@ async function callOpenAICompatible(
     ...(auxThinkingDisabled(cfg.model) ? { thinking: { type: 'disabled' } } : {}),
   };
 
-  const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = req.timeoutMs ?? auxTimeoutFor(req.maxTokens);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = req.signal
     ? anySignal([req.signal, timeoutSignal])
@@ -339,7 +366,7 @@ async function callAnthropicCompatible(
   // Disable thinking on thinking-capable models — see auxThinkingDisabled (fixes empty content).
   if (auxThinkingDisabled(cfg.model)) body.thinking = { type: 'disabled' };
 
-  const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = req.timeoutMs ?? auxTimeoutFor(req.maxTokens);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = req.signal
     ? anySignal([req.signal, timeoutSignal])
