@@ -405,15 +405,121 @@ export function isTransientLlmError(e: unknown): boolean {
   );
 }
 
+/**
+ * Endpoint circuit breaker.
+ *
+ * The adaptive per-call timeout (see chat-handler) is sized for "slow but working" — 30s + 4096 tokens x
+ * 100ms = 439.6s. It has no concept of "dead". When the endpoint is genuinely down, every layer waits its
+ * full budget and then the turn retries the whole call once: prod 2026-07-18 a request to clear some
+ * memories sat 14.7 MINUTES and ran zero tools, because the single LLM call that decides which tool to run
+ * never came back. Each attempt also kept a slot in an already-full queue, making the outage worse.
+ *
+ * After LLM_BREAKER_THRESHOLD consecutive failures the breaker opens and subsequent calls fail IMMEDIATELY
+ * with a readable error instead of hanging. Every background caller fails fast too, which stops philont
+ * hammering an endpoint that is already queue-saturated.
+ *
+ * Designed so it can only shorten a doomed wait, never strand a healthy endpoint:
+ *   - only CONSECUTIVE failures count; a single success resets the count to zero
+ *   - it opens only on transient/infrastructure errors, never on a model-level rejection
+ *   - after LLM_BREAKER_COOLDOWN_MS it goes half-open and lets ONE probe through, so recovery is automatic
+ *     and needs no restart; the probe succeeding closes it
+ *   - PHILONT_LLM_BREAKER=0 disables it entirely
+ * Worst case if it opens spuriously: one cooldown window of fast errors, versus 15 minutes of hanging.
+ */
+const LLM_BREAKER_THRESHOLD = 4;
+const LLM_BREAKER_COOLDOWN_MS = 30_000;
+
+function llmBreakerEnabled(): boolean {
+  const v = (process.env.PHILONT_LLM_BREAKER ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+export class LlmEndpointBreaker {
+  private consecutiveFailures = 0;
+  private openedAt = 0;
+  private probeInFlight = false;
+
+  constructor(
+    private readonly threshold: number = LLM_BREAKER_THRESHOLD,
+    private readonly cooldownMs: number = LLM_BREAKER_COOLDOWN_MS,
+  ) {}
+
+  /** Throws when the breaker is open and this call is not the half-open probe. */
+  assertClosed(): void {
+    if (!llmBreakerEnabled() || this.openedAt === 0) return;
+    const downMs = Date.now() - this.openedAt;
+    if (downMs >= this.cooldownMs && !this.probeInFlight) {
+      this.probeInFlight = true; // half-open: let exactly one call through to test recovery
+      return;
+    }
+    if (this.probeInFlight) return; // the probe itself must proceed
+    throw new LlmEndpointDownError(this.consecutiveFailures, downMs);
+  }
+
+  recordSuccess(): void {
+    if (this.openedAt !== 0) {
+      console.warn(`[llm-breaker] endpoint recovered after ${Math.round((Date.now() - this.openedAt) / 1000)}s — closing`);
+    }
+    this.consecutiveFailures = 0;
+    this.openedAt = 0;
+    this.probeInFlight = false;
+  }
+
+  recordFailure(e: unknown): void {
+    this.probeInFlight = false;
+    // Only infrastructure failures indict the endpoint. A model-level rejection means it is answering fine.
+    if (!isTransientLlmError(e)) return;
+    this.consecutiveFailures++;
+    if (this.consecutiveFailures >= this.threshold && this.openedAt === 0) {
+      this.openedAt = Date.now();
+      console.error(
+        `[llm-breaker] OPEN after ${this.consecutiveFailures} consecutive endpoint failures — ` +
+          `calls now fail fast instead of waiting the full per-call timeout. ` +
+          `Retrying one probe every ${this.cooldownMs / 1000}s; any success closes it. ` +
+          `(disable with PHILONT_LLM_BREAKER=0)`,
+      );
+    } else if (this.openedAt !== 0) {
+      this.openedAt = Date.now(); // still failing — restart the cooldown
+    }
+  }
+
+  /** Test hook. */
+  reset(): void {
+    this.consecutiveFailures = 0;
+    this.openedAt = 0;
+    this.probeInFlight = false;
+  }
+}
+
+export class LlmEndpointDownError extends Error {
+  constructor(failures: number, downMs: number) {
+    super(
+      `LLM endpoint is not responding (${failures} consecutive failures, down ${Math.round(downMs / 1000)}s). ` +
+        `Failing fast instead of waiting for a timeout. It will be retried automatically; ` +
+        `check the inference endpoint's health/queue.`,
+    );
+    this.name = 'LlmEndpointDownError';
+  }
+}
+
+export const llmBreaker = new LlmEndpointBreaker();
+
 async function sendWithTransientRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   let lastErr: unknown;
+  // Checked once up front, not per attempt: an open breaker means do not even start.
+  llmBreaker.assertClosed();
   for (let attempt = 0; attempt <= LLM_MAX_RETRIES; attempt++) {
     if (signal?.aborted) throw new Error('aborted');
     try {
-      return await fn();
+      const out = await fn();
+      llmBreaker.recordSuccess();
+      return out;
     } catch (e) {
       lastErr = e;
-      if (attempt >= LLM_MAX_RETRIES || !isTransientLlmError(e)) throw e;
+      if (attempt >= LLM_MAX_RETRIES || !isTransientLlmError(e)) {
+        llmBreaker.recordFailure(e);
+        throw e;
+      }
       const backoffMs = Math.min(8000, 500 * 2 ** attempt) + (attempt * 113) % 250; // deterministic jitter
       console.warn(
         `[llm-adapter] transient error (attempt ${attempt + 1}/${LLM_MAX_RETRIES + 1}), retrying in ${backoffMs}ms: ${(e as Error)?.message ?? e}`,
