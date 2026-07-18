@@ -435,6 +435,72 @@ export function endpointGuardReject(
   };
 }
 
+/**
+ * Opt-in (unlike the other guard flags, which default ON). The corpus check below is high-precision but not
+ * infallible — a value legitimately known from an earlier turn's context, never re-read this turn, would be
+ * flagged — so it is gated OFF until a run proves it lifts first-run completion without false blocks. Turn
+ * on with PHILONT_ID_PROVENANCE=1/on/true/yes.
+ */
+export function idProvenanceEnabled(): boolean {
+  const v = (process.env.PHILONT_ID_PROVENANCE ?? '').trim().toLowerCase();
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+}
+
+/** A body field naming an identifier the request REFERS to (community_id / post_id / actorId / id). */
+const ID_FIELD_RE = /(?:^|_|\b)id$|_id$|Id$/;
+
+/**
+ * Refuse a write whose identifier field carries a value the agent never actually read this turn — i.e. it
+ * invented the id. Prod 2026-07-17: a weak model posted with `community_id: "general"` without ever calling
+ * GET /communities, the server rejected it, and the model then thrashed (url-less calls → circuit breaker →
+ * turn died). Fabricating a plausible token when it hits a gap is the weak model's signature failure; this
+ * catches it at the boundary and points at where the real value comes from.
+ *
+ * `corpus` is every string the agent genuinely saw this turn — successful tool results (API reads,
+ * get_fact/list_facts output) plus the task text — so all three legitimate sources of an id are covered by
+ * construction. A value absent from ALL of them was minted here. Failure direction is safe: a coincidental
+ * substring match lets a fabrication through (status quo), never blocks a real id. Only the FIRST offending
+ * field is reported, with the service's documented GET endpoints as the place to obtain a real one.
+ */
+export function idProvenanceReject(
+  input: Record<string, unknown>,
+  corpus: readonly string[],
+  spec: SpecDoc | null,
+): { error: string } | null {
+  if (!/^(POST|PUT|PATCH)$/i.test(String(input.method ?? 'GET'))) return null;
+  const body = input.body;
+  const obj =
+    body && typeof body === 'object' && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : (() => {
+          try {
+            const p = typeof body === 'string' ? JSON.parse(body) : null;
+            return p && typeof p === 'object' && !Array.isArray(p) ? (p as Record<string, unknown>) : null;
+          } catch {
+            return null;
+          }
+        })();
+  if (!obj) return null;
+  for (const [key, val] of Object.entries(obj)) {
+    if (typeof val !== 'string' || val.length < 2) continue;
+    if (!ID_FIELD_RE.test(key)) continue;
+    if (corpus.some((c) => c.includes(val))) continue; // read somewhere this turn → legitimate
+    const gets = (spec?.endpoints ?? [])
+      .filter((e) => e.method === 'GET')
+      .slice(0, 8)
+      .map((e) => `GET ${e.path}`);
+    const where = gets.length
+      ? ` Fetch a real one from the service first — its readable endpoints include: ${gets.join(', ')}.`
+      : ' Fetch a real one from the service first (call the endpoint that lists this resource).';
+    return {
+      error:
+        `[id-provenance guard] "${key}": "${val}" was not read from any response, fact, or the task this ` +
+        `turn — do not invent an identifier.${where} Then use the value the service returned.`,
+    };
+  }
+  return null;
+}
+
 function slugify(s: string): string {
   return s
     .toLowerCase()
@@ -855,6 +921,10 @@ export async function runPlanExecuteLoop(
   // Wrap the tool runner so a step's http call to an UNDOCUMENTED host is blocked with a correction
   // instead of silently 404'ing on a hallucinated endpoint.
   const okBusinessCalls: string[] = []; // C: mechanism cookbook — verified-working calls
+  // Everything the agent genuinely READ this turn: the task, plus every successful tool result. The
+  // id-provenance guard checks invented identifiers against this — a value here was seen, a value absent
+  // from it was minted. Seeded with the task so a user-supplied id counts as read.
+  const readCorpus: string[] = [task];
   // A successful auth call whose response carried a credential ⇒ the securedHttp capture layer
   // stored it (see agent-tools credential_capture). Proof for credential-save deliverables.
   let credentialCaptured = false;
@@ -871,6 +941,8 @@ export async function runPlanExecuteLoop(
       // documented required fields is corrected BEFORE sending (prod: raw-markdown string body
       // -> server 500 "Failed to create post").
       ['spec-body', () => (compiledSpec ? specBodyGuardReject(name, input, compiledSpec) : null)],
+      // Invented identifier in a write body — checked against everything actually read this turn. Opt-in.
+      ['id-provenance', () => (idProvenanceEnabled() && name === 'http' ? idProvenanceReject(input, readCorpus, compiledSpec) : null)],
       ['schedule-instruction', () => (name === 'schedule_reminder' ? scheduleInstructionReject(input, guideApi) : null)],
     ];
     for (const [guardName, run] of guards) {
@@ -883,6 +955,9 @@ export async function runPlanExecuteLoop(
       }
     }
     const res = await deps.toolRunner(name, input);
+    // A successful read is provenance for later ids: record its body so a value the model later puts in a
+    // write can be traced to something it actually saw (API response, get_fact output, …).
+    if (res.ok && typeof res.output === 'string' && res.output) readCorpus.push(res.output);
     // Per-tool outcome. The step summary only aggregates ("tools=5 ok=2"), which makes a failing step
     // undiagnosable from logs — prod 2026-07-17: a save-creds step reported ok=2/5 and there was no way to
     // see WHICH tool failed or why, so the root cause could not be pinned from the log at all. Name +
