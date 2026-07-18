@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { idProvenanceReject, type SpecDoc } from '../src/plan_execute_loop.js';
+import { idProvenanceReject, idProvenanceEnabled, type SpecDoc } from '../src/plan_execute_loop.js';
 
 const SPEC = {
   source: { contentHash: 'x' },
@@ -57,4 +57,18 @@ test('stringified JSON body is parsed and checked', () => {
 
 test('trivial short values are not policed (avoids noise)', () => {
   assert.equal(idProvenanceReject({ method: 'POST', url: 'https://svc.test/api/posts', body: { post_id: '3' } }, ['t'], SPEC), null);
+});
+
+test('the guard is ON by default and honours its kill switch', () => {
+  const prev = process.env.PHILONT_ID_PROVENANCE;
+  try {
+    delete process.env.PHILONT_ID_PROVENANCE;
+    assert.equal(idProvenanceEnabled(), true, 'default on, like the sibling guard flags');
+    process.env.PHILONT_ID_PROVENANCE = '0';
+    assert.equal(idProvenanceEnabled(), false, 'kill switch must work — this guard can false-positive');
+    process.env.PHILONT_ID_PROVENANCE = 'off';
+    assert.equal(idProvenanceEnabled(), false);
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_ID_PROVENANCE; else process.env.PHILONT_ID_PROVENANCE = prev;
+  }
 });

@@ -436,14 +436,20 @@ export function endpointGuardReject(
 }
 
 /**
- * Opt-in (unlike the other guard flags, which default ON). The corpus check below is high-precision but not
- * infallible — a value legitimately known from an earlier turn's context, never re-read this turn, would be
- * flagged — so it is gated OFF until a run proves it lifts first-run completion without false blocks. Turn
- * on with PHILONT_ID_PROVENANCE=1/on/true/yes.
+ * On by default, like the sibling guard flags; disable with PHILONT_ID_PROVENANCE=0.
+ *
+ * Enabled after repeated runs where fabricating an identifier was the last thing standing between the loop
+ * and a completed first run: the agent could never obtain a real one, so the required post was never sent.
+ * Scope limits the blast radius — this guard is wired only into the plan-loop's own tool runner, i.e. the
+ * first-run onboarding flow, which reads everything fresh, so the corpus genuinely contains every legitimate
+ * id. Scheduled/legacy turns do not go through it.
+ *
+ * Residual risk it cannot rule out: a value legitimately known from an earlier turn's context and never
+ * re-read this turn would be flagged. That is why the kill switch exists.
  */
 export function idProvenanceEnabled(): boolean {
   const v = (process.env.PHILONT_ID_PROVENANCE ?? '').trim().toLowerCase();
-  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
 /** A body field naming an identifier the request REFERS to (community_id / post_id / actorId / id). */

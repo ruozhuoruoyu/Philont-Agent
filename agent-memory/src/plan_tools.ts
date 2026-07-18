@@ -58,6 +58,32 @@ export function resolveStepId(requested: string, realIds: string[]): string | nu
   return null;
 }
 
+/**
+ * Forgiving plan-id resolution — the same idea as resolveStepId, one level up.
+ *
+ * An LLM cannot reliably transcribe a 36-char UUID. Prod 2026-07-18, a single run produced `plan_01`,
+ * `placeholder-missing-id`, `plan_7c3f2a1b`, and even two UUIDs concatenated into one string; every call
+ * failed, and every one succeeded on the immediate retry once the error listed the real ids. The listing
+ * fix (2026-07-13) made it self-correct in one retry, but each occurrence still burns a round trip, and a
+ * run spent seven of them.
+ *
+ * So resolve instead of merely explaining: an exact hit wins; otherwise a unique prefix match; otherwise, if
+ * the session has exactly ONE open plan, that is unambiguously the one meant — there is no other candidate
+ * to confuse it with. Returns null when genuinely ambiguous (0 or 2+ open plans and no id match), leaving
+ * the existing explain-and-retry error in place.
+ *
+ * Safe because the caller still validates the STEP against the resolved plan: a mis-resolution whose step
+ * does not exist there is rejected by that second gate rather than silently updating the wrong plan.
+ */
+export function resolvePlanId(requested: string, openPlanIds: string[]): string | null {
+  const req = requested.trim();
+  if (openPlanIds.includes(req)) return req;
+  const prefixHits = openPlanIds.filter((id) => id.startsWith(req));
+  if (req.length >= 8 && prefixHits.length === 1) return prefixHits[0];
+  if (openPlanIds.length === 1) return openPlanIds[0];
+  return null;
+}
+
 export function kebabize(id: string): string {
   return id
     .trim()
@@ -287,6 +313,18 @@ function describeSessionActivePlans(plans: PlanStore, sessionId: string): string
     );
   } catch {
     return 'Could not list this session\'s plans.';
+  }
+}
+
+/** Ids of this session's still-open plans (draft/executing) — the candidate set for forgiving resolution. */
+function sessionOpenPlanIds(plans: PlanStore, sessionId: string): string[] {
+  try {
+    return plans
+      .listBySession(sessionId, { limit: 5 })
+      .filter((p) => p.status === 'draft' || p.status === 'executing')
+      .map((p) => p.id);
+  } catch {
+    return [];
   }
 }
 
@@ -911,10 +949,10 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
     capability: 'write',
     domain: 'self',
     async execute(params) {
-      const planId = params.plan_id;
+      const requestedPlanId = params.plan_id;
       const stepId = params.step_id;
       const status = params.status;
-      if (typeof planId !== 'string' || !planId) {
+      if (typeof requestedPlanId !== 'string' || !requestedPlanId) {
         return { success: false, output: '', error: 'plan_id is required' };
       }
       if (typeof stepId !== 'string' || !stepId) {
@@ -933,7 +971,22 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
       // forcing LLM to use plan_revise to promote the plan first.
       // Otherwise LLM finds a shortcut: plan_update_step doing (draft→executing directly) → all done →
       // plan_close success({}) passes C1-C4 vacuously for deliverables=[] → placeholder plan fakes completion.
-      const currentPlan = plans.get(planId);
+      // An LLM cannot transcribe a 36-char UUID; resolve a mistyped/invented id instead of only explaining it
+      // (see resolvePlanId). The step check below is the second gate against a wrong resolution.
+      let planId = requestedPlanId;
+      let currentPlan = plans.get(planId);
+      if (!currentPlan) {
+        const resolved = resolvePlanId(planId, sessionOpenPlanIds(plans, getCurrentSessionId()));
+        if (resolved && resolved !== planId) {
+          const candidate = plans.get(resolved);
+          // Only adopt it when the requested STEP actually exists there — otherwise fall through to the error.
+          if (candidate && candidate.steps.some((st) => st.id === stepId || resolveStepId(stepId, candidate.steps.map((x) => x.id)) === st.id)) {
+            console.warn(`[plan-tools] plan_update_step: plan id '${planId}' not found — resolved to the session's open plan ${resolved}`);
+            planId = resolved;
+            currentPlan = candidate;
+          }
+        }
+      }
 
       // Phase 12 cont (2026-05-17): distinguish "plan does not exist" vs "step does not exist",
       // listing real step ids when the step is not found. Real-world bug: LLM abbreviated
