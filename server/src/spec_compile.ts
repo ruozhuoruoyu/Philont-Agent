@@ -263,6 +263,23 @@ export function endpointMatches(ep: SpecEndpoint, method: string, pathname: stri
 }
 
 /**
+ * The path prefix the contract actually governs. Prefer the declared basePath; otherwise derive the longest
+ * leading path segment ALL documented endpoints share (e.g. every path starting /api/ ⇒ "/api"). Returns
+ * null when the endpoints share nothing, meaning the API surface spans the whole host and we cannot tell an
+ * API call from an unrelated file — in that case the endpoint check stays silent rather than guess.
+ */
+export function specApiPrefix(spec: SpecDoc): string | null {
+  const declared = spec.basePath?.trim();
+  if (declared && declared.startsWith('/') && declared.length > 1) return declared.replace(/\/+$/, '');
+  const firstSegs = spec.endpoints
+    .map((e) => e.path.split('/').filter(Boolean)[0])
+    .filter((s): s is string => Boolean(s));
+  if (firstSegs.length === 0) return null;
+  const head = firstSegs[0];
+  return firstSegs.every((s) => s === head) ? `/${head}` : null;
+}
+
+/**
  * Generic contract guard for a request to a host the SpecDoc governs — the companion to the body guard,
  * covering the dimensions a weaker model breaks that body-shape checks miss (observed with a small model:
  * it hit an undocumented endpoint → server 404, and omitted the documented auth header). Reads ONLY
@@ -292,8 +309,15 @@ export function specRequestGuard(
   const authHeader = spec.auth?.header?.trim();
   const ep = spec.endpoints.find((e) => endpointMatches(e, method, u.pathname));
 
-  // (1) Undocumented endpoint (only when the service documents any endpoints at all).
-  if (!ep && spec.endpoints.length > 0) {
+  // (1) Undocumented endpoint — but ONLY within the service's API surface. A spec describes an API; it has
+  // no authority over every other path the same host serves. Prod 2026-07-18: this blocked a plain GET of a
+  // guide's companion doc on the same host, because a .md file is naturally not among the documented
+  // /api/* endpoints, and the step that needed it failed. Scope the check to paths under the
+  // contract's own basePath; when the contract declares no basePath, fall back to the prefix its endpoints
+  // actually share, and if even that is unknowable, do not police paths at all — silence beats a false block.
+  const apiPrefix = specApiPrefix(spec);
+  const withinApiSurface = apiPrefix ? u.pathname.startsWith(apiPrefix) : false;
+  if (!ep && withinApiSurface && spec.endpoints.length > 0) {
     const list = spec.endpoints.slice(0, 12).map((e) => `${e.method} ${e.path}`).join(', ');
     return {
       error:
