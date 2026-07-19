@@ -968,8 +968,22 @@ export async function runPlanExecuteLoop(
     // undiagnosable from logs — prod 2026-07-17: a save-creds step reported ok=2/5 and there was no way to
     // see WHICH tool failed or why, so the root cause could not be pinned from the log at all. Name +
     // outcome only: never the args, which carry credentials.
+    // For http, name the endpoint. Without it a run reads as an opaque wall of `tool http → ok` and you
+    // cannot tell which call the agent actually made — prod 2026-07-19: a post was blocked for a missing
+    // required field and there was no way to see whether the agent had first fetched the resource list it
+    // needed the field from. METHOD + host + PATH only: the query string is dropped because it can carry
+    // tokens, and args are never logged for the same reason.
+    let where = '';
+    if (name === 'http') {
+      try {
+        const u = new URL(String(input.url ?? ''));
+        where = ` ${String(input.method ?? 'GET').toUpperCase()} ${u.host}${u.pathname}`;
+      } catch {
+        where = ' (unparseable url)';
+      }
+    }
     deps.log(
-      `[plan-loop] tool ${name} → ${res.ok ? 'ok' : `FAIL ${String(res.error ?? '').replace(/\s+/g, ' ').slice(0, 140)}`}`,
+      `[plan-loop] tool ${name}${where} → ${res.ok ? 'ok' : `FAIL ${String(res.error ?? '').replace(/\s+/g, ' ').slice(0, 140)}`}`,
     );
     if (name === 'http') {
       const diag = describeAuthCall(input, res);
