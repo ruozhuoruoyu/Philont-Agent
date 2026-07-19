@@ -25,7 +25,7 @@ import {
   type MiniLoopToolRunResult,
 } from '@agent/tools';
 import type { ToolDefinition } from '@agent/policy';
-import { compileSpec, specToGuideApi, specBodyGuardReject, specRequestGuard, guideContentHash, type SpecDoc } from './spec_compile.js';
+import { compileSpec, specToGuideApi, specBodyGuardReject, specRequestGuard, guideContentHash, specEndpointForDeliverable, endpointMatches, type SpecDoc } from './spec_compile.js';
 
 // ── Flag ────────────────────────────────────────────────────────────────────
 
@@ -1247,6 +1247,28 @@ export async function runPlanExecuteLoop(
       // most 4 min, and the loop moves on to the next step / the honest report.
       abortSignal: budgetSignal(4 * 60_000),
     });
+
+    // Which successful calls count as THE action a deliverable names. Prefer the service's own contract —
+    // the endpoint whose compiled `purpose` matches this deliverable — and fall back to the keyword table
+    // only when the spec cannot answer unambiguously. The table mis-assigns on wording the service did not
+    // choose ("Upvote…" misses \bvote\b and lands on the posts-collection hint), which reports a
+    // SUCCEEDED action as FAILED and triggers a pointless forced retry.
+    const actionMatcher = (dText: string): ((c: { name: string; input: Record<string, unknown> }) => boolean) | null => {
+      const ep = specEndpointForDeliverable(compiledSpec, dText);
+      if (ep) {
+        return (c) => {
+          if (c.name !== 'http') return false;
+          if (String(c.input.method ?? 'GET').toUpperCase() !== ep.method) return false;
+          try {
+            return endpointMatches(ep, ep.method, new URL(String(c.input.url ?? '')).pathname);
+          } catch {
+            return false;
+          }
+        };
+      }
+      const hint = ENDPOINT_HINTS.find(([k]) => k.test(dText))?.[1];
+      return hint ? (c) => callMatchesHint(hint, c.input.url, c.name) : null;
+    };
     const isActionCall = (c: { name: string; input: Record<string, unknown> }): boolean => {
       const cls = deps.classifyCall?.(c.name, c.input);
       if (cls?.capability !== undefined) {
@@ -1263,15 +1285,13 @@ export async function runPlanExecuteLoop(
     // Endpoint-aware: when a covered deliverable names an endpoint (post/comment/vote…), only
     // attempts MATCHING that hint count — prod: one unrelated ok action (an auth verify POST) let
     // publish-first-post dodge the forced retry, and the post was never attempted at all.
-    const requiredHints = coverTexts
+    const requiredMatchers = coverTexts
       .filter((t) => ACTION_REQ_RE.test(t))
-      .map((t) => ENDPOINT_HINTS.find(([k]) => k.test(t))?.[1])
-      .filter((h): h is RegExp => !!h);
+      .map((t) => actionMatcher(t))
+      .filter((m): m is (c: { name: string; input: Record<string, unknown> }) => boolean => !!m);
     const attemptedAct = () =>
       result.toolCallHistory.some(
-        (c) =>
-          isActionCall(c) &&
-          (requiredHints.length === 0 || requiredHints.some((h) => callMatchesHint(h, c.input.url, c.name))),
+        (c) => isActionCall(c) && (requiredMatchers.length === 0 || requiredMatchers.some((m) => m(c))),
       );
     // No forced retry when the turn ledger ALREADY satisfies every covered deliverable's required
     // evidence — the retry exists to force an attempt, but the work happened in an earlier step
@@ -1282,11 +1302,8 @@ export async function runPlanExecuteLoop(
       const t = `${d.description} ${step.description}`;
       if (SCHEDULE_REQ_RE.test(t)) return turnOkSchedules.length > 0;
       if (ACTION_REQ_RE.test(t)) {
-        const hint = ENDPOINT_HINTS.find(([k]) => k.test(t))?.[1];
-        return (hint
-          ? turnOkActions.filter((c) => callMatchesHint(hint, c.input.url, c.name))
-          : turnOkActions
-        ).length > 0;
+        const m = actionMatcher(t);
+        return (m ? turnOkActions.filter((c) => m(c)) : turnOkActions).length > 0;
       }
       return true;
     });
@@ -1372,10 +1389,8 @@ export async function runPlanExecuteLoop(
         }
       } else if (ACTION_REQ_RE.test(dText)) {
         // Endpoint matching: the successful action must be THE one the deliverable names, not any write.
-        const hint = ENDPOINT_HINTS.find(([k]) => k.test(dText))?.[1];
-        const matched = hint
-          ? okActions.filter((c) => callMatchesHint(hint, (c.input as Record<string, unknown>).url, c.name))
-          : okActions;
+        const match = actionMatcher(dText);
+        const matched = match ? okActions.filter((c) => match(c)) : okActions;
         const conflict = result.toolCallHistory.find(
           (c) => !c.ok && /\b409\b|conflict|already\s+(?:used|exist|exists|registered|taken)/i.test(c.outputPreview),
         );
@@ -1389,7 +1404,7 @@ export async function runPlanExecuteLoop(
         // Turn-global fallback: the required action already succeeded in an EARLIER step this turn
         // (adopted duplicates land in late fulfill-steps with nothing left to do).
         const globalMatched = !dOk
-          ? (hint ? turnOkActions.filter((c) => callMatchesHint(hint, c.input.url, c.name)) : turnOkActions)
+          ? (match ? turnOkActions.filter((c) => match(c)) : turnOkActions)
           : [];
         if (!dOk && globalMatched.length > 0) {
           dOk = true;
@@ -1402,9 +1417,14 @@ export async function runPlanExecuteLoop(
             ? matched.map(describeCall).join(', ').slice(0, 120)
             : conflict
               ? `409 conflict — "${conflict.outputPreview.replace(/\s+/g, ' ').slice(0, 90)}". The resource already exists; do not retry — reuse the existing one or provide a fresh input.`
-              : hint
-                ? `requires a successful action matching ${String(hint)} (e.g. http POST to that endpoint) — none did`
-                : `requires an external action (e.g. http POST) — attempted ${actionAttempts.length}, succeeded 0`;
+              : (() => {
+                  const ep = specEndpointForDeliverable(compiledSpec, dText);
+                  if (ep) return `requires a successful ${ep.method} ${ep.path} (the endpoint this service documents for it) — none did`;
+                  const h = ENDPOINT_HINTS.find(([k]) => k.test(dText))?.[1];
+                  return h
+                    ? `requires a successful action matching ${String(h)} (e.g. http POST to that endpoint) — none did`
+                    : `requires an external action (e.g. http POST) — attempted ${actionAttempts.length}, succeeded 0`;
+                })();
         }
       } else {
         dOk = stepSucceeded;

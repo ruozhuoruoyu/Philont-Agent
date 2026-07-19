@@ -279,6 +279,54 @@ export function specApiPrefix(spec: SpecDoc): string | null {
   return firstSegs.every((s) => s === head) ? `/${head}` : null;
 }
 
+/** Normalize a word for loose comparison: lowercase, drop a trailing plural 's', ignore short filler. */
+function normTokens(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((t) => t.length >= 3)
+      .map((t) => (t.length > 4 && t.endsWith('s') ? t.slice(0, -1) : t)),
+  );
+}
+
+/**
+ * Which endpoint does this deliverable actually require? Answered from the SERVICE'S OWN words — each
+ * endpoint's compiled `purpose` — instead of a hard-coded keyword→path table.
+ *
+ * The table it supersedes maps words like "vote"/"publish" to paths like /vote//\/posts$/, i.e. one
+ * service's endpoint vocabulary, and it fails in the harmful direction: when it mis-assigns, a SUCCESSFUL
+ * action is reported FAILED, which then drives a forced retry and burns the budget. Prod 2026-07-19 showed
+ * it twice over — a deliverable phrased "Upvote posts…" does not match `\bvote\b` (no word boundary inside
+ * "Upvote"), so it fell through to the posts-collection hint, which correctly rejects the sub-resource
+ * /posts/{id}/upvote — and two successful upvotes were reported as a failure.
+ *
+ * Deliberately conservative: it answers only when the match is UNAMBIGUOUS (a clear winner sharing at least
+ * two meaningful words with the deliverable). Anything less returns null and the caller keeps its existing
+ * keyword table, so this can only ever add precision where the table was silent or wrong — never relax the
+ * evidence bar, which is the direction that would let a false success through.
+ */
+export function specEndpointForDeliverable(spec: SpecDoc | null, text: string): SpecEndpoint | null {
+  if (!spec || spec.endpoints.length === 0) return null;
+  const want = normTokens(text);
+  if (want.size === 0) return null;
+  const scored = spec.endpoints
+    // An action deliverable is satisfied by a WRITE; scoring reads would let "list posts" answer "post something".
+    .filter((e) => /^(POST|PUT|PATCH|DELETE)$/.test(e.method))
+    .map((e) => {
+      const have = normTokens(`${e.purpose ?? ''} ${e.path.replace(/[:${][^/]*/g, ' ')}`);
+      let overlap = 0;
+      for (const t of have) if (want.has(t)) overlap++;
+      return { endpoint: e, overlap };
+    })
+    .sort((a, b) => b.overlap - a.overlap);
+  const best = scored[0];
+  const second = scored[1];
+  if (!best || best.overlap < 2) return null; // too weak to be sure
+  if (second && second.overlap === best.overlap) return null; // ambiguous — do not guess
+  return best.endpoint;
+}
+
 /**
  * Generic contract guard for a request to a host the SpecDoc governs — the companion to the body guard,
  * covering the dimensions a weaker model breaks that body-shape checks miss (observed with a small model:
