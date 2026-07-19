@@ -117,6 +117,22 @@ export function isActionableInstruction(text: string): boolean {
   return IMPERATIVE_HEAD_RE.test(text.trim());
 }
 
+/**
+ * Does this call's endpoint satisfy an ENDPOINT_HINT?
+ *
+ * The URL and the tool name must be tested SEPARATELY. They used to be concatenated
+ * (`${url} ${name}`) and tested as one string, which silently broke every hint anchored with `$` — and the
+ * publish hint, `/\/posts\/?(?:\?|$)/`, is anchored precisely so that creating a post (the /posts
+ * COLLECTION) is not satisfied by a sub-resource like /posts/{id}/upvote. Appending " http" to the URL put
+ * a space where the anchor expected end-of-string, so a genuine `POST https://host/api/posts` never
+ * matched: prod 2026-07-19 the first post SUCCEEDED (`tool http POST mycox.ai/api/posts → ok`) and the
+ * deliverable was still reported ❌ "requires a successful action matching /\/posts\/?(?:\?|$)/i", every
+ * run, which then drove forced retries and burned budget re-doing work that had already landed.
+ */
+export function callMatchesHint(hint: RegExp, url: unknown, toolName: string): boolean {
+  return hint.test(String(url ?? '')) || hint.test(toolName);
+}
+
 /** Deliverable-keyword → endpoint-path fragment the successful action must match (prod: the
  * comment deliverable passed off 2 ok actions that were NOT the comment POST — nothing on the site). */
 export const ENDPOINT_HINTS: ReadonlyArray<[RegExp, RegExp]> = [
@@ -1255,7 +1271,7 @@ export async function runPlanExecuteLoop(
       result.toolCallHistory.some(
         (c) =>
           isActionCall(c) &&
-          (requiredHints.length === 0 || requiredHints.some((h) => h.test(`${String(c.input.url ?? '')} ${c.name}`))),
+          (requiredHints.length === 0 || requiredHints.some((h) => callMatchesHint(h, c.input.url, c.name))),
       );
     // No forced retry when the turn ledger ALREADY satisfies every covered deliverable's required
     // evidence — the retry exists to force an attempt, but the work happened in an earlier step
@@ -1268,7 +1284,7 @@ export async function runPlanExecuteLoop(
       if (ACTION_REQ_RE.test(t)) {
         const hint = ENDPOINT_HINTS.find(([k]) => k.test(t))?.[1];
         return (hint
-          ? turnOkActions.filter((c) => hint.test(`${String(c.input.url ?? '')} ${c.name}`))
+          ? turnOkActions.filter((c) => callMatchesHint(hint, c.input.url, c.name))
           : turnOkActions
         ).length > 0;
       }
@@ -1358,7 +1374,7 @@ export async function runPlanExecuteLoop(
         // Endpoint matching: the successful action must be THE one the deliverable names, not any write.
         const hint = ENDPOINT_HINTS.find(([k]) => k.test(dText))?.[1];
         const matched = hint
-          ? okActions.filter((c) => hint.test(`${String((c.input as Record<string, unknown>).url ?? '')} ${c.name}`))
+          ? okActions.filter((c) => callMatchesHint(hint, (c.input as Record<string, unknown>).url, c.name))
           : okActions;
         const conflict = result.toolCallHistory.find(
           (c) => !c.ok && /\b409\b|conflict|already\s+(?:used|exist|exists|registered|taken)/i.test(c.outputPreview),
@@ -1373,7 +1389,7 @@ export async function runPlanExecuteLoop(
         // Turn-global fallback: the required action already succeeded in an EARLIER step this turn
         // (adopted duplicates land in late fulfill-steps with nothing left to do).
         const globalMatched = !dOk
-          ? (hint ? turnOkActions.filter((c) => hint.test(`${String(c.input.url ?? '')} ${c.name}`)) : turnOkActions)
+          ? (hint ? turnOkActions.filter((c) => callMatchesHint(hint, c.input.url, c.name)) : turnOkActions)
           : [];
         if (!dOk && globalMatched.length > 0) {
           dOk = true;
