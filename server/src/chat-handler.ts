@@ -212,7 +212,7 @@ import {
 } from './controller_registry.js';
 import { writeServiceSkill } from './service_skill.js';
 import { findSpecForHost, findServiceSkillForText, specHostDriftGuard } from './service_spec_registry.js';
-import { specBodyGuardReject, specRequestGuard } from './spec_compile.js';
+import { specBodyGuardReject, specRequestGuard, specCompileEnabled } from './spec_compile.js';
 import { createAutoAdvanceLoop } from './deep_explore_autoadvance.js';
 import { createFollowUpLoop } from './deep_explore_followup.js';
 import { semanticToolPhrase, semanticToolFailPhrase, summarizingPhrase, type PhraseLang } from './channel_phrases.js';
@@ -9919,7 +9919,11 @@ async function runToolLoop(
           const skillsRoot = join(process.cwd(), '.philont', 'skills');
           const method = String(call.input.method ?? 'GET').toUpperCase();
           const specHost = new URL(String(call.input.url ?? '')).host.toLowerCase();
-          const installedSpec = findSpecForHost(specHost, skillsRoot);
+          // Same switch as the plan loop: an installed spec.json is an LLM-derived contract, and gating one
+          // path while leaving the other enforcing it executes the decision only halfway. Prod 2026-07-20:
+          // the plan loop logged `spec: OFF` and a scheduled turn on this path was still blocked by
+          // `rejected_by_spec_request_guard` minutes later.
+          const installedSpec = specCompileEnabled() ? findSpecForHost(specHost, skillsRoot) : null;
           // Full generic contract guard, driven only by the installed SpecDoc (host/auth/endpoints/body) so
           // every service spec is protected the same way. When the host is governed we check auth-header +
           // endpoint + body; when it is NOT, we check for host-drift against every other installed spec.
