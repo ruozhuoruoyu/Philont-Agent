@@ -12,7 +12,7 @@
  *      - guide fetch hard-fail → aborted with an honest reply (task never starts).
  */
 
-import { test } from 'node:test';
+import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   extractSpecItems,
@@ -23,6 +23,10 @@ import {
   type PlanLoopDeps,
 } from '../src/plan_execute_loop.js';
 import { guideContentHash, clearSpecCache } from '../src/spec_compile.js';
+
+// The spec compile path is opt-in; reset to the product default before each test so a test that opts in
+// cannot leak the flag into the ones after it.
+beforeEach(() => { delete process.env.PHILONT_SPEC_COMPILE; });
 
 const GUIDE = [
   '# MycoX Agent Guide',
@@ -880,6 +884,7 @@ test('forced retry is endpoint-aware: an unrelated ok action must not satisfy a 
 });
 
 test('adoption filter: spec rules and $VAR snippets never become deliverables', async () => {
+  process.env.PHILONT_SPEC_COMPILE = '1';
   const logs: string[] = [];
   const guide = [
     'You MUST publish one substantive post.',
@@ -918,6 +923,7 @@ const INSTALLED_SPEC = {
 };
 
 test('spec: an installed spec.json is reused and the LLM compile is NOT called', async () => {
+  process.env.PHILONT_SPEC_COMPILE = '1';
   clearSpecCache();
   let compiles = 0;
   const logs: string[] = [];
@@ -933,6 +939,7 @@ test('spec: an installed spec.json is reused and the LLM compile is NOT called',
 });
 
 test('spec: with no installed spec and a failing compile, the loop says so LOUDLY', async () => {
+  process.env.PHILONT_SPEC_COMPILE = '1';
   clearSpecCache();
   const logs: string[] = [];
   const deps = makeDeps({
@@ -949,6 +956,7 @@ test('spec: with no installed spec and a failing compile, the loop says so LOUDL
 });
 
 test('spec: a STALE installed spec.json (built from another guide revision) is NOT trusted', async () => {
+  process.env.PHILONT_SPEC_COMPILE = '1';
   clearSpecCache();
   let compiles = 0;
   const logs: string[] = [];

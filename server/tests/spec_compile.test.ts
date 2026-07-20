@@ -32,7 +32,11 @@ const GOOD_JSON = JSON.stringify({
 
 const REGEX_API = { hosts: ['mycox.ai'], endpoints: ['POST /api/comments', 'GET /api/stats'] };
 
-beforeEach(() => clearSpecCache());
+// This file tests the compile subsystem, which is now opt-in (see specCompileEnabled).
+beforeEach(() => {
+  process.env.PHILONT_SPEC_COMPILE = '1';
+  clearSpecCache();
+});
 
 test('compileSpec: validates shape, drops illegal entries, reports via log', async () => {
   const logs: string[] = [];

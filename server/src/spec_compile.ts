@@ -58,9 +58,31 @@ export interface SpecDoc {
   confidence: number;
 }
 
+/**
+ * OFF by default. Turn on with PHILONT_SPEC_COMPILE=1/on/true/yes.
+ *
+ * Compiling a guide into an enforceable contract asks the weak model to do, in ONE shot over 17k characters
+ * of prose, the very comprehension we already assume it cannot be trusted with — and then grants the result
+ * authority over every downstream guard. The circularity showed up as a straight negative in production:
+ * every fresh compile landed at the 0.30 confidence floor with paths that were not base-resolved, which
+ * drove 404s; `rejected_by_spec_request_guard` became the single largest source of tool failures; and a
+ * wrong contract, unlike a wrong call, has nothing to correct it — the contract IS the corrector.
+ *
+ * What replaces it needs no comprehension at all:
+ *   - hosts come from the deterministic regex anchor, which is what the host guard already runs on. That
+ *     guard stays, because a wrong host is the one error the server cannot report (it surfaces as an opaque
+ *     `fetch failed`, which the agent misread for days).
+ *   - endpoint / auth / body mistakes are judged by the service itself, for free and exactly: 404, 401, 400.
+ *   - what actually worked is remembered as VERIFIED CALLS and replayed next run.
+ *   - coverage of the guide is checked by the plan loop's two independent reviewers plus its ratchet, which
+ *     converges (deliverables 5→9→12, gaps 8→4→1) where a one-shot compile cannot.
+ *
+ * Left switchable rather than deleted: this is a judgement about where a weak model's output deserves
+ * authority, and it should be cheap to reverse if a run shows otherwise.
+ */
 export function specCompileEnabled(): boolean {
   const v = (process.env.PHILONT_SPEC_COMPILE ?? '').trim().toLowerCase();
-  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
 }
 
 export function guideContentHash(guideText: string): string {

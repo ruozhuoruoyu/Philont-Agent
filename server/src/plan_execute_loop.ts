@@ -25,7 +25,7 @@ import {
   type MiniLoopToolRunResult,
 } from '@agent/tools';
 import type { ToolDefinition } from '@agent/policy';
-import { compileSpec, specToGuideApi, specBodyGuardReject, specRequestGuard, guideContentHash, specEndpointForDeliverable, endpointMatches, type SpecDoc, type SpecEndpoint } from './spec_compile.js';
+import { compileSpec, specCompileEnabled, specToGuideApi, specBodyGuardReject, specRequestGuard, guideContentHash, specEndpointForDeliverable, endpointMatches, type SpecDoc, type SpecEndpoint } from './spec_compile.js';
 
 // ── Flag ────────────────────────────────────────────────────────────────────
 
@@ -903,7 +903,10 @@ export async function runPlanExecuteLoop(
   if (planEndpointGuardEnabled()) {
     // Prefer a spec this service already has on disk — the answer is already compiled, and it keeps the
     // slow aux model off the critical path of everything that depends on compiledSpec (see installedSpecFor).
-    const installed = deps.installedSpecFor?.(regexApi.hosts) ?? null;
+    // Gated on the same switch as compiling: an INSTALLED spec.json is the same artefact, just produced by
+    // an earlier run of the same weak model. Trusting it while distrusting a fresh compile would be
+    // inconsistent, and there is no reliable way to tell a good stored contract from a bad one.
+    const installed = specCompileEnabled() ? (deps.installedSpecFor?.(regexApi.hosts) ?? null) : null;
     // Only trust an installed spec that was compiled from THIS guide. source.contentHash exists exactly for
     // this: a spec compiled from an older revision is a contract for a service that may have moved, and
     // enforcing it would block legitimate calls — the same way requiring auth on the register endpoint did.
@@ -932,11 +935,12 @@ export async function runPlanExecuteLoop(
     if (compiledSpec) guideApi = specToGuideApi(compiledSpec);
   }
   if (!compiledSpec) {
-    // Loud, because the silent-degradation is the whole problem: no spec ⇒ the adoption rule filter and the
-    // spec guards are inert, and the plan can fill with guide prose.
     deps.log(
-      '[plan-loop] spec: NONE (no installed spec.json, and the compile failed/was unavailable) — ' +
-        'rule filter + spec guards are INERT this run; only the regex anchor applies',
+      specCompileEnabled()
+        ? '[plan-loop] spec: NONE (no installed spec.json, and the compile failed/was unavailable) — ' +
+          'rule filter + spec guards are INERT this run; only the regex anchor applies'
+        : '[plan-loop] spec: OFF (PHILONT_SPEC_COMPILE) — host guard runs on the regex anchor, the service ' +
+          'judges endpoint/auth/body itself, and coverage is the review loop\'s job',
     );
   } else if (!compiledSpec.endpoints.some((e) => e.auth)) {
     // Same reason: a spec compiled before per-endpoint auth existed carries no auth facts, so the missing-

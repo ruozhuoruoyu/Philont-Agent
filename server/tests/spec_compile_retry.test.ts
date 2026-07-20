@@ -1,9 +1,11 @@
-import { test } from 'node:test';
+import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { compileSpec, clearSpecCache, type SpecDoc } from '../src/spec_compile.js';
 import type { GuideApi } from '../src/plan_execute_loop.js';
 import { AuxLLMError } from '@agent/tools';
 
+// Exercises the compile subsystem, which is opt-in by default (see specCompileEnabled).
+beforeEach(() => { process.env.PHILONT_SPEC_COMPILE = '1'; });
 const GUIDE = 'POST /api/things — create a thing. Host: api.acme.test';
 const REGEX_API: GuideApi = { hosts: ['api.acme.test'], endpoints: ['POST /api/things'], authPaths: [] } as unknown as GuideApi;
 
