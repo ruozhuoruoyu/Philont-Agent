@@ -72,21 +72,38 @@ export class NotesStore {
    * @param limit Maximum results to return
    */
   search(query: string, limit = 5): Note[] {
-    // Simple sanitize: remove FTS5 special characters to avoid syntax errors
     const safe = query.replace(/['"*()]/g, ' ').trim();
     if (!safe) return [];
 
+    // Every token goes to FTS5 as a QUOTED phrase, so nothing in it can be read as query syntax.
+    // Stripping a fixed set of punctuation was not enough: ':' is FTS5's column filter and '.' is a syntax
+    // error, so ordinary search terms blew up with `no such column: <word>` and `fts5: syntax error near "."`
+    // — prod hit this three times with plain inputs like an agent handle and a dotted fact key. Quoting is
+    // exhaustive where a blocklist is not, and it preserves the meaning (implicit AND across terms).
+    const ftsQuery = safe
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((t) => `"${t.replace(/"/g, '')}"`)
+      .join(' ');
+
     // Primary path: FTS5 (only used when length >= 3, trigram constraint)
-    if (safe.length >= 3) {
-      const rows = this.db
-        .prepare<[string, number]>(
-          `SELECT n.* FROM memory_notes n
-           JOIN memory_notes_fts fts ON fts.rowid = n.rowid
-           WHERE memory_notes_fts MATCH ?
-           ORDER BY n.importance DESC, n.created_at DESC
-           LIMIT ?`
-        )
-        .all(safe, limit) as NoteRow[];
+    if (safe.length >= 3 && ftsQuery) {
+      let rows: NoteRow[] = [];
+      try {
+        rows = this.db
+          .prepare<[string, number]>(
+            `SELECT n.* FROM memory_notes n
+             JOIN memory_notes_fts fts ON fts.rowid = n.rowid
+             WHERE memory_notes_fts MATCH ?
+             ORDER BY n.importance DESC, n.created_at DESC
+             LIMIT ?`
+          )
+          .all(ftsQuery, limit) as NoteRow[];
+      } catch {
+        // A raw SqliteError must never surface as a tool failure the agent then has to reason about:
+        // an unsearchable query is a miss, not an error. Fall through to the LIKE path below.
+        rows = [];
+      }
 
       if (rows.length > 0) return rows.map(rowToNote);
     }
