@@ -587,6 +587,24 @@ export interface CoverageResult {
   gaps: SpecItem[];
 }
 
+/**
+ * Is this the same complaint as one raised earlier? The reviewer rewords freely between rounds, so identity
+ * has to be by meaning-overlap rather than string equality — the same token-overlap test the rule filter
+ * uses. Only used for PERSISTENCE bookkeeping: a false pairing merely fails to escalate, it never blocks.
+ */
+function sameComplaint(a: string, b: string): boolean {
+  const ta = tokenize(a);
+  const tb = tokenize(b);
+  if (ta.size === 0 || tb.size === 0) return false;
+  let inter = 0;
+  for (const x of ta) if (tb.has(x)) inter++;
+  return inter / Math.min(ta.size, tb.size) >= 0.6;
+}
+
+function raisedBefore(text: string, previous: readonly string[]): boolean {
+  return previous.some((p) => sameComplaint(p, text));
+}
+
 function tokenize(s: string): Set<string> {
   return new Set(
     s
@@ -1033,6 +1051,11 @@ export async function runPlanExecuteLoop(
   let bestGaps: string[] = [];
   let bestMandatoryGaps: SpecItem[] = [];
   const acceptedIds = new Set<string>();
+  // Cross-round memory of what the reviewers said. Held by the MECHANISM, never handed to the aux reviewer:
+  // its verdict is only worth something while its context stays clean, so it must not be anchored on its own
+  // earlier judgements. The mechanism does the remembering instead.
+  let prevGapTexts: string[] = [];
+  let prevContestedTexts: string[] = [];
   let gapsNote = '';
   let unresolvedGaps: string[] = [];
   let lastMandatoryGaps: SpecItem[] = [];
@@ -1099,16 +1122,28 @@ export async function runPlanExecuteLoop(
       const core = g.replace(/^no\s+deliverable\s+(?:covers|enforces|validates|respects|triggers|handles)\b[:\s]*/i, '');
       return RULE_LINE_RE.test(core) || SKIP_LINE_RE.test(core) || /\boptional\b|可选/i.test(core);
     };
-    const auxGaps = (auxGapsRaw ?? []).filter(
-      (g) =>
-        !auxGapIsNoise(g) &&
-        !checkCoverage([{ id: 'aux', text: g, mandatory: true }], draft.deliverables, 0.5, stepTexts).covered,
-    );
+    const auxSignal = (auxGapsRaw ?? []).filter((g) => !auxGapIsNoise(g));
+    const detCovers = (g: string): boolean =>
+      checkCoverage([{ id: 'aux', text: g, mandatory: true }], draft.deliverables, 0.5, stepTexts).covered;
+    const auxGaps = auxSignal.filter((g) => !detCovers(g));
+    // CONTESTED: the deterministic check reads this as covered, the reviewer says it is not. Today that
+    // disagreement is silently resolved in favour of the checker and the reviewer's objection is dropped —
+    // yet disagreement between two independent reviewers is the most informative event in the round. It is
+    // not surfaced on first sight, because a one-off aux objection is often noise (it once reported
+    // "read SOUL.md" as missing while deliverable #1 was literally that). A complaint the reviewer raises
+    // AGAIN after a revision is different: the author had a chance to address it and did not.
+    const auxContested = auxSignal.filter((g) => detCovers(g));
     lastMandatoryGaps = cov.gaps.filter((g) => g.mandatory);
     const gapTexts = [...lastMandatoryGaps.map((g) => g.text), ...auxGaps];
+    const repeatedContested = auxContested.filter((g) => raisedBefore(g, prevContestedTexts)).slice(0, 3);
+    const persistedGaps = gapTexts.filter((g) => raisedBefore(g, prevGapTexts));
+    prevContestedTexts = auxContested;
+    prevGapTexts = gapTexts;
     deps.log(
       `[plan-loop] VERIFY round ${round + 1}: deliverables=${draft.deliverables.length} ` +
-      `detGaps=${cov.gaps.filter((g) => g.mandatory).length} auxGaps=${auxGapsRaw ? auxGaps.length : 'n/a'}`,
+      `detGaps=${cov.gaps.filter((g) => g.mandatory).length} auxGaps=${auxGapsRaw ? auxGaps.length : 'n/a'}` +
+      (persistedGaps.length ? ` persisted=${persistedGaps.length}` : '') +
+      (repeatedContested.length ? ` contested=${repeatedContested.length}` : ''),
     );
     // Keep the BEST round, not the last. `plan = draft` alone ships whichever draft happened to come last,
     // and a later round is not always better: prod saw round 3 arrive with MORE unresolved gaps than round 2
@@ -1128,7 +1163,21 @@ export async function runPlanExecuteLoop(
     }
     if (gapTexts.length === 0) { unresolvedGaps = []; break; }
     unresolvedGaps = gapTexts;
-    gapsNote = gapTexts.map((g, i) => `${i + 1}. ${g}`).join('\n');
+    gapsNote = [
+      ...gapTexts.map(
+        (g, i) =>
+          `${i + 1}. ${raisedBefore(g, persistedGaps) ? '[RAISED AGAIN — your last revision did not close this] ' : ''}${g}`,
+      ),
+      // Contested items are put to the author as a QUESTION, not asserted as gaps: the checker and the
+      // reviewer disagree, and the author is the one who can say which is right. Kept out of the
+      // owner-facing gap list — the deterministic check does read them as covered, and the owner should not
+      // be handed a disputed item as if it were a confirmed omission.
+      ...repeatedContested.map(
+        (g, i) =>
+          `${gapTexts.length + i + 1}. [CONTESTED — the reviewer has raised this twice; the automated check ` +
+          `reads it as already covered] ${g}\n   → Decide: name the deliverable that covers it, or add one.`,
+      ),
+    ].join('\n');
   }
   // Execute the best plan the loop produced, not merely the last one it happened to draft.
   if (bestPlan && bestGapCount < unresolvedGaps.length) {
