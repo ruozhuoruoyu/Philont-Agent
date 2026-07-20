@@ -1248,27 +1248,50 @@ export async function runPlanExecuteLoop(
       abortSignal: budgetSignal(4 * 60_000),
     });
 
-    // Which successful calls count as THE action a deliverable names. Prefer the service's own contract —
-    // the endpoint whose compiled `purpose` matches this deliverable — and fall back to the keyword table
-    // only when the spec cannot answer unambiguously. The table mis-assigns on wording the service did not
-    // choose ("Upvote…" misses \bvote\b and lands on the posts-collection hint), which reports a
-    // SUCCEEDED action as FAILED and triggers a pointless forced retry.
+    // Which successful calls count as THE action a deliverable names.
+    //
+    // UNION of two independent matchers, never a replacement — a call counts if EITHER recognises it:
+    //   - the service's own contract: the endpoint whose compiled `purpose` matches this deliverable
+    //   - the keyword table: the historical word→path-fragment hints
+    //
+    // Union, because the harmful direction here is the FALSE NEGATIVE. A deliverable wrongly judged unmet
+    // does not merely misreport: it trips the forced retry, which re-runs work that already succeeded.
+    // Prod 2026-07-20 showed exactly that after the contract matcher was made to REPLACE the table — a
+    // freshly compiled spec carried paths that were not base-resolved (/auth/verify instead of
+    // /api/auth/verify), so exact path matching missed real calls: two successful verifies were reported
+    // FAILED, and a completed registration was retried into a 409 that consumed the single-use invite.
+    // The keyword hints are prefix-insensitive and would have matched both. So each matcher can only ADD
+    // recognition; neither can veto the other.
+    //
+    // Spec paths are also matched suffix-wise for the same reason: a contract that omits the base prefix
+    // still identifies its endpoint correctly by its tail, and the tail is what distinguishes a collection
+    // from a sub-resource anyway.
     const actionMatcher = (dText: string): ((c: { name: string; input: Record<string, unknown> }) => boolean) | null => {
       const ep = specEndpointForDeliverable(compiledSpec, dText);
-      if (ep) {
-        return (c) => {
-          if (c.name !== 'http') return false;
-          if (String(c.input.method ?? 'GET').toUpperCase() !== ep.method) return false;
-          try {
-            return endpointMatches(ep, ep.method, new URL(String(c.input.url ?? '')).pathname);
-          } catch {
-            return false;
-          }
-        };
-      }
       const hint = ENDPOINT_HINTS.find(([k]) => k.test(dText))?.[1];
-      return hint ? (c) => callMatchesHint(hint, c.input.url, c.name) : null;
+      if (!ep && !hint) return null;
+      const bySpec = (c: { name: string; input: Record<string, unknown> }): boolean => {
+        if (!ep || c.name !== 'http') return false;
+        if (String(c.input.method ?? 'GET').toUpperCase() !== ep.method) return false;
+        let pathname: string;
+        try {
+          pathname = new URL(String(c.input.url ?? '')).pathname;
+        } catch {
+          return false;
+        }
+        if (endpointMatches(ep, ep.method, pathname)) return true;
+        // Tolerate a contract that did not resolve its base prefix: compare segment-aligned tails.
+        const segs = pathname.split('/').filter(Boolean);
+        const want = ep.path.split('/').filter(Boolean).length;
+        return want > 0 && want < segs.length
+          ? endpointMatches(ep, ep.method, `/${segs.slice(segs.length - want).join('/')}`)
+          : false;
+      };
+      const byHint = (c: { name: string; input: Record<string, unknown> }): boolean =>
+        !!hint && callMatchesHint(hint, c.input.url, c.name);
+      return (c) => bySpec(c) || byHint(c);
     };
+
     const isActionCall = (c: { name: string; input: Record<string, unknown> }): boolean => {
       const cls = deps.classifyCall?.(c.name, c.input);
       if (cls?.capability !== undefined) {
