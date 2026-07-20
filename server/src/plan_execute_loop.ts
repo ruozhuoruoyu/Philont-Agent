@@ -1025,6 +1025,14 @@ export async function runPlanExecuteLoop(
 
   // ── DRAFT → VERIFY → REVISE (bounded ring) ────────────────────────────────
   let plan: DraftPlan | null = null;
+  // Ratchet state — the MEMORY neither weak model has. Each round the models supply judgement; the mechanism
+  // remembers what was already accepted and which round scored best, so the loop accumulates instead of
+  // restarting. This is what makes two passes worth more than two independent attempts.
+  let bestPlan: DraftPlan | null = null;
+  let bestGapCount = Number.POSITIVE_INFINITY;
+  let bestGaps: string[] = [];
+  let bestMandatoryGaps: SpecItem[] = [];
+  const acceptedIds = new Set<string>();
   let gapsNote = '';
   let unresolvedGaps: string[] = [];
   let lastMandatoryGaps: SpecItem[] = [];
@@ -1037,9 +1045,25 @@ export async function runPlanExecuteLoop(
       break;
     }
     deps.onStatus?.(round === 0 ? 'drafting plan…' : `revising plan (round ${round + 1})…`);
+    // A revision must SEE what it is revising. Without the previous plan in the prompt the model redrafts
+    // from scratch every round, so each round silently discards what the last one got right: prod rounds
+    // oscillated 3→9→5 and 7→6→5 deliverables, with gaps going 2→5 — three independent attempts, not one
+    // improving one. Feeding the previous plan back, plus which deliverables the reviewers already accept,
+    // turns the loop into a ratchet: ground can be added but not lost.
     const user =
       `# Task\n${task}\n\n# Guide (authoritative spec)\n${guideText.slice(0, 24_000)}\n\n` +
-      (gapsNote ? `# Coverage gaps you MUST address in this revision\n${gapsNote}\n\n` : '') +
+      (plan
+        ? `# Your previous plan — REVISE it, do not start over\n` +
+          `${JSON.stringify({ deliverables: plan.deliverables, steps: plan.steps })}\n\n` +
+          (acceptedIds.size > 0
+            ? `# Already accepted — keep these deliverables and their steps VERBATIM\n` +
+              `${[...acceptedIds].join(', ')}\n\n`
+            : '') +
+          `# Coverage gaps you MUST fix in this revision\n${gapsNote}\n\n` +
+          `Return the FULL plan: the accepted items unchanged, plus whatever closes the gaps above.\n`
+        : gapsNote
+          ? `# Coverage gaps you MUST address in this revision\n${gapsNote}\n\n`
+          : '') +
       'Produce the JSON plan now.';
     // 3-min ceiling per DRAFT/REVISE call (prod rounds take 55-75s; a hung call must not stall the
     // loop). An abort/exception degrades to an unparseable draft → the round retries with a note.
@@ -1086,9 +1110,34 @@ export async function runPlanExecuteLoop(
       `[plan-loop] VERIFY round ${round + 1}: deliverables=${draft.deliverables.length} ` +
       `detGaps=${cov.gaps.filter((g) => g.mandatory).length} auxGaps=${auxGapsRaw ? auxGaps.length : 'n/a'}`,
     );
+    // Keep the BEST round, not the last. `plan = draft` alone ships whichever draft happened to come last,
+    // and a later round is not always better: prod saw round 3 arrive with MORE unresolved gaps than round 2
+    // (9 deliverables/3 gaps → 5/4, and 6/2 → 5/5), and that worse plan was the one executed. The mechanism
+    // remembers which round scored best; the models do not have to.
+    if (gapTexts.length < bestGapCount) {
+      bestGapCount = gapTexts.length;
+      bestPlan = draft;
+      bestGaps = gapTexts;
+      bestMandatoryGaps = lastMandatoryGaps;
+    }
+    // Deliverables the reviewers no longer contest carry forward as accepted, so the next round is told to
+    // keep them verbatim instead of re-deriving (and possibly losing) them.
+    const contested = new Set(gapTexts.map((g) => g.toLowerCase()));
+    for (const d of draft.deliverables) {
+      if (![...contested].some((c) => c.includes(d.id.toLowerCase()))) acceptedIds.add(d.id);
+    }
     if (gapTexts.length === 0) { unresolvedGaps = []; break; }
     unresolvedGaps = gapTexts;
     gapsNote = gapTexts.map((g, i) => `${i + 1}. ${g}`).join('\n');
+  }
+  // Execute the best plan the loop produced, not merely the last one it happened to draft.
+  if (bestPlan && bestGapCount < unresolvedGaps.length) {
+    deps.log(
+      `[plan-loop] VERIFY: keeping the best round (${bestGapCount} gap(s)) over the last (${unresolvedGaps.length})`,
+    );
+    plan = bestPlan;
+    unresolvedGaps = bestGaps;
+    lastMandatoryGaps = bestMandatoryGaps;
   }
   if (!plan) {
     return fail((currentPhraseLang() === 'en'

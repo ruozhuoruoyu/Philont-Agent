@@ -963,3 +963,41 @@ test('spec: a STALE installed spec.json (built from another guide revision) is N
   assert.equal(compiles, 1, 'a stale spec must fall through to a recompile attempt');
   assert.ok(logs.some((l) => /spec: NONE/.test(l)), 'and with the compile down, degrade loudly');
 });
+
+// ── 1+1 ratchet: the loop must accumulate across rounds, not restart ─────────────────────────────
+// Prod rounds oscillated (3→9→5 deliverables, gaps 2→5): each REVISE redrafted from scratch because the
+// prompt never showed the model its own previous plan, so every round discarded what the last one fixed.
+
+test('REVISE shows the model its previous plan and what is already accepted', async () => {
+  clearSpecCache();
+  const prompts: string[] = [];
+  const deps = makeDeps({ drafts: [GAPPY_DRAFT, GOOD_DRAFT] });
+  const inner = deps.llm.send.bind(deps.llm);
+  deps.llm.send = async (systemPrompt: string, messages: unknown[], toolDefs: unknown[]) => {
+    // DRAFT/REVISE calls carry no tools; capture their user prompt.
+    if ((toolDefs as unknown[]).length === 0) {
+      const m = messages as Array<{ content?: unknown }>;
+      prompts.push(String(m[m.length - 1]?.content ?? ''));
+    }
+    return inner(systemPrompt as never, messages as never, toolDefs as never);
+  };
+  await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  assert.ok(prompts.length >= 2, 'expected at least one revision round');
+  const revise = prompts[1];
+  assert.match(revise, /previous plan/i, 'the revision must see the plan it is revising');
+  assert.match(revise, /do not start over/i, 'and be told to revise rather than redraft');
+});
+
+test('the loop executes the BEST round, not merely the last one drafted', async () => {
+  clearSpecCache();
+  const logs: string[] = [];
+  // Round 2 is good; round 3 regresses back to the gappy plan. The loop must not ship round 3.
+  const deps = makeDeps({
+    drafts: [GAPPY_DRAFT, GOOD_DRAFT, GAPPY_DRAFT],
+    log: (m: string) => logs.push(m),
+  });
+  const r = await runPlanExecuteLoop('Read guide then register', ['https://g/guide.md'], deps);
+  const keptBest = logs.some((l) => /keeping the best round/.test(l));
+  // Either it converged on the good plan and stopped, or it explicitly kept the best round.
+  assert.ok(keptBest || r.outcome === 'completed', `a regressing later round must not be shipped: ${r.reply}`);
+});
