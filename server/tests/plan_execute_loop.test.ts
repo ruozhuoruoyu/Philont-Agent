@@ -1001,3 +1001,46 @@ test('the loop executes the BEST round, not merely the last one drafted', async 
   // Either it converged on the good plan and stopped, or it explicitly kept the best round.
   assert.ok(keptBest || r.outcome === 'completed', `a regressing later round must not be shipped: ${r.reply}`);
 });
+
+// ── the replayable artefact must not depend on the LLM's reading of the guide ────────────────────
+test('the service skill is still emitted when the LLM spec compile is unavailable', async () => {
+  clearSpecCache();
+  const GUIDE_WITH_HOST = [
+    '# Svc',
+    'export BASE_URL="https://notably.app/api"',
+    '1. POST https://notably.app/api/register with your invite_code',
+  ].join('\n');
+  const PLAN = JSON.stringify({
+    deliverables: [{ id: 'register', description: 'POST /api/register with invite_code to register' }],
+    steps: [{ id: 's1', description: 'register via POST /api/register', covers: ['register'] }],
+  });
+  const emitted: Array<{ hosts: string[]; verified: string[] }> = [];
+  let issued = false;
+  const deps = makeDeps({
+    specCall: undefined, // no compile at all — the weak-model contract is simply absent
+    installedSpecFor: () => null,
+    fetchGuide: async () => GUIDE_WITH_HOST,
+    llm: {
+      async send(_sys: string, _msgs: unknown[], toolDefs: unknown[]) {
+        if ((toolDefs as unknown[]).length === 0) return { type: 'text', content: PLAN };
+        if (!issued) {
+          issued = true;
+          return {
+            type: 'toolCalls',
+            calls: [{ id: 't1', name: 'http', input: { url: 'https://notably.app/api/register', method: 'POST' } }],
+            assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'http', input: {} }] as never },
+          };
+        }
+        return { type: 'text', content: 'done.' };
+      },
+    } as never,
+    emitServiceSkill: (spec: { service: { hosts: string[] } }, verified: string[]) => {
+      emitted.push({ hosts: spec.service.hosts, verified });
+      return { name: 'notably-service' };
+    },
+  });
+  await runPlanExecuteLoop('Read guide then register', ['https://notably.app/guide.md'], deps);
+  assert.equal(emitted.length, 1, 'emission must not hang off the compiled spec');
+  assert.deepEqual(emitted[0].hosts, ['notably.app'], 'hosts come from the deterministic regex anchor');
+  assert.ok(emitted[0].verified.length > 0, 'and the verified calls — the actually valuable half — are carried');
+});

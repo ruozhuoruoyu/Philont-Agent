@@ -25,7 +25,7 @@ import {
   type MiniLoopToolRunResult,
 } from '@agent/tools';
 import type { ToolDefinition } from '@agent/policy';
-import { compileSpec, specToGuideApi, specBodyGuardReject, specRequestGuard, guideContentHash, specEndpointForDeliverable, endpointMatches, type SpecDoc } from './spec_compile.js';
+import { compileSpec, specToGuideApi, specBodyGuardReject, specRequestGuard, guideContentHash, specEndpointForDeliverable, endpointMatches, type SpecDoc, type SpecEndpoint } from './spec_compile.js';
 
 // ── Flag ────────────────────────────────────────────────────────────────────
 
@@ -1582,15 +1582,35 @@ export async function runPlanExecuteLoop(
   // every string derives from the SpecDoc + this run's verified calls). Scheduled routines then
   // use_skill instead of re-fetching the guide; cleanup uninstalls it by service slug.
   let emittedSkillNote = '';
-  if (deps.emitServiceSkill && compiledSpec) {
+  // The emitted service skill is what the scheduled routine later replays, and its value lives in the
+  // VERIFIED CALLS — calls this run actually got a success from — not in the LLM's reading of the guide.
+  // Hanging emission off compiledSpec meant that whenever the compile was unavailable or switched off, the
+  // one artefact proven to work (a heartbeat replayed it at 29/29) was silently not produced. Fall back to
+  // the deterministic regex anchor, which supplies hosts and endpoints without any model comprehension.
+  const emitSpec: SpecDoc | null =
+    compiledSpec ??
+    (guideApi.hosts.length > 0
+      ? {
+          source: { contentHash: guideContentHash(guideText) },
+          service: { name: guideApi.hosts[0].split('.')[0], hosts: [...guideApi.hosts] },
+          endpoints: guideApi.endpoints
+            .map((e) => e.match(/^(GET|POST|PUT|PATCH|DELETE)\s+(\/\S+)$/))
+            .filter((m): m is RegExpMatchArray => !!m)
+            .map((m) => ({ method: m[1] as SpecEndpoint['method'], path: m[2] })),
+          preconditions: [],
+          rules: [],
+          confidence: 0,
+        }
+      : null);
+  if (deps.emitServiceSkill && emitSpec && (emitSpec.endpoints.length > 0 || okBusinessCalls.length > 0)) {
     try {
-      const emitted = deps.emitServiceSkill(compiledSpec, [...new Set(okBusinessCalls)]);
+      const emitted = deps.emitServiceSkill(emitSpec, [...new Set(okBusinessCalls)]);
       // Surface the emission in the USER-FACING report — it only ever hit the console log, so the
       // compiled-contract skill looked like it never existed to anyone reading the chat.
       if (emitted?.name) {
         emittedSkillNote =
           `\n\n📘 服务契约已编译为技能 \`${emitted.name}\`` +
-          `(${compiledSpec.endpoints.length} 个端点,${okBusinessCalls.length ? [...new Set(okBusinessCalls)].length : 0} 条已验证调用)` +
+          `(${emitSpec.endpoints.length} 个端点,${okBusinessCalls.length ? [...new Set(okBusinessCalls)].length : 0} 条已验证调用)` +
           ` — 定时例程将直接使用它,不再重抓 guide;清除该服务时会一并删除。`;
       }
     } catch (e) {
