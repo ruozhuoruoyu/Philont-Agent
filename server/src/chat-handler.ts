@@ -5783,9 +5783,29 @@ export async function handleChatSend(
         try {
           const until = Date.now() + CLEANUP_SCHEDULE_PAUSE_MS;
           const paused: string[] = [];
+          const aborted: string[] = [];
           for (const s of memory.schedules.list({ enabledOnly: true })) {
             if (!matchesCleanupTarget(s, targets)) continue;
             if (memory.schedules.pauseUntil(s.id, until)) paused.push(s.name);
+            // Pausing only blocks FUTURE fires. A run already in flight keeps going and then has the very
+            // resources it is using deleted out from under it: prod 2026-07-20, a check-in started 13s before
+            // the clear, lost its credential mid-turn, and hammered `Unknown credential` 11 times into the
+            // circuit breaker — a whole heartbeat wasted, caused by the mechanism itself.
+            //
+            // Aborting is the right reading of the request, not merely the convenient one: "clear this
+            // service" means stop doing this service's work. Waiting for the run instead would leave it
+            // posting and voting for the several minutes such a turn takes — actively producing more of what
+            // is being cleared. The abort must also happen HERE, before the turn's deletions run.
+            //
+            // Scheduled turns are keyed by schedule NAME (see the autonomous_turn dispatch), not id; passing
+            // an id would return false and silently do nothing.
+            if (abortActiveTurn(`system:scheduled:${s.name}`)) aborted.push(s.name);
+          }
+          if (aborted.length > 0) {
+            console.log(
+              `[cleanup-scope] session=${sessionId} aborted ${aborted.length} in-flight scheduled run(s) ` +
+                `before deleting: ${aborted.join(', ')}`,
+            );
           }
           if (paused.length > 0) {
             console.log(
