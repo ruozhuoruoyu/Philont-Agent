@@ -2,11 +2,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # compass.md — you tell your second mind where to point.
 #
-# Where to put this file:
-#   • default: next to your memory DB — <MEMORY_DB_PATH dir>/compass.md
-#     (on the usual setup: ~/.philont/memory/compass.md  ·  Windows: C:\Users\you\.philont\memory\compass.md)
-#   • or set PHILONT_COMPASS_PATH to point anywhere you like.
-# Copy this file there, edit it, and restart. No compass = neutral defaults
+# Where this file lives:
+#   • the ACTIVE compass is compass.md next to this template, in philont's own
+#     directory. On first start it is created for you as a copy of this file.
+#   • it is git-ignored, so your edits survive every `git pull`.
+#   • PHILONT_COMPASS_PATH overrides the location if you want it elsewhere.
+# Edit compass.md (not this template) and restart. No compass = neutral defaults
 # (drives auto-tune with no leash, and there is no declared focus).
 #
 # This frontmatter (between the --- lines) is parsed exactly; the prose below it
