@@ -36,6 +36,59 @@ export function normalizeHeaderName(raw: string): string | null {
   return stripped && /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(stripped) ? stripped : null;
 }
 
+/**
+ * Normalize the `headers` PARAMETER itself (as opposed to one header's name, above).
+ *
+ * The schema says object, but a model that has just watched `body` accept a JSON *string* symmetrically
+ * passes headers the same way — and the old code did `Object.entries(params.headers as Record<…>)` on it.
+ * `Object.entries` of a string returns index→character pairs, so the request went out with ~45 headers
+ * named "0","1","2"… and NO Authorization. The credential placeholder was therefore never substituted and
+ * the service answered 401 UNAUTHORIZED — a wrong-credentials error for a request that never carried any.
+ * Prod 2026-07-21: the model retried that exact shape three times, fell back to GET (404), tripped the
+ * in-turn tool block, spawned a placeholder revise-plan, then fabricated a recovery claim that fired the
+ * honesty gate. One unparsed parameter cost the entire run.
+ *
+ * So: accept the string form and parse it, exactly as `body` already accepts both forms. Anything that is
+ * not an object after parsing fails fast with a message naming the shape, rather than silently sending a
+ * request with no auth — an authentication error that is really a serialization error is close to
+ * undebuggable from the model's side, because the error text points at the credential.
+ *
+ * Returns the header record, or an error string for the caller to surface.
+ */
+export function coerceHeadersParam(raw: unknown): { headers: Record<string, unknown> } | { error: string } {
+  if (raw === undefined || raw === null) return { headers: {} };
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed === '') return { headers: {} };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return {
+        error:
+          `http tool: headers must be an OBJECT, e.g. {"Authorization": "Bearer {my-key}"} — got a string ` +
+          `that is not valid JSON either. Pass the object itself; do not serialize it.`,
+      };
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {
+        error:
+          `http tool: headers must be an OBJECT of name → value, e.g. {"Authorization": "Bearer {my-key}"}. ` +
+          `The value given parsed to ${Array.isArray(parsed) ? 'an array' : typeof parsed}.`,
+      };
+    }
+    return { headers: parsed as Record<string, unknown> };
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return {
+      error:
+        `http tool: headers must be an OBJECT of name → value, e.g. {"Authorization": "Bearer {my-key}"} ` +
+        `(got ${Array.isArray(raw) ? 'an array' : typeof raw}).`,
+    };
+  }
+  return { headers: raw as Record<string, unknown> };
+}
+
 export interface SecuredHttpOptions {
   /** Whitelist of secret IDs allowed for injection; if not provided, all secrets in the store are allowed */
   allowedSecrets?: string[];
@@ -170,7 +223,9 @@ export function createSecuredHttpTool(
       // backticks / quotes copied from the doc (`` `X-Actor-Id` ``), which fetch rejects cryptically.
       // Self-heal by stripping the wrapping; fail fast with a clear message only if it is still invalid.
       const headers: Record<string, string> = {};
-      for (const [rawKey, rawVal] of Object.entries((params.headers as Record<string, unknown>) || {})) {
+      const coerced = coerceHeadersParam(params.headers);
+      if ('error' in coerced) return { success: false, output: '', error: coerced.error };
+      for (const [rawKey, rawVal] of Object.entries(coerced.headers)) {
         const key = normalizeHeaderName(rawKey);
         if (!key) {
           return {

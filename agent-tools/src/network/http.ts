@@ -3,6 +3,7 @@
  */
 
 import type { Tool } from '@agent/policy';
+import { coerceHeadersParam } from './securedHttp.js';
 
 export const httpTool: Tool = {
   name: 'http',
@@ -14,7 +15,10 @@ export const httpTool: Tool = {
     properties: {
       url: { type: 'string', description: 'URL' },
       method: { type: 'string', description: 'HTTP method', enum: ['GET', 'POST', 'PUT', 'DELETE'] },
-      headers: { type: 'object', description: 'Request headers' },
+      headers: {
+        type: 'object',
+        description: 'Request headers as an OBJECT, e.g. {"Authorization": "Bearer {my-key}"} — not a JSON string',
+      },
       body: { type: 'string', description: 'Request body (JSON string)' },
     },
     required: ['url'],
@@ -30,7 +34,13 @@ export const httpTool: Tool = {
   async execute(params) {
     const url = params.url as string;
     const method = (params.method as string) || 'GET';
-    const headers = (params.headers as Record<string, string>) || {};
+    // Same coercion as the secured tool: a JSON-string headers value would otherwise be spread by
+    // Object.entries into index→character pairs and the real headers silently dropped.
+    const coerced = coerceHeadersParam(params.headers);
+    if ('error' in coerced) return { success: false, output: '', error: coerced.error };
+    const headers = Object.fromEntries(
+      Object.entries(coerced.headers).map(([k, v]) => [k, typeof v === 'string' ? v : String(v)]),
+    );
     const body = params.body as string | undefined;
 
     try {

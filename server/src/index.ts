@@ -26,6 +26,11 @@
 
 import './load-env.js'; // must be first: loads dotenv override, overriding any shell/system residual env
 import './proxy-bootstrap.js'; // second: install global outbound proxy before any HTTP client is constructed (contains top-level await)
+// Third, and it MUST stay an import rather than a call: imports are hoisted above every statement, so a
+// `initFileLogging()` statement lower down runs only after every other module below has already been
+// evaluated — and anything they logged while loading (the compass diagnostics among them) never reached
+// the file. See boot_logging.ts.
+import './boot_logging.js';
 
 // Force stdout/stderr into blocking mode — on Windows + PowerShell, Node defaults to
 // non-blocking writes for piped/pty stdout; in some cases log output is OS-level buffered
@@ -47,6 +52,7 @@ import './proxy-bootstrap.js'; // second: install global outbound proxy before a
 // Tee console output to a daily-rotating file so tool-call evidence (web/compute success+failure,
 // deep_explore rounds, gate decisions) survives terminal scrollback — and gives honesty checks a
 // durable after-the-fact source. Best-effort, default ON (PHILONT_FILE_LOG=0 to disable).
+// (installed above via `import './boot_logging.js'` — kept idempotent so a re-entry is harmless)
 import { initFileLogging } from './file_logger.js';
 initFileLogging();
 

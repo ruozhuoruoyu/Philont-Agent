@@ -23,7 +23,7 @@ export { appendJournalTool, journalRoot, journalDateOf, journalPathFor } from '.
 export { shellTool, processTool, z3VerifyTool, pariGpTool, leanCheckTool, magnitudeTool, lemmaLookupTool, barrierCheckTool } from './runtime/index.js';
 export { KNOWN_BARRIERS, matchBarriers, mentionsCircumvention, renderBarrierAdvisory, formatBarrier } from './runtime/index.js';
 export type { Barrier, BarrierMatch, BarrierSeverity } from './runtime/index.js';
-export { httpTool, webSearchTool, webFetchTool, downloadFileTool, createSecuredHttpTool, parseContentDisposition, filenameFromUrl, sanitizeFilename } from './network/index.js';
+export { httpTool, webSearchTool, webFetchTool, downloadFileTool, createSecuredHttpTool, normalizeHeaderName, coerceHeadersParam, parseContentDisposition, filenameFromUrl, sanitizeFilename } from './network/index.js';
 export type { SecuredHttpOptions } from './network/index.js';
 export { echoTool, timeTool, jsonTool, memoryTool, jsonPatchTool, envTool, hashTool, askUserQuestionTool, renderQuestion, parseQuestionAnswer, createCredentialTools } from './utility/index.js';
 export type { ParsedAnswer } from './utility/index.js';
