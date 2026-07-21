@@ -186,6 +186,8 @@ export interface DesiredCompassPursuit {
   intent: string;
   stakeWeight: number;
   mode: 'active' | 'survey';
+  /** The opening question the pursuit is created with — without one no driver can advance it. */
+  openingQuestion: string;
 }
 
 /** Minimal shape of an existing pursuit needed to reconcile (decouples this from the full Pursuit type). */
@@ -218,6 +220,24 @@ export function compassPursuitId(name: string): string {
   return ascii ? `compass-${ascii}-${h}` : `compass-${h}`;
 }
 
+/**
+ * The opening question a freshly declared focus starts life with.
+ *
+ * Without one the pursuit is inert: PursuitDriver can only advance a pursuit that has an open question or
+ * resolutionCriteria, and it says so itself — "the pursuit first needs an LLM-side goal definition; that is
+ * the reflector's job". For a compass focus nothing ever did that job, so the owner's declared direction sat
+ * in the table forever while every autonomous tick went to free curiosity instead (prod 2026-07-21).
+ *
+ * The question is deliberately about ORIENTATION, not about a solution: it asks what the current state is and
+ * what would move it, which is answerable by research for any focus area and does not put a goal in the
+ * owner's mouth. Survey-mode focus areas get a strictly observational phrasing, mirroring focusIntent.
+ */
+export function focusOpeningQuestion(f: CompassFocus): string {
+  return f.mode === 'active'
+    ? `What is the current state of "${f.name}", and what concrete next step would actually advance it?`
+    : `What has recently and verifiably happened in "${f.name}"? Track and summarize only — do not attempt to solve it.`;
+}
+
 function focusIntent(f: CompassFocus): string {
   return f.mode === 'active'
     ? `A focus area my owner declared in their compass. Advance it: make real, verifiable progress and report what moved.`
@@ -240,7 +260,14 @@ export function reconcileCompassPursuits(
   for (const f of compass?.focus ?? []) {
     const id = compassPursuitId(f.name);
     // On a slug collision the last focus wins (rare; keeps the map 1:1 with ids).
-    desired.set(id, { id, title: f.name, intent: focusIntent(f), stakeWeight: f.stake, mode: f.mode });
+    desired.set(id, {
+      id,
+      title: f.name,
+      intent: focusIntent(f),
+      stakeWeight: f.stake,
+      mode: f.mode,
+      openingQuestion: focusOpeningQuestion(f),
+    });
   }
   const existingCompass = existing.filter((p) => p.origin === 'compass');
   const existingIds = new Set(existingCompass.map((p) => p.id));

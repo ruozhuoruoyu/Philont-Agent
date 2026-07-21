@@ -169,3 +169,26 @@ test('compassPursuitId: a Chinese focus name still yields a valid, stable id', (
   assert.equal(compassPursuitId('自演进 agent 研究'), id, 'deterministic — same name → same id');
   assert.notEqual(compassPursuitId('自演进 agent 研究'), compassPursuitId('another topic'), 'distinct names → distinct ids');
 });
+
+test('a seeded focus arrives ACTIONABLE — with an opening question a driver can advance', () => {
+  // Without one the pursuit is inert: PursuitDriver can only advance a pursuit that has an open question or
+  // resolutionCriteria, and nothing ever wrote either for a compass focus. Prod 2026-07-21: the owner's
+  // focus area sat in the table while every autonomous tick went to free curiosity instead.
+  const compass = parseCompass(`---
+focus: 9 active philont itself
+focus: 6 survey AI agent field
+---
+prose`);
+  const r = reconcileCompassPursuits(compass, []);
+  assert.equal(r.create.length, 2);
+  for (const d of r.create) {
+    assert.ok(d.openingQuestion && d.openingQuestion.trim().length > 0, `${d.title} must arrive with a question`);
+    assert.ok(d.openingQuestion.includes(d.title), 'the question must be about THIS focus, not a generic stub');
+  }
+  // Mode is carried into the phrasing: a survey focus must not be told to advance/solve anything.
+  const active = r.create.find((d) => d.mode === 'active')!;
+  const survey = r.create.find((d) => d.mode === 'survey')!;
+  assert.match(active.openingQuestion, /advance/i);
+  assert.match(survey.openingQuestion, /summarize|track/i);
+  assert.match(survey.openingQuestion, /do not attempt to solve/i, 'survey mode must stay observational');
+});

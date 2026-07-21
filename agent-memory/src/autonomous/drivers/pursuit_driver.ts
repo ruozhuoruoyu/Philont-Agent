@@ -1,9 +1,10 @@
 /**
  * PursuitDriver — advances **engaged but stalled** active pursuits.
  *
- * Strictly complementary to CuriosityDriver's dormant-pursuit branch:
- *   - CuriosityDriver: evidenceRefs.length === 0 (commitment made but never touched)
- *   - PursuitDriver:   evidenceRefs.length > 0 (touched before but now stalled)
+ * Two cases, distinguished by whether the pursuit has ever PRODUCED anything (evidenceRefs):
+ *   - never started (evidenceRefs empty) → KICKOFF: advance it now; staleness is meaningless for something
+ *     that has not run once. See the branch for why nothing else could ever pick these up.
+ *   - started but stalled (evidenceRefs non-empty, untouched for stalledDays) → the ordinary advance.
  *
  * Two advancement paths (at most 1 initiative produced per pursuit per tick):
  *   - advance-question: openQuestions[status='open'] is non-empty; pick the earliest one to research
@@ -12,7 +13,7 @@
  * Skip conditions:
  *   - status !== 'active' (already guaranteed by listActive)
  *   - isEvergreen === true (root pursuit is the agent's identity itself; not "advanced")
- *   - lastTouchedAt is within the stalledDays threshold (still active, no push needed)
+ *   - lastTouchedAt is within the stalledDays threshold (still active) — un-started pursuits excepted
  *   - Already in the 24h dedup set (targetRef hit)
  *
  * When deadline is within 24h, utility is boosted by 0.1, capped at 0.95.
@@ -86,11 +87,30 @@ export class PursuitDriver implements Driver {
         continue;
       }
 
-      // Still active within the stalled threshold; skip
-      if (lastTouched > stalledThreshold) continue;
-
-      // Must have been engaged before (otherwise hand off to CuriosityDriver)
-      if (p.evidenceRefs.length === 0) continue;
+      // KICKOFF (2026-07-21): a pursuit that has NEVER been touched is un-started, not stalled — the two
+      // gates below are about not re-poking something, and there is nothing here to re-poke. Without this
+      // branch a newly declared pursuit is unreachable: the staleness gate holds it for `stalledDays`, and
+      // the evidence gate then holds it forever, because evidenceRefs are only written by
+      // PursuitProgressWriter after a `pursuit:*` initiative completes — which requires this driver to have
+      // proposed. Circular. The hand-off comment below points at CuriosityDriver, but that path does not
+      // close the loop either: its dormant branch waits 14 days, needs stake >= 7, and emits targetRef
+      // `pursuit:<id>` — which applyPursuitProgress explicitly filters out by driver, so it writes no
+      // evidence and does not refresh last_touched.
+      //
+      // Net effect in prod (2026-07-21): the owner's compass focus area was seeded as a pursuit and then
+      // could never be advanced by anything, ever, while every autonomous tick went to free curiosity.
+      //
+      // Self-limiting by construction: the kickoff produces a `pursuit:<id>:q:<qid>` initiative, whose
+      // completion adds evidence — so this branch stops matching after one completed run and the normal
+      // stalled cadence takes over. No new state, no flag. (If the initiative never reaches done it retries
+      // once the 24h dedup lapses, which is the right behaviour for something that never got started.)
+      //
+      // The marker is evidenceRefs, deliberately NOT last_touched_ts: that column is bumped by bookkeeping
+      // like addOpenQuestion, so "recently touched" does not mean "has produced anything". evidenceRefs is
+      // only ever written by PursuitProgressWriter after a real pursuit initiative completed, which is
+      // exactly the question being asked here.
+      const neverStarted = p.evidenceRefs.length === 0;
+      if (!neverStarted && lastTouched > stalledThreshold) continue; // still active; no push needed
 
       // Select advancement path
       const openQuestions = p.openQuestions
@@ -98,7 +118,7 @@ export class PursuitDriver implements Driver {
         .sort((a, b) => a.createdTurn - b.createdTurn);
 
       if (openQuestions.length > 0) {
-        const proposal = this.buildAdvanceQuestion(p, openQuestions[0], lastTouched, snap);
+        const proposal = this.buildAdvanceQuestion(p, openQuestions[0], lastTouched, snap, false, neverStarted);
         if (proposal) proposals.push(proposal);
         continue;
       }
@@ -131,6 +151,7 @@ export class PursuitDriver implements Driver {
     lastTouched: number,
     snap: MemorySnapshot,
     activeResearch = false,
+    kickoff = false,
   ): InitiativeProposal | null {
     const targetRef = `pursuit:${p.id}:q:${q.id}`;
 
@@ -174,6 +195,9 @@ export class PursuitDriver implements Driver {
         ? `Active research "${p.title}": authorization granted, advancing open question "${truncate(q.text, 80)}" using ${grantedTool}.`
         : activeResearch
           ? `Active research "${p.title}": advancing open question "${truncate(q.text, 80)}", research and produce fact/note.`
+          : kickoff
+          ? `pursuit "${p.title}" stake=${p.stakeWeight}/10 has never been worked on — this is its FIRST advance, ` +
+            `not a stalled one. Open question: "${truncate(q.text, 80)}". Research and produce fact/note to get it moving.`
           : `pursuit "${p.title}" stake=${p.stakeWeight}/10 has not been touched for ${ageDays} days (evidence=${p.evidenceRefs.length}), ` +
             `has unresolved open question "${truncate(q.text, 80)}". Research and produce fact/note to advance it.`,
       utility,

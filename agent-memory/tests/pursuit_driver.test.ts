@@ -159,7 +159,13 @@ test('PursuitDriver: 无 open question 也无 resolutionCriteria → 不产 prop
 
 // ── 跳过条件 ─────────────────────────────────────────────────────────────
 
-test('PursuitDriver: evidenceRefs 空 → 跳过(留给 CuriosityDriver)', () => {
+// 2026-07-21 behaviour change (deliberate, not a silenced test). This used to assert that an
+// evidence-less pursuit was skipped and "handed off to CuriosityDriver". That hand-off never closed the
+// loop: CuriosityDriver's dormant branch waits 14 days, needs stake >= 7, and emits targetRef
+// `pursuit:<id>` — which applyPursuitProgress filters out by driver, so it writes no evidence and the
+// pursuit could never satisfy this driver's evidence gate either. The owner's compass focus was
+// consequently unreachable by anything, forever. Empty evidence now means UN-STARTED → kick it off.
+test('PursuitDriver: evidenceRefs 空 → 视为未启动,直接 kickoff(不再交给 CuriosityDriver)', () => {
   const d = new PursuitDriver();
   const ps = d.propose(snap({
     activePursuits: [pursuit({
@@ -167,7 +173,9 @@ test('PursuitDriver: evidenceRefs 空 → 跳过(留给 CuriosityDriver)', () =>
       openQuestions: [openQ()],
     })],
   }));
-  assert.equal(ps.length, 0);
+  assert.equal(ps.length, 1);
+  assert.equal(ps[0].kind, 'pursuit:advance-question');
+  assert.match(ps[0].rationale, /never been worked on|FIRST advance/i);
 });
 
 test('PursuitDriver: lastTouchedAt 在 stalled 阈值内 → 跳过', () => {

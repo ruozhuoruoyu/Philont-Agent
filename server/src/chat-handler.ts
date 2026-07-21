@@ -651,10 +651,32 @@ try {
       stakeWeight: d.stakeWeight,
       origin: 'compass',
       status: 'active',
+      // A focus with no open question is inert — no driver can advance it (see focusOpeningQuestion).
+      openQuestions: [{ text: d.openingQuestion }],
     });
   }
   for (const u of plan.updateStake) memory.pursuits.setStakeWeight(u.id, u.stakeWeight);
   for (const id of plan.archive) memory.pursuits.updateStatus(id, 'archived');
+  // Backfill for rows seeded before focus areas carried an opening question. Such a pursuit is inert —
+  // PursuitDriver can only advance one that has an open question or resolutionCriteria — so without this
+  // an existing compass focus would stay stuck even after the fix. Idempotent by construction: it only
+  // fires when the pursuit has NO open question and NO criteria, which stops being true immediately after.
+  // Reconciling against an empty "existing" yields every focus area the compass declares, whether or not
+  // it already has a row — which is exactly the set to check.
+  const allDesired = reconcileCompassPursuits(loadedCompass, []).create;
+  let backfilled = 0;
+  for (const desired of allDesired) {
+    const existing = memory.pursuits.get(desired.id);
+    if (!existing || existing.status !== 'active') continue;
+    const hasQuestion = existing.openQuestions.some((q) => q.status === 'open');
+    const hasCriteria = (existing.resolutionCriteria ?? '').trim().length > 0;
+    if (hasQuestion || hasCriteria) continue;
+    memory.pursuits.addOpenQuestion(desired.id, desired.openingQuestion, 0);
+    backfilled++;
+  }
+  if (backfilled > 0) {
+    console.log(`[compass] backfilled an opening question onto ${backfilled} inert pursuit(s)`);
+  }
   if (plan.create.length || plan.updateStake.length || plan.archive.length) {
     console.log(
       `[compass] pursuits reconciled: +${plan.create.length} created, ` +
@@ -1993,6 +2015,32 @@ function reportUnsatisfiableGoal(
 }
 
 /**
+ * What an unattended turn CAN do, stated up front.
+ *
+ * appendJournal shipped as the supported way for a scheduled run to record what it did, but its only
+ * advertisement was the blacklist rejection message — so the model learned it exists by first calling
+ * writeFile and being refused. Prod 2026-07-21: run 61 hit the wall, read the message, and called
+ * appendJournal correctly; runs 62-69 never attempted writeFile at all, therefore never saw the message,
+ * therefore never used the tool, and settled on store_fact — which the learning judge then failed for not
+ * satisfying the goal's "log to memory/YYYY-MM-DD.md", run after run.
+ *
+ * The general defect: a capability advertised only in an error message is invisible to anyone who stops
+ * making the error. So state it at the top of the turn, where the model is deciding what to do, instead of
+ * at the bottom of a failure it may never repeat.
+ */
+export function autonomousCapabilityNote(): string {
+  return (
+    `\n\n[unattended-turn] No user is present this turn, so tools that change the machine or need approval ` +
+    `are unavailable — writeFile, shell, and file edits among them. Two things ARE available and cover what ` +
+    `they are usually reached for:\n` +
+    `- appendJournal({text}) — append to the agent's own dated journal. This is how you record what this run ` +
+    `did or observed; use it INSTEAD of trying to write a log/markdown file yourself. Do not report a log as ` +
+    `written unless this call succeeded.\n` +
+    `- store_note({content, importance}) — hand something to the owner to act on when you next talk.`
+  );
+}
+
+/**
  * The single rejection message for an autonomous-turn blacklist hit. Both interception sites (initial
  * calls and the main loop) MUST use this: they used to carry separately-written text that had already
  * drifted — one English, one Chinese — and a model that reads only one of them gets only half the
@@ -3108,6 +3156,26 @@ const viabilityPivotStreak = new Map<string, number>();
  * loop where the gate declared a brand-new direction dead on 0 attempts. See the doom-reset block.
  */
 const episodeAnchorTs = new Map<string, number>();
+
+/**
+ * Last prompt seen per scheduled session, so a re-fire of the SAME stored prompt can be told apart from the
+ * owner actually editing the schedule. A scheduled task replays byte-identical text forever; the doom-reset
+ * read that as "the user overrode the stop" and cleared the accounting on every fire. Comparing against the
+ * previous prompt keeps a real edit working (that IS a new instruction) while a replay is not.
+ */
+const lastScheduledPrompt = new Map<string, string>();
+
+/** True when this is a scheduled session re-firing the exact prompt it fired last time — nobody said this. */
+export function isScheduledPromptReplay(
+  sessionId: string,
+  userMessage: string,
+  seen: Map<string, string> = lastScheduledPrompt,
+): boolean {
+  if (!sessionId.startsWith('system:scheduled:')) return false;
+  const prev = seen.get(sessionId);
+  seen.set(sessionId, userMessage);
+  return prev !== undefined && prev === userMessage;
+}
 
 /**
  * 2026-06-17: injected when the user approves a concrete next step the agent proposed last turn ("要我开始吗"
@@ -7141,7 +7209,12 @@ async function handleChatSendInner(
   let turnAnchors = { doomReset: false, commit: false, anchor: false };
   try {
     const hadDoom = (viabilityPivotStreak.get(sessionId) ?? 0) >= 1 || viabilityRecommendStop.has(sessionId);
-    turnAnchors = decideTurnAnchors({ lastAssistantText: lastAssistantText(messages), userMessage, hadDoom });
+    turnAnchors = decideTurnAnchors({
+      lastAssistantText: lastAssistantText(messages),
+      userMessage,
+      hadDoom,
+      promptIsReplay: isScheduledPromptReplay(sessionId, userMessage),
+    });
     if (turnAnchors.doomReset) {
       // User overrode an accumulated stop (push-forward or a substantive redirect): clear the carried-over
       // doom and anchor a fresh episode so the next direction is judged on its own attempts, not the prior one.
@@ -7190,6 +7263,13 @@ async function handleChatSendInner(
         `[failure-recovery] session=${sessionId} injected ${recovery.recentFailures.length} failure hints (kinds=${recovery.recentFailures.map((f) => f.kind).join(',')})`,
       );
     }
+  }
+
+  // Unattended-turn capability note: what this turn CAN do, stated before it picks a tool rather than after
+  // it picks a forbidden one. See autonomousCapabilityNote.
+  if (messages[0] && sessionId.startsWith('system:scheduled:')) {
+    messages[0] = { ...messages[0], content: messages[0].content + autonomousCapabilityNote() };
+    console.log(`[unattended-turn] session=${sessionId} injected capability note (appendJournal / store_note)`);
   }
 
   // Commit-to-execution + stay-on-target (2026-06-17). Two prompt anchors for the prod failures where the

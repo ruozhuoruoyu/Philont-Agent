@@ -181,17 +181,28 @@ export function decideTurnAnchors(input: {
   lastAssistantText: string;
   userMessage: string;
   hadDoom: boolean;
+  /**
+   * This turn's message is a REPLAY — a scheduled task firing the same stored prompt again, with no user
+   * in the loop. Every branch below asks "how did the user respond to the stop?", and a replay is not a
+   * response: nobody read the stop, nobody overrode it. Treating it as an override cleared the doom
+   * accounting on every fire, so stop signals could never accumulate past one turn — prod 2026-07-21: the
+   * agent itself concluded "这个模式已经走到死胡同了…同样的情况已经重复了 30+ 次", the gate fired
+   * verdict=pivot, and six minutes later `doom-reset on user override ("MycoX check-in routi")` wiped it.
+   * Its own correct conclusion was erased on a fixed schedule.
+   */
+  promptIsReplay?: boolean;
 }): TurnAnchorDecision {
   const msg = input.userMessage ?? '';
   const pushesForward = VIABILITY_CONTINUE_RE.test(msg) || PUSH_FORWARD_RE.test(msg);
   const accepts = VIABILITY_ACCEPT_RE.test(msg);
   const bareAffirm = BARE_AFFIRM_RE.test(msg);
+  const replay = input.promptIsReplay === true;
   const doomReset =
-    input.hadDoom && !accepts && (pushesForward || (!bareAffirm && msg.trim().length >= 4));
+    input.hadDoom && !replay && !accepts && (pushesForward || (!bareAffirm && msg.trim().length >= 4));
   const prior = input.lastAssistantText ?? '';
   const priorPitch = prior.length > 0 && (CONTINUATION_PITCH_RE.test(prior) || OFFER_QUESTION_RE.test(prior));
   // !accepts guard: a trailing-吧 acceptance ("算了吧 / 放弃吧") must never read as "execute the proposal".
-  const commit = priorPitch && pushesForward && !accepts;
+  const commit = priorPitch && pushesForward && !accepts && !replay;
   return { doomReset, commit, anchor: commit || doomReset };
 }
 
