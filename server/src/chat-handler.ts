@@ -3553,17 +3553,70 @@ export function splitPrefixBySection(raw: string): Array<{ title: string; chars:
  * tails of bulky low-priority sections first; only fall back to the blunt cut if that is not
  * enough. Pure; exported for tests.
  */
+// 2026-07-21 reorder. The original ordering assumed "Lessons I have learned" was a long historical
+// accumulation whose tail ages worst. It is not: it is capped at PLAYBOOK_TOP_N entries and it is the
+// ONLY thing the self-learning layer puts in front of the model — reflection distils a lesson, and the
+// trimmer then cut it to PREFIX_SECTION_MIN_KEEP before the prompt was sent. Prod 2026-07-21: thirteen
+// consecutive turns each logged `trimmed: Lessons I have learned(-5170)`, i.e. 6170 chars shaved to the
+// 1000-char floor, every single turn. The learning loop was compiling output that never shipped.
+// What actually grows is "Known project information" (top-N by recency, one new entry per scheduled
+// run) — it sat in 4th place and was therefore never reached. So: trim the churn-prone section FIRST
+// and the learning layer's output LAST.
 const PREFIX_TRIM_ORDER: readonly string[] = [
-  // lowest value-per-char first — long historical accumulations whose tails age worst
-  'Lessons I have learned',
+  // most churn-prone / least durable first
+  'Known project information',
   'Known user information',
   'Operational Knowledge',
-  'Known project information',
   'Recent Runs',
   'Extended capabilities',
   'Endpoints',
+  // the self-learning layer's only channel into the prompt — sacrificed only if nothing else fits
+  'Lessons I have learned',
 ];
 const PREFIX_SECTION_MIN_KEEP = 1_000;
+
+/**
+ * Stem of a fact key with its run-identifying tail removed, used to group a recurring series.
+ *
+ * Derived from the key's own SHAPE — trailing segments that are pure serials, dates, times or hex ids
+ * are what distinguishes one run from the next, so dropping them leaves what the series is ABOUT.
+ * Deliberately carries no per-service or per-task vocabulary: a table of known key names would only
+ * ever cover the series we had already been bitten by.
+ *
+ *   checkin-2026-07-21-13-11 → checkin        run-42        → run
+ *   note-a3f9b2c1            → note           api-endpoints → api-endpoints  (nothing stripped)
+ */
+export function factKeyStem(key: string): string {
+  const parts = key.split(/[-_.:/\s]+/).filter(Boolean);
+  if (parts.length === 0) return key.toLowerCase();
+  const isRunSegment = (s: string) => /^\d+$/.test(s) || /^[0-9a-f]{6,}$/i.test(s) || /^v\d+$/i.test(s);
+  let end = parts.length;
+  // Keep at least the first segment: a key that is ENTIRELY serial still needs an identity.
+  while (end > 1 && isRunSegment(parts[end - 1])) end--;
+  return parts.slice(0, end).join('-').toLowerCase();
+}
+
+/**
+ * Keep only the freshest member of each recurring series, preserving input order (callers pass a
+ * recency-ranked list, so the survivor is the latest run). Series of one are unaffected, so this is a
+ * no-op for every fact store that has no recurring writer.
+ *
+ * Failure direction is deliberate: over-collapsing hides an older fact from the PROMPT only — it stays
+ * in the DB and listFacts still returns it. Under-collapsing would restore the eviction this fixes.
+ */
+export function collapseFactSeries<T extends { key: string }>(
+  ranked: readonly T[],
+): { kept: T[]; collapsed: number } {
+  const seen = new Set<string>();
+  const kept: T[] = [];
+  for (const f of ranked) {
+    const stem = factKeyStem(f.key);
+    if (seen.has(stem)) continue;
+    seen.add(stem);
+    kept.push(f);
+  }
+  return { kept, collapsed: ranked.length - kept.length };
+}
 
 export function trimPrefixToCap(
   raw: string,
@@ -4056,6 +4109,14 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
   //   top-20 by createdAt prioritizes the most recently relevant context; the LLM can call listFacts for older entries.
   //
   // Fallback: user.* also has a "100-entry ceiling" to prevent pathological cases; not triggered under normal use.
+  //
+  // 2026-07-21 — recurring-series collapse. The two rules above interact badly with a recurring
+  // scheduled task: each run stores one record ("checkin-2026-07-21-13-11", "…-13-17", "…-13-23"), and
+  // because storeFact bumps lastAccessedAt, each new record lands at the head of the recency order. A
+  // 6-minute heartbeat therefore owns all 20 slots within two hours, evicting every durable project
+  // fact — and the section's growth (prod: 3356 → 10335 chars in 80 minutes, +600 per run, still
+  // climbing) is what pushed the whole prefix over its cap turn after turn. The knowledge content of a
+  // series is its latest member; the rest stay in the DB and remain reachable via listFacts.
   const PROJECT_FACTS_TOP_N = 20;
   const USER_FACTS_SAFETY_CAP = 100;
   const renderFactsSection = (
@@ -4069,7 +4130,12 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
     // "Accessed = explicitly read by getFact / written by storeFact", reflecting actual usage patterns. Better than
     // pure createdAt at preserving identity/config-type facts that are "written once but read often".
     const key = (f: Fact) => f.lastAccessedAt ?? f.createdAt;
-    const top = [...all].sort((a, b) => key(b) - key(a)).slice(0, topN);
+    const ranked = [...all].sort((a, b) => key(b) - key(a));
+    // 2026-07-21: collapse recurring series before taking top-N (see collapseFactSeries). A scheduled
+    // task that writes one record per run owns a slot per run, and since every write also bumps
+    // lastAccessedAt the series monopolises the whole top-N within a couple of hours.
+    const { kept, collapsed } = collapseFactSeries(ranked);
+    const top = kept.slice(0, topN);
     lines.push(`## ${headingLabel}`);
     for (const f of top) {
       const valueStr = truncateForInjection(
@@ -4079,9 +4145,12 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
       );
       lines.push(`  ${ns}.${f.key} = ${valueStr}`);
     }
-    if (all.length > topN) {
+    const withheld = all.length - top.length;
+    if (withheld > 0) {
       lines.push(
-        `  ... (${all.length - topN} older facts not injected — use \`listFacts({namespace:"${ns}"})\` to retrieve all when needed)`,
+        `  ... (${withheld} more fact(s) not injected` +
+          (collapsed > 0 ? `, incl. ${collapsed} older entr(ies) of recurring series shown above` : '') +
+          ` — use \`listFacts({namespace:"${ns}"})\` to retrieve all when needed)`,
       );
     }
     lines.push('');
@@ -6210,14 +6279,14 @@ export async function handleChatSend(
       //
       // Determination principle: **prefer false negatives over false positives** — only strong failure signals
       // mark failure; others default to success.
-      //   Strong failure signals:
+      //   Strong failure signals — SAME-TURN events only (see the 2026-07-13 / 2026-07-21 notes below;
+      //   every cross-turn signal admitted here has eventually become always-on and broken promotion):
       //     - HonestyGate fired (honesty issue)
-      //     - sameRootCauseFailures >= 2 (repeated same-root-cause failures)
-      //     - InterruptDrained (K7 signal drained ≥ 1 entry)
       //     - emptyConclusionFired (empty conclusion regen)
+      //   Removed: interruptDrained (2026-07-13), sameRootCauseFailures (2026-07-21) — both cross-turn.
       //
-      // If any strong failure signal triggered → mark all activeRuleIds as failure (this turn took a wrong path)
-      // Otherwise → mark all as success (turn closed normally; rule recommendation was effective)
+      // If any strong failure signal triggered → record NOTHING (ambiguous — we cannot attribute a
+      // turn-level failure to a specific rule). Otherwise → mark all as success (turn closed normally).
       //
       // This is the key step from routing_rules.recordRuleOutcome having 0 callers to a true closed loop:
       // without outcome backflow, the 5-tier confidence state machine is dead data.
@@ -6230,10 +6299,20 @@ export async function handleChatSend(
         // and with promotion needing 3 consecutive successes (provisional→tentative→validated) the result
         // was 1022 stored rules and validated=0 (0%) — the confidence machine could only ever demote.
         // The 2026-07-05 attribution fix was aimed at exactly this and left the one always-on signal in.
-        // The remaining three ARE genuine same-turn failure evidence.
+        //
+        // 2026-07-21: sameRootCauseFailures REMOVED for the identical reason — it is the same defect
+        // wearing a different name, and removing interruptDrained simply promoted it into the vacancy.
+        // It counts failures clustered by (toolName + errorClass) over a 24h GLOBAL window, so it is a
+        // statement about the last day of system-wide state, not about this turn. Once any failure
+        // recurs — prod 2026-07-21: a scheduled task whose goal required writeFile while heartbeat
+        // turns forbid writeFile, so the same blocked call recurred every 6 minutes forever — it is
+        // pinned ≥2 permanently and no turn can ever close clean again: success=12 vs
+        // ambiguous_skipped=106, validated 3 of 1094 rules.
+        //
+        // The invariant this keeps re-learning: an always-on signal in the strong-failure set turns the
+        // confidence machine into a demote-only machine. Both survivors are strictly same-turn events.
         const strongFailure =
           signalBus.honesty !== undefined ||
-          sameRootCauseFailures >= 2 ||
           signalBus.emptyConclusionFired === true;
         const outcome = !strongFailure;
         // 2026-07-05 attribution fix: a hard turn is NOT evidence against the injected rules — the
@@ -7383,7 +7462,7 @@ async function handleChatSendInner(
       }
       // Anti-fabrication backstop: when forcing is off / not possible (no active session), still replace
       // a fabricated recite with an honest message before it goes out.
-      const safeText = guardDeepExploreFabrication(firstTextContent, signalBus);
+      const safeText = guardDeepExploreFabrication(firstTextContent, signalBus, sessionId);
       messages.push({ role: 'assistant', content: safeText });
       onDelta(safeText);
       // Layer 0 append: assistant text response goes into the global timeline
@@ -8020,12 +8099,27 @@ const DEEP_EXPLORE_FABRICATION_REPLY =
   '[fabrication-gate] 本回合未实际调用 deep_explore 却声称了回合/会话结果 → 已拦截并替换为如实说明。';
 
 /** Returns the safe outgoing text: if it fabricates deep_explore progress (claims a round/session result with no deep_explore call this turn), replace it with an honest message. */
-function guardDeepExploreFabrication(text: string, signalBus: TurnSignalBus): string {
+function guardDeepExploreFabrication(
+  text: string,
+  signalBus: TurnSignalBus,
+  sessionId: string | null,
+): string {
   const calledDeepExplore = (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore');
   // A status/count question was asked → reporting the saved snapshot ("2 proved / 17 open") IS the answer,
   // not a faked round; don't replace it. (force-continue is suppressed for the same case.)
   if (signalBus.userAsksExploreStatus) return text;
   if (calledDeepExplore || !DEEP_EXPLORE_FABRICATION_RE.test(text)) return text;
+  // 2026-07-21: no active reasoning session ⇒ no saved snapshot to recite ⇒ a marker match cannot be
+  // the fabrication this guard exists to catch. Force-continue already carried this premise
+  // (shouldForceDeepExploreAdvance's hasActiveSession); the two rewrite paths did not, so 第N轮 in a
+  // numbered scheduled routine ("第25轮签到") replaced the entire real report with the boilerplate below
+  // — prod 2026-07-21, replyText 1820b → 274b, the user lost the check-in result five runs running.
+  // This guard REPLACES the reply, so its misfire is maximally destructive: it must be the conservative one.
+  try {
+    if (memory.reasoning.getMostRecentActiveSession(sessionId) == null) return text;
+  } catch {
+    return text; // lookup failure → never blank a reply on a premise we could not substantiate
+  }
   console.warn(
     '[fabrication-gate] blocked fabricated deep_explore progress (response claimed round/session results but no deep_explore call this turn)',
   );
@@ -9709,7 +9803,7 @@ async function runToolLoop(
       // Anti-fabrication: block a tool-loop text response that claims deep_explore round/session
       // results when no deep_explore tool actually ran this turn (e.g. it called list_facts then
       // invented "第N轮/时间帽"). A response that did call deep_explore reports legitimately.
-      const safeText = guardDeepExploreFabrication(response.content, signalBus);
+      const safeText = guardDeepExploreFabrication(response.content, signalBus, sessionId);
       messages.push({ role: 'assistant', content: safeText });
       onDelta(safeText);
       // Layer 0 append: assistant text response goes into the global timeline
@@ -10293,7 +10387,7 @@ async function runToolLoop(
       // Invariant: must call onDelta before returning outcome.text — the frontend treats
       // `final outcome=response` as "content already delivered via delta stream" and stays silent.
       // This line was once omitted here, causing the maxIterations fallback summary to never reach the frontend.
-      const safeText = guardDeepExploreFabrication(summary.content, signalBus);
+      const safeText = guardDeepExploreFabrication(summary.content, signalBus, sessionId);
       onDelta(safeText);
       memory.raw.appendMessage({
         sessionId: GLOBAL_TIMELINE_SESSION_ID,

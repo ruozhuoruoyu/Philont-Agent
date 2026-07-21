@@ -884,8 +884,18 @@ export function evaluateHonesty(
   // ── deep_explore: round-result narration with no actual round this turn → high ─────────────
   // "第2轮 / +1证 / 7开→8开 / 时间帽" is deep_explore round jargon; if no successful deep_explore
   // call ran this turn, the model invented the progress from a stale snapshot.
+  //
+  // 2026-07-21: requires an active reasoning session (rs), exactly like the terminal-claim branch
+  // above and like the force-continue path's own hasActiveSession premise. What this branch catches is
+  // progress "invented from the in-progress snapshot in the prompt" — with no session there IS no
+  // snapshot, so the premise cannot hold and a match is necessarily a false positive. Without the gate
+  // the generic ordinal 第N轮 fired on any numbered routine: a 6-minute scheduled check-in numbered its
+  // own runs, and every reply that wrote "第25轮" (rather than "第25次") was ruled a high-severity
+  // fabrication — 5 of 13 consecutive runs, each one also forcing the learning judge to a deterministic
+  // failure verdict, so the whole learning loop read as broken. A guard whose misfire BLOCKS must carry
+  // the narrower premise.
   const roundClaim = findRoundResultClaim(assistantText);
-  if (roundClaim) {
+  if (roundClaim && rs) {
     const deepExploreRan = records.some(
       (r) => r.toolName === 'deep_explore' && classifyToolResult(r.content) === 'ok',
     );
