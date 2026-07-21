@@ -114,6 +114,34 @@ export function detectGpScriptError(command: string, stdout: string, stderr: str
   return gpFatalError(`${stderr}\n${stdout}`);
 }
 
+/**
+ * Did the shell report that the COMMAND ITSELF does not exist on this host, and if so which one?
+ *
+ * Matches the SHELL's own "not found" phrasing — a small closed set fixed by cmd.exe / sh / bash — and reads
+ * the command name out of that message. Deliberately holds no list of commands: a list would have to be
+ * written per OS (Unix-isms on Windows, PowerShell on Linux, GNU-only flags on macOS), would never be
+ * complete, and is the same hard-coded-vocabulary trap that keeps producing wrong verdicts elsewhere. The
+ * OS already knows the answer and says so; this only reads it.
+ *
+ * Exit codes are not used as the signal: POSIX reserves 127 for this, but Windows was observed returning
+ * 255 for exactly this failure, so the message is the reliable part.
+ */
+export function missingShellCommand(stderr: string): string | null {
+  const s = stderr.trim();
+  if (!s) return null;
+  const patterns = [
+    /'([^']+)' is not recognized as an internal or external command/i, // cmd.exe
+    /^(?:.*: )?(?:line \d+: )?([^\s:]+): command not found/im,          // bash / zsh
+    /^(?:.*: )?(?:\d+: )?([^\s:]+): not found/im,                       // dash / sh
+    /is not recognized as the name of a cmdlet[\s\S]*?^(\S+)/im,        // PowerShell
+  ];
+  for (const re of patterns) {
+    const m = re.exec(s);
+    if (m?.[1]) return m[1];
+  }
+  return null;
+}
+
 /** Format a child_process.exec failure exception as structured text so the LLM immediately knows it failed. */
 function formatFailure(error: any, durationMs: number, requestedTimeout: number): string {
   const exitCode = typeof error?.code === 'number' ? error.code : null;
@@ -147,7 +175,21 @@ function formatFailure(error: any, durationMs: number, requestedTimeout: number)
       `\n  - regular pip / npm install / single-page PDF parse (already >5min): timeout: 600000 (10 min)` +
       `\n  note: never retry with the original timeout — you will hit the same wall again.`
     : '';
-  return `[${meta.join(', ')}] ${cause}${tail}${hint}`;
+  // The command does not exist here. Models default to the dialect they saw most in training, which is
+  // frequently not this host's — a Windows run reached for `head` and `mkdir -p`, and the step died. The
+  // runtime environment IS already stated once in the prompt prefix and was ignored; a correction at the
+  // moment the assumption breaks is what actually lands. Names no commands and no OS-specific
+  // replacements: it points at the tools that behave identically on every platform, which is where this
+  // work belonged anyway, and otherwise defers to the host's native shell.
+  const missing = !timedOut ? missingShellCommand(stderr) : null;
+  const missingHint = missing
+    ? `\nhint: \`${missing}\` does not exist in this host's shell (Host OS: ${process.platform}).` +
+      `\n  - Reading, writing, listing or searching files: use the readFile / writeFile / glob / grep TOOLS.` +
+      ` They behave identically on every platform, so no shell dialect is involved — prefer them over shell for file work.` +
+      `\n  - Genuine shell logic: rewrite it in this host's native shell syntax.` +
+      `\n  Do not retry the same command — it will fail the same way.`
+    : '';
+  return `[${meta.join(', ')}] ${cause}${tail}${hint}${missingHint}`;
 }
 
 export const shellTool: Tool = {

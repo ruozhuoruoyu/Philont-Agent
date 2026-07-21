@@ -115,7 +115,8 @@ export const builtinTools: Tool[] = [
   readFileTool, writeFileTool, deleteFileTool, moveFileTool, listDirTool, inspectPathTool,
   grepTool, globTool, patchTool,
   // runtime
-  shellTool, processTool, z3VerifyTool, pariGpTool, leanCheckTool, magnitudeTool, lemmaLookupTool, barrierCheckTool,
+  shellTool,
+  processTool, z3VerifyTool, pariGpTool, leanCheckTool, magnitudeTool, lemmaLookupTool, barrierCheckTool,
   // network
   httpTool, webSearchTool, webFetchTool, downloadFileTool,
   // vision (read image + call vision model, read/network)
