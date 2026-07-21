@@ -922,7 +922,12 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
     schema: {
       type: 'object',
       properties: {
-        plan_id: { type: 'string' },
+        plan_id: {
+          type: 'string',
+          description:
+            'OPTIONAL. Omit it when the session has a single open plan — the mechanism uses that one. ' +
+            'Only pass it if several plans are open at once.',
+        },
         step_id: { type: 'string', description: 'step.id from plan_draft (defaults to step-1/2/3)' },
         status: {
           type: 'string',
@@ -944,17 +949,20 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
             '\nThis evidence is used in plan close distillation; weak evidence → bad artifacts enter SkillStore and pollute future turns.',
         },
       },
-      required: ['plan_id', 'step_id', 'status'],
+      required: ['step_id', 'status'],
     },
     capability: 'write',
     domain: 'self',
     async execute(params) {
-      const requestedPlanId = params.plan_id;
+      // plan_id is OPTIONAL (see schema). A 36-char UUID is not something a model transcribes reliably, and
+      // making it mandatory only forced invention: one production run produced `placeholder`, `p-981691`,
+      // `plan-mycox-onboarding`, `mycox-onboarding`, `plan_mycox_checkin_routine` and a `plan_` prefix glued
+      // onto a UUID — seven fabricated ids in a single run, not one of them correct. The id it needs is
+      // already known here, so asking for it at all was the mistake. plan_revise reached the same conclusion
+      // earlier; this brings the two tools into line.
+      const requestedPlanId = typeof params.plan_id === 'string' ? params.plan_id.trim() : '';
       const stepId = params.step_id;
       const status = params.status;
-      if (typeof requestedPlanId !== 'string' || !requestedPlanId) {
-        return { success: false, output: '', error: 'plan_id is required' };
-      }
       if (typeof stepId !== 'string' || !stepId) {
         return { success: false, output: '', error: 'step_id is required' };
       }
@@ -974,17 +982,39 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
       // An LLM cannot transcribe a 36-char UUID; resolve a mistyped/invented id instead of only explaining it
       // (see resolvePlanId). The step check below is the second gate against a wrong resolution.
       let planId = requestedPlanId;
-      let currentPlan = plans.get(planId);
+      let currentPlan = planId ? plans.get(planId) : undefined;
       if (!currentPlan) {
-        const resolved = resolvePlanId(planId, sessionOpenPlanIds(plans, getCurrentSessionId()));
-        if (resolved && resolved !== planId) {
-          const candidate = plans.get(resolved);
-          // Only adopt it when the requested STEP actually exists there — otherwise fall through to the error.
-          if (candidate && candidate.steps.some((st) => st.id === stepId || resolveStepId(stepId, candidate.steps.map((x) => x.id)) === st.id)) {
-            console.warn(`[plan-tools] plan_update_step: plan id '${planId}' not found — resolved to the session's open plan ${resolved}`);
-            planId = resolved;
+        const openIds = sessionOpenPlanIds(plans, getCurrentSessionId());
+        const resolved = resolvePlanId(planId, openIds);
+        const candidate = resolved ? plans.get(resolved) : undefined;
+        if (candidate) {
+          // Omitted and mistyped are different situations and get different safety.
+          //  - OMITTED with a single open plan: there is nothing to be wrong about, so adopt it. A missing
+          //    step then produces the "no step X, the real ids are …" error, which is the useful one.
+          //  - MISTYPED: the model meant SOME plan, and we are guessing which. Require the requested step to
+          //    exist in the candidate, so a wrong guess is rejected instead of quietly updating another plan.
+          const stepFits = candidate.steps.some(
+            (st) => st.id === stepId || resolveStepId(String(stepId ?? ''), candidate.steps.map((x) => x.id)) === st.id,
+          );
+          if (!planId || stepFits) {
+            console.warn(
+              planId
+                ? `[plan-tools] plan_update_step: plan id '${planId}' not found — resolved to the session's open plan ${candidate.id}`
+                : `[plan-tools] plan_update_step: plan_id omitted — using the session's single open plan ${candidate.id}`,
+            );
+            planId = candidate.id;
             currentPlan = candidate;
           }
+        }
+        if (!currentPlan && !planId) {
+          return {
+            success: false,
+            output: '',
+            error:
+              'plan_id was omitted and this session does not have exactly one open plan to fall back on.\n' +
+              `${describeSessionActivePlans(plans, getCurrentSessionId())}\n` +
+              'Re-issue the call with an explicit plan_id from the list above.',
+          };
         }
       }
 
