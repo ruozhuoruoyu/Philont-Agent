@@ -4,6 +4,7 @@
 
 export { readFileTool } from './readFile.js';
 export { writeFileTool } from './writeFile.js';
+export { appendJournalTool, journalRoot, journalDateOf, journalPathFor } from './appendJournal.js';
 export { deleteFileTool } from './deleteFile.js';
 export { moveFileTool } from './moveFile.js';
 export { listDirTool } from './listDir.js';

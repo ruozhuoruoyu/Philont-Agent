@@ -56,6 +56,8 @@ function semanticToolPhrase_en(toolName: string): string {
     // ── File write ──
     case 'writeFile':
       return 'Writing file…';
+    case 'appendJournal':
+      return 'Writing to journal…';
     case 'deleteFile':
       return 'Deleting file…';
     case 'moveFile':
@@ -146,6 +148,8 @@ function semanticToolPhrase_zh(toolName: string): string {
       return '正在检查文件…';
     case 'writeFile':
       return '正在写入文件…';
+    case 'appendJournal':
+      return '正在写日志…';
     case 'deleteFile':
       return '正在删除文件…';
     case 'moveFile':
@@ -232,6 +236,7 @@ function semanticToolFailPhrase_en(toolName: string): string {
     case 'listDir':
       return '⚠ File lookup did not succeed, retrying…';
     case 'writeFile':
+    case 'appendJournal':
     case 'deleteFile':
     case 'moveFile':
     case 'patch':
@@ -268,6 +273,7 @@ function semanticToolFailPhrase_zh(toolName: string): string {
     case 'listDir':
       return '⚠ 文件查找未成功,继续尝试…';
     case 'writeFile':
+    case 'appendJournal':
     case 'deleteFile':
     case 'moveFile':
     case 'patch':

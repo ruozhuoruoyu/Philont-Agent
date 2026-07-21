@@ -19,6 +19,7 @@ import { createSecuredHttpTool, type SecuredHttpOptions } from './network/secure
 
 // ── Categorized exports ───────────────────────────────
 export { readFileTool, writeFileTool, deleteFileTool, moveFileTool, listDirTool, inspectPathTool, grepTool, globTool, patchTool } from './fs/index.js';
+export { appendJournalTool, journalRoot, journalDateOf, journalPathFor } from './fs/index.js';
 export { shellTool, processTool, z3VerifyTool, pariGpTool, leanCheckTool, magnitudeTool, lemmaLookupTool, barrierCheckTool } from './runtime/index.js';
 export { KNOWN_BARRIERS, matchBarriers, mentionsCircumvention, renderBarrierAdvisory, formatBarrier } from './runtime/index.js';
 export type { Barrier, BarrierMatch, BarrierSeverity } from './runtime/index.js';
@@ -101,7 +102,7 @@ export type {
 } from './control/planAndExecute.js';
 
 // ── All built-in tools ────────────────────────────────
-import { readFileTool, writeFileTool, deleteFileTool, moveFileTool, listDirTool, inspectPathTool, grepTool, globTool, patchTool } from './fs/index.js';
+import { readFileTool, writeFileTool, deleteFileTool, moveFileTool, listDirTool, inspectPathTool, grepTool, globTool, patchTool, appendJournalTool } from './fs/index.js';
 import { shellTool, processTool, z3VerifyTool, pariGpTool, leanCheckTool, magnitudeTool, lemmaLookupTool, barrierCheckTool } from './runtime/index.js';
 import { httpTool, webSearchTool, webFetchTool, downloadFileTool } from './network/index.js';
 import { echoTool, timeTool, jsonTool, memoryTool, jsonPatchTool, envTool, hashTool, askUserQuestionTool } from './utility/index.js';
@@ -114,6 +115,8 @@ export const builtinTools: Tool[] = [
   // fs
   readFileTool, writeFileTool, deleteFileTool, moveFileTool, listDirTool, inspectPathTool,
   grepTool, globTool, patchTool,
+  // append-only dated journal, domain='self' (see appendJournal.ts) — usable in unattended turns
+  appendJournalTool,
   // runtime
   shellTool,
   processTool, z3VerifyTool, pariGpTool, leanCheckTool, magnitudeTool, lemmaLookupTool, barrierCheckTool,

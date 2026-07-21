@@ -1913,8 +1913,110 @@ export const PLAN_LOOP_BLACKLIST: ReadonlySet<string> = (() => {
   return b;
 })();
 
+// ── Unsatisfiable scheduled goal ──────────────────────────────────────────────────────────────
+//
+// A scheduled task whose goal needs a tool the mechanism forbids fails identically forever, and
+// nothing ever said so. Prod 2026-07-21: a 6-minute heartbeat was created with the goal "MycoX
+// check-in routine (including logging to memory/YYYY-MM-DD.md)"; heartbeat turns may not call
+// writeFile, so every run was blocked at the same step and every run was correctly judged a failure.
+// Fourteen consecutive runs, hours of tokens, and the only trace was one warn line per run.
+//
+// Detection is from EVIDENCE, not from reading the goal text. Deciding up-front whether prose
+// "requires writeFile" would need the aux LLM to classify capability requirements from free text, and
+// a false positive there would BLOCK task creation — the landmine direction. A rejection that already
+// happened, repeatedly, is a fact: the task tried, and the mechanism said no. The cost of waiting for
+// the evidence is a few runs; the cost of guessing wrong at creation is a task the user cannot create.
+const UNSATISFIABLE_GOAL_WINDOW = 5;
+/** Runs within the window that must show the same block before it counts as structural, not incidental. */
+const UNSATISFIABLE_GOAL_MIN_RUNS = 3;
+
+/** Persisted signature for "the blacklist refused this tool" — namespaced so it cannot collide with http ones. */
+export function blockedToolSignature(toolName: string): string {
+  return `blocked:${toolName}`;
+}
+
+/**
+ * Tools blocked in THIS run that have now been blocked in at least UNSATISFIABLE_GOAL_MIN_RUNS of the
+ * last UNSATISFIABLE_GOAL_WINDOW runs. Pure; `prior` is the window BEFORE this run was recorded.
+ *
+ * Fires on the crossing only (count === threshold), so a permanently broken schedule reports once per
+ * streak instead of once per run — the report is meant to reach a human, and a repeated report is one
+ * a human learns to ignore.
+ */
+export function detectUnsatisfiableGoal(
+  blockedThisRun: readonly string[],
+  prior: ReadonlyArray<{ failureSignatures: string[] }>,
+  minRuns = UNSATISFIABLE_GOAL_MIN_RUNS,
+  window = UNSATISFIABLE_GOAL_WINDOW,
+): string[] {
+  const recent = prior.slice(0, Math.max(0, window - 1));
+  return blockedThisRun.filter((sig) => {
+    const count = 1 + recent.filter((o) => o.failureSignatures.includes(sig)).length;
+    return count === minRuns;
+  });
+}
+
+/**
+ * Surface a structurally unsatisfiable schedule to the owner. High-importance note (the same channel
+ * the rejection message tells the model to use) plus a warn line, so it shows up whether the user is
+ * reading notes or reading logs.
+ */
+function reportUnsatisfiableGoal(
+  scheduleId: string,
+  sessionId: string,
+  blockedThisRun: readonly string[],
+  prior: ReadonlyArray<{ failureSignatures: string[] }>,
+): void {
+  try {
+    const crossed = detectUnsatisfiableGoal(blockedThisRun, prior);
+    if (crossed.length === 0) return;
+    const tools = crossed.map((sig) => sig.replace(/^blocked:/, ''));
+    console.warn(
+      `[unsatisfiable-goal] scheduleId=${scheduleId} blocked ${tools.join(', ')} in ` +
+        `${UNSATISFIABLE_GOAL_MIN_RUNS} of the last ${UNSATISFIABLE_GOAL_WINDOW} runs — the goal needs a tool this task can never call`,
+    );
+    memory.notes.storeNote({
+      sessionId,
+      importance: 0.95,
+      content:
+        `Scheduled task "${scheduleId}" cannot achieve its goal as written. It has tried to call ` +
+        `${tools.join(', ')} in ${UNSATISFIABLE_GOAL_MIN_RUNS} of its last ${UNSATISFIABLE_GOAL_WINDOW} runs, and ` +
+        `unattended turns are not allowed to call ${tools.length > 1 ? 'those tools' : 'that tool'}. ` +
+        `Every run will keep failing at the same step until either the goal is reworded to use what a ` +
+        `scheduled turn can do (appendJournal for a per-run log, store_note to hand something to you), ` +
+        `or the task is run interactively instead. Nothing else about the task is broken.`,
+    });
+  } catch (e) {
+    // Advisory reporting only — never let it take down the turn it is reporting on.
+    console.warn('[unsatisfiable-goal] report failed, ignored', (e as Error)?.message ?? e);
+  }
+}
+
+/**
+ * The single rejection message for an autonomous-turn blacklist hit. Both interception sites (initial
+ * calls and the main loop) MUST use this: they used to carry separately-written text that had already
+ * drifted — one English, one Chinese — and a model that reads only one of them gets only half the
+ * available options. Same lesson as PLAN_LOOP_BLACKLIST being the single source for defs AND runner.
+ *
+ * The message must name a tool that ACTUALLY EXISTS for the blocked intent. Telling a scheduled task
+ * "you may not write files, leave a note instead" left its stated goal ("log to memory/YYYY-MM-DD.md")
+ * unreachable, so it failed identically on every run forever — see appendJournal.ts.
+ */
+export function autonomousBlacklistReason(toolName: string): string {
+  return (
+    `Autonomous heartbeat turns may not call ${toolName}. This turn was fired by a schedule with no user ` +
+    `present, so changing self-state timing, writing to the shared filesystem and asking the user are all unsafe.\n` +
+    `Continue observing with read-only tools (http / readFile / listDir / get_fact / list_facts / search_notes / search_skills).\n` +
+    `To RECORD what this run did: call appendJournal({text}) — an append-only dated journal inside the agent's own ` +
+    `state directory. It is permitted here and is the supported way to keep a per-run log; do not try to write the ` +
+    `log file yourself.\n` +
+    `To hand work to the user (cancelling a schedule, saving a credential, anything needing approval): ` +
+    `store_note(importance=high), and they will see it next time you talk.`
+  );
+}
+
 //  - planAndExecute: prevent nested unbounded budget
-const AUTONOMOUS_TURN_BLACKLIST_HARDCODED: ReadonlySet<string> = new Set([
+export const AUTONOMOUS_TURN_BLACKLIST_HARDCODED: ReadonlySet<string> = new Set([
   'askUserQuestion',
   'cancel_schedule',
   'schedule_reminder',
@@ -6192,6 +6294,13 @@ export async function handleChatSend(
           return trace;
         });
         const summary = summarizeTurnTrace(traces);
+        // Carry blacklist rejections into the persisted signatures. summarizeTurnTrace only derives
+        // signatures from http failures, so a call the mechanism refused left no trace at all — which is
+        // why "blocked on every run" stayed invisible. These rows are also rendered into the scheduled
+        // turn's own prefix, so the agent sees its own history of being blocked, not just the owner.
+        const blockedSignatures = [...(signalBus.blockedTools ?? [])].map(blockedToolSignature);
+        const failureSignatures = [...new Set([...summary.failureSignatures, ...blockedSignatures])];
+        const priorOutcomes = memory.scheduleOutcomes.recent(scheduleId, UNSATISFIABLE_GOAL_WINDOW);
         memory.scheduleOutcomes.record({
           scheduleId,
           firedAt: turnStartedAt,
@@ -6200,7 +6309,7 @@ export async function handleChatSend(
           httpOkCount: summary.httpOkCount,
           httpFailCount: summary.httpFailCount,
           httpStatusCounts: summary.httpStatusCounts,
-          failureSignatures: summary.failureSignatures,
+          failureSignatures,
           textSummary: summary.textSummary,
         });
         // Phase 14: scheduled session has ≥ 1 successful http + outcome is not fail → trigger
@@ -6211,8 +6320,9 @@ export async function handleChatSend(
         console.log(
           `[schedule-outcomes] session=${sessionId} scheduleId=${scheduleId} ` +
             `outcome=${summary.outcome} httpOk=${summary.httpOkCount} ` +
-            `httpFail=${summary.httpFailCount} sigs=[${summary.failureSignatures.join(',')}]`,
+            `httpFail=${summary.httpFailCount} sigs=[${failureSignatures.join(',')}]`,
         );
+        reportUnsatisfiableGoal(scheduleId, sessionId, blockedSignatures, priorOutcomes);
         // Progress verdict for the scheduler's circuit breaker (see scheduledTurnProgress + the pure
         // rule in schedule_progress.ts). No real external progress (writes attempted, all failed —
         // the all-401 avalanche shape) must count as a failure so the 1h auto-pause can arm, even
@@ -7962,6 +8072,12 @@ interface TurnSignalBus {
   authApprovedCallId?: string;
   /** The user message that opened this turn (for correction-aware honesty branches). */
   userMessage?: string;
+  /**
+   * Tools this turn tried to call and the autonomous-turn blacklist rejected. Feeds the
+   * unsatisfiable-goal detector: a scheduled task whose goal needs a tool it can never call fails
+   * identically forever, and nothing used to say so out loud.
+   */
+  blockedTools?: Set<string>;
   /** Ask-tier deep_explore: the owner approved entering the engine for the restored goal this turn. */
   exploreAskApproved?: boolean;
   /** Ask-tier deep_explore: the owner declined — run flat, do not re-ask or force this turn. */
@@ -8273,11 +8389,8 @@ async function runToolLoop(
     // 2026-05-10: autonomous turn blacklist interception. Return failure as tool_result; the LLM
     // adapts to this turn's constraint without interrupting the turn (unlike auth_pending which halts the entire schedule).
     if (isAutonomousTurn && AUTONOMOUS_TURN_BLACKLIST.has(call.name)) {
-      const reason =
-        `Autonomous heartbeat turn 不允许调 ${call.name}。\n` +
-        `理由:此 turn 由 schedule 触发,无用户在场,改 self 时序 / 写 fs / askUserQuestion 都不安全。\n` +
-        `对策:用只读工具(http / readFile / listDir / get_fact / list_facts / search_notes)继续本轮观察,` +
-        `把需要"取消 schedule / 录凭证 / 写文件"的事写成 store_note(importance=high),等用户下次回话再处理。`;
+      const reason = autonomousBlacklistReason(call.name);
+      (signalBus.blockedTools ??= new Set()).add(call.name);
       console.warn(
         `[autonomous-blacklist] session=${sessionId} rejected ${call.name}`,
       );
@@ -9873,10 +9986,8 @@ async function runToolLoop(
       // 2026-05-10: autonomous turn blacklist check must also be applied inside the main loop branch
       // (previously only checked on initial calls; subsequent iterations were missed)
       if (isAutonomousTurn && AUTONOMOUS_TURN_BLACKLIST.has(call.name)) {
-        const reason =
-          `Autonomous heartbeat turns may not call ${call.name}. ` +
-          `Continue with read-only tools (http / readFile / list_facts / get_fact / search_notes / search_skills), ` +
-          `or use store_note(importance=high) to leave a note for the user to handle next turn.`;
+        const reason = autonomousBlacklistReason(call.name);
+        (signalBus.blockedTools ??= new Set()).add(call.name);
         console.warn(
           `[autonomous-blacklist] session=${sessionId} rejected ${call.name} (in main loop)`,
         );
