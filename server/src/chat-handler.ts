@@ -5779,6 +5779,15 @@ export async function handleChatSend(
     if (looksLikeCleanupIntent(userMessage)) {
       const targets = extractCleanupTargets(userMessage);
       signalBus.cleanupIntent = { targets };
+      // Wiping a direction's state is the strongest possible fresh-start signal, so it anchors a new episode.
+      // same_root_cause is a GLOBAL 24h ledger by design (it has to span deep_explore into raw shell
+      // grinding), and the existing doom-reset only fires once doom has accumulated in THIS session — so a
+      // brand-new session's FIRST turn is judged on a previous day's failures with nothing to bound it.
+      // Prod 2026-07-21: a clear ran 18 tools with zero failures and still fired stop_and_report, telling the
+      // owner "11 same-root failures accumulated", every one of them from the night before — and caused by a
+      // race that had since been fixed. Whatever those failures were about, they were against state the user
+      // has just deleted; the next attempt deserves to be judged on its own.
+      episodeAnchorTs.set(sessionId, Date.now());
       if (targets.length > 0) {
         try {
           const until = Date.now() + CLEANUP_SCHEDULE_PAUSE_MS;
