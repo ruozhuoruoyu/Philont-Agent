@@ -48,6 +48,8 @@ async function tickWith(over: {
     outcomeSummary: 'looked it up',
     outcomeRefs: { facts: over.facts, notes: [], pursuits: [] },
     escalate: over.escalate,
+    llmTokensSpent: 0,
+    toolCallsSpent: 0,
   };
   const loop = startAutonomousLoop({
     db: handle.db,
