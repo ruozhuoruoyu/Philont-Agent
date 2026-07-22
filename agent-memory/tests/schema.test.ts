@@ -36,7 +36,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 37);
+  assert.equal(SCHEMA_VERSION, 38);
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
   assert.ok(tableExists(db, 'reasoning_sessions'));
@@ -471,10 +471,36 @@ test('migration v36 → v37: reasoning_sessions gets followup_asked_at, existing
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 37);
+  assert.equal(SCHEMA_VERSION, 38);
   assert.ok(hasColumn(db, 'reasoning_sessions', 'followup_asked_at'), 'v37 must add followup_asked_at');
   const row = db.prepare(`SELECT goal, followup_asked_at FROM reasoning_sessions WHERE id = 'rs-old'`).get() as
     { goal: string; followup_asked_at: number | null };
   assert.equal(row.goal, 'an old exploration', 'pre-existing session survives the migration');
   assert.equal(row.followup_asked_at, null, 'backfills to null — a migrated session was never asked');
+});
+
+// v38: reasoning_nodes.check_criterion — what would confirm or refute the node, stated when it is created.
+// A tree of nodes with no acceptance criterion cannot produce a signal: hours of work, and nobody can say
+// whether anything moved. Backfills to null, which is exactly what "criterion never stated" means.
+test('migration v37 → v38: reasoning_nodes gets check_criterion, existing nodes intact', () => {
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.exec(`ALTER TABLE reasoning_nodes DROP COLUMN check_criterion;`);
+  db.prepare(`UPDATE memory_meta SET value = '37' WHERE key = 'schema_version'`).run();
+  assert.ok(!hasColumn(db, 'reasoning_nodes', 'check_criterion'), 'degraded state must really lack the column');
+
+  db.prepare(
+    `INSERT INTO reasoning_nodes (id, session_id, parent_id, claim, kind, status, depth, created_at, updated_at)
+     VALUES ('rn-old', 'rs-1', NULL, 'an old subgoal', 'subgoal', 'open', 0, 1000, 2000)`
+  ).run();
+
+  initSchema(db);
+
+  assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 38);
+  assert.ok(hasColumn(db, 'reasoning_nodes', 'check_criterion'), 'v38 must add check_criterion');
+  const row = db.prepare(`SELECT claim, check_criterion FROM reasoning_nodes WHERE id = 'rn-old'`).get() as
+    { claim: string; check_criterion: string | null };
+  assert.equal(row.claim, 'an old subgoal', 'pre-existing node survives the migration');
+  assert.equal(row.check_criterion, null, 'backfills to null — a migrated node never stated one');
 });

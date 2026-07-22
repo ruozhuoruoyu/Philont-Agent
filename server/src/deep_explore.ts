@@ -931,6 +931,15 @@ export const REASON_TOOL_DEFS: ToolDefinition[] = [
                 enum: ['subgoal', 'lemma', 'construction', 'counterexample', 'conjecture'],
                 description: 'subgoal=goal to prove / lemma=lemma / construction=construction / counterexample=counterexample attempt / conjecture=data-backed conjecture to prove (produced by experimental-math mode)',
               },
+              check: {
+                type: 'string',
+                description:
+                  'What would CONFIRM OR REFUTE this node — the acceptance criterion, stated now. Name the ' +
+                  'concrete thing: a tool and its input (pariGp/z3Verify/shell/magnitude), a citation that ' +
+                  'would settle it, or the property a produced object must satisfy. If you cannot state one, ' +
+                  'say so plainly ("no direct check — only an argument") rather than inventing one: a node ' +
+                  'nobody can check is worth knowing about at creation, not after ten rounds of work on it.',
+              },
             },
             required: ['claim', 'kind'],
           },
@@ -1274,6 +1283,22 @@ const MAGNITUDE_PRIMER: readonly string[] = [
   '- It reasons about ORDERS only, never hidden constants. A "closes" verdict means the orders compose — you still owe an analytic justification for each bound\'s SHAPE. A "does not close" with a dominant-scale obstruction is a real structural gap (a sharper idea is needed), not a tuning failure — record it honestly.',
 ];
 
+/**
+ * How a node's acceptance criterion appears on the frontier.
+ *
+ * The absence is rendered as loudly as the presence, deliberately. A node nobody can check is not a neutral
+ * node — it is the one that can absorb rounds without ever producing a signal, and the engine only found
+ * that out in hindsight, after a session had spent fourteen of them.
+ */
+export function renderNodeCheck(n: ReasoningNode): string {
+  return n.checkCriterion ? ` — check: ${n.checkCriterion}` : ' — ⚠ no stated check (nothing can confirm or refute this yet)';
+}
+
+/** Open nodes carrying no acceptance criterion — the unanswerable part of the frontier. */
+export function uncheckableFrontier(nodes: ReasoningNode[]): ReasoningNode[] {
+  return computeFrontier(nodes).filter((n) => !n.checkCriterion);
+}
+
 export function renderTreePrompt(session: ReasoningSession, nodes: ReasoningNode[], lessons: string[] = []): string {
   const lines: string[] = [];
   lines.push('You are a deep-exploreing engine advancing a reasoning tree to crack a root proposition. Record progress into the tree at every step.');
@@ -1309,7 +1334,7 @@ export function renderTreePrompt(session: ReasoningSession, nodes: ReasoningNode
       const ann = VALUE_GUIDED
         ? ` — value ${n.value === null ? '?' : n.value.toFixed(2)} / ${n.visits} rounds spent${n.technique ? ` / technique ${n.technique}` : ''}`
         : '';
-      lines.push(`- [${n.id}] (${KIND_LABEL[n.kind]}) ${n.claim}${ann}`);
+      lines.push(`- [${n.id}] (${KIND_LABEL[n.kind]}) ${n.claim}${ann}${renderNodeCheck(n)}`);
     }
   }
 
@@ -1339,7 +1364,8 @@ export function renderTreePrompt(session: ReasoningSession, nodes: ReasoningNode
 
   lines.push('');
   lines.push('## Your actions (tools)');
-  lines.push('- reason_decompose(parentNodeId, subClaims[]): split a node into subgoals/lemmas; returns new child ids. **Primary action.**');
+  lines.push('- reason_decompose(parentNodeId, subClaims[], each with `check`): split a node into subgoals/lemmas; returns new child ids. **Primary action.**');
+  lines.push('  · `check` = what would CONFIRM OR REFUTE that child — a tool call (pariGp/z3Verify/magnitude/shell), a computation, a property a produced object must satisfy. A subgoal you cannot check is one you can work on forever without knowing whether you moved; if only an argument can settle it, say exactly that instead of inventing a check.');
   lines.push('- reason_record(nodeId, status, result, approach?): settle a node as proved/refuted/dead_end. **Primary action.**');
   lines.push('- z3Verify(smtlib): **external check** — use the Z3 solver to rigorously verify a decidable/bounded/arithmetic subclaim or find a counterexample.');
   lines.push('- pariGp(script): **external computation** — use PARI/GP for number-theory/algebra computation and counterexample search (factoring, primality certificates, elliptic curves, enumeration, concrete values). Prefer it over z3 for number theory. Use print() to output your conclusion.');
@@ -1561,6 +1587,20 @@ function renderFinalReport(session: ReasoningSession, nodes: ReasoningNode[], st
       `refuted ${refuted.length} / dead ends ${dead.length}. ` +
       `Budget spent: ${session.budgetSpent}/${SESSION_TOKEN_BUDGET} tokens.`,
   );
+  // How much of what is still open can be checked by anything. Reported as a number rather than left to be
+  // noticed: a session grinding on a frontier where nothing is decidable is the failure the engine could
+  // only describe in hindsight, and a count says it while there is still budget left to act on it.
+  const unchecked = frontier.filter((n) => !n.checkCriterion);
+  if (frontier.length > 0) {
+    lines.push(
+      unchecked.length === 0
+        ? `Every open direction states what would settle it.`
+        : `⚠ ${unchecked.length}/${frontier.length} open directions state NO way to confirm or refute them` +
+          (unchecked.length === frontier.length
+            ? ` — nothing currently on the frontier can produce a signal. Narrowing one of them to something checkable is worth more than another round on all of them.`
+            : `.`),
+    );
+  }
 
   if (proved.length) {
     lines.push('\n## ✓ Established (proved lemmas / sub-results)');
@@ -1651,7 +1691,7 @@ export function renderDeliberatePrompt(session: ReasoningSession, nodes: Reasoni
     }
     for (const n of frontier.slice(0, 20)) {
       const ann = VALUE_GUIDED ? ` — value ${n.value === null ? '?' : n.value.toFixed(2)} / ${n.visits} rounds spent` : '';
-      lines.push(`- [${n.id}] (${DELIBERATE_KIND_LABEL[n.kind]}) ${n.claim}${ann}`);
+      lines.push(`- [${n.id}] (${DELIBERATE_KIND_LABEL[n.kind]}) ${n.claim}${ann}${renderNodeCheck(n)}`);
     }
   }
 
@@ -1678,7 +1718,8 @@ export function renderDeliberatePrompt(session: ReasoningSession, nodes: Reasoni
 
   lines.push('');
   lines.push('## Your actions (tools)');
-  lines.push('- reason_decompose(parentNodeId, subClaims[]): split a question into concrete sub-questions (kind="subgoal") or candidate options (kind="construction"). **Primary action.**');
+  lines.push('- reason_decompose(parentNodeId, subClaims[], each with `check`): split a question into concrete sub-questions (kind="subgoal") or candidate options (kind="construction"). **Primary action.**');
+  lines.push('  · `check` = what would settle that sub-question — the kind of source that would answer it, the observation that would decide it, or a computation. A sub-question with no stated check is a topic, not a question: it can absorb rounds and never resolve.');
   lines.push('- reason_record(nodeId, status, result, evidence[], basis?, approach?): settle a sub-question. status=proved = "established"; refuted = "ruled out by evidence"; dead_end = "cannot be resolved with available evidence". **You MUST pass `evidence` (the sources/observations you relied on) to settle a finding — a conclusion with no cited evidence is NOT accepted.**');
   lines.push('  · For a FACTUAL sub-question use basis="empirical" (default) — cite an external source. For a VALUE-laden one ("what should I prefer / which fits ME"), use basis="preferential" and ground it in the USER\'s own values/data (searchNotes / getFact / readFile) — an external citation cannot settle what the user wants.');
   lines.push('- webSearch / webFetch / fetchUrl: gather external evidence; read the actual source, do not settle on a snippet alone.');
@@ -2388,6 +2429,7 @@ export function makeReasoningToolRunner(
         .map((c) => ({
           claim: c.claim as string,
           kind: (VALID_KINDS.has(c.kind as string) ? c.kind : 'subgoal') as ReasoningNodeKind,
+          check: typeof c.check === 'string' ? c.check : null,
         }));
       if (!parentNodeId || subClaims.length === 0) {
         const nodes = reasoning.getNodes(sessionId);
@@ -2402,7 +2444,20 @@ export function makeReasoningToolRunner(
         // Critical: echo newly created node ids; without this the sub-LLM has no ids to
         // reference in subsequent reason_record calls (systemPrompt is not re-rendered in-loop).
         const listed = created.map((n) => `[${n.id}] ${n.claim}`).join(' ; ');
-        return { ok: true, output: `Expanded ${created.length} child node(s) under ${parentNodeId}: ${listed}` };
+        // Name the children nobody can check, at the moment they are created. Not a rejection: some real
+        // subgoals genuinely have no direct check and only an argument settles them. But that has to be a
+        // stated position, not something discovered ten rounds in — a node with no acceptance criterion is
+        // the one that can absorb a whole session without ever answering "did this move?".
+        const unchecked = created.filter((n) => !n.checkCriterion);
+        const uncheckedNote = unchecked.length
+          ? ` ⚠ ${unchecked.length}/${created.length} have NO stated check: ${unchecked.map((n) => `[${n.id}]`).join(' ')} —` +
+            ` say what would confirm or refute each (a tool call, a citation, a property the object must satisfy),` +
+            ` or state plainly that only an argument can settle it.`
+          : '';
+        return {
+          ok: true,
+          output: `Expanded ${created.length} child node(s) under ${parentNodeId}: ${listed}${uncheckedNote}`,
+        };
       } catch (e) {
         if (e instanceof ReasoningNodeNotFoundError) {
           const nodes = reasoning.getNodes(sessionId);
@@ -3309,7 +3364,11 @@ export function createDeepExploreTool(
           if (refutable) {
             try {
               reasoning.addNodes(session.id, rootNode.id, [
-                { claim: renderRefutationClaim(goal), kind: 'counterexample' },
+                {
+                  claim: renderRefutationClaim(goal),
+                  kind: 'counterexample',
+                  check: 'Enumerate a bounded region with pariGp/shell: a witness refutes the goal; an exhausted region settles this node. Both outcomes are decided by the tool output, not by argument.',
+                },
               ]);
               refutationNote = renderRefutationNote(refutable.reason);
               console.log(`[deep-explore] refutation node seeded (${refutable.reason}: "${refutable.cue}") session=${session.id}`);

@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 37;
+export const SCHEMA_VERSION = 38;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -1042,6 +1042,7 @@ function migrateV24ToV25(db: Database.Database): void {
       approaches_tried_json TEXT,
       evidence_refs_json   TEXT,
       depth                INTEGER NOT NULL DEFAULT 0,
+      check_criterion      TEXT,
       created_at           INTEGER NOT NULL,
       updated_at           INTEGER NOT NULL
     );
@@ -1189,6 +1190,18 @@ function migrateV35ToV36(db: Database.Database): void {
 
 function migrateV36ToV37(db: Database.Database): void {
   addColumnIfMissing(db, 'reasoning_sessions', 'followup_asked_at', 'INTEGER');
+}
+
+/**
+ * v37→v38: reasoning_nodes.check_criterion — what would CONFIRM OR REFUTE this node.
+ *
+ * A tree whose nodes carry no acceptance criterion produces no signal: the engine can work for hours
+ * without ever being able to answer "am I closer or further?". Stated at creation, the criterion also
+ * exposes the unanswerable node at the moment it is proposed rather than fourteen rounds later.
+ * NULL = criterion not stated (every pre-existing node, and any node created without one).
+ */
+function migrateV37ToV38(db: Database.Database): void {
+  addColumnIfMissing(db, 'reasoning_nodes', 'check_criterion', 'TEXT');
 }
 
 function migrateV19ToV20(db: Database.Database): void {
@@ -1447,6 +1460,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 37) {
     migrateV36ToV37(db);
+  }
+  if (current < 38) {
+    migrateV37ToV38(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

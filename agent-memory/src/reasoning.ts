@@ -96,6 +96,12 @@ export interface ReasoningNode {
   visits: number;
   /** Proof/exploration technique tag (behavior descriptor for MAP-Elites bucketing + novelty; null=unclassified) */
   technique: string | null;
+  /**
+   * What would CONFIRM OR REFUTE this node — stated when the node is created, not discovered afterwards.
+   * A node with no criterion can be worked forever without anyone being able to say whether it moved, which
+   * is the shape of a session that runs for hours and yields no signal. null = never stated.
+   */
+  checkCriterion: string | null;
   /** For empirical (deliberate) nodes: evidence basis the node was settled on ('empirical'/'preferential'); null=unset (treated as empirical). */
   settleBasis: ReasoningSettleBasis | null;
   createdAt: number;
@@ -135,6 +141,7 @@ interface NodeRow {
   value: number | null;
   visits: number;
   technique: string | null;
+  check_criterion: string | null;
   settle_basis: string | null;
   created_at: number;
   updated_at: number;
@@ -178,6 +185,7 @@ function rowToNode(r: NodeRow): ReasoningNode {
     value: r.value ?? null,
     visits: r.visits ?? 0,
     technique: r.technique ?? null,
+    checkCriterion: r.check_criterion ?? null,
     settleBasis:
       r.settle_basis === 'empirical' || r.settle_basis === 'preferential' ? r.settle_basis : null,
     createdAt: r.created_at,
@@ -361,7 +369,7 @@ export class ReasoningStore {
   addNodes(
     sessionId: string,
     parentId: string,
-    children: Array<{ claim: string; kind: ReasoningNodeKind }>,
+    children: Array<{ claim: string; kind: ReasoningNodeKind; check?: string | null }>,
   ): ReasoningNode[] {
     const parent = this.getNode(sessionId, parentId);
     if (!parent) throw new ReasoningNodeNotFoundError(parentId);
@@ -369,17 +377,18 @@ export class ReasoningStore {
     const now = Date.now();
     const created: ReasoningNode[] = [];
     const insert = this.db.prepare<
-      [string, string, string, string, string, number, number, number]
+      [string, string, string, string, string, string | null, number, number, number]
     >(
       `INSERT INTO reasoning_nodes
         (id, session_id, parent_id, claim, kind, status, result,
-         approaches_tried_json, evidence_refs_json, depth, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'open', NULL, '[]', '[]', ?, ?, ?)`,
+         approaches_tried_json, evidence_refs_json, check_criterion, depth, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'open', NULL, '[]', '[]', ?, ?, ?, ?)`,
     );
     const tx = this.db.transaction(() => {
       for (const c of children) {
         const id = randomUUID();
-        insert.run(id, sessionId, parentId, c.claim, c.kind, parent.depth + 1, now, now);
+        const check = typeof c.check === 'string' && c.check.trim() ? c.check.trim().slice(0, 400) : null;
+        insert.run(id, sessionId, parentId, c.claim, c.kind, check, parent.depth + 1, now, now);
         created.push(this.getNode(sessionId, id)!);
       }
     });
