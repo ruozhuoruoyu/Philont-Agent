@@ -115,7 +115,7 @@ export class PushDispatcher {
     // 1. Global kill switch
     if (!this.opts.isGloballyEnabled()) {
       result.skipped.push({ channel: '*', peer: '*', reason: 'global_disabled' });
-      return result;
+      return this.finish(req, result);
     }
 
     // 2. Resolve routing: explicit routing takes priority; otherwise fan-out to all active subscriptions
@@ -126,8 +126,11 @@ export class PushDispatcher {
           .map((sub) => ({ channel: sub.channel, peer: sub.peer, sub }));
 
     if (targets.length === 0) {
-      // No subscriptions → drop silently (not a skip error; normal state)
-      return result;
+      // No subscriptions. This used to return an empty result with no skip reason at all — the quietest
+      // possible failure, and the most common one: a channel nobody has opted into looks exactly like a
+      // channel that had nothing to say. Record it as a reason so finish() can say so out loud.
+      result.skipped.push({ channel: '*', peer: '*', reason: 'no_active_subscription' });
+      return this.finish(req, result);
     }
 
     // 3. 24h dedup fingerprint
@@ -137,7 +140,7 @@ export class PushDispatcher {
       for (const t of targets) {
         result.skipped.push({ channel: t.channel, peer: t.peer, reason: 'duplicate' });
       }
-      return result;
+      return this.finish(req, result);
     }
 
     // 4. Send per target
@@ -187,6 +190,29 @@ export class PushDispatcher {
     if (anyDelivered) {
       this.recordFingerprint(fp, now);
     }
+    return this.finish(req, result);
+  }
+
+  /**
+   * Single exit point, so every dispatch says what happened to it.
+   *
+   * Gates 4-9 of the owner funnel all live in here, and none of them reached the console: skip reasons
+   * were returned to the caller, and the caller (the autonomy sink) only wrote an audit row when
+   * `delivered > 0`. So a push that died in here left no trace anywhere a human looks. The 2026-07-14
+   * funnel-visibility pass instrumented gates 1 and 3 and stopped at the dispatcher boundary; this is the
+   * other half. Without it, relaxing gate 1 would just move the silence one gate to the right — and we
+   * would be tuning a funnel we still could not watch.
+   */
+  private finish(req: PushRequest, result: DispatchResult): DispatchResult {
+    if (result.delivered > 0 && result.skipped.length === 0 && result.failed === 0) {
+      this.opts.logger.log(`[push] ${req.kind} delivered to ${result.delivered} target(s)`);
+      return result;
+    }
+    const why = result.skipped.map((s) => `${s.channel}:${s.peer}=${s.reason}`).join(', ');
+    this.opts.logger.log(
+      `[push-funnel] ${req.kind} (${req.severity}) → delivered=${result.delivered} failed=${result.failed}` +
+        (why ? ` skipped=[${why}]` : ''),
+    );
     return result;
   }
 

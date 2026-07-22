@@ -2049,7 +2049,21 @@ function reportUnsatisfiableGoal(
         tools.length > 0 ? `blocked ${tools.join(', ')}; ` : ''
       }${goalUnmet ? 'goal unconfirmed by the judge; ' : ''}in ${runs}`,
     );
-    memory.notes.storeNote({ sessionId, importance: 0.95, content: parts.join(' ') });
+    const text = parts.join(' ');
+    // The durable record.
+    memory.notes.storeNote({ sessionId, importance: 0.95, content: text });
+    // ...and actually tell the owner. This report existed for exactly one purpose — so they would learn
+    // a scheduled task cannot work — and it was filed into a note, which is passive: it sits in the DB
+    // until someone thinks to look. That is the same silence this whole class of defect keeps taking, and
+    // it was mine. It is safe to be loud here precisely because detectUnsatisfiableGoal fires on the
+    // threshold CROSSING only: at most one message per schedule per streak, not one per run.
+    for (const [, send] of webuiClients) {
+      try { send({ type: 'finding', text: `🔔 ${text}` }); }
+      catch (e) { console.warn('[unsatisfiable-goal] webui send failed', e); }
+    }
+    void pushDispatcher
+      .enqueue({ severity: 'digest', kind: 'schedule_unsatisfiable', targetRef: `schedule:${scheduleId}`, text })
+      .catch((e) => console.warn('[unsatisfiable-goal] push dispatch threw', e));
   } catch (e) {
     // Advisory reporting only — never let it take down the turn it is reporting on.
     console.warn('[unsatisfiable-goal] report failed, ignored', (e as Error)?.message ?? e);
@@ -2729,6 +2743,24 @@ function enqueueResearchGrantPush(
     .catch((e) => console.warn('[research-grant] push enqueue failed', e));
 }
 
+/**
+ * True when a targetRef points at a pursuit the OWNER declared (origin='compass'), i.e. a focus area they
+ * wrote in compass.md rather than something the agent drifted into on its own. Used as the mechanism-side
+ * escalation criterion for the owner funnel.
+ *
+ * Reads the origin rather than the id shape: `compass-<slug>-<hash>` is only a readability convention, and
+ * matching on it would be a naming table that breaks the first time the id scheme changes.
+ */
+function isOwnerDeclaredTarget(targetRef: string): boolean {
+  const m = /^pursuit:([^:]+)/.exec(targetRef);
+  if (!m) return false;
+  try {
+    return memory.pursuits.get(m[1])?.origin === 'compass';
+  } catch {
+    return false;
+  }
+}
+
 /** PursuitProgressWriter instance (reused by the onOutcome composite hook). */
 const pursuitWriter = pursuitProgressWriter(memory.pursuits);
 /** H3 SkillRevisionWriter instance (same composite hook). Inert unless a skill_repair initiative settles. */
@@ -2943,6 +2975,10 @@ export const autonomousLoop: AutonomousLoopHandle = startAutonomousLoop({
   drivers: AUTONOMOUS_DRIVERS,
   executor: autonomousExecutor,
   interrupt: autonomousInterruptSink,
+  // Relevance the mechanism can establish on its own: this initiative advances a pursuit the owner
+  // declared in their compass. See AutonomousLoopOptions.isOwnerDeclared for why the LLM self-rating it
+  // replaced could never fire.
+  isOwnerDeclared: (targetRef: string) => isOwnerDeclaredTarget(targetRef),
   budgetCaps: _autonomousBudgetCaps,
   // 2026-05-06 PursuitProgressWriter:pursuit:* initiative done → addEvidence +
   // bumpProgress (automatically updates last_touched_ts), so the next PursuitDriver tick does not immediately hit

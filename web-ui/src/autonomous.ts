@@ -336,10 +336,15 @@ export class AutonomousDashboard extends LitElement {
               }}
             >
               <option value="">${t('全部', 'All')}</option>
-              <option value="gap">gap</option>
-              <option value="curiosity">curiosity</option>
-              <option value="pursuit">pursuit</option>
-              <option value="k7-bridge">k7-bridge</option>
+              <!--
+                Driven from overview.drivers, which the API has always sent (autonomousDriverNames) and
+                this file has always typed — it just was not used. The hardcoded copy had drifted: it
+                still offered 'k7-bridge' and was missing 'skill_repair', so the self-repair driver was
+                unfilterable and effectively invisible in the dashboard.
+              -->
+              ${(this.overview?.drivers ?? []).map(
+                (d) => html`<option value=${d}>${d}</option>`,
+              )}
             </select>
           </label>
         </div>

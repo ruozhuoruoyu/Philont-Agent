@@ -106,6 +106,23 @@ export interface AutonomousLoopOptions {
   /** How many recent raw messages to extract specific tokens from. Default 200. */
   recentMessagesForTokens?: number;
   interrupt?: InterruptSink;
+  /**
+   * Does this initiative advance something the OWNER declared (a compass focus area)? Supplied as a
+   * callback so agent-memory does not have to reach back into the pursuit/compass wiring — the same
+   * shape PursuitDriver's `isGranted` uses. Undefined = never owner-declared (previous behaviour).
+   *
+   * Why it exists (2026-07-22): escalation to 'high' — the only severity that can reach the owner —
+   * required the executor LLM to BOTH self-rate `shouldEscalate: true` AND emit at least one fact
+   * carrying non-empty sourceRefs. That is three conditions, all of them judgements by a weak model
+   * working inside a 2000-token per-initiative budget, ANDed together. Across three production logs and
+   * a hundred-plus initiatives it passed zero times, and the owner's report was "I don't perceive the
+   * autonomy at all".
+   *
+   * A compass focus is a better relevance signal than any self-rating, because it is the one place the
+   * owner has literally written down what matters. It is also self-limiting: a compass pursuit advances
+   * once at kickoff and then on the stalled cadence, so this cannot become a firehose.
+   */
+  isOwnerDeclared?: (targetRef: string) => boolean;
   audit?: AutonomousAuditHook;
   /**
    * Side-effect hook after each initiative is persisted (added 2026-05-06, serves PursuitProgressWriter etc.).
@@ -233,8 +250,16 @@ export function startAutonomousLoop(
         // fact by definition; note-only outcomes stay 'normal' (next-turn silent injection).
         const hasNewFacts =
           result.outcomeRefs != null && result.outcomeRefs.facts.length > 0;
+        // Either the LLM cleared the (very high) evidence bar, or the mechanism knows the owner asked
+        // for this by name. See isOwnerDeclared.
+        let ownerDeclared = false;
+        try {
+          ownerDeclared = opts.isOwnerDeclared?.(initiative.targetRef) === true;
+        } catch {
+          ownerDeclared = false; // never let relevance lookup break the loop
+        }
         opts.interrupt.fire(
-          result.escalate === true && hasNewFacts ? 'high' : 'normal',
+          ownerDeclared || (result.escalate === true && hasNewFacts) ? 'high' : 'normal',
           {
             kind: 'discovery_made',
             initiativeId: initiative.id,

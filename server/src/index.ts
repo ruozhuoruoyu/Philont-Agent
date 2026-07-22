@@ -902,6 +902,19 @@ if (process.env.WECHAT_ENABLED === '1') {
     )
     .then((gw) => {
       console.log('  WeChat:    ✅ gateway scheduled (long-poll)');
+      // Being reachable is not the same as being subscribed. Proactive push is per-peer opt-in by
+      // design (consent), but that default was silent: a channel nobody had opted into looked exactly
+      // like a channel with nothing to say, and the owner's report was "it never tells me anything".
+      // Say which it is, at the one moment someone is reading.
+      try {
+        const active = memory.pushSubscriptions.countActive();
+        console.log(
+          active > 0
+            ? `  Push:      ✅ ${active} active subscription(s) — proactive findings can reach you`
+            : '  Push:      ⚠️  no active subscriptions — proactive findings will NOT reach WeChat/Telegram ' +
+              '(DM the bot once to auto-subscribe, or say "开启推送")',
+        );
+      } catch { /* advisory only */ }
       // Reuse server graceful-shutdown path
       const stopGw = () => {
         void gw.stop();

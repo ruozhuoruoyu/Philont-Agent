@@ -91,14 +91,20 @@ test('dispatcher: 全局 kill → skip global_disabled', async () => {
 
 // ── 无订阅 ──────────────────────────────────────────────────────────────
 
-test('dispatcher: 无订阅 → 静默丢(不报错)', async () => {
+// 2026-07-22 behaviour change (deliberate, not a silenced test). This used to assert that having no
+// subscription produced an EMPTY skip list — a silent drop, described as "normal state". It is the most
+// common way a push dies and it was the quietest: a channel nobody had opted into looked exactly like a
+// channel with nothing to say, and the owner's report was "it never tells me anything". Not delivering
+// is still correct (opt-in is consent); being unable to find out why is not.
+test('dispatcher: 无订阅 → 不投递,但要说明原因(不再静默丢)', async () => {
   const { h, dispatcher } = setup();
   const f = fakeChannel();
   registerPushChannel(f.channel);
 
   const r = await dispatcher.enqueue(URGENT_REQ);
-  assert.equal(r.delivered, 0);
-  assert.equal(r.skipped.length, 0);
+  assert.equal(r.delivered, 0, 'still delivers nothing — opt-in is consent, not a bug');
+  assert.equal(r.skipped.length, 1, 'but the reason is now recorded');
+  assert.equal(r.skipped[0].reason, 'no_active_subscription');
   unregisterPushChannel(f.channel.name);
   h.close();
 });
