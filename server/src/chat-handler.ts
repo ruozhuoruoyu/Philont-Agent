@@ -2761,6 +2761,59 @@ function isOwnerDeclaredTarget(targetRef: string): boolean {
   }
 }
 
+// ── Scheduled-run reporting ───────────────────────────────────────────────────────────────────
+//
+// A scheduled task used to report NOTHING unless it was created with replyChannel:'summary', and the
+// default was 'silent'. Prod 2026-07-21/22: a check-in ran every six minutes for days, and every reply
+// — including "这个模式已经走到死胡同了，同样的情况已经重复了 30+ 次" — was discarded at the emitter.
+// The owner's report was that the whole flywheel is invisible.
+//
+// But flipping the default to 'summary' would be the opposite error: six minutes apart, that is ten
+// "feed unchanged, nothing to do" messages an hour, and a notification stream a human learns to ignore
+// is worth the same as no notification at all. What a person actually wants from a recurring task is to
+// hear when something CHANGES.
+//
+// So the default becomes change-based. 'silent' and 'summary' keep their exact meanings for anyone who
+// set them deliberately.
+
+/**
+ * Coarse identity of a scheduled run's OUTCOME — what a human would call "the same thing happened again".
+ *
+ * Deliberately drops the counts: httpOk 5 vs 6 fluctuates with how many comment threads existed that
+ * minute and means nothing, while an outcome flipping ok→partial, or a new failure signature appearing,
+ * always does. Coarse enough to stay stable across a quiet week, sharp enough that the first 401 breaks it.
+ */
+export function scheduleRunFingerprint(run: {
+  outcome: string;
+  httpFailCount: number;
+  failureSignatures: readonly string[];
+}): string {
+  return [
+    run.outcome,
+    run.httpFailCount > 0 ? 'httpfail' : 'httpok',
+    [...run.failureSignatures].sort().join('|'),
+  ].join('/');
+}
+
+export type ScheduleReplyChannel = 'silent' | 'summary' | 'on-change';
+
+/**
+ * Should this run's reply reach the owner?
+ *   - 'silent'    → never (an explicit opt-out stays an opt-out)
+ *   - 'summary'   → always (an explicit opt-in stays an opt-in)
+ *   - 'on-change' → the first run, and thereafter only when the outcome fingerprint moved
+ * `prevFingerprint` is undefined on the very first run of a schedule.
+ */
+export function shouldReportScheduledRun(
+  mode: ScheduleReplyChannel,
+  fingerprint: string,
+  prevFingerprint: string | undefined,
+): boolean {
+  if (mode === 'silent') return false;
+  if (mode === 'summary') return true;
+  return prevFingerprint === undefined || prevFingerprint !== fingerprint;
+}
+
 /** PursuitProgressWriter instance (reused by the onOutcome composite hook). */
 const pursuitWriter = pursuitProgressWriter(memory.pursuits);
 /** H3 SkillRevisionWriter instance (same composite hook). Inert unless a skill_repair initiative settles. */
@@ -3505,7 +3558,14 @@ const scheduler = startScheduler(
           console.warn(`${label} autonomous_turn: missing payload.prompt, skipped`);
           return;
         }
-        const replyChannel = payload.replyChannel === 'summary' ? 'summary' : 'silent';
+        // Default is now on-change (see scheduleRunFingerprint). 'silent' and 'summary' still mean
+        // exactly what they meant to anyone who set them on purpose.
+        const replyChannel: ScheduleReplyChannel =
+          payload.replyChannel === 'summary'
+            ? 'summary'
+            : payload.replyChannel === 'silent'
+              ? 'silent'
+              : 'on-change';
         const turnSessionId = `system:scheduled:${s.name}`;
         const startTs = Date.now();
         let finalText = '';
@@ -3568,13 +3628,46 @@ const scheduler = startScheduler(
               console.warn(`${label} recordSuccess failed (ignored):`, (e as Error)?.message ?? e);
             }
           }
-          // when replyChannel='summary', push to user via reminderEmitter (reuses the prompt channel)
-          if (replyChannel === 'summary' && finalText.trim()) {
-            reminderEmitter.emit('reminder', {
-              scheduleName: s.name,
-              text: finalText.slice(0, 500),
-              at: Date.now(),
-            } satisfies ReminderPayload);
+          // Report to the owner. Two runs are read back: [0] is this run (its outcome row was written
+          // during the turn), [1] is the previous one — comparing their fingerprints is what makes
+          // "nothing changed again" silent without making the schedule silent.
+          if (finalText.trim()) {
+            try {
+              const recent = memory.scheduleOutcomes.recent(s.name, 2);
+              const fp = recent[0] ? scheduleRunFingerprint(recent[0]) : 'unknown';
+              const prevFp = recent[1] ? scheduleRunFingerprint(recent[1]) : undefined;
+              if (shouldReportScheduledRun(replyChannel, fp, prevFp)) {
+                const text = finalText.slice(0, 500);
+                console.log(
+                  `[schedule-report] ${s.name} → owner (mode=${replyChannel}, ` +
+                    `${prevFp === undefined ? 'first run' : prevFp === fp ? 'forced' : `changed ${prevFp} → ${fp}`})`,
+                );
+                // Web-ui, as before.
+                reminderEmitter.emit('reminder', {
+                  scheduleName: s.name,
+                  text,
+                  at: Date.now(),
+                } satisfies ReminderPayload);
+                // ...and the push channels. reminderEmitter is wired ONLY to the web-ui WS, so even an
+                // explicit replyChannel:'summary' never reached WeChat or Telegram. digest severity, so
+                // the dispatcher's rate limit and quiet hours still apply.
+                void pushDispatcher
+                  .enqueue({
+                    severity: 'digest',
+                    kind: 'schedule_report',
+                    // Fingerprint in the targetRef on purpose: the dispatcher dedups (kind, targetRef)
+                    // for 24h, so a bare `schedule:<name>` would swallow the SECOND change of the day —
+                    // exactly the one worth hearing about.
+                    targetRef: `schedule:${s.name}:${fp}`,
+                    text: `⏰ ${s.name}\n${text}`,
+                  })
+                  .catch((e) => console.warn('[schedule-report] push dispatch threw', e));
+              } else {
+                console.log(`[schedule-report] ${s.name} suppressed — outcome unchanged (${fp})`);
+              }
+            } catch (e) {
+              console.warn('[schedule-report] reporting failed (ignored):', (e as Error)?.message ?? e);
+            }
           }
         } catch (e) {
           const dur = Date.now() - startTs;
