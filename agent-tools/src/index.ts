@@ -41,7 +41,7 @@ export {
 export type { ToolProfile, BuiltinProfile, ProfileDef, ProfileSet } from './profiles.js';
 
 // ── Skills ────────────────────────────────────────────
-export { parseSkillFile, loadSkills, watchSkillDir, MAX_ACTION_TEMPLATE_SIZE } from './skills/index.js';
+export { parseSkillFile, loadSkills, watchSkillDir, isIgnoredSkillPath, MAX_ACTION_TEMPLATE_SIZE } from './skills/index.js';
 export type { ParsedSkill } from './skills/index.js';
 
 // ── Skill marketplace registry (aggregator client + safety gate) ──────────

@@ -384,6 +384,21 @@ export async function loadSkills(
  *
  * @returns close to release the watcher
  */
+/**
+ * Paths inside a skill directory whose churn cannot change what a skill IS: dependency trees, VCS
+ * metadata, caches and editor droppings. Matched on any path segment, so nesting depth is irrelevant.
+ */
+const IGNORED_SKILL_DIR_SEGMENTS = new Set([
+  'node_modules', '.git', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache',
+  'dist', 'build', '.cache', '.idea', '.vscode',
+]);
+
+export function isIgnoredSkillPath(relPath: string): boolean {
+  return relPath
+    .split(/[\\/]/)
+    .some((seg) => IGNORED_SKILL_DIR_SEGMENTS.has(seg) || seg.endsWith('.swp') || seg.endsWith('~'));
+}
+
 export function watchSkillDir(
   dir: string,
   onChange: (dir: string) => void,
@@ -398,6 +413,11 @@ export function watchSkillDir(
   const DIAG_LOG_INTERVAL_MS = 10_000;
 
   const schedule = (eventType?: string, filename?: string | Buffer | null) => {
+    // A skill may carry its own dependency tree. Production: installing one skill's node_modules produced
+    // 46 fs events in a single batch and reloaded every skill in the directory — none of which could have
+    // changed, since a skill is defined by its SKILL.md and scripts, never by its dependencies' internals.
+    // fs.watch(recursive) has no ignore list, so the filter belongs here.
+    if (filename && isIgnoredSkillPath(String(filename))) return;
     if (filename) {
       pendingEvents.push(`${eventType ?? '?'}:${String(filename)}`);
     }

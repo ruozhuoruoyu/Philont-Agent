@@ -142,8 +142,22 @@ export function missingShellCommand(stderr: string): string | null {
   return null;
 }
 
+/**
+ * A command made of several segments joined by the shell's chain operators.
+ *
+ * This matters because the exit code of such a line is the exit code of its LAST segment only. Production
+ * ran `where python & dir …2511* & dir … & dir …`: `where` found both interpreters, and the trailing `dir`
+ * found no files and returned 1 — so a call that had already answered the question came back as a failure
+ * with no error text at all, was counted twice into same_root_cause_failures, and triggered a reflection.
+ */
+function looksChained(command: string): boolean {
+  // Quotes are ignored deliberately: a false positive only adds one explanatory clause to an error message,
+  // whereas parsing shell quoting correctly here would be a second, worse bug.
+  return /(?:&&|\|\||[&;|])/.test(command.replace(/"[^"]*"|'[^']*'/g, ''));
+}
+
 /** Format a child_process.exec failure exception as structured text so the LLM immediately knows it failed. */
-function formatFailure(error: any, durationMs: number, requestedTimeout: number): string {
+function formatFailure(error: any, durationMs: number, requestedTimeout: number, command = ''): string {
   const exitCode = typeof error?.code === 'number' ? error.code : null;
   const signal = error?.signal ?? null;
   const killed = error?.killed === true;
@@ -156,13 +170,29 @@ function formatFailure(error: any, durationMs: number, requestedTimeout: number)
   if (killed) meta.push('killed=true (likely timeout)');
   meta.push(`durationMs=${durationMs}`);
 
+  // A non-zero exit with NO error text is the shape of "nothing matched", not of a broken command: dir,
+  // findstr, grep, where and test all report an empty result that way. Saying only "(no stderr output)"
+  // left the model to guess, and the guess is reliably "it broke, retry" — so the meaning is spelled out.
+  // It is still reported as a FAILURE: `grep` finding nothing really is a non-zero exit, and quietly
+  // relabelling it success would be the same lie in the opposite direction.
+  const noErrorText =
+    '(no stderr output — a non-zero exit with no error text usually means "nothing matched / not found",' +
+    ' not a broken command; any stdout below is real output and may already answer the question)';
+  const chainNote = looksChained(command)
+    ? `\nnote: this command chains several segments, and the exit code reflects only the LAST one —` +
+      ` earlier segments may well have succeeded. Read the stdout below before concluding anything failed,` +
+      ` and split the segments into separate calls if you need to know which one failed.`
+    : '';
   const cause = stderr
     ? `stderr: ${stderr}`
     : exitCode === null && !signal
       ? `exception: ${error?.message ?? String(error)}`
-      : '(no stderr output)';
+      : noErrorText;
 
-  const tail = stdoutLeftover ? `\nstdout(partial): ${stdoutLeftover.slice(0, 800)}` : '';
+  // When there is no stderr, stdout is the ONLY content — truncating it to a preview throws away the part
+  // that worked (production: `where python` found both interpreters and the model never saw it).
+  const stdoutCap = stderr ? 800 : 4000;
+  const tail = stdoutLeftover ? `\nstdout(partial): ${stdoutLeftover.slice(0, stdoutCap)}` : '';
   // Timed out (killed=true and duration close to the limit) → append action hint: **retry with an explicitly larger timeout**.
   // Do not let the LLM guess from a silent error: in practice LLMs have misread "killed at default timeout"
   // as "network hiccup" and retried repeatedly with the same timeout, wasting many turns.
@@ -189,7 +219,24 @@ function formatFailure(error: any, durationMs: number, requestedTimeout: number)
       `\n  - Genuine shell logic: rewrite it in this host's native shell syntax.` +
       `\n  Do not retry the same command — it will fail the same way.`
     : '';
-  return `[${meta.join(', ')}] ${cause}${tail}${hint}${missingHint}`;
+  return `[${meta.join(', ')}] ${cause}${chainNote}${tail}${hint}${missingHint}`;
+}
+
+/**
+ * Environment for a spawned command.
+ *
+ * The decoder above fixes what WE read. It cannot fix what the CHILD refuses to WRITE: on a Chinese
+ * Windows install, Python's stdout encoding defaults to cp936, and printing a character outside it raises
+ * UnicodeEncodeError and kills the script. Production 2026-07-22 hit exactly that on a paper with Hungarian
+ * letters — and the failure surfaced to the OWNER as "PDF encoding problem, most text cannot be extracted",
+ * which is a false statement about the PDF. An environment defect narrated as a capability limit is the
+ * worst shape a bug can take here: it sounds like an honest boundary report.
+ *
+ * PYTHONIOENCODING/PYTHONUTF8 are set unconditionally — they are no-ops where Python is absent or already
+ * UTF-8, and setting them only on win32 would leave the same trap for any non-UTF-8 POSIX locale.
+ */
+function childEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, PYTHONIOENCODING: process.env.PYTHONIOENCODING ?? 'utf-8', PYTHONUTF8: process.env.PYTHONUTF8 ?? '1' };
 }
 
 export const shellTool: Tool = {
@@ -241,6 +288,7 @@ export const shellTool: Tool = {
         timeout,
         shell: POSIX_PREFERRED_SHELL,
         encoding: 'buffer',
+        env: childEnv(),
       });
       const durationMs = Date.now() - startedAt;
       // Success path: exit 0. Prefer stdout; append stderr as supplementary info (many tools
@@ -291,7 +339,7 @@ export const shellTool: Tool = {
       return {
         success: false,
         output: (error?.stdout ?? '').toString(),
-        error: formatFailure(error, durationMs, timeout),
+        error: formatFailure(error, durationMs, timeout, command),
       };
     }
   },
