@@ -2761,6 +2761,60 @@ function isOwnerDeclaredTarget(targetRef: string): boolean {
   }
 }
 
+/**
+ * A schedule just auto-paused — tell the owner.
+ *
+ * Both pause sites wrote an audit row and one console.warn and stopped there. A scheduled task going
+ * quiet is indistinguishable from a scheduled task with nothing to say, so the owner would find out by
+ * eventually noticing the absence of something they had stopped expecting. The 2026-07-22 move to a
+ * 24h cadence made that worse, not better: at one fire a day, a pause costs days before it is noticed.
+ *
+ * Fires exactly once per pause — the callers only reach here on the transition (`after > before`), not
+ * on every fire of an already-paused schedule. Same shape as reportUnsatisfiableGoal: one structural,
+ * one-shot, must-know event, and the durable note is kept alongside the notification.
+ *
+ * Shared by both call sites on purpose. They were separately written and had already drifted (one
+ * carries a `reason`, the other does not) — the same split that produced two different blacklist
+ * rejection messages.
+ */
+function reportSchedulePaused(input: {
+  scheduleName: string;
+  consecutiveFailures: number;
+  pausedUntilTs: number;
+  reason: 'no_external_progress' | 'run_failed';
+}): void {
+  try {
+    const mins = Math.max(1, Math.round((input.pausedUntilTs - Date.now()) / 60_000));
+    const why =
+      input.reason === 'no_external_progress'
+        ? 'its runs kept completing without achieving anything outside the agent'
+        : 'its runs kept failing outright';
+    const text =
+      `⏸ Scheduled task "${input.scheduleName}" has been auto-paused for ~${mins} minute(s) after ` +
+      `${input.consecutiveFailures} consecutive unproductive runs — ${why}. It will resume on its own ` +
+      `afterwards; until then it does nothing. If that is not what you want, fix what it is stuck on or ` +
+      `re-enable it, and tell me if the goal itself needs rewording.`;
+    console.warn(`[schedule-paused] ${input.scheduleName} → owner (${input.reason}, ~${mins}min)`);
+    memory.notes.storeNote({ sessionId: `system:scheduled:${input.scheduleName}`, importance: 0.9, content: text });
+    for (const [, send] of webuiClients) {
+      try { send({ type: 'finding', text }); }
+      catch (e) { console.warn('[schedule-paused] webui send failed', e); }
+    }
+    void pushDispatcher
+      .enqueue({
+        severity: 'digest',
+        kind: 'schedule_paused',
+        // Include the deadline so a LATER pause of the same schedule is a distinct target and does not
+        // get eaten by the dispatcher's 24h (kind, targetRef) dedup.
+        targetRef: `schedule-paused:${input.scheduleName}:${input.pausedUntilTs}`,
+        text,
+      })
+      .catch((e) => console.warn('[schedule-paused] push dispatch threw', e));
+  } catch (e) {
+    console.warn('[schedule-paused] report failed (ignored):', (e as Error)?.message ?? e);
+  }
+}
+
 // ── Scheduled-run reporting ───────────────────────────────────────────────────────────────────
 //
 // A scheduled task used to report NOTHING unless it was created with replyChannel:'summary', and the
@@ -3623,6 +3677,12 @@ const scheduler = startScheduler(
                   pausedUntil: after, pauseDurationMs: after - Date.now(),
                   reason: 'no_external_progress',
                 });
+                reportSchedulePaused({
+                  scheduleName: s.name,
+                  consecutiveFailures: updated.consecutiveFailures,
+                  pausedUntilTs: after,
+                  reason: 'no_external_progress',
+                });
               }
             } catch (e) {
               console.warn(`${label} recordFailure (no-progress) failed (ignored):`, (e as Error)?.message ?? e);
@@ -3698,6 +3758,13 @@ const scheduler = startScheduler(
                 consecutiveFailures: updated.consecutiveFailures,
                 pausedUntil: after,
                 pauseDurationMs: after - Date.now(),
+                reason: 'run_failed',
+              });
+              reportSchedulePaused({
+                scheduleName: s.name,
+                consecutiveFailures: updated.consecutiveFailures,
+                pausedUntilTs: after,
+                reason: 'run_failed',
               });
             }
           } catch (e2) {

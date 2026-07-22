@@ -74,3 +74,32 @@ test('explicit modes still mean exactly what they meant', () => {
   assert.equal(shouldReportScheduledRun('silent', fp({ httpFailCount: 1 }), fp()), false);
   assert.equal(shouldReportScheduledRun('summary', fp(), fp()), true, 'summary even when unchanged');
 });
+
+// ── Auto-pause reaches the owner (2026-07-22) ───────────────────────────────────────────────────
+//
+// Both pause sites wrote an audit row and one console.warn and stopped. A schedule going quiet is
+// indistinguishable from a schedule with nothing to say, so the owner would find out by eventually
+// noticing the absence of something they had stopped expecting. At the 24h cadence they moved to, that
+// costs days.
+import { readFileSync } from 'node:fs';
+
+test('both auto-pause sites report through the one shared builder', () => {
+  // They were separately written and had already drifted — one carried a `reason`, the other did not.
+  // Same split that produced two different blacklist rejection messages.
+  const src = readFileSync(new URL('../src/chat-handler.ts', import.meta.url), 'utf8');
+  const calls = src.match(/reportSchedulePaused\(\{/g) ?? [];
+  assert.equal(calls.length, 2, 'both pause paths must notify');
+  assert.equal((src.match(/function reportSchedulePaused/g) ?? []).length, 1, 'one definition, not two');
+});
+
+test('the pause report goes to the owner channels, not only to a note', () => {
+  const src = readFileSync(new URL('../src/chat-handler.ts', import.meta.url), 'utf8');
+  const body = src.slice(src.indexOf('function reportSchedulePaused'));
+  const fn = body.slice(0, body.indexOf('\n}\n') + 3);
+  assert.match(fn, /memory\.notes\.storeNote/, 'durable record kept');
+  assert.match(fn, /webuiClients/, 'web-ui');
+  assert.match(fn, /pushDispatcher/, 'WeChat/Telegram');
+  // The dedup key must vary per pause, or a second pause the same day is swallowed by the 24h
+  // (kind, targetRef) dedup — exactly the one worth hearing about.
+  assert.match(fn, /schedule-paused:\$\{input\.scheduleName\}:\$\{input\.pausedUntilTs\}/);
+});
