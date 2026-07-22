@@ -95,3 +95,33 @@ test('a throwing relevance lookup degrades to normal and never breaks the tick',
   });
   assert.deepEqual(got, ['normal']);
 });
+
+test('the interrupt payload carries driver + targetRef so a drop is attributable', async () => {
+  // `kind` has exactly two values and both are outcome shapes, so a funnel line reading
+  // "kind=discovery_made" was identical whether it came from a free-curiosity lookup or from advancing
+  // the owner's declared focus. Prod 2026-07-22: eight drops in one tick, all unattributable — the
+  // escalation fix could not be observed even in principle.
+  const handle = openMemoryDb(':memory:');
+  const seen: Array<{ driver?: string; targetRef?: string }> = [];
+  const loop = startAutonomousLoop({
+    db: handle.db,
+    facts: handle.facts, notes: handle.notes, raw: handle.raw,
+    skills: handle.skills, routingRules: handle.routingRules, pursuits: handle.pursuits,
+    drivers: [oneProposal],
+    executor: {
+      async run() {
+        return {
+          status: 'done' as const, outcomeSummary: 's',
+          outcomeRefs: { facts: [], notes: [], pursuits: [] },
+          escalate: false, llmTokensSpent: 0, toolCallsSpent: 0,
+        };
+      },
+    },
+    interrupt: { fire: (_s, p) => { seen.push({ driver: p.driver, targetRef: p.targetRef }); } },
+    enabled: true,
+  });
+  await loop.tickOnce();
+  await loop.stop();
+  handle.close();
+  assert.deepEqual(seen, [{ driver: 'pursuit', targetRef: TARGET }]);
+});

@@ -2832,15 +2832,19 @@ const autonomousInterruptSink: InterruptSink = {
     // The owner's report was "I don't perceive the autonomy at all" — and every one of those gates wrote
     // its decision to the audit DB and NOTHING to the console, so neither they nor I could see where the
     // findings were dying. A funnel you cannot watch is a funnel you cannot fix.
+    // driver + targetRef, because `kind` has two values and both are outcome shapes — without these the
+    // line cannot say whether a drop was a free-curiosity lookup or an owner-declared pursuit advance,
+    // which is exactly what we now need to watch.
+    const who = `${payload.driver ?? '?'} ${payload.targetRef ?? '?'}`;
     if (severity !== 'high') {
       console.log(
-        `[autonomy-funnel] initiative=${payload.initiativeId} kind=${payload.kind} DROPPED at gate 1/9 ` +
-          `(severity=normal — needs executor escalate=true AND >=1 new fact). Owner will NOT see this; ` +
-          `it is only injected into the next turn's prompt.`,
+        `[autonomy-funnel] initiative=${payload.initiativeId} kind=${payload.kind} [${who}] DROPPED at gate 1/9 ` +
+          `(severity=normal — needs owner-declared target, OR executor escalate=true AND >=1 new fact). ` +
+          `Owner will NOT see this; it is only injected into the next turn's prompt.`,
       );
     }
     if (severity === 'high') {
-      console.log(`[autonomy-funnel] initiative=${payload.initiativeId} passed gate 1/9 (severity=high)`);
+      console.log(`[autonomy-funnel] initiative=${payload.initiativeId} [${who}] passed gate 1/9 (severity=high)`);
       interruptController.sendHigh({ signalType: 'AutonomousFinding', payload: text });
       // Web-ui: surface the finding to any connected web-ui session (no subscription/rate-limit;
       // the user is actively looking at the chat). WeChat/Telegram still go through pushDispatcher below.

@@ -52,6 +52,17 @@ export interface AutonomousInterruptPayload {
   kind: AutonomousInterruptKind;
   initiativeId: string;
   summary: string;
+  /**
+   * Which driver produced this, and what it was aimed at.
+   *
+   * `kind` has exactly two values and both are outcome shapes, so the funnel log could not distinguish a
+   * curiosity lookup from a compass-anchored pursuit advance — every drop read `kind=discovery_made`
+   * whatever produced it. That made the owner-funnel unwatchable in the one dimension that now matters:
+   * whether the mechanism-side escalation (isOwnerDeclared) ever fires. Prod 2026-07-22: eight drops in
+   * one tick, all identical in the log, all unattributable.
+   */
+  driver?: string;
+  targetRef?: string;
 }
 
 /**
@@ -264,6 +275,8 @@ export function startAutonomousLoop(
             kind: 'discovery_made',
             initiativeId: initiative.id,
             summary: updated.outcomeSummary ?? '',
+            driver: initiative.driver,
+            targetRef: initiative.targetRef,
           },
         );
       }
