@@ -97,3 +97,48 @@ test('low stake does not block a kickoff — the owner declared it, stake only o
 test('the evergreen root is never kicked off', () => {
   assert.deepEqual(driver.propose(snap([pursuit({ isEvergreen: true })])), []);
 });
+
+// ── Owner-declared stake sets the cadence (2026-07-22) ──────────────────────────────────────────
+//
+// stakeWeight only ever fed scoreUtility, which ORDERS competing proposals — so with a single focus
+// area (the common case, and the owner's) the stake they wrote had literally no effect. A stake-9
+// "active" focus and a stake-1 "survey" one shared one flat 7-day clock.
+
+const started = (over: Record<string, unknown> = {}) =>
+  pursuit({ evidenceRefs: ['init-1'], origin: 'compass', ...over });
+
+function advancesAfter(days: number, p: ReturnType<typeof pursuit>): boolean {
+  return driver.propose(snap([{ ...p, lastTouchedAt: NOW - days * DAY }])).length > 0;
+}
+
+test('a high-stake compass focus is advanced daily, not weekly', () => {
+  const p = started({ stakeWeight: 9 });
+  assert.equal(advancesAfter(0.5, p), false, 'not within the day');
+  assert.equal(advancesAfter(2, p), true, 'stake 9 → ~1 day, so two days is stale');
+});
+
+test('a low-stake compass focus keeps the full default', () => {
+  const p = started({ stakeWeight: 1 });
+  assert.equal(advancesAfter(3, p), false, 'stake 1 → the full 7 days');
+  assert.equal(advancesAfter(8, p), true);
+});
+
+test('mid stake lands in between', () => {
+  const p = started({ stakeWeight: 5 });
+  assert.equal(advancesAfter(2, p), false);
+  assert.equal(advancesAfter(5, p), true, 'stake 5 → ~4 days');
+});
+
+test('a pursuit the AGENT created is NOT accelerated by its own stake', () => {
+  // A stake the owner wrote is a declaration; a stake the agent assigned itself is a guess, and letting
+  // that guess buy more of its own compute is a loop that funds itself.
+  const selfMade = started({ stakeWeight: 10, origin: 'llm' });
+  assert.equal(advancesAfter(2, selfMade), false, 'still the flat default');
+  assert.equal(advancesAfter(8, selfMade), true);
+});
+
+test('the cadence never goes below a day, even at stake 10', () => {
+  const p = started({ stakeWeight: 10 });
+  assert.equal(advancesAfter(0.5, p), false, 'floor of 1 day holds at the top of the scale');
+  assert.equal(advancesAfter(1.5, p), true);
+});

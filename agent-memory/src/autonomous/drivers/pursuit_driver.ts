@@ -13,7 +13,9 @@
  * Skip conditions:
  *   - status !== 'active' (already guaranteed by listActive)
  *   - isEvergreen === true (root pursuit is the agent's identity itself; not "advanced")
- *   - lastTouchedAt is within the stalledDays threshold (still active) — un-started pursuits excepted
+ *   - lastTouchedAt is within the stalled threshold (still active) — un-started pursuits excepted.
+ *     For an owner-declared (compass) pursuit that threshold scales with the stake they wrote; see
+ *     stalledDaysFor.
  *   - Already in the 24h dedup set (targetRef hit)
  *
  * When deadline is within 24h, utility is boosted by 0.1, capped at 0.95.
@@ -58,15 +60,35 @@ export class PursuitDriver implements Driver {
     private readonly isGranted?: (tool: string) => boolean,
   ) {}
 
+  /**
+   * How long THIS pursuit must sit untouched before it counts as stalled.
+   *
+   * 2026-07-22: the owner declares a stake 1-10 per focus area in compass.md, and it had no effect on
+   * pacing at all — stakeWeight fed scoreUtility, which only ORDERS competing proposals, so with a single
+   * focus area (the common case, and the owner's) it did literally nothing. A stake-9 "active" focus and
+   * a stake-1 "survey" one were both advanced on the same flat 7-day clock. The compass is where the owner
+   * says what matters; ignoring that for cadence is ignoring most of what they said.
+   *
+   * Scaled ONLY for owner-declared pursuits. A stake the OWNER wrote is a declaration; a stake the agent
+   * assigned itself is a guess, and letting that guess buy more of its own compute is a loop that funds
+   * itself. Same line isOwnerDeclared draws in the loop's escalation.
+   */
+  private stalledDaysFor(p: MemorySnapshot['activePursuits'][number]): number {
+    if (p.origin !== 'compass') return this.cfg.stalledDays;
+    const stake = Math.max(1, Math.min(10, p.stakeWeight));
+    // stake 10 → 1 day … stake 1 → the full default. Floor of 1: never more than daily, even at stake 10.
+    return Math.max(1, Math.round((this.cfg.stalledDays * (11 - stake)) / 10));
+  }
+
   propose(snap: MemorySnapshot): InitiativeProposal[] {
     const proposals: InitiativeProposal[] = [];
-    const stalledThreshold = snap.now - this.cfg.stalledDays * 86_400_000;
 
     for (const p of snap.activePursuits) {
       // Skip root identity (evergreen)
       if (p.isEvergreen) continue;
 
       const lastTouched = p.lastTouchedAt ?? p.updatedAt;
+      const stalledThreshold = snap.now - this.stalledDaysFor(p) * 86_400_000;
 
       // v24 active research: a pursuit where the user has asked for "ongoing research".
       // **Does not wait for staleness or require evidence** — advances the earliest open question
