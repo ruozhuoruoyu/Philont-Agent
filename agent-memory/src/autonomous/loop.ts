@@ -415,14 +415,32 @@ export function startAutonomousLoop(
         return event;
       }
 
-      // Active-research (pursuit:advance-question, utility 0.9) is dispatched first when tied,
-      // ensuring user-assigned ongoing research isn't crowded out of the tick by trivial gap items.
-      // All others are sorted by utility descending.
+      // Work the OWNER asked for is dispatched first, so it is not crowded out of the tick by
+      // opportunistic gap items. All others are sorted by utility descending.
+      //
+      // This carve-out existed for exactly that reason, but recognised the owner by `utility >= 0.9` —
+      // which only `research_focus`-created active-research pursuits ever reach. A compass focus area
+      // scores through scoreUtility instead: stake 9 lands at ~0.755, while a low-confidence gap fact
+      // scores 0.6 + 0.2*(1 - confidence), i.e. up to 0.85. So the guard written to protect the owner's
+      // declared work ranked it BELOW re-checking a fact nobody asked about, and with perTickInitiatives
+      // at 8 it could be pushed out of the tick entirely (prod 2026-07-22: 18 of 21 initiatives were gap).
+      //
+      // Recognise it by provenance instead of by score — the same question isOwnerDeclared already
+      // answers for escalation: did the owner ask for this, or did the agent pick it up on its own?
       const isActiveResearch = (p: InitiativeProposal): boolean =>
         p.driver === 'pursuit' && p.kind === 'pursuit:advance-question' && p.utility >= 0.9;
+      const ownerAsked = (p: InitiativeProposal): boolean => {
+        if (isActiveResearch(p)) return true;
+        if (p.driver !== 'pursuit') return false;
+        try {
+          return opts.isOwnerDeclared?.(p.targetRef) === true;
+        } catch {
+          return false;
+        }
+      };
       allProposals.sort((a, b) => {
-        const ar = isActiveResearch(a);
-        const br = isActiveResearch(b);
+        const ar = ownerAsked(a);
+        const br = ownerAsked(b);
         if (ar !== br) return ar ? -1 : 1;
         return b.utility - a.utility;
       });
