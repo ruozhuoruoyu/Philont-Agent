@@ -369,7 +369,26 @@ export function computeViability(input: ViabilityInput): ViabilityResult {
  */
 export function buildViabilityDirective(
   result: ViabilityResult,
-  ctx: { provedCount: number; openProblemNote?: string },
+  ctx: {
+    provedCount: number;
+    openProblemNote?: string;
+    /**
+     * The deep_explore session this verdict is about, or null when there is none. The actuator
+     * deliberately still fires without one (`viabilityActuatorRelevant`: a session-less doom-grind keeps
+     * its behaviour) — but the wording below assumed one existed, and told the model to "summarize the
+     * proved lemmas that persist in the tree" on turns that had no tree.
+     *
+     * Prod 2026-07-22: a `system:scheduled:mycox-checkin` turn hit stop_and_report with hasSession=false
+     * and provedCount=0, and the model — asked to credit banked lemmas for "the active reasoning goal" —
+     * went looking in its memory for something that fit and reported on Goldbach CRT residue-class
+     * coverage instead. The check-in's own owner-facing reply was about an unrelated conjecture. Nothing
+     * was wrong with the verdict; the directive simply described a different kind of work than the one
+     * being done. (It became reachable only once the pivot ratchet stopped being cleared every fire.)
+     */
+    hasReasoningSession: boolean;
+    /** What this turn is actually about, so a session-less rewrite anchors on the real subject. */
+    taskHint?: string;
+  },
 ): string {
   if (result.verdict === 'intractable') {
     const lines = [
@@ -392,15 +411,27 @@ export function buildViabilityDirective(
   }
 
   const stopping = result.verdict === 'stop_and_report';
+  // The subject line and the "what we banked" credit are the two places the old wording assumed a
+  // reasoning tree. Both now follow whether one actually exists.
+  const subject = ctx.hasReasoningSession
+    ? 'The active reasoning goal is not advancing'
+    : ctx.taskHint
+      ? `This task ("${ctx.taskHint}") is not advancing`
+      : 'This task is not advancing';
+  const banked = ctx.hasReasoningSession
+    ? `  2. Credits what we BANKED — ${ctx.provedCount} proved lemma(s) persist in the tree and are reusable by a future attack; summarize them.`
+    : `  2. Credits what this run DID achieve — name only what THIS turn's tools actually returned. If that is ` +
+      `nothing beyond confirming the same unchanged state, say exactly that. Do NOT reach into memory for a ` +
+      `different piece of work to report on: the subject is the task above and nothing else.`;
   const lines = [
-    `[drive Viability/${result.reasons.join(',')}] The active reasoning goal is not advancing: ${result.evidence}.`,
+    `[drive Viability/${result.reasons.join(',')}] ${subject}: ${result.evidence}.`,
     '',
     '**Do NOT pitch "要我继续吗 / shall I continue?" as if progress were normal.** The sensors say this path is',
     stopping ? 'exhausted via the current method.' : 'stalling.',
     '',
     '**Rewrite the final reply (keep the two-section `## For User` / `## Work Log` format) so it:**',
     `  1. States the no-go HONESTLY and concretely: ${result.evidence}.`,
-    `  2. Credits what we BANKED — ${ctx.provedCount} proved lemma(s) persist in the tree and are reusable by a future attack; summarize them.`,
+    banked,
     result.recommendedReframe
       ? `  3. RECOMMENDS the concrete reframe (a genuinely DIFFERENT method, not the same wall): ${result.recommendedReframe}.`
       : `  3. RECOMMENDS changing the framework / goal rather than grinding the same wall.`,

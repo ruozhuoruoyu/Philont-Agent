@@ -16,6 +16,7 @@ import {
   autonomousBlacklistReason,
   blockedToolSignature,
   detectUnsatisfiableGoal,
+  JUDGE_GOAL_UNMET_SIGNATURE,
 } from '../src/chat-handler.js';
 
 const run = (...sigs: string[]) => ({ failureSignatures: sigs });
@@ -83,4 +84,42 @@ test('detect: the window is bounded — an ancient block does not accumulate for
   // Window 5 ⇒ this run plus the previous 4. A 3rd occurrence that falls outside cannot be counted.
   const prior = [run(), run(), run(), run(WRITE), run(WRITE)];
   assert.deepEqual(detectUnsatisfiableGoal([WRITE], prior), []);
+});
+
+// ── The detector had the very defect it was built to fix (2026-07-22) ───────────────────────────
+//
+// It only ever saw a goal fail through a BLOCKED TOOL CALL. Once appendJournal shipped, the model
+// stopped calling writeFile, no `blocked:` signature was produced, and the detector fell silent — while
+// the goal ("log to memory/YYYY-MM-DD.md") stayed just as unreachable and the judge said so every run:
+// "appended a journal entry but the goal requires logging to memory/YYYY-MM-DD.md, not journal/".
+// A model that learns to work AROUND an impossible requirement makes it invisible to a detector that
+// watches only for the collision.
+const UNMET = JUDGE_GOAL_UNMET_SIGNATURE;
+
+test('a goal the model works AROUND is still detected', () => {
+  // No tool was ever blocked; the runs look clean. Only the judge dissents, run after run.
+  assert.deepEqual(detectUnsatisfiableGoal([UNMET], [run(UNMET), run(UNMET)]), [UNMET]);
+});
+
+test('the two kinds are counted independently', () => {
+  // A schedule can be blocked on a tool AND separately failing to satisfy its goal; each has its own clock.
+  const crossed = detectUnsatisfiableGoal([WRITE, UNMET], [run(WRITE, UNMET), run(UNMET)]);
+  assert.deepEqual(crossed, [UNMET], 'goal-unmet hit 3; the block only 2');
+});
+
+test('the threshold is a RATE, not a streak — one confirmed run does not excuse the rest', () => {
+  // The carry is cleared on a confirmed run, so that row simply lacks the signature. But "3 of the last
+  // 5" is deliberately a rate: a schedule that meets its goal one run in three is still not working, and
+  // requiring an unbroken streak would let exactly that hide forever.
+  assert.deepEqual(detectUnsatisfiableGoal([UNMET], [run(UNMET), run(), run(UNMET)]), [UNMET]);
+});
+
+test('runs the judge confirms DO push it back under the threshold', () => {
+  assert.deepEqual(detectUnsatisfiableGoal([UNMET], [run(), run(), run(UNMET)]), []);
+  assert.deepEqual(detectUnsatisfiableGoal([UNMET], [run(), run(), run(), run()]), []);
+});
+
+test('the judge signature cannot collide with a tool name', () => {
+  assert.equal(UNMET, 'judge:goal_unmet');
+  assert.notEqual(UNMET, blockedToolSignature('goal_unmet'));
 });

@@ -1509,7 +1509,12 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
     schema: {
       type: 'object',
       properties: {
-        plan_id: { type: 'string' },
+        plan_id: {
+          type: 'string',
+          description:
+            'OPTIONAL. Omit it when this session has one open plan — the mechanism knows which plan you are ' +
+            'closing. Only pass it if several plans are open at once.',
+        },
         outcome: { type: 'string', enum: ['success', 'failure'] },
         summary: {
           type: 'string',
@@ -1553,7 +1558,7 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
             '\n\nFor placeholder plans (empty deliverables), pass {}.',
         },
       },
-      required: ['plan_id', 'outcome', 'summary', 'deliverable_status'],
+      required: ['outcome', 'summary', 'deliverable_status'],
     },
     capability: 'write',
     domain: 'self',
@@ -1563,11 +1568,38 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
       // Placed first so even if subsequent validation rejects, it still counts as "LLM has called plan_close".
       markPlanCloseCalled?.();
 
-      const planId = params.plan_id;
       const outcomeRaw = params.outcome;
       const summary = params.summary;
-      if (typeof planId !== 'string' || !planId) {
-        return { success: false, output: '', error: 'plan_id is required' };
+      // 2026-07-22: same treatment plan_update_step already got. plan_close demanded an id the model has
+      // to transcribe from a 36-char UUID, and prod showed the predictable result — a plan the mechanism
+      // itself had just resolved by session for nine consecutive update_step calls could not then be
+      // closed, failing with a bare "plan_id is required". Closing is also the LOWEST-risk of the three:
+      // there is exactly one plan a session can be closing, and if the id is wrong the resolution below
+      // is a no-op rather than a mis-write.
+      let planId = typeof params.plan_id === 'string' ? params.plan_id.trim() : '';
+      if (!plans.get(planId)) {
+        const openIds = sessionOpenPlanIds(plans, getCurrentSessionId());
+        const resolved = resolvePlanId(planId, openIds);
+        if (resolved) {
+          console.warn(
+            planId
+              ? `[plan-tools] plan_close: plan id '${planId}' not found — resolved to the session's open plan ${resolved}`
+              : `[plan-tools] plan_close: plan_id omitted — using the session's single open plan ${resolved}`,
+          );
+          planId = resolved;
+        }
+      }
+      if (!planId) {
+        const openIds = sessionOpenPlanIds(plans, getCurrentSessionId());
+        return {
+          success: false,
+          output: '',
+          error:
+            openIds.length === 0
+              ? 'plan_id was omitted and this session has no open plan to close.'
+              : `plan_id was omitted and this session has ${openIds.length} open plans, so which one to close is ` +
+                `ambiguous. Pass one of: ${openIds.join(', ')}`,
+        };
       }
       if (outcomeRaw !== 'success' && outcomeRaw !== 'failure') {
         return {

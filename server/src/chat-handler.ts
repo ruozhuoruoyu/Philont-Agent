@@ -1958,6 +1958,34 @@ export function blockedToolSignature(toolName: string): string {
 }
 
 /**
+ * Persisted signature for "the learning judge could not confirm this run met its goal".
+ *
+ * 2026-07-22: the detector above only ever saw a goal fail through a BLOCKED TOOL CALL — which is the
+ * exact defect it was built to fix, wearing a different hat. Once appendJournal shipped, the model
+ * stopped calling writeFile, so no `blocked:` signature was produced and the detector fell silent — while
+ * the goal ("log to memory/YYYY-MM-DD.md") remained just as unreachable, and the judge kept saying so
+ * every run: "appended a journal entry but the goal requires logging to memory/YYYY-MM-DD.md, not
+ * journal/". A model that learns to work AROUND an impossible requirement makes the impossibility
+ * invisible to a detector that watches only for the collision.
+ *
+ * Deliberately ONE signature rather than a key derived from the judge's prose. The evidence text is
+ * free-form LLM output that words the same cause differently every run, and matching it would mean either
+ * a vocabulary table or a similarity threshold — both guesses. "The judge has not been able to confirm
+ * this schedule met its goal, N runs running" is already the actionable statement, and it is exact.
+ */
+export const JUDGE_GOAL_UNMET_SIGNATURE = 'judge:goal_unmet';
+
+/**
+ * Latest unconfirmed-goal verdict per schedule, carried into the NEXT run's outcome row.
+ *
+ * The judge is deliberately async and fire-and-forget (shadow wiring), so its verdict lands after this
+ * run's outcome row is already written. Rather than reopen the row, the signal rides along with the next
+ * one: the detector counts recurrence over a window, so a one-run offset changes nothing about what it
+ * concludes. A restart loses at most one run's carry.
+ */
+const lastJudgeGoalUnmet = new Map<string, string>();
+
+/**
  * Tools blocked in THIS run that have now been blocked in at least UNSATISFIABLE_GOAL_MIN_RUNS of the
  * last UNSATISFIABLE_GOAL_WINDOW runs. Pure; `prior` is the window BEFORE this run was recorded.
  *
@@ -1986,28 +2014,42 @@ export function detectUnsatisfiableGoal(
 function reportUnsatisfiableGoal(
   scheduleId: string,
   sessionId: string,
-  blockedThisRun: readonly string[],
+  structuralThisRun: readonly string[],
   prior: ReadonlyArray<{ failureSignatures: string[] }>,
+  judgeEvidence?: string,
 ): void {
   try {
-    const crossed = detectUnsatisfiableGoal(blockedThisRun, prior);
+    const crossed = detectUnsatisfiableGoal(structuralThisRun, prior);
     if (crossed.length === 0) return;
-    const tools = crossed.map((sig) => sig.replace(/^blocked:/, ''));
-    console.warn(
-      `[unsatisfiable-goal] scheduleId=${scheduleId} blocked ${tools.join(', ')} in ` +
-        `${UNSATISFIABLE_GOAL_MIN_RUNS} of the last ${UNSATISFIABLE_GOAL_WINDOW} runs — the goal needs a tool this task can never call`,
-    );
-    memory.notes.storeNote({
-      sessionId,
-      importance: 0.95,
-      content:
-        `Scheduled task "${scheduleId}" cannot achieve its goal as written. It has tried to call ` +
-        `${tools.join(', ')} in ${UNSATISFIABLE_GOAL_MIN_RUNS} of its last ${UNSATISFIABLE_GOAL_WINDOW} runs, and ` +
-        `unattended turns are not allowed to call ${tools.length > 1 ? 'those tools' : 'that tool'}. ` +
-        `Every run will keep failing at the same step until either the goal is reworded to use what a ` +
-        `scheduled turn can do (appendJournal for a per-run log, store_note to hand something to you), ` +
+    const tools = crossed.filter((s) => s.startsWith('blocked:')).map((s) => s.slice('blocked:'.length));
+    const goalUnmet = crossed.includes(JUDGE_GOAL_UNMET_SIGNATURE);
+    const runs = `${UNSATISFIABLE_GOAL_MIN_RUNS} of the last ${UNSATISFIABLE_GOAL_WINDOW} runs`;
+
+    const parts: string[] = [`Scheduled task "${scheduleId}" is not achieving its goal as written.`];
+    if (tools.length > 0) {
+      parts.push(
+        `It has tried to call ${tools.join(', ')} in ${runs}, and unattended turns are not allowed to call ` +
+          `${tools.length > 1 ? 'those tools' : 'that tool'}.`,
+      );
+    }
+    if (goalUnmet) {
+      parts.push(
+        `Its runs completed without erroring, but the learning judge could not confirm the goal was met in ` +
+          `${runs}.` + (judgeEvidence ? ` Latest reason: "${judgeEvidence}"` : ''),
+      );
+    }
+    parts.push(
+      `It will keep ending the same way until the goal is reworded to describe something a scheduled turn ` +
+        `can actually do and verify (appendJournal for a per-run log, store_note to hand something to you), ` +
         `or the task is run interactively instead. Nothing else about the task is broken.`,
-    });
+    );
+
+    console.warn(
+      `[unsatisfiable-goal] scheduleId=${scheduleId} ${
+        tools.length > 0 ? `blocked ${tools.join(', ')}; ` : ''
+      }${goalUnmet ? 'goal unconfirmed by the judge; ' : ''}in ${runs}`,
+    );
+    memory.notes.storeNote({ sessionId, importance: 0.95, content: parts.join(' ') });
   } catch (e) {
     // Advisory reporting only — never let it take down the turn it is reporting on.
     console.warn('[unsatisfiable-goal] report failed, ignored', (e as Error)?.message ?? e);
@@ -5592,11 +5634,21 @@ function shadowLearningJudge(
       assistantClaim: claim,
       honestyFired: bus?.honesty !== undefined,
     })
-      .then((v) =>
+      .then((v) => {
         console.log(
           `[learning-judge] shadow session=${sessionId} verdict=${v.outcome} basis=${v.basis} "${v.evidence}"`,
-        ),
-      )
+        );
+        // Carry an unconfirmed goal into the next run's outcome row (see JUDGE_GOAL_UNMET_SIGNATURE).
+        // The judge stays shadow-only: this changes no control flow, it only makes a recurring
+        // "goal not met" visible to the same detector that already watches for recurring blocks.
+        const scheduleId = extractScheduleIdFromSession(sessionId);
+        if (!scheduleId) return;
+        if (v.outcome === 'failure' || v.outcome === 'could_not_verify') {
+          lastJudgeGoalUnmet.set(scheduleId, (v.evidence ?? '').replace(/\s+/g, ' ').trim().slice(0, 240));
+        } else {
+          lastJudgeGoalUnmet.delete(scheduleId); // a confirmed run breaks the streak
+        }
+      })
       .catch(() => {});
   } catch {
     // Shadow must never affect the turn.
@@ -6367,7 +6419,11 @@ export async function handleChatSend(
         // why "blocked on every run" stayed invisible. These rows are also rendered into the scheduled
         // turn's own prefix, so the agent sees its own history of being blocked, not just the owner.
         const blockedSignatures = [...(signalBus.blockedTools ?? [])].map(blockedToolSignature);
-        const failureSignatures = [...new Set([...summary.failureSignatures, ...blockedSignatures])];
+        const judgeEvidence = lastJudgeGoalUnmet.get(scheduleId);
+        const structuralSignatures = judgeEvidence
+          ? [...blockedSignatures, JUDGE_GOAL_UNMET_SIGNATURE]
+          : blockedSignatures;
+        const failureSignatures = [...new Set([...summary.failureSignatures, ...structuralSignatures])];
         const priorOutcomes = memory.scheduleOutcomes.recent(scheduleId, UNSATISFIABLE_GOAL_WINDOW);
         memory.scheduleOutcomes.record({
           scheduleId,
@@ -6390,7 +6446,7 @@ export async function handleChatSend(
             `outcome=${summary.outcome} httpOk=${summary.httpOkCount} ` +
             `httpFail=${summary.httpFailCount} sigs=[${failureSignatures.join(',')}]`,
         );
-        reportUnsatisfiableGoal(scheduleId, sessionId, blockedSignatures, priorOutcomes);
+        reportUnsatisfiableGoal(scheduleId, sessionId, structuralSignatures, priorOutcomes, judgeEvidence);
         // Progress verdict for the scheduler's circuit breaker (see scheduledTurnProgress + the pure
         // rule in schedule_progress.ts). No real external progress (writes attempted, all failed —
         // the all-401 avalanche shape) must count as a failure so the 1h auto-pause can arm, even
@@ -9878,6 +9934,8 @@ async function runToolLoop(
               content: buildViabilityDirective(v, {
                 provedCount: vSummary?.provedCount ?? 0,
                 openProblemNote: openMatch?.barrier.circumvention,
+                hasReasoningSession: !!ownerSession,
+                taskHint: (signalBus.userMessage ?? '').replace(/\s+/g, ' ').trim().slice(0, 100),
               }),
             });
             onTrace?.({

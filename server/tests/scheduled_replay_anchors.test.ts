@@ -87,3 +87,45 @@ test('the unattended-turn note names what IS possible, not only what is not', ()
     'must tell it what to reach for in place of the blocked tool',
   );
 });
+
+// ── The viability directive must describe the work actually being done (2026-07-22) ─────────────
+//
+// Once the pivot ratchet stopped being cleared every fire, stop_and_report became reachable on a
+// scheduled session for the first time — and the directive turned out to be written entirely in
+// deep_explore vocabulary. Told to "credit the proved lemmas that persist in the tree" for "the active
+// reasoning goal", on a turn with no tree and provedCount=0, the model found the nearest thing in memory
+// that fit and reported on Goldbach CRT residue-class coverage. In a mycox check-in.
+import { buildViabilityDirective } from '../src/viability_gate.js';
+
+const STOP = {
+  verdict: 'stop_and_report' as const,
+  score: 2,
+  reasons: ['same_root_cause', 'repeated_pivot_ratchet'],
+  evidence: 'the feed has been unchanged for 3 runs',
+  recommendedReframe: undefined,
+};
+
+test('no reasoning session: the directive never mentions a tree, lemmas, or an attack', () => {
+  const d = buildViabilityDirective(STOP, {
+    provedCount: 0,
+    hasReasoningSession: false,
+    taskHint: 'MycoX check-in routine',
+  });
+  for (const term of [/proved lemma/i, /in the tree/i, /future attack/i, /active reasoning goal/i]) {
+    assert.doesNotMatch(d, term, `session-less directive must not use reasoning vocabulary: ${term}`);
+  }
+  assert.match(d, /MycoX check-in routine/, 'it must name the task actually being judged');
+  assert.match(d, /do NOT reach into memory/i, 'and forbid substituting a different piece of work');
+});
+
+test('with a reasoning session: the original wording is intact', () => {
+  const d = buildViabilityDirective(STOP, { provedCount: 4, hasReasoningSession: true });
+  assert.match(d, /4 proved lemma\(s\) persist in the tree/);
+  assert.match(d, /active reasoning goal/i);
+});
+
+test('no session and no task hint: still generic, never reasoning-flavoured', () => {
+  const d = buildViabilityDirective(STOP, { provedCount: 0, hasReasoningSession: false });
+  assert.match(d, /This task is not advancing/);
+  assert.doesNotMatch(d, /proved lemma/i);
+});

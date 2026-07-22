@@ -192,7 +192,11 @@ test('intractable directive: states categorical truth, offers NO path, forbids �
   const v = computeViability(
     base({ goalIsOpenProblem: true, barrierApplies: true, barrierTitle: 'Erdős–Straus — Jacobi barrier', status: 'stuck' }),
   );
-  const d = buildViabilityDirective(v, { provedCount: 2, openProblemNote: 'BlEl22 modular reduction' });
+  const d = buildViabilityDirective(v, {
+    provedCount: 2,
+    openProblemNote: 'BlEl22 modular reduction',
+    hasReasoningSession: true,
+  });
   assert.match(d, /known open problem|categorically out of reach/i);
   assert.match(d, /do NOT list approaches to try/i);
   assert.match(d, /genuinely new idea/i);
@@ -209,11 +213,13 @@ test('method barrier WITHOUT open-problem flag → pivot offers the reframe (rea
   assert.equal(v.recommendedReframe, 'use a different decomposition'); // legitimate pivot still offers a path
 });
 
+// hasReasoningSession: true — this scenario IS a deep_explore session (barrier, rounds, proved lemmas).
+// The session-less shape is covered in scheduled_replay_anchors.test.ts.
 test('directive forbids the pitch and credits banked lemmas', () => {
   const v = computeViability(
     base({ barrierApplies: true, noProgressRounds: 4, barrierTitle: 'Jacobi barrier', barrierCircumvention: 'inject non-sieve input' }),
   );
-  const d = buildViabilityDirective(v, { provedCount: 3 });
+  const d = buildViabilityDirective(v, { provedCount: 3, hasReasoningSession: true });
   assert.match(d, /要我继续吗/);
   assert.match(d, /3 proved lemma/);
   assert.match(d, /inject non-sieve input/);

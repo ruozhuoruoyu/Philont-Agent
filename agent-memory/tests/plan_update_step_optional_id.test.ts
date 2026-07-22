@@ -14,7 +14,11 @@ function setup(sessionId = 'sess-opt') {
     getCurrentSessionId: () => sessionId,
   });
   const byName = new Map(tools.map((t) => [t.name, t]));
-  return { draft: byName.get('plan_draft')!, update: byName.get('plan_update_step')! };
+  return {
+    draft: byName.get('plan_draft')!,
+    update: byName.get('plan_update_step')!,
+    close: byName.get('plan_close')!,
+  };
 }
 
 const PLAN = {
@@ -66,4 +70,47 @@ test('omitting plan_id with no open plan asks for one explicitly', async () => {
   const r = await update.execute({ step_id: 'publish-post', status: 'doing' });
   assert.equal(r.success, false);
   assert.match(r.error ?? '', /omitted/i);
+});
+
+// ── plan_close: the same treatment, 2026-07-22 ────────────────────────────────────────────────
+// Prod: a plan the mechanism had itself resolved by session for NINE consecutive update_step calls
+// then could not be closed — plan_close failed with a bare "plan_id is required". Two tools, one
+// session, opposite strictness about the same untranscribable 36-char id.
+
+test('plan_close: plan_id is not required either', () => {
+  const { close } = setup();
+  const required = (close.schema as { required: string[] }).required;
+  assert.ok(!required.includes('plan_id'));
+  assert.ok(required.includes('outcome') && required.includes('summary'));
+});
+
+test('plan_close: omitted with a single open plan → closes it', async () => {
+  const { draft, close } = setup();
+  await draft.execute(PLAN as never);
+  const r = await close.execute({
+    outcome: 'failure',
+    summary: 'Stopped: the feed was unchanged and there was nothing to act on.',
+    deliverable_status: { d1: 'not-attempted' },
+  } as never);
+  assert.equal(r.success, true, r.error);
+});
+
+test('plan_close: a mistyped id still resolves to the session plan', async () => {
+  const { draft, close } = setup();
+  await draft.execute(PLAN as never);
+  const r = await close.execute({
+    plan_id: 'plan-mycox-checkin',
+    outcome: 'failure',
+    summary: 'Stopped early; nothing to act on.',
+    deliverable_status: { d1: 'not-attempted' },
+  } as never);
+  assert.equal(r.success, true, r.error);
+});
+
+test('plan_close: omitted with no open plan → says so, instead of "plan_id is required"', async () => {
+  const { close } = setup();
+  const r = await close.execute({ outcome: 'failure', summary: 'x', deliverable_status: {} } as never);
+  assert.equal(r.success, false);
+  assert.match(r.error ?? '', /no open plan/i);
+  assert.doesNotMatch(r.error ?? '', /^plan_id is required$/);
 });
