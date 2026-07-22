@@ -273,6 +273,7 @@ import {
   isAutonomyStatusCommand,
   classifyProposalReply,
 } from './autonomy_status.js';
+import { recordAutonomyReach, autonomyReachSummary, renderAutonomyReach } from './autonomy_reach.js';
 import {
   renderCapabilityManifest,
   renderCapabilityDetail,
@@ -2890,6 +2891,9 @@ const autonomousInterruptSink: InterruptSink = {
     // line cannot say whether a drop was a free-curiosity lookup or an owner-declared pursuit advance,
     // which is exactly what we now need to watch.
     const who = `${payload.driver ?? '?'} ${payload.targetRef ?? '?'}`;
+    // Count it for the OWNER-facing summary too. The console funnel below is watchable by whoever is
+    // reading a terminal; /autonomy is where the person who asked "why do I never perceive this?" looks.
+    recordAutonomyReach(payload.driver, severity === 'high');
     if (severity !== 'high') {
       console.log(
         `[autonomy-funnel] initiative=${payload.initiativeId} kind=${payload.kind} [${who}] DROPPED at gate 1/9 ` +
@@ -3178,6 +3182,7 @@ export function autonomySelfhoodStatus() {
     proposals: constitutionProposals,
     initiatives: autonomousLoop.initiatives,
     budget: autonomousLoop.budget,
+    reach: () => autonomyReachSummary(),
   });
 }
 
@@ -5812,16 +5817,55 @@ function learningJudgeEnabled(): boolean {
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
+/**
+ * Which text the learning judge should score this turn against.
+ *
+ * Returns null when the turn cannot be judged at all — a pending-auth resume whose original message is no
+ * longer recoverable. See shadowLearningJudge for why scoring the approval word is worse than not scoring.
+ */
+export function resolveJudgeGoal(
+  carriedGoal: string | undefined,
+  userMessage: string | undefined,
+  resumedFromAuth: boolean,
+): string | null {
+  const carried = (carriedGoal ?? '').trim();
+  if (carried) return carried;
+  if (resumedFromAuth) return null;
+  return userMessage ?? '';
+}
+
 function shadowLearningJudge(
   sessionId: string,
   userMessage: string | undefined,
   messages: ReadonlyArray<{ role: string; content: unknown }>,
-  bus: { inTurnRecords?: Array<{ toolName: string; success: boolean; resultText?: string }>; honesty?: unknown } | undefined,
+  bus:
+    | {
+        inTurnRecords?: Array<{ toolName: string; success: boolean; resultText?: string }>;
+        honesty?: unknown;
+        carriedExploreGoal?: string;
+      }
+    | undefined,
+  resumedFromAuth = false,
 ): void {
   if (!learningJudgeEnabled()) return;
   try {
     const records = bus?.inTurnRecords ?? [];
     if (records.length === 0) return; // nothing ran this turn — no verdict worth logging
+    // On a pending-auth RESUME the turn's userMessage is the approval word — "ok" — not the task. Judging
+    // "did this turn achieve the goal 'ok'?" can only ever come back could_not_verify, and the judge said
+    // so in as many words in production ("The goal \"ok\" is too vague to determine what constitutes
+    // success"). The damage is directional: an execute-class tool is exactly what raises an auth card, so
+    // resumed turns are the ones carrying the MOST tool evidence — the highest-signal sample, poisoned
+    // wholesale. Phase 2 is gated on this distribution being trustworthy, so the gate could never open.
+    // carriedIntent already stashes the original message for the router; reuse it here.
+    const resolved = resolveJudgeGoal(bus?.carriedExploreGoal, userMessage, resumedFromAuth);
+    if (!resolved) {
+      // Nothing recoverable: emit no verdict rather than a meaningless one. A skipped sample is honest;
+      // a could_not_verify about the word "ok" is noise that looks like data.
+      console.log(`[learning-judge] shadow session=${sessionId} skipped (auth resume, original goal not recoverable)`);
+      return;
+    }
+    const goal = resolved;
     const trace: JudgeToolRecord[] = records.map((r) => ({
       toolName: r.toolName,
       ok: r.success,
@@ -5829,7 +5873,7 @@ function shadowLearningJudge(
     }));
     const claim = lastAssistantText(messages as unknown as NativeMessage[]).slice(0, 1000);
     void judgeRun({
-      goal: userMessage ?? '',
+      goal,
       trace,
       assistantClaim: claim,
       honestyFired: bus?.honesty !== undefined,
@@ -6818,7 +6862,7 @@ export async function handleChatSend(
     }
 
     // Phase 1 shadow: score this turn, log only. See shadowLearningJudge.
-    shadowLearningJudge(sessionId, userMessage, messages, signalBus);
+    shadowLearningJudge(sessionId, userMessage, messages, signalBus, !!pending);
 
     return result;
   } catch (e) {
