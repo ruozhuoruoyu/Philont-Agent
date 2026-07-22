@@ -277,6 +277,12 @@ export {
   isExecutionTool,
   turnDidExecute,
 } from './honesty_gate.js';
+export {
+  findCheckableObject,
+  renderCheckableObjectRefusal,
+  CHECKABLE_OBJECT_CAVEAT,
+} from './checkable_claim.js';
+export type { CheckableKind, CheckableObject } from './checkable_claim.js';
 export type {
   HonestyEvaluation,
   EvaluateOptions as HonestyEvaluateOptions,

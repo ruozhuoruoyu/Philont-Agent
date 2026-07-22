@@ -74,6 +74,9 @@ import {
   ReasoningNodeNotFoundError,
   extractFailureSignature,
   findOrderClaim,
+  findCheckableObject,
+  renderCheckableObjectRefusal,
+  CHECKABLE_OBJECT_CAVEAT,
   type ReasoningStore,
   type ReasoningSession,
   type ReasoningSessionMode,
@@ -1151,6 +1154,24 @@ function recordSessionToolFailure(sessionId: string, toolName: string, error: st
  */
 const sessionVerifierUsed = new Set<string>();
 const VERIFIER_TOOLS = new Set(['magnitude', 'z3Verify', 'pariGp']);
+
+/**
+ * Checkable-object tooth (2026-07-22). The estimate tooth above fires only in FORMAL mode and only on
+ * order/bound claims — so a DELIBERATE session holding an explicit polynomial map, its determinant, and
+ * three points said to collide settled all of it on citations while z3/gp/shell sat unused. Checkability
+ * is a property of the CLAIM, not of the mode the session happens to be running in.
+ *
+ * Semantics are refuse-ONCE-per-node: the first settle carrying an unchecked object is returned with the
+ * tool named, the second attempt on that same node is let through with a caveat. So the cost of a false
+ * positive is bounded at one extra iteration and the loop can never deadlock on it — which is why this can
+ * default ON, unlike a guard that refuses indefinitely. Process-scoped, like the sibling state above.
+ */
+const sessionCheckableRefused = new Set<string>();
+
+function verifyObjectsEnabled(): boolean {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_VERIFY_OBJECTS ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
 const ESTIMATE_CAVEAT =
   '  [⚠ unverified estimate — this order/bound claim was recorded without any machine check this session; ' +
   'confirm the composition with magnitude(action="closes") / z3Verify / pariGp before relying on it as a lemma]';
@@ -2410,7 +2431,15 @@ export function makeReasoningToolRunner(
 
       // Estimate-honesty gate (FORMAL only, advisory): a node recorded "proved" on an asymptotic/quantitative
       // ESTIMATE in a session that never ran a verification tool is annotated as unverified. Fail-open.
-      if (profile.id === 'formal' && status === 'proved' && result && !sessionVerifierUsed.has(sessionId) && findOrderClaim(result)) {
+      // The checkable-object tooth below owns any claim it recognises, so the two never double-annotate.
+      if (
+        profile.id === 'formal' &&
+        status === 'proved' &&
+        result &&
+        !sessionVerifierUsed.has(sessionId) &&
+        findOrderClaim(result) &&
+        !findCheckableObject(result)
+      ) {
         result += ESTIMATE_CAVEAT;
       }
 
@@ -2435,6 +2464,34 @@ export function makeReasoningToolRunner(
             output: `Node [${nodeId}] not ${profile.settledVerb}: ${pre.reason ?? 'precheck failed'} Node stays open — address that and settle again.`,
           };
         }
+        // Checkable-object tooth: a claim a machine can DECIDE must not be settled on assertion alone.
+        // Placed before the skeptics deliberately — refusing here costs nothing, whereas letting an
+        // uncomputed object through spends N sub-LLM calls arguing about something one tool call answers.
+        // Bypassed for the rest of the session once any verifier tool has actually run (same premise as the
+        // estimate tooth): a session that computes is not the failure mode this exists for.
+        if (verifyObjectsEnabled() && !sessionVerifierUsed.has(sessionId)) {
+          const obj = findCheckableObject(result) ?? findCheckableObject(target.claim);
+          const refusedKey = `${sessionId}::${nodeId}`;
+          if (obj && !sessionCheckableRefused.has(refusedKey)) {
+            sessionCheckableRefused.add(refusedKey);
+            writeEvidence(nodeId); // keep what was gathered — the settle is deferred, not discarded
+            reasoning.updateNode(sessionId, nodeId, {
+              appendApproach: `not ${profile.settledVerb}: unchecked ${obj.kind} — ${obj.excerpt}`,
+            });
+            console.warn(
+              `[deep-explore] settle refused once: ${obj.kind} was never machine-checked (node ${nodeId}, session ${sessionId})`,
+            );
+            return {
+              ok: true,
+              output:
+                `Node [${nodeId}] not ${profile.settledVerb}: ${renderCheckableObjectRefusal(obj)} ` +
+                `Node stays open — compute it, then settle again with what the tool returned.`,
+            };
+          }
+          // Second attempt on the same node: let it through, but it may not pass as a checked result.
+          if (obj) result = `${result ?? ''}${CHECKABLE_OBJECT_CAVEAT}`;
+        }
+
         // Phase 18 (2026-06-15) WS3: barrier code-authority. A node proved via a method blocked by an
         // APPLICABLE barrier, with no NAMED circumvention, cannot be recorded proved — turning barriers.ts's
         // advisory directive into an enforced precondition (the "knowing→acting" actuator at the proof site).
