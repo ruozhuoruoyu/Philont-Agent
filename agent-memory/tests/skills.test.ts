@@ -94,9 +94,12 @@ test('SkillStore: create and retrieve', () => {
   assert.equal(fetched.id, skill.id);
 });
 
-test('SkillStore: pruneDraftsToCap 只淘汰 draft、封顶、保护已晋升/非 draft', () => {
+test('SkillStore: pruneDraftsToCap 只淘汰有证据不利的 draft,保护未被 offer 过的与已晋升的', () => {
+  // Contract changed 2026-07-22. The cap used to evict by score once the declined pool ran out, which in
+  // production deleted two drafts that had NEVER been offered — an untried hypothesis evicted for losing a
+  // race it was never entered in. Eviction now requires evidence AGAINST the skill (it was offered and not
+  // chosen); the bound on growth moved to the creation side (Reflector.untestedDraftCount).
   const { skills } = openMemoryDb(':memory:');
-  // 6 个 draft(默认 maturity=draft)+ 1 个 playbook(已晋升,应被保护)
   for (let i = 0; i < 6; i++) {
     skills.createSkill({
       name: `draft-skill-${i}`,
@@ -114,15 +117,32 @@ test('SkillStore: pruneDraftsToCap 只淘汰 draft、封顶、保护已晋升/�
   });
   assert.equal(skills.count(), 7);
 
+  // No skill has been offered yet → there is no evidence against any of them → nothing is evicted.
+  assert.equal(skills.pruneDraftsToCap(2), 0, 'an untried hypothesis is not evicted to make room');
+  assert.equal(skills.count(), 7);
+
+  // Offer three of them; declining is real negative evidence, and those become the evictable pool.
+  skills.recordSkillsOffered(['draft-skill-0', 'draft-skill-1', 'draft-skill-2']);
   const deleted = skills.pruneDraftsToCap(2);
-  assert.equal(deleted, 4); // 6 drafts → cap 2 → delete 4
-  assert.equal(skills.count(), 3); // 2 drafts + 1 playbook
+  assert.equal(deleted, 3, 'only the ones with evidence against them go');
+  assert.equal(skills.count(), 4); // 3 never-offered drafts + 1 playbook
   assert.ok(skills.getByName('curated-playbook'), 'promoted playbook must NOT be pruned');
-  const remainingDrafts = skills.listAll(100).filter((s) => s.maturity === 'draft').length;
-  assert.equal(remainingDrafts, 2);
+  for (const n of ['draft-skill-3', 'draft-skill-4', 'draft-skill-5']) {
+    assert.ok(skills.getByName(n), `${n} was never offered — it must survive`);
+  }
 
   // under cap → no-op
   assert.equal(skills.pruneDraftsToCap(10), 0);
+});
+
+test('SkillStore: untestedDraftCount 只数没被 offer 过的 draft', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill({ name: 'a', description: 'd', triggerKeywords: ['k'], actionTemplate: 't' });
+  skills.createSkill({ name: 'b', description: 'd', triggerKeywords: ['k'], actionTemplate: 't' });
+  skills.createSkill({ name: 'p', description: 'd', triggerKeywords: ['k'], actionTemplate: 't', maturity: 'playbook' });
+  assert.equal(skills.untestedDraftCount(), 2, 'a promoted skill is not an untested draft');
+  skills.recordSkillsOffered(['a']);
+  assert.equal(skills.untestedDraftCount(), 1, 'being offered is what makes a draft tested');
 });
 
 test('SkillStore: search by keyword', () => {

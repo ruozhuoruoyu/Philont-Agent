@@ -292,6 +292,20 @@ export class SessionReflector {
     const created: Skill[] = [];
     let updated = 0;
 
+    // Creation-side bound on the untested pool. The store's own design metric is "creation rate <=
+    // measurement rate", and while that is violated, minting is not free: the cap has to evict a draft to
+    // make room, and once the declined pool is empty the only thing left to evict is another hypothesis
+    // nobody has tried either. Refusing to mint is strictly better than trading one untried draft for
+    // another. Updates and merges into EXISTING skills are unaffected — those add evidence, not volume.
+    const untested = this.skills.untestedDraftCount();
+    const mintingBlocked = untested >= MAX_DRAFT_SKILLS;
+    if (mintingBlocked && specs.length > 0) {
+      console.log(
+        `[reflector] not minting ${specs.length} new draft(s): ${untested} untested draft(s) already at cap ${MAX_DRAFT_SKILLS} — ` +
+        `the bottleneck is offering them, not generating more (existing skills are still updated)`,
+      );
+    }
+
     for (const spec of specs) {
       const kind: 'positive' | 'negative' = spec.kind === 'negative' ? 'negative' : 'positive';
       try {
@@ -341,6 +355,8 @@ export class SessionReflector {
                 note: `merged near-duplicate "${spec.name}" → "${dup.skill.name}" (jaccard ${dup.jaccard.toFixed(2)})`,
               });
             }
+          } else if (mintingBlocked) {
+            // Nothing to do: the hypothesis is dropped rather than displacing an untried one.
           } else {
             const skill = this.skills.createSkill({
               name: spec.name,

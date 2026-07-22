@@ -643,20 +643,46 @@ export class SkillStore extends EventEmitter {
       }
       return scoreSkill(a, now) - scoreSkill(b, now);
     });
-    const toDelete = sorted.slice(0, drafts.length - maxDrafts);
+    // ...and once the declined pool IS exhausted, STOP. Production 2026-07-22 pruned three drafts: one
+    // genuinely declined, and two that had never been offered at all. Ordering the eviction was only half
+    // the fix — while the reflector mints faster than the funnel can offer, the never-offered pool is eaten
+    // anyway, and the conveyor is back with better logging. Deleting an untested hypothesis to make room
+    // for another untested hypothesis is not a trade worth making. The bound now lives on the CREATION
+    // side (see untestedDraftCount): stop generating what there is no capacity to test.
+    const evictable = sorted.filter((s) => s.offeredCount > 0);
+    const wanted = drafts.length - maxDrafts;
+    const toDelete = evictable.slice(0, wanted);
+    if (toDelete.length < wanted) {
+      console.log(
+        `[skill-funnel] cap ${maxDrafts}: ${wanted} over, only ${toDelete.length} have evidence against them — ` +
+        `${wanted - toDelete.length} never-offered draft(s) kept (an untried hypothesis is not evicted for losing a race it never entered)`,
+      );
+    }
     let deleted = 0;
     for (const s of toDelete) {
-      const why = s.offeredCount > 0 && s.useCount === 0
+      const why = s.useCount === 0
         ? `offered ${s.offeredCount}x, never chosen`
-        : s.offeredCount === 0
-          ? 'NEVER OFFERED (no evidence — pruned only because the declined pool was exhausted)'
-          : `score ${scoreSkill(s, now).toFixed(3)}`;
+        : `score ${scoreSkill(s, now).toFixed(3)}`;
       if (this.deleteSkill(s.name)) {
         deleted++;
         console.log(`[skill-funnel] pruned draft '${s.name}' (${why})`);
       }
     }
     return deleted;
+  }
+
+  /**
+   * Drafts that have never been offered to the model — hypotheses nobody has had the chance to test.
+   *
+   * This is the number the CREATION side must respect. The store's own design metric is "creation rate <=
+   * measurement rate"; while it is violated, minting another draft cannot help and costs a real one, since
+   * the cap has to evict something to make room.
+   */
+  untestedDraftCount(): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM memory_skills WHERE maturity = 'draft' AND COALESCE(offered_count, 0) = 0`)
+      .get() as { n: number };
+    return row.n;
   }
 
   /**
