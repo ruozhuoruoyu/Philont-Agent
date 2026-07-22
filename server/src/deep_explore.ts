@@ -77,6 +77,9 @@ import {
   findCheckableObject,
   renderCheckableObjectRefusal,
   CHECKABLE_OBJECT_CAVEAT,
+  findRefutableGoal,
+  renderRefutationClaim,
+  renderRefutationNote,
   type ReasoningStore,
   type ReasoningSession,
   type ReasoningSessionMode,
@@ -1170,6 +1173,12 @@ const sessionCheckableRefused = new Set<string>();
 
 function verifyObjectsEnabled(): boolean {
   const v = (process.env.PHILONT_DEEP_EXPLORE_VERIFY_OBJECTS ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/** Refutation pairing at session start — see findRefutableGoal. */
+function refutationNodeEnabled(): boolean {
+  const v = (process.env.PHILONT_DEEP_EXPLORE_REFUTATION_NODE ?? '').trim().toLowerCase();
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 const ESTIMATE_CAVEAT =
@@ -3284,10 +3293,30 @@ export function createDeepExploreTool(
           : explicitPhase
             ? (params.phase as ReasoningPhase)
             : (auto?.initialPhase ?? 'converge');
-        let { session } = reasoning.createSession({ goal, assumptions, ownerSessionId: owner, mode });
+        let { session, rootNode } = reasoning.createSession({ goal, assumptions, ownerSessionId: owner, mode });
         if (PHASES_ENABLED && initialPhase === 'diverge') {
           reasoning.setPhase(session.id, 'diverge');
           session = reasoning.getSession(session.id) ?? session; // refetch so runRound dispatches the diverge round
+        }
+        // Refutation pairing: a ∀-shaped goal gets one node that a machine can decide, seeded before the
+        // first round. Proving needs an argument; DISPROVING needs a single witness — so this side is always
+        // checkable, and the session can no longer spend its whole life on a tree where nothing is decidable
+        // (the 14-round no-signal shape). Advisory by construction: it is one open node the model may work,
+        // defer, or close as dead_end like any other.
+        let refutationNote = '';
+        if (refutationNodeEnabled()) {
+          const refutable = findRefutableGoal(goal);
+          if (refutable) {
+            try {
+              reasoning.addNodes(session.id, rootNode.id, [
+                { claim: renderRefutationClaim(goal), kind: 'counterexample' },
+              ]);
+              refutationNote = renderRefutationNote(refutable.reason);
+              console.log(`[deep-explore] refutation node seeded (${refutable.reason}: "${refutable.cue}") session=${session.id}`);
+            } catch (e) {
+              console.warn('[deep-explore] refutation pairing failed (ignored):', e);
+            }
+          }
         }
         // Literature grounding: one-shot web pass surveying what is already known (cited cards), injected
         // into every round prompt + merged into the start milestone below. Runs before the first round.
@@ -3310,6 +3339,7 @@ export function createDeepExploreTool(
               : renderLiteratureCards(litCards).join('\n'),
           );
         }
+        if (refutationNote) noteParts.push(refutationNote);
         if (noteParts.length) {
           deps.onMilestone?.(
             `📚 Grounding for "${goal.slice(0, 60)}${goal.length > 60 ? '…' : ''}":\n\n${noteParts.join('\n\n')}` +

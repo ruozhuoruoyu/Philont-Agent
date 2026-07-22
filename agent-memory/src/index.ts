@@ -283,6 +283,12 @@ export {
   CHECKABLE_OBJECT_CAVEAT,
 } from './checkable_claim.js';
 export type { CheckableKind, CheckableObject } from './checkable_claim.js';
+export {
+  findRefutableGoal,
+  renderRefutationClaim,
+  renderRefutationNote,
+} from './refutable_goal.js';
+export type { RefutableGoal } from './refutable_goal.js';
 export type {
   HonestyEvaluation,
   EvaluateOptions as HonestyEvaluateOptions,
