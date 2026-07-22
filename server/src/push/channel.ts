@@ -60,9 +60,42 @@ export function unregisterPushChannel(name: string): void {
   channels.delete(name);
 }
 
-/** Exact lookup by name */
+/**
+ * Look up a channel by the name a SUBSCRIPTION carries.
+ *
+ * Exact match first, then a unique account-qualified match — because the two sides of this have been
+ * disagreeing in production since both were written. A channel registers as `wechat:<accountId>` (the
+ * convention documented at the top of this file), while a subscription stores whatever
+ * parseDmPeerFromSessionId read out of the session id, which is the BARE `wechat`. `channels.get('wechat')`
+ * therefore missed every time, and every proactive push to the owner's only real channel was silently
+ * skipped as channel_not_found — while startup printed "proactive findings can reach you".
+ *
+ * Resolving here rather than rewriting the stored rows is deliberate: existing subscriptions are the ones
+ * that are broken right now, and a migration would have to guess which account an old row meant.
+ *
+ * Ambiguity is NOT resolved by picking one. With two accounts registered under the same channel prefix,
+ * a bare name does not identify a target, and quietly choosing the first would send the owner's private
+ * digest through whichever account happened to register first.
+ */
 export function findPushChannel(name: string): PushChannel | null {
-  return channels.get(name) ?? null;
+  const exact = channels.get(name);
+  if (exact) return exact;
+  const qualified = [...channels.keys()].filter((k) => k.startsWith(`${name}:`));
+  return qualified.length === 1 ? channels.get(qualified[0]) ?? null : null;
+}
+
+/**
+ * Why a bare name did not resolve — for the log line that has to explain it. Returns null when it resolves.
+ */
+export function describePushChannelMiss(name: string): string {
+  const qualified = [...channels.keys()].filter((k) => k.startsWith(`${name}:`));
+  if (qualified.length > 1) {
+    return `ambiguous: ${qualified.length} accounts registered under "${name}" (${qualified.join(', ')}) — the subscription must name one`;
+  }
+  const registered = listRegisteredPushChannels();
+  return registered.length === 0
+    ? 'no push channel is registered at all (the gateway may not have started)'
+    : `registered=[${registered.join(', ')}]`;
 }
 
 /** List all registered channel names (for testing / diagnostics / dispatcher fan-out) */

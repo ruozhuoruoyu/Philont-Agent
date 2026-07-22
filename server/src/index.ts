@@ -96,7 +96,7 @@ import {
   probeAuxLLM,
   isAuxLLMConfigured,
 } from '@agent/tools';
-import { listRegisteredPushChannels } from './push/channel.js';
+import { listRegisteredPushChannels, findPushChannel, describePushChannelMiss } from './push/channel.js';
 
 // Port: default 20266 (large enough to avoid common dev server ports 3000/8080; below the
 // Linux ephemeral range 32768+, so it won't be stolen by ephemeral client ports).
@@ -907,12 +907,20 @@ if (process.env.WECHAT_ENABLED === '1') {
       // like a channel with nothing to say, and the owner's report was "it never tells me anything".
       // Say which it is, at the one moment someone is reading.
       try {
-        const active = memory.pushSubscriptions.countActive();
+        const subs = memory.pushSubscriptions.listActive();
+        // Subscribed is not deliverable either. This banner claimed "proactive findings can reach you" for
+        // months while every push was being skipped as channel_not_found, because the subscription's channel
+        // name and the registered channel name were written by two different conventions. A claim about
+        // reachability now resolves the channel it is claiming, so the banner cannot outrun the mechanism.
+        const undeliverable = subs.filter((s) => !findPushChannel(s.channel));
         console.log(
-          active > 0
-            ? `  Push:      ✅ ${active} active subscription(s) — proactive findings can reach you`
-            : '  Push:      ⚠️  no active subscriptions — proactive findings will NOT reach WeChat/Telegram ' +
-              '(DM the bot once to auto-subscribe, or say "开启推送")',
+          subs.length === 0
+            ? '  Push:      ⚠️  no active subscriptions — proactive findings will NOT reach WeChat/Telegram ' +
+              '(DM the bot once to auto-subscribe, or say "开启推送")'
+            : undeliverable.length === 0
+              ? `  Push:      ✅ ${subs.length} active subscription(s) — proactive findings can reach you`
+              : `  Push:      ⛔ ${undeliverable.length}/${subs.length} subscription(s) cannot be delivered: ` +
+                undeliverable.map((s) => `${s.channel}:${s.peer} — ${describePushChannelMiss(s.channel)}`).join(' ; '),
         );
       } catch { /* advisory only */ }
       // Reuse server graceful-shutdown path

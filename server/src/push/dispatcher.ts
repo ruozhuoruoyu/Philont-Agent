@@ -24,7 +24,7 @@
 import { createHash } from 'node:crypto';
 import type { PushSubscription, PushSubscriptionStore } from '@agent/memory';
 import type { PushChannel } from './channel.js';
-import { findPushChannel, listRegisteredPushChannels } from './channel.js';
+import { findPushChannel, describePushChannelMiss } from './channel.js';
 
 export type PushSeverity = 'urgent' | 'digest';
 
@@ -158,7 +158,7 @@ export class PushDispatcher {
           channel: t.channel,
           peer: t.peer,
           reason: 'channel_not_found',
-          detail: `registered=[${listRegisteredPushChannels().join(',')}]`,
+          detail: describePushChannelMiss(t.channel),
         });
         continue;
       }
@@ -208,7 +208,9 @@ export class PushDispatcher {
       this.opts.logger.log(`[push] ${req.kind} delivered to ${result.delivered} target(s)`);
       return result;
     }
-    const why = result.skipped.map((s) => `${s.channel}:${s.peer}=${s.reason}`).join(', ');
+    const why = result.skipped
+      .map((s) => `${s.channel}:${s.peer}=${s.reason}${s.detail ? ` (${s.detail})` : ''}`)
+      .join(', ');
     this.opts.logger.log(
       `[push-funnel] ${req.kind} (${req.severity}) → delivered=${result.delivered} failed=${result.failed}` +
         (why ? ` skipped=[${why}]` : ''),
@@ -237,7 +239,7 @@ export class PushDispatcher {
         channel,
         peer,
         reason: 'channel_not_found',
-        detail: `registered=[${listRegisteredPushChannels().join(',')}]`,
+        detail: describePushChannelMiss(channel),
       };
     }
     if (!lookupChannel.isReady()) {
