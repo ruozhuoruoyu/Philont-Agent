@@ -10,6 +10,7 @@
  */
 
 import type { PhraseLang } from './channel_phrases.js';
+import { renderAutonomyReach, type AutonomyReachSummary } from './autonomy_reach.js';
 import {
   listSelfObservations,
   renderProposalCard,
@@ -38,6 +39,8 @@ export interface SelfhoodStatus {
   initiativesToday: { done: number };
   initiativesTotalByStatus: Record<string, number>;
   budget: { llmTokensUsed: number; toolCallsUsed: number; initiativesRun: number };
+  /** 24h findings-vs-reached summary; omitted when the caller does not supply one. */
+  reach?: AutonomyReachSummary;
 }
 
 export interface SelfhoodStatusDeps {
@@ -48,6 +51,7 @@ export interface SelfhoodStatusDeps {
   proposals: ConstitutionProposalStore;
   initiatives: InitiativeStore;
   budget: BudgetTracker;
+  reach?: () => AutonomyReachSummary;
   userId?: string;
   rootPursuitId?: string;
 }
@@ -94,6 +98,7 @@ export function buildSelfhoodStatus(
     })),
     initiativesToday: { done: doneToday },
     initiativesTotalByStatus: byStatus,
+    reach: deps.reach?.(),
     budget: {
       llmTokensUsed: usage.llmTokensUsed,
       toolCallsUsed: usage.toolCallsUsed,
@@ -136,6 +141,11 @@ export function renderSelfhoodStatusText(
       : `今日自主工作: 完成 ${s.initiativesToday.done} 件 · ` +
           `${s.budget.llmTokensUsed} tokens · ${s.budget.toolCallsUsed} 次工具调用`,
   );
+  // How much of that work ever reached the person it was done for. The nine delivery gates are correct
+  // and stay untouched; what was missing is that their aggregate outcome was only ever written to a
+  // console the owner does not read — so an hour of findings and zero messages was indistinguishable
+  // from a dead feature. See autonomy_reach.ts.
+  if (s.reach) lines.push(renderAutonomyReach(s.reach, en ? 'en' : 'zh'));
   if (s.pursuits.length > 0) {
     lines.push(en ? 'Pursuing:' : '在追目标:');
     for (const p of s.pursuits.slice(0, 5)) {
