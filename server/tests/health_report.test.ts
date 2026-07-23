@@ -163,3 +163,16 @@ test('dayCount: the boot-time blind spot — a restart must not erase the day', 
   assert.equal(dayCount(snap, 'autonomy.day.eligible', '20260723'), 0, 'a key never written reads as zero');
   assert.equal(dayCount(snap, 'judge.day.total', '20260724'), 0, 'yesterday does not leak into today');
 });
+
+test('a channel whose every send today failed is not "deliverable", and the line says what to do', () => {
+  // Twelve hours of ret=-2 "prepare failed" — boot+8s, +20min, +40min, all dead — while the reachability
+  // line reported 1/1 because the name resolved. Resolution is not delivery.
+  const [r] = computeHealthRatios({ push: { deliverable: 0, active: 1, failingToday: 1 } }, 'zh');
+  assert.equal(r.numerator, 0);
+  assert.match(r.line, /发送全部失败/);
+  assert.match(r.line, /重新扫码登录/, 'the owner must be told the fix, not just the failure');
+
+  // And a healthy channel keeps the plain line.
+  const [ok] = computeHealthRatios({ push: { deliverable: 1, active: 1 } }, 'zh');
+  assert.doesNotMatch(ok.line, /失败/);
+});

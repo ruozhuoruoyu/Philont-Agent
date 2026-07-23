@@ -75,6 +75,13 @@ export interface PushDispatcherOptions {
   logger?: { log: (m: string) => void; warn: (m: string) => void; error: (m: string, e?: unknown) => void };
   /** Clock injection for testing */
   now?: () => number;
+  /**
+   * Called after every real send attempt with its outcome. Exists because "registered" and "deliverable"
+   * are different facts: the health report's reachability line was answering "does the channel name
+   * resolve?" while every actual send had been failing for twelve hours — a reachability claim that did
+   * not consult the delivery path, on the very line built after the last time that happened.
+   */
+  onSendOutcome?: (channel: string, ok: boolean) => void;
 }
 
 interface DedupEntry {
@@ -85,14 +92,16 @@ interface DedupEntry {
 const DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class PushDispatcher {
-  private readonly opts: Required<Omit<PushDispatcherOptions, 'logger' | 'now' | 'isGloballyEnabled'>> & {
+  private readonly opts: Required<Omit<PushDispatcherOptions, 'logger' | 'now' | 'isGloballyEnabled' | 'onSendOutcome'>> & {
     logger: NonNullable<PushDispatcherOptions['logger']>;
     now: () => number;
     isGloballyEnabled: () => boolean;
   };
   private dedupRing: DedupEntry[] = [];
+  private readonly onSendOutcome?: (channel: string, ok: boolean) => void;
 
   constructor(options: PushDispatcherOptions) {
+    this.onSendOutcome = options.onSendOutcome;
     this.opts = {
       subscriptions: options.subscriptions,
       dedupRingCap: options.dedupRingCap ?? 1000,
@@ -165,6 +174,7 @@ export class PushDispatcher {
 
       try {
         const sendResult = await channel.pushText(t.peer, req.text);
+        try { this.onSendOutcome?.(t.channel, sendResult.ok); } catch { /* observability must not break sends */ }
         if (sendResult.ok) {
           result.delivered += 1;
           anyDelivered = true;

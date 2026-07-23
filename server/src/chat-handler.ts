@@ -929,10 +929,22 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
           advanced: compassPursuits.filter((p) => (p.lastTouchedAt ?? 0) >= dayAgo).length,
           declared: compassFocus.length,
         },
-        push: {
-          deliverable: subs.filter((sub) => findPushChannel(sub.channel)).length,
-          active: subs.length,
-        },
+        push: (() => {
+          // Deliverable = resolvable AND not observably failing. A channel whose every send today failed
+          // is down whatever the registry says — that is precisely the state the WeChat iLink session was
+          // in for twelve hours while this line reported 1/1.
+          const failingToday = subs.filter(
+            (sub) =>
+              findPushChannel(sub.channel) &&
+              dayCount(metricsSnap, `push.day.fail.${sub.channel}`, today) > 0 &&
+              dayCount(metricsSnap, `push.day.ok.${sub.channel}`, today) === 0,
+          ).length;
+          return {
+            deliverable: subs.filter((sub) => findPushChannel(sub.channel)).length - failingToday,
+            active: subs.length,
+            failingToday,
+          };
+        })(),
       },
       lang,
     );
@@ -2775,6 +2787,14 @@ export const autonomousDriverNames: readonly string[] = AUTONOMOUS_DRIVERS.map((
 // 2026-05-06 Phase C: proactive push dispatcher. env PHILONT_PUSH_ENABLED controls the global switch.
 // Default OFF — even when enabled, per-(channel, peer) opt-in is required for actual pushes.
 const pushDispatcher = new PushDispatcher({
+  // Day-keyed send outcomes, so "deliverable" in the health report means "sends actually work today", not
+  // merely "the name resolves". Keyed by the SUBSCRIPTION's channel string so the health check's lookups
+  // match without re-deriving the qualified name.
+  onSendOutcome: (channel, ok) => {
+    try {
+      memory.metrics.increment(`push.day.${ok ? 'ok' : 'fail'}.${channel}.${utcDateString(Date.now())}`);
+    } catch { /* counting must never affect delivery */ }
+  },
   subscriptions: memory.pushSubscriptions,
   logger: {
     log: (m) => console.log(`[push] ${m}`),

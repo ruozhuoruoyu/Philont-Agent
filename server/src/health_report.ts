@@ -65,8 +65,14 @@ export interface HealthInput {
   skills?: { offered: number; drafts: number };
   /** Owner-declared focus areas advanced in the window. */
   focus?: { advanced: number; declared: number };
-  /** Push subscriptions that actually resolve to a live channel. */
-  push?: { deliverable: number; active: number };
+  /**
+   * Push subscriptions that can actually receive a message. "Deliverable" consults BOTH facts: the channel
+   * name resolves, AND today's real sends have not all failed. The first version checked only resolution —
+   * and reported "1/1 真的能收到消息" in the same breath as the report itself failing to deliver for the
+   * third time in twelve hours. A reachability claim that does not consult the delivery path is the
+   * original push bug restated, on the line that was built because of it.
+   */
+  push?: { deliverable: number; active: number; failingToday?: number };
   /** Broken references found by the startup integrity check. */
   brokenRefs?: Array<{ check: string; ref: string; consequence: string }>;
 }
@@ -150,14 +156,19 @@ export function computeHealthRatios(input: HealthInput, lang: 'zh' | 'en' = 'zh'
   }
 
   if (input.push && input.push.active > 0) {
-    const { deliverable, active } = input.push;
+    const { deliverable, active, failingToday } = input.push;
+    const failNote = failingToday
+      ? en
+        ? ` ${failingToday} channel(s) are registered but every send today has FAILED — a WeChat channel in this state usually needs a fresh scan-login (npm run wechat:login).`
+        : ` 其中 ${failingToday} 条渠道注册正常但今天的发送全部失败 —— 微信渠道出现这种状态,通常需要重新扫码登录(npm run wechat:login)。`
+      : '';
     out.push({
       key: 'push',
       numerator: deliverable,
       denominator: active,
       line: en
-        ? `Reachability: ${deliverable}/${active} of the channels I am subscribed to can actually receive a message.`
-        : `可达性:我订阅的 ${active} 条渠道里,${deliverable} 条真的能收到消息。`,
+        ? `Reachability: ${deliverable}/${active} of the channels I am subscribed to can actually receive a message.${failNote}`
+        : `可达性:我订阅的 ${active} 条渠道里,${deliverable} 条真的能收到消息。${failNote}`,
     });
   }
 
