@@ -282,3 +282,62 @@ test('writer: hook 抛错被吞,仅 warn', async () => {
     h.close();
   }
 });
+
+// ── Cross-driver credit: work on a pursuit counts whoever proposed it ────────
+//
+// Production 2026-07-23: the curiosity driver picked up the owner's compass focus at 14:02, the
+// initiative ran and produced a discovery — and the daily self-check still reported "1 个焦点中推进了
+// 0 个", because the driver filter ran FIRST and the completed work was recorded nowhere. last_touched
+// never moved, so the dormancy branch also re-proposed the same pursuit the next day: the ledger
+// disagreed with the work, and both the health report and the scheduler read the ledger.
+
+test('apply: curiosity 的休眠分支(pursuit:<id>)完成 → 记账(evidence + last_touched)', () => {
+  const { h, pursuitId } = setup();
+  const before = h.pursuits.get(pursuitId)!;
+  const init = makeInitiative({ driver: 'curiosity', targetRef: `pursuit:${pursuitId}` });
+
+  const r = applyPursuitProgress(h.pursuits, init, doneResult());
+
+  assert.equal(r.applied, true);
+  assert.equal(r.reason, 'applied_cross_driver');
+  const after = h.pursuits.get(pursuitId)!;
+  assert.equal(after.evidenceRefs.length, before.evidenceRefs.length + 1);
+  assert.ok(after.lastTouchedAt >= before.lastTouchedAt, 'last_touched 必须前移 —— 健康报告和休眠分支都读它');
+  h.close();
+});
+
+test('apply: goal-loop 提升形(goal-loop:pursuit:<id>)同样记账', () => {
+  const { h, pursuitId } = setup();
+  const init = makeInitiative({ driver: 'curiosity', targetRef: `goal-loop:pursuit:${pursuitId}` });
+  const r = applyPursuitProgress(h.pursuits, init, doneResult());
+  assert.equal(r.applied, true);
+  assert.equal(r.reason, 'applied_cross_driver');
+  h.close();
+});
+
+test('apply: 跨 driver 只给最小记账 —— question 语义仍归 pursuit driver 独有', () => {
+  const { h, pursuitId } = setup();
+  // A question-shaped ref from a foreign driver must NOT be treated as answering the question.
+  const init = makeInitiative({ driver: 'curiosity', targetRef: `pursuit:${pursuitId}:q:q1` });
+  const r = applyPursuitProgress(h.pursuits, init, doneResult());
+  assert.equal(r.applied, false);
+  assert.equal(r.reason, 'wrong_driver');
+  h.close();
+});
+
+test('apply: 跨 driver + 已归档的 pursuit → pursuit_gone,不抛', () => {
+  const { h } = setup();
+  const init = makeInitiative({ driver: 'curiosity', targetRef: 'pursuit:no-such-id' });
+  const r = applyPursuitProgress(h.pursuits, init, doneResult());
+  assert.equal(r.applied, false);
+  assert.equal(r.reason, 'pursuit_gone');
+  h.close();
+});
+
+test('apply: 跨 driver + 未完成 → 不记账', () => {
+  const { h, pursuitId } = setup();
+  const init = makeInitiative({ driver: 'curiosity', targetRef: `pursuit:${pursuitId}`, status: 'failed' });
+  const r = applyPursuitProgress(h.pursuits, init, { ...doneResult(), status: 'failed' });
+  assert.equal(r.applied, false);
+  h.close();
+});

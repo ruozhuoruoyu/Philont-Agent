@@ -86,3 +86,50 @@ test('Chinese rendering carries the same interpretations', () => {
   assert.match(text, /一件都没动/);
   assert.match(text, /只增不学/);
 });
+
+// ── The stamp records the outcome, not the intent ───────────────────────────
+//
+// Production 2026-07-23 16:53: the boot-time send raced the WeChat gateway warmup and failed with
+// "prepare failed" 8 seconds after start — and the stamp-before-dispatch design then swallowed the
+// report for the entire day. A mechanism claiming "sent today" while the owner received nothing is the
+// push bug in miniature.
+
+import {
+  shouldSkipHealthSend,
+  nextHealthSendStamp,
+  HEALTH_SEND_MAX_ATTEMPTS_PER_DAY,
+} from '../src/health_report.js';
+
+test('a delivered report is final for the day; a failed one may retry', () => {
+  const failed = nextHealthSendStamp(null, '20260723', false);
+  assert.equal(shouldSkipHealthSend(failed, '20260723'), false, 'the production case: failure must be retryable');
+
+  const ok = nextHealthSendStamp(failed, '20260723', true);
+  assert.equal(shouldSkipHealthSend(ok, '20260723'), true);
+});
+
+test('retries are capped — a channel that failed three times today is down, not unlucky', () => {
+  let stamp = null;
+  for (let i = 0; i < HEALTH_SEND_MAX_ATTEMPTS_PER_DAY; i++) stamp = nextHealthSendStamp(stamp, '20260723', false);
+  assert.equal(shouldSkipHealthSend(stamp, '20260723'), true, 'the cap holds even though nothing was delivered');
+});
+
+test('a new day resets everything', () => {
+  let stamp = nextHealthSendStamp(null, '20260723', true);
+  assert.equal(shouldSkipHealthSend(stamp, '20260724'), false);
+  stamp = nextHealthSendStamp(stamp, '20260724', false);
+  assert.deepEqual(stamp, { ymd: '20260724', delivered: false, attempts: 1 });
+});
+
+test('a later failed attempt cannot un-deliver the day', () => {
+  const ok = nextHealthSendStamp(null, '20260723', true);
+  const after = nextHealthSendStamp(ok, '20260723', false);
+  assert.equal(after.delivered, true, 'delivered is a ratchet within the day');
+});
+
+test('the legacy stamp shape (no attempts field) is treated as unsent, not as a crash', () => {
+  // Rows written by the previous version look like { ymd } — reading them must degrade to a resend at
+  // worst, never to an exception inside the health path.
+  const legacy = { ymd: '20260723' } as never;
+  assert.equal(shouldSkipHealthSend(legacy, '20260723'), false);
+});

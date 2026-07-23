@@ -286,6 +286,9 @@ import {
   shouldSendHealthReport,
   recordJudgeVerdict,
   judgeWindowTally,
+  shouldSkipHealthSend,
+  nextHealthSendStamp,
+  type HealthSendStamp,
 } from './health_report.js';
 import {
   buildIntegrityChecks,
@@ -879,10 +882,10 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
     // swallowed by the generic 4-hour digest rate limiter, turning "daily self-check" into "whatever
     // survives the limiter after a restart". A cadence that depends on process lifetime is not a cadence.
     const today = utcDateString(Date.now());
-    const lastSent = memory.facts.getFact('system', 'health_selfcheck_last_ymd');
-    const lastYmd = (lastSent?.value as { ymd?: string } | undefined)?.ymd;
-    if (!force && lastYmd === today) {
-      console.log(`[health] daily self-check already sent today (${today}) — not repeating on restart`);
+    const stampFact = memory.facts.getFact('system', 'health_selfcheck_last_ymd');
+    const stamp = (stampFact?.value ?? null) as HealthSendStamp | null;
+    if (!force && shouldSkipHealthSend(stamp, today)) {
+      console.log(`[health] daily self-check already handled today (${today}) — not repeating on restart`);
       return null;
     }
     const lang = currentPhraseLang() === 'en' ? 'en' : 'zh';
@@ -931,15 +934,26 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
     }
     const text = renderHealthReport(ratios, broken, lang);
     console.log(`[health] daily self-check reporting to owner:\n${text}`);
-    // Stamped before dispatch, not after: a delivery failure must not turn into a retry every restart.
-    // The report is worth sending once a day; it is not worth hammering a channel over.
-    memory.facts.storeFact({ namespace: 'system', key: 'health_selfcheck_last_ymd', value: { ymd: today }, confidence: 1 });
     for (const [, send] of webuiClients) {
       try { send({ type: 'finding', text }); } catch { /* one dead client must not stop the rest */ }
     }
-    await pushDispatcher
+    // The stamp records the OUTCOME. The first version stamped before dispatch so a failure could not
+    // retry-hammer — and the boot-time send then raced the WeChat gateway warmup, failed with "prepare
+    // failed" 8s after start, and the stamp swallowed the report for the day. Now: delivered → final for
+    // today; failed → retryable (next boot / 24h tick, paced by the dispatcher's own digest limiter) up to
+    // a small daily cap. See shouldSkipHealthSend.
+    const dispatch = await pushDispatcher
       .enqueue({ severity: 'digest', kind: 'health_selfcheck', targetRef: 'health:daily', text })
-      .catch((e) => console.warn('[health] push dispatch threw', e));
+      .catch((e) => {
+        console.warn('[health] push dispatch threw', e);
+        return { delivered: 0 } as { delivered: number };
+      });
+    memory.facts.storeFact({
+      namespace: 'system',
+      key: 'health_selfcheck_last_ymd',
+      value: nextHealthSendStamp(stamp, today, (dispatch?.delivered ?? 0) > 0),
+      confidence: 1,
+    });
     return text;
   } catch (e) {
     // Reporting on health must never be the thing that breaks.

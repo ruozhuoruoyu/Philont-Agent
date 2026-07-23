@@ -42,8 +42,8 @@ export function parsePursuitTargetRef(targetRef: string): {
   // pursuit:<id>:resolve
   const r = targetRef.match(/^pursuit:([^:]+):resolve$/);
   if (r) return { pursuitId: r[1], kind: 'resolve' };
-  // pursuit:<id> fallback (CuriosityDriver dormant-pursuit uses this, but driver is not
-  // 'pursuit'; applyPursuitProgress below filters it out by driver)
+  // pursuit:<id> — CuriosityDriver's dormant-pursuit branch. Credited via the cross-driver path in
+  // applyPursuitProgress (evidence + touch only; no question/resolve semantics).
   const p = targetRef.match(/^pursuit:([^:]+)$/);
   if (p) return { pursuitId: p[1], kind: 'other' };
   return null;
@@ -81,7 +81,9 @@ export interface ApplyResult {
     | 'pursuit_not_found'
     | 'applied_question'
     | 'applied_grant_request'
-    | 'applied_resolve';
+    | 'applied_resolve'
+    | 'applied_cross_driver'
+    | 'pursuit_gone';
 }
 
 /**
@@ -94,12 +96,37 @@ export function applyPursuitProgress(
   initiative: Initiative,
   result: InitiativeRunResult,
 ): ApplyResult {
-  // Only accept initiatives produced by PursuitDriver
-  if (initiative.driver !== 'pursuit') {
-    return { applied: false, reason: 'wrong_driver' };
-  }
   if (result.status !== 'done') {
     return { applied: false, reason: 'not_done' };
+  }
+
+  // Cross-driver credit: work on a pursuit counts whoever proposed it.
+  //
+  // The driver filter below used to be the FIRST check, which meant the curiosity driver's two
+  // pursuit-shaped branches — dormant pickup (`pursuit:<id>`) and goal-loop promotion
+  // (`goal-loop:pursuit:<id>`) — completed real initiatives that were then recorded nowhere. Production
+  // 2026-07-23: the owner's compass focus was picked up at 14:02, the initiative ran and produced a
+  // discovery, and the daily self-check still reported "1 个焦点中推进了 0 个" — because last_touched never
+  // moved, which ALSO made the dormancy branch re-propose the same pursuit the next day. The ledger
+  // disagreed with the work, and both the health report and the scheduler read the ledger.
+  //
+  // The judgement is by TARGET, not by sender: a completed initiative whose targetRef names a pursuit
+  // advanced that pursuit, whoever proposed it. (Same direction as the from_disk fix: decide by what a
+  // thing IS, not by which component it came from.) Only the minimal credit is applied here — evidence +
+  // progress touch; question/resolve semantics stay exclusive to the pursuit driver below, which is the
+  // only producer that constructs those refs.
+  if (initiative.driver !== 'pursuit') {
+    const cross = initiative.targetRef.match(/^(?:goal-loop:)?pursuit:([^:]+)$/);
+    if (!cross) return { applied: false, reason: 'wrong_driver' };
+    const summary = (result.outcomeSummary ?? initiative.rationale).slice(0, 200);
+    try {
+      pursuits.addEvidence(cross[1], `autonomous:initiative-${initiative.id}`);
+      pursuits.bumpProgress(cross[1], 0, summary, null);
+      return { applied: true, reason: 'applied_cross_driver' };
+    } catch (e) {
+      if (e instanceof PursuitNotFoundError) return { applied: false, reason: 'pursuit_gone' };
+      throw e;
+    }
   }
 
   const parsed = parsePursuitTargetRef(initiative.targetRef);

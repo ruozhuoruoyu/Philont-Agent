@@ -243,3 +243,41 @@ export function judgeWindowTally(now = Date.now()): { verified: number; total: n
 export function _resetJudgeTallyForTest(): void {
   judgeEvents.length = 0;
 }
+
+// ── When to send, when to retry ─────────────────────────────────────────────────────────────────────
+//
+// The first stamping design wrote the day-stamp BEFORE dispatch, reasoning that a delivery failure must
+// not become a retry on every restart. Production answered within hours: the boot-time send raced the
+// WeChat gateway's warmup, failed with "prepare failed" eight seconds after start — and the stamp then
+// swallowed the report for the whole day. A report that dies to a transient send error and cannot retry
+// is the push bug in miniature: the mechanism claims "sent today" while the owner received nothing.
+//
+// So the stamp records the OUTCOME, not the intent, and the skip rule reads it: a delivered report is
+// final for the day; a failed one may retry (next boot or the 24h tick — the dispatcher's own digest rate
+// limiter bounds the pace) up to a small cap, because a channel that failed three times today is down for
+// reasons a fourth attempt will not fix, and the webui copy has already been shown.
+
+export interface HealthSendStamp {
+  ymd: string;
+  delivered: boolean;
+  attempts: number;
+}
+
+export const HEALTH_SEND_MAX_ATTEMPTS_PER_DAY = 3;
+
+/** Whether today's report should be skipped, given the stored stamp. */
+export function shouldSkipHealthSend(stamp: HealthSendStamp | null | undefined, today: string): boolean {
+  if (!stamp || stamp.ymd !== today) return false;
+  if (stamp.delivered) return true;
+  return stamp.attempts >= HEALTH_SEND_MAX_ATTEMPTS_PER_DAY;
+}
+
+/** The stamp to store after an attempt. */
+export function nextHealthSendStamp(
+  prev: HealthSendStamp | null | undefined,
+  today: string,
+  delivered: boolean,
+): HealthSendStamp {
+  const attempts = prev && prev.ymd === today ? prev.attempts + 1 : 1;
+  return { ymd: today, delivered: delivered || (prev?.ymd === today && prev.delivered === true), attempts };
+}
