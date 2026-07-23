@@ -146,3 +146,41 @@ test('success is downgraded when the aux cites a NON-grounding or failed tool', 
   // shell failed so !grounded → capped deterministically before the aux is even consulted.
   assert.notEqual(v.outcome, 'success');
 });
+
+// ── Effect tools ground the goal that IS their effect (2026-07-23) ──────────
+//
+// "明天早上7点提醒我吃早饭" → schedule_reminder ok → could_not_verify, "no successful execution/verifier
+// tool". For a goal that IS the tool's effect, the ok result is the proof — the schedule row exists. These
+// simple tool-does-the-thing turns are the most verifiable class the agent has, and the judge was
+// structurally blind to every one of them, which alone pins the shadow distribution at success=0.
+
+test('effect tool: schedule_reminder ok can ground the reminder goal', async () => {
+  const aux = { call: async () => 'VERDICT: success\nGROUNDS: tool #1\nWHY: the schedule was created' };
+  const v = await judgeRun({
+    goal: '明天早上7点提醒我吃早饭',
+    trace: [{ toolName: 'schedule_reminder', ok: true, summary: "Scheduled task '吃早饭提醒', first run @ 2026-07-23T23:00:00Z" }],
+    assistantClaim: '已设好,明早 7:00 提醒你吃早饭',
+    honestyFired: false,
+  }, aux);
+  assert.equal(v.outcome, 'success');
+});
+
+test('effect tool that FAILED still cannot ground anything', async () => {
+  const v = await judgeRun({
+    goal: '明天早上7点提醒我吃早饭',
+    trace: [{ toolName: 'schedule_reminder', ok: false, summary: 'invalid cron expression' }],
+    assistantClaim: '已设好,明早 7:00 提醒你',
+    honestyFired: false,
+  }, yesMan);
+  assert.notEqual(v.outcome, 'success', 'a failed effect tool is a failed deed, whatever the yes-man says');
+});
+
+test('reads remain bystanders — Finding 1 is not reopened', async () => {
+  const v = await judgeRun({
+    goal: 'compile and benchmark the kernel',
+    trace: [{ toolName: 'readFile', ok: true, summary: 'read the makefile' }],
+    assistantClaim: 'compiled clean, 53/53 tests pass',
+    honestyFired: false,
+  }, yesMan);
+  assert.notEqual(v.outcome, 'success');
+});

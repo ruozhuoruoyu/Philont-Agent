@@ -110,6 +110,18 @@ const SYSTEM = [
  */
 const GROUNDING_TOOLS = new Set([
   'shell', 'execute', 'pariGp', 'z3Verify', 'leanCheck', 'magnitude', 'http',
+  // Effect tools — the deed itself, not a proxy for it (added 2026-07-23). Production: "明天早上7点提醒我
+  // 吃早饭" → schedule_reminder ok → verdict could_not_verify, "no successful execution/verifier tool".
+  // For a goal that IS the tool's effect, the ok result is the proof: the schedule row exists, the file was
+  // written, the message was handed to the channel. These were exactly the turns most worth learning from —
+  // the simplest verifiable class philont has — and the judge was structurally blind to all of them, which
+  // poisons the shadow distribution the Phase 2 decision reads (success=0 forever, gate never opens).
+  //
+  // This does not reopen red-team Finding 1. The bystander in F1 was a READ (a fabricated result plus an
+  // irrelevant successful readFile); reads remain excluded. An effect tool can still be an irrelevant
+  // bystander in principle, but the aux must cite the specific tool index as accomplishing the goal, and
+  // the deterministic rail only caps the ceiling — the aux still decides the ambiguous middle.
+  'schedule_reminder', 'writeFile', 'replyWithMedia', 'appendJournal',
 ]);
 
 function hasSuccessfulGroundingTool(trace: ReadonlyArray<JudgeToolRecord>): boolean {
