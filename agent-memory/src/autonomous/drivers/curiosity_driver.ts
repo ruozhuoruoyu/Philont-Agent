@@ -23,41 +23,53 @@ import type {
   MemorySnapshot,
 } from '../types.js';
 import { shouldPromoteToGoal, DEFAULT_TRAITS, type TraitProfile } from '../../drives_to_goals.js';
+import { looksLikeCredential, redactForLog } from '../../credential_shape.js';
 
-// ── extractSpecificTokens (ported from kernel_drives.ts) ─────────────────────
+// ── extractSpecificTokens ────────────────────────────────────────────────────
 //
-// Extracts "worth looking up" tokens from a piece of text:
-//   1. Academic/standard IDs (arxiv/CVE/RFC/PEP/ISO/IETF) — strong signal
+// Extracts tokens from the timeline that name something OUTSIDE this system and are therefore worth one
+// web lookup:
+//   1. Academic/standard IDs (arxiv/CVE/RFC/PEP/ISO/IETF)
 //   2. lib@version
 //   3. URL
-//   4. Acronyms of 3+ uppercase letters (common words excluded)
-//   5. Content inside quotation marks — **must contain a structural signal** (digits/ASCII letters/hyphens/dots etc.);
-//      pure Chinese phrases are filtered out (e.g. "tool calls" / "context", common meta-concept words)
-//   6. Content inside 《》 book-title brackets — by convention these are book/work names; structural signal not required
+//   4. Quoted content that is shaped like a PRODUCT / MODEL / VERSION name — ASCII, no spaces, and
+//      carrying a digit ("Hermes-2", "GPT-4", "v1.2.3")
+//   5. Content inside 《》 book-title brackets — by convention, a work's title
 //
-// Pure heuristic, no LLM calls; can be ported 1:1 to the Rust side.
-
-const ACRONYM_BLACKLIST = new Set([
-  'I', 'OK', 'AI', 'AGI', 'CPU', 'GPU', 'IO', 'API', 'URL', 'HTTP',
-  'JSON', 'YAML', 'CSV', 'PDF', 'DOC', 'TODO', 'FIXME', 'OS', 'PC',
-  'MAC', 'PHP', 'SQL', 'CSS', 'HTML', 'JS', 'TS', 'GO', 'C', 'WIFI',
-]);
-
-/**
- * Returns true if the string contains a structural signal (used to filter pure-Chinese quoted content).
- *
- * Any of the following counts as "concrete":
- *   - ASCII letters (English / Latin characters)
- *   - Digits
- *   - Structural separators: - _ . / @ : =
- *
- * Pure Chinese + Chinese punctuation → returns false. This prevents CuriosityDriver from
- * mistakenly grabbing common LLM meta-concept words like "tool calls" / "context" / "agent".
- * Content inside 《》 book-title brackets bypasses this filter.
- */
-function hasStructuralSignal(s: string): boolean {
-  return /[A-Za-z0-9_\-./@:=]/.test(s);
-}
+// ── What was removed, and why (2026-07-23) ──────────────────────────────────
+//
+// Two further rules used to run here and produced, empirically, ALL of the junk and none of the value:
+//
+//   - any run of 3+ uppercase letters not in a 30-word blacklist;
+//   - any quoted string of 2..40 chars containing "a structural signal", which was implemented as
+//     "contains at least one ASCII letter, digit or separator" — so every quoted English phrase passed.
+//
+// The acronym rule is GONE: nothing distinguishes "DSML" from "USERS" by shape, so only a vocabulary
+// could separate them, and a vocabulary is the trap. The quoted rule is NARROWED rather than deleted,
+// because it did have a real intended case with a test behind it — a quoted product/model/version name.
+// That case has a shape: ASCII, no spaces, and a digit. Every one of the 45 junk tokens fails it, and
+// "Hermes-2" / "GPT-4" / "v1.2.3" still pass.
+//
+// Over one production night those two rules generated 45 research targets and the ID/URL rules generated
+// zero. The 45: POST, CST, UTC, ZERO, HIGH, USERS, COMMUNITIES, AGENTS, "body", "...", "great point",
+// "and handle", "post_id", "community_id". Each became a real webSearch and a real initiative; the night
+// cost ~48k tokens and produced nothing.
+//
+// The fix is not a longer blacklist. The blacklist was already the hard-coded-vocabulary trap this
+// codebase has been bitten by repeatedly, and no list of English words could have been long enough,
+// because the premise was wrong:
+//
+//   > The timeline is philont's own conversation with its owner. A bare string lifted out of it is OUR
+//   > OWN vocabulary — a field name, an HTTP verb, a log level, a phrase the owner used — not an external
+//   > entity. Only tokens that are external identifiers BY CONSTRUCTION are worth an outside lookup.
+//
+// Note what this does NOT cost: those rules never caught the case that would have justified them either.
+// An unfamiliar proper noun ("FunSearch", "Drużkowski") is usually neither all-caps nor quoted, so the
+// good case was already being missed. Recovering it is a semantic judgement — "is this an external entity
+// worth researching?" — which by this repo's own standing rule belongs to the aux LLM, not to a regex.
+// Until that exists, proposing nothing is strictly better than proposing junk.
+//
+// Pure heuristic, no LLM calls.
 
 export function extractSpecificTokens(text: string): string[] {
   const found = new Set<string>();
@@ -83,24 +95,18 @@ export function extractSpecificTokens(text: string): string[] {
   let um: RegExpExecArray | null;
   while ((um = urlPattern.exec(text)) !== null) found.add(um[0].trim());
 
-  const acronymPattern = /\b[A-Z]{3,}(?:[A-Z0-9-]*[A-Z0-9])?\b/g;
-  let am: RegExpExecArray | null;
-  while ((am = acronymPattern.exec(text)) !== null) {
-    const t = am[0];
-    if (!ACRONYM_BLACKLIST.has(t)) found.add(t);
-  }
-
-  // Quoted content: must contain a structural signal (filters pure-Chinese phrases)
-  const strictQuotedPatterns: RegExp[] = [
-    /"([^"]{2,40})"/g,
-    /"([^"]{2,40})"/g,
-    /「([^」]{2,40})」/g,
-  ];
-  for (const re of strictQuotedPatterns) {
+  // Quoted content, restricted to the shape of a product / model / version NAME. The digit is what
+  // carries the signal: a name people bother to quote and would look up almost always caries a version or
+  // generation marker, while our own vocabulary ("body", "post_id", "great point") does not. Requiring
+  // pure ASCII drops quoted Chinese fragments like "2篇原创帖", which have a digit but name nothing
+  // external.
+  const NAME_SHAPE = /^[A-Za-z][A-Za-z0-9._-]{1,30}$/;
+  const quotedPatterns: RegExp[] = [/"([^"]{2,40})"/g, /"([^"]{2,40})"/g, /「([^」]{2,40})」/g];
+  for (const re of quotedPatterns) {
     let qm: RegExpExecArray | null;
     while ((qm = re.exec(text)) !== null) {
       const inner = qm[1].trim();
-      if (inner.length >= 2 && hasStructuralSignal(inner)) found.add(inner);
+      if (NAME_SHAPE.test(inner) && /\d/.test(inner)) found.add(inner);
     }
   }
 
@@ -112,7 +118,10 @@ export function extractSpecificTokens(text: string): string[] {
     if (inner.length >= 2) found.add(inner);
   }
 
-  return Array.from(found);
+  // Defence in depth: applied to every rule's output, not just the removed ones. A URL can carry a token
+  // in its query string, and a standard-ID match can overlap a key. The cost of dropping one candidate is
+  // a skipped lookup; the cost of missing one is a live credential in a search engine's query log.
+  return Array.from(found).filter((t) => !looksLikeCredential(t));
 }
 
 // ── Driver ───────────────────────────────────────────────────────────────
@@ -194,6 +203,14 @@ export class CuriosityDriver implements Driver {
     }
 
     for (const tok of stuck ? [] : snap.recentTimelineTokens) {
+      // Second gate, at the point of no return. The extractor already filters, but this is where a token
+      // becomes an outbound `webSearch(query)` — and the snapshot is built by the loop, not by us, so a
+      // future producer could put anything here. The one place worth paying for a redundant check is the
+      // last one before egress.
+      if (looksLikeCredential(tok)) {
+        console.warn(`[curiosity] suppressed a credential-shaped token before it became a web search: ${redactForLog(tok)}`);
+        continue;
+      }
       const targetRef = `token:${tok}`;
       if (snap.recentDoneTargetRefs.has(targetRef)) continue;
       // Already referenced by any fact → not considered "unchecked"

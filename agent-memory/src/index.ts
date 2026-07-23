@@ -283,6 +283,7 @@ export {
   CHECKABLE_OBJECT_CAVEAT,
 } from './checkable_claim.js';
 export type { CheckableKind, CheckableObject } from './checkable_claim.js';
+export { looksLikeCredential, redactForLog } from './credential_shape.js';
 export {
   findRefutableGoal,
   renderRefutationClaim,

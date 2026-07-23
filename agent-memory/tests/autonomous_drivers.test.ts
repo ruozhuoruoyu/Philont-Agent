@@ -498,3 +498,36 @@ test('SkillRepairDriver: maxProposals 截断,按 utility 排序', () => {
   const ps = d.propose(snap({ skills }));
   assert.equal(ps.length, 2);
 });
+
+// ── The 2026-07-23 night, as a regression ────────────────────────────────────
+//
+// Seven idle hours produced 45 research targets and ~48k tokens: POST, CST, UTC, ZERO, HIGH, USERS,
+// "body", "...", "great point", "post_id". Every one became a real webSearch. Zero came from the
+// ID/URL rules; all 45 came from the acronym rule and from a quoted rule whose "structural signal" test
+// was satisfied by any ASCII character. The fix is not a longer blacklist — the acronym rule is gone
+// (nothing distinguishes "DSML" from "USERS" by shape), and the quoted rule is narrowed to the shape of
+// a product/model/version name, which is the case it was actually written for.
+
+test('extractSpecificTokens: 那一夜的 45 个垃圾 token 一个都不再产生', () => {
+  const lines = [
+    'I will POST to the endpoint and set "community_id" and "parent_id" in the body',
+    'Times are shown in CST, the server uses UTC',
+    'The response had "great point" as the comment text',
+    'Fields: "post_id", "body", "..." and handle',
+    'Endpoints: USERS, COMMUNITIES, AGENTS',
+    'Part 0: read SOUL.md and handle the flow',
+    'severity was HIGH and the result was ZERO',
+    'wrote "2篇原创帖" and "~50次投票" and "11+次心跳"',
+    'the id format is "<8-char-hex>" or "<hex>"',
+    'note said "CONFIRMED: p=571 has NO solution!"',
+    'topics: "Empirical Convergence of Failure", "Computational Surrogates"',
+  ];
+  for (const l of lines) assert.deepEqual(extractSpecificTokens(l), [], l);
+});
+
+test('extractSpecificTokens: 凭证形状的 token 永不外流(它会变成 webSearch query)', () => {
+  // The driver's plan for a token is webSearch({query: token}); a key reaching that is not recoverable.
+  assert.deepEqual(extractSpecificTokens('the key is "mycox-api-key" for now'), []);
+  assert.deepEqual(extractSpecificTokens('community 7362d16f-cd31-4eab-a02e-1891fa888c66 was used'), []);
+  assert.deepEqual(extractSpecificTokens('token "sk-ant-api03-abcdefghijklmnop12345"'), []);
+});
