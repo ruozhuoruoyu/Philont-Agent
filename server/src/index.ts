@@ -80,6 +80,8 @@ import {
   internalAudit,
   type ReminderPayload,
   markWebuiUserActivity,
+  runStartupIntegrityCheck,
+  runDailyHealthCheck,
 } from './chat-handler.js';
 import { currentPhraseLang } from './response_language.js';
 import { readdirSync } from 'node:fs';
@@ -866,6 +868,22 @@ server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`  HTTP API:  http://localhost:${PORT}/api/memory/stats`);
   console.log(`  WebSocket: ws://localhost:${PORT}`);
+
+  // Referential integrity. Deferred to here rather than run at module load: the push channels and the
+  // skill registry are populated by the gateway/hot-reload startup paths above, and a check that runs
+  // before the registries exist would report every reference as broken. Advisory — never blocks boot.
+  setTimeout(() => {
+    void runStartupIntegrityCheck()
+      .then(() => runDailyHealthCheck())
+      .catch((e) => console.warn('[integrity] check failed to run:', e));
+  }, 8000);
+
+  // ...and once a day thereafter. Daily rather than hourly because the report competes for the owner's
+  // attention with everything else the agent sends, and it only fires when something is degenerate.
+  const healthTimer = setInterval(() => {
+    void runDailyHealthCheck().catch(() => {});
+  }, 24 * 60 * 60 * 1000);
+  healthTimer.unref?.();
 
   // Aux-LLM health probe. The aux model is shared by reflection, the learning judge, auth-intent and the
   // intent router; when its endpoint is misconfigured it fails SILENTLY (each caller degrades gracefully,

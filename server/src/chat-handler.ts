@@ -63,6 +63,7 @@ import {
   parseCompass,
   renderCompassForPrompt,
   reconcileCompassPursuits,
+  compassPursuitId,
   type CompassConfig,
   TsDriveRuntime,
   TsTaskCommitmentDrive,
@@ -275,6 +276,20 @@ import {
 } from './autonomy_status.js';
 import { recordAutonomyReach, autonomyReachSummary, renderAutonomyReach } from './autonomy_reach.js';
 import {
+  computeHealthRatios,
+  renderHealthReport,
+  shouldSendHealthReport,
+  recordJudgeVerdict,
+  judgeWindowTally,
+} from './health_report.js';
+import {
+  buildIntegrityChecks,
+  runIntegrityChecks,
+  renderIntegrityReport,
+  type IntegrityReport,
+} from './referential_integrity.js';
+import { findPushChannel, describePushChannelMiss } from './push/channel.js';
+import {
   renderCapabilityManifest,
   renderCapabilityDetail,
   capabilityManifestInjectEnabled,
@@ -358,6 +373,7 @@ import {
   buildLanguageDirective,
   observeUserLanguage,
   setUserLocaleProvider,
+  currentPhraseLang,
 } from './response_language.js';
 
 const llm = createLLMAdapter();
@@ -804,6 +820,114 @@ const selfReflector = new SelfReflector(
   memory.driveOutcomes,
   { auditHook: internalAudit, rootPursuitId: BOOTSTRAP_ROOT_PURSUIT_ID },
 );
+
+// Referential integrity (2026-07-23). The self.* check below covers ONE reference class; the defects that
+// actually cost months — a subscription naming a channel that does not resolve, a DB skill the disk prune
+// treats as an orphan — live in the classes nothing checked. See referential_integrity.ts for why a written
+// lesson was not enough. Advisory: a broken reference means a feature is silently dead, but refusing to
+// boot over it is worse. Runs after the skill/channel registries are populated, hence deferred.
+export async function runStartupIntegrityCheck(): Promise<IntegrityReport> {
+  let diskNames: string[] = [];
+  try {
+    diskNames = (await loadSkills(process.cwd(), [bundledSkillsDir])).map((p) => p.name);
+  } catch {
+    diskNames = [];
+  }
+  const report = runIntegrityChecks(
+    buildIntegrityChecks({
+      listSubscriptions: () => memory.pushSubscriptions.listActive().map((s) => ({ channel: s.channel, peer: s.peer })),
+      resolvePushChannel: (c) => findPushChannel(c),
+      describePushChannelMiss,
+      listExternalSkills: () => memory.skills.listExternalSkills().map((s) => ({ name: s.name, source: s.source })),
+      listDiskSkillNames: () => diskNames,
+      listCompassPursuits: () =>
+        memory.pursuits
+          .listActive(BOOTSTRAP_ROOT_PURSUIT_ID)
+          .filter((p) => p.origin === 'compass')
+          .map((p) => ({ id: p.id, title: p.title })),
+      compassFocusIds: () => (loadedCompass?.focus ?? []).map((f) => compassPursuitId(f.name)),
+    }),
+  );
+  for (const line of renderIntegrityReport(report)) {
+    if (line.includes('⛔') || line.includes('⚠')) console.warn(line);
+    else console.log(line);
+  }
+  lastIntegrityReport = report;
+  return report;
+}
+
+/**
+ * The daily self-check, delivered to the OWNER.
+ *
+ * This is the piece the console instrumentation could never be. Every number below was already being
+ * computed and written to a log; the log was read by nobody for months while five subsystems sat dead.
+ * See health_report.ts — the design property is not "report health", it is that the report goes to the
+ * one recipient who cannot silently drop it.
+ *
+ * Sent only when something is actually wrong. A report that arrives every day is one a person learns to
+ * skip, which is precisely how the console stopped working.
+ */
+export async function runDailyHealthCheck(): Promise<string | null> {
+  try {
+    const lang = currentPhraseLang() === 'en' ? 'en' : 'zh';
+    const reach = autonomyReachSummary();
+    const rules = memory.routingRules.listAll();
+    const compassFocus = loadedCompass?.focus ?? [];
+    const compassPursuits = memory.pursuits
+      .listActive(BOOTSTRAP_ROOT_PURSUIT_ID)
+      .filter((p) => p.origin === 'compass');
+    const dayAgo = Date.now() - 86_400_000;
+    const subs = memory.pushSubscriptions.listActive();
+
+    const ratios = computeHealthRatios(
+      {
+        autonomy: { found: reach.found, eligible: reach.eligible },
+        judge: judgeWindowTally(),
+        routingRules: { validated: rules.filter((r) => r.confidence === 'validated').length, stored: rules.length },
+        focus: {
+          // "Advanced" means touched in the last day — the same lastTouchedAt the dormancy branch reads,
+          // so the report cannot disagree with the mechanism it is reporting on.
+          advanced: compassPursuits.filter((p) => (p.lastTouchedAt ?? 0) >= dayAgo).length,
+          declared: compassFocus.length,
+        },
+        push: {
+          deliverable: subs.filter((sub) => findPushChannel(sub.channel)).length,
+          active: subs.length,
+        },
+      },
+      lang,
+    );
+    const broken = (lastIntegrityReport?.violations ?? []).map((v) => ({
+      check: v.check,
+      ref: v.ref,
+      consequence: v.consequence,
+    }));
+
+    if (!shouldSendHealthReport(ratios, broken)) {
+      console.log('[health] daily self-check: nothing degenerate — not interrupting the owner');
+      return null;
+    }
+    const text = renderHealthReport(ratios, broken, lang);
+    console.log(`[health] daily self-check reporting to owner:\n${text}`);
+    for (const [, send] of webuiClients) {
+      try { send({ type: 'finding', text }); } catch { /* one dead client must not stop the rest */ }
+    }
+    await pushDispatcher
+      .enqueue({ severity: 'digest', kind: 'health_selfcheck', targetRef: 'health:daily', text })
+      .catch((e) => console.warn('[health] push dispatch threw', e));
+    return text;
+  } catch (e) {
+    // Reporting on health must never be the thing that breaks.
+    console.warn('[health] daily self-check failed, ignored', (e as Error)?.message ?? e);
+    return null;
+  }
+}
+
+/** Latest startup integrity result, for the owner-facing health report. */
+let lastIntegrityReport: IntegrityReport | null = null;
+export function getLastIntegrityReport(): IntegrityReport | null {
+  return lastIntegrityReport;
+}
 
 // K3 cleanup: at startup, verify that sourceRefs in self.summary / strengths / growth_edges
 // still reference valid skills / pursuits. High stale rate → asynchronously trigger reflectSelf regeneration,
@@ -5882,6 +6006,9 @@ function shadowLearningJudge(
         console.log(
           `[learning-judge] shadow session=${sessionId} verdict=${v.outcome} basis=${v.basis} "${v.evidence}"`,
         );
+        // ...and count it, so "0 verified out of 12" is a number something can read rather than one a
+        // human has to tally off a pasted log.
+        recordJudgeVerdict(v.outcome);
         // Carry an unconfirmed goal into the next run's outcome row (see JUDGE_GOAL_UNMET_SIGNATURE).
         // The judge stays shadow-only: this changes no control flow, it only makes a recurring
         // "goal not met" visible to the same detector that already watches for recurring blocks.
