@@ -159,6 +159,7 @@ import { classifyExploreControlReply, resolveExploreTarget } from './explore_con
 import { judgeRun, type JudgeToolRecord } from './learning_judge.js';
 import {
   extractScheduleIdFromSession,
+  utcDateString,
   summarizeTurnTrace,
   renderScheduleOutcomesSection,
   type ToolCallTrace,
@@ -275,6 +276,10 @@ import {
   classifyProposalReply,
 } from './autonomy_status.js';
 import { recordAutonomyReach, autonomyReachSummary, renderAutonomyReach } from './autonomy_reach.js';
+import {
+  adjudicateSessionClaim,
+  shouldAdjudicateSessionClaim,
+} from './session_claim_adjudicator.js';
 import {
   computeHealthRatios,
   renderHealthReport,
@@ -867,8 +872,19 @@ export async function runStartupIntegrityCheck(): Promise<IntegrityReport> {
  * Sent only when something is actually wrong. A report that arrives every day is one a person learns to
  * skip, which is precisely how the console stopped working.
  */
-export async function runDailyHealthCheck(): Promise<string | null> {
+export async function runDailyHealthCheck(force = false): Promise<string | null> {
   try {
+    // Once per CALENDAR DAY, persisted. The first version fired 8s after every boot plus every 24h of
+    // uptime, so three restarts in one morning meant three attempts — the second of which was correctly
+    // swallowed by the generic 4-hour digest rate limiter, turning "daily self-check" into "whatever
+    // survives the limiter after a restart". A cadence that depends on process lifetime is not a cadence.
+    const today = utcDateString(Date.now());
+    const lastSent = memory.facts.getFact('system', 'health_selfcheck_last_ymd');
+    const lastYmd = (lastSent?.value as { ymd?: string } | undefined)?.ymd;
+    if (!force && lastYmd === today) {
+      console.log(`[health] daily self-check already sent today (${today}) — not repeating on restart`);
+      return null;
+    }
     const lang = currentPhraseLang() === 'en' ? 'en' : 'zh';
     const reach = autonomyReachSummary();
     const rules = memory.routingRules.listAll();
@@ -884,6 +900,12 @@ export async function runDailyHealthCheck(): Promise<string | null> {
         autonomy: { found: reach.found, eligible: reach.eligible },
         judge: judgeWindowTally(),
         routingRules: { validated: rules.filter((r) => r.confidence === 'validated').length, stored: rules.length },
+        // The ratio that would have shown the frozen skill ladder on day one. It was defined in
+        // health_report.ts and then not passed in — an unused field is a check that does not exist.
+        skills: (() => {
+          const drafts = memory.skills.listByMaturity('draft', 500);
+          return { offered: drafts.filter((d) => (d.offeredCount ?? 0) > 0).length, drafts: drafts.length };
+        })(),
         focus: {
           // "Advanced" means touched in the last day — the same lastTouchedAt the dormancy branch reads,
           // so the report cannot disagree with the mechanism it is reporting on.
@@ -909,6 +931,9 @@ export async function runDailyHealthCheck(): Promise<string | null> {
     }
     const text = renderHealthReport(ratios, broken, lang);
     console.log(`[health] daily self-check reporting to owner:\n${text}`);
+    // Stamped before dispatch, not after: a delivery failure must not turn into a retry every restart.
+    // The report is worth sending once a day; it is not worth hammering a channel over.
+    memory.facts.storeFact({ namespace: 'system', key: 'health_selfcheck_last_ymd', value: { ymd: today }, confidence: 1 });
     for (const [, send] of webuiClients) {
       try { send({ type: 'finding', text }); } catch { /* one dead client must not stop the rest */ }
     }
@@ -4767,7 +4792,7 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
         // Otherwise playbooks would be sorted by useCount too; always 0 → ranked last, never making top-15, effectively invisible.
         && s.maturity !== 'playbook'
       );
-  const positives = relevanceOn
+  const ranked = relevanceOn
     ? selectRelevantSkills(memory.skills, recallQuery, {
         pool: 'positive',
         k: POSITIVE_CAP,
@@ -4775,6 +4800,22 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
         fallback: positiveFallback,
       }).filter((s) => !META_SKILL_NAMES.has(s.name))
     : positiveFallback().slice(0, SKILL_INDEX_MAX_LINES);
+  // ONE slot of the index is reserved for a draft nobody has been shown yet.
+  //
+  // Without it the ladder cannot turn at all. Production offered the SAME six mature skills on every turn,
+  // across completely unrelated queries, for as long as the funnel has been logged: ranking is by
+  // use_count × success-rate × recency, which a never-used draft is at the bottom of by construction, and
+  // relevance cannot break the tie because a Chinese query tokenizes to nothing to match on. So
+  // offered_count stayed 0 forever, "never shown" and "shown and declined" stayed indistinguishable, and
+  // the creation-side bound added on 2026-07-23 turned that standstill into a permanent freeze — the
+  // reflector stops minting until untested drafts drain, and they could not drain.
+  //
+  // Exactly one slot, and it comes out of the cap rather than adding to it: context budget is a hard
+  // constraint, and the point is to let the pool ROTATE, not to promote drafts over things that work.
+  const explore = memory.skills
+    .untestedDraftsForExploration(1)
+    .filter((s) => !META_SKILL_NAMES.has(s.name) && !ranked.some((r) => r.name === s.name));
+  const positives = explore.length > 0 ? [...ranked.slice(0, Math.max(0, POSITIVE_CAP - 1)), ...explore] : ranked;
   if (positives.length > 0) {
     // SKILL FUNNEL VISIBILITY (2026-07-14). Measured over 7 days / 462 turns: 64 skills, use_skill called
     // 10 times, validated=0, draft pinned at exactly the prune cap (40). The maturity ladder's ONLY rung is
@@ -9771,6 +9812,44 @@ async function runToolLoop(
               }
             : undefined,
         });
+        // Pattern floor → model ceiling. evaluateHonesty's session-claim rule matches a few phrasings and
+        // will never match them all; asking whether a paragraph ASSERTS something is inference, and this
+        // repo has already paid once for handing inference to a keyword list (the authorization classifier
+        // that read three ordinary questions as consent). So when the deterministic precondition holds —
+        // no session exists, no deep_explore succeeded — and the patterns found nothing, the aux model is
+        // asked the reading-comprehension question the list cannot answer. It returns `unknown` on every
+        // failure path, so an unconfigured or broken aux leaves exactly today's behaviour rather than
+        // silently deleting the guard.
+        let honestyVerdict = honesty;
+        if (
+          !honestyVerdict &&
+          shouldAdjudicateSessionClaim({
+            hasActiveSession: !!ownerReasoning,
+            deepExploreSucceededThisTurn: (signalBus.inTurnRecords ?? []).some(
+              (r) => r.success && r.toolName === 'deep_explore',
+            ),
+            textLength: response.content.length,
+          })
+        ) {
+          const verdict = await adjudicateSessionClaim(response.content);
+          if (verdict === 'asserts') {
+            console.warn(`[honesty] session=${sessionId} adjudicator caught a session claim the patterns missed`);
+            honestyVerdict = {
+              severity: 'high',
+              reason: 'fabricated_reasoning_session',
+              matchedClaim: '(adjudicated)',
+              okCount: 0,
+              failCount: 0,
+              unknownCount: 0,
+              evidence:
+                'You stated that a reasoning session exists or advanced, but there is no active session ' +
+                'and no deep_explore call succeeded this turn. If the call failed, say so and why; if you ' +
+                'want one, call deep_explore(action=start). Do not describe rounds, frontiers or ' +
+                'evaluations that did not happen.',
+            };
+          }
+        }
+
         // Fold this turn into the latch BEFORE acting on the verdict: a fresh "现在跑" / announced-but-
         // did-nothing (0 tools) arms it; an actual execution clears it; a fire bumps the violation counter.
         if (honestySessionEnabled) {
@@ -9781,13 +9860,13 @@ async function runToolLoop(
           honestySessionStore.update(sessionId, {
             promisedRun: !!findRunPromise(response.content) || announcedStall,
             didExecute: turnDidExecute(recentToolResults),
-            fired: !!honesty,
+            fired: !!honestyVerdict,
             // Arms the sticky latch: from here on, an execution claim with zero execution tools gets no
             // free "sorry, I have not run it" exit — that exit is what it took last time.
-            fabricatedExec: honesty?.reason === 'fabricated_execution_claim',
+            fabricatedExec: honestyVerdict?.reason === 'fabricated_execution_claim',
           });
         }
-        if (!honesty) {
+        if (!honestyVerdict) {
           // Explicitly print "passed" status so tests can see the gate actually ran + no false positives
           const okN = recentToolResults.filter((r) => r.content.startsWith('✓')).length;
           const failN = recentToolResults.filter((r) => r.content.startsWith('⚠')).length;
@@ -9795,27 +9874,27 @@ async function runToolLoop(
             `[honesty] session=${sessionId} passed (${okN} ok / ${failN} fail / ${recentToolResults.length} total)`,
           );
         }
-        if (honesty) {
+        if (honestyVerdict) {
           honestyAttempts++;
           audit.append('self_domain_write', {
             source: 'honesty_gate',
             origin: 'Internal',
             toolName: 'honesty_gate_fired',
             sessionId,
-            severity: honesty.severity,
-            reason: honesty.reason,
-            failCount: honesty.failCount,
-            okCount: honesty.okCount,
-            matchedClaim: honesty.matchedClaim,
+            severity: honestyVerdict.severity,
+            reason: honestyVerdict.reason,
+            failCount: honestyVerdict.failCount,
+            okCount: honestyVerdict.okCount,
+            matchedClaim: honestyVerdict.matchedClaim,
           });
           recordControllerFire('honesty');
           console.warn(
-            `[honesty] session=${sessionId} fired severity=${honesty.severity} reason=${honesty.reason} failCount=${honesty.failCount} okCount=${honesty.okCount} claim="${honesty.matchedClaim}"`,
+            `[honesty] session=${sessionId} fired severity=${honestyVerdict.severity} reason=${honestyVerdict.reason} failCount=${honestyVerdict.failCount} okCount=${honestyVerdict.okCount} claim="${honestyVerdict.matchedClaim}"`,
           );
           // K7→K8 bridge: write fire to signalBus so the finally block produces a K8 initiative.
           // Take **the most recent** fire (honestyAttempts cap is 1 per turn; at most one overwrite).
           signalBus.honesty = {
-            evaluation: honesty,
+            evaluation: honestyVerdict,
             toolResults: recentToolResults,
             assistantText: response.content,
           };
@@ -9827,9 +9906,9 @@ async function runToolLoop(
           // following a procedure is more actionable for the LLM than simply saying "don't lie".
           // Each severity level has its own standard correction routine.
           let reminder: string;
-          if (honesty.reason === 'fabricated_size_claim') {
+          if (honestyVerdict.reason === 'fabricated_size_claim') {
             reminder =
-              `[drive Honesty/fabricated_size] You just said "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
+              `[drive Honesty/fabricated_size] You just said "${honestyVerdict.matchedClaim}", but ${honestyVerdict.evidence}\n\n` +
               `**Verification steps (execute in order)**:\n` +
               `  1. Check the actual "bytes" value in the most recent stat / dir / ls / readFile / tool JSON output;\n` +
               `  2. **Compute the ratio**: claimed value ÷ actual value. E.g. claimed 577 KB / actual 18 bytes ≈ 30,000×.\n` +
@@ -9839,15 +9918,15 @@ async function runToolLoop(
               `  4. If the tool returned an anomalous value (e.g. an 18-byte .docx — files < 256 bytes are usually a JSON error body, not real binary),\n` +
               `     tell the user honestly "this looks wrong — the API may have returned an error response" — **do not pretend success**.\n\n` +
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
-          } else if (honesty.reason === 'fabricated_execution_claim') {
+          } else if (honestyVerdict.reason === 'fabricated_execution_claim') {
             // This is the branch that actually fired in prod (07-14), twice in one session — fabricate,
             // apologise, fabricate again. Step 4 below WAS the mechanism: "if you will not run it, say 'not
             // run yet'" is a free exit that costs nothing, satisfies the gate, and changes nothing, while the
             // pressure that produced the fabrication survives intact into the next turn. On a repeat the exit
             // is removed: the only non-execution reply that counts is a NAMED blocker, which an apology
             // cannot fake.
-            reminder = honesty.repeatOffense
-              ? `[drive Honesty/fabricated_execution · REPEAT] You wrote "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
+            reminder = honestyVerdict.repeatOffense
+              ? `[drive Honesty/fabricated_execution · REPEAT] You wrote "${honestyVerdict.matchedClaim}", but ${honestyVerdict.evidence}\n\n` +
                 `**You already did this once in THIS session, acknowledged it, and have now done it again. ` +
                 `An apology is therefore not an acceptable reply — it did not work last time.**\n` +
                 `  1. There is no result to report. No process started, no output was produced, no exit code was ` +
@@ -9859,7 +9938,7 @@ async function runToolLoop(
                 `restatement, not a blocker, and will be rejected;\n` +
                 `  4.${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n\n` +
                 `This is an intra-turn internal correction. Do not surface this reminder to the user.`
-              : `[drive Honesty/fabricated_execution] You wrote "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
+              : `[drive Honesty/fabricated_execution] You wrote "${honestyVerdict.matchedClaim}", but ${honestyVerdict.evidence}\n\n` +
                 `**This is the most serious dishonesty: reporting results of a computation that never ran this turn.**\n` +
                 `  1. Do NOT narrate numbers / eigenvalues / ratios / "shell 返回" you did not get from a tool THIS turn;\n` +
                 `  2. In this same reply, actually CALL the tool (shell / pariGp) and wait for its ✓ / ⚠ output;\n` +
@@ -9867,44 +9946,44 @@ async function runToolLoop(
                 `  4. If you will not run it now, tell the user plainly "not run yet" — never invent the result;\n` +
                 `  5.${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n\n` +
                 `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
-          } else if (honesty.reason === 'run_promise_without_exec') {
+          } else if (honestyVerdict.reason === 'run_promise_without_exec') {
             reminder =
-              `[drive Honesty/say_do_gap] You said "${honesty.matchedClaim}" but issued no tool call — ${honesty.evidence}\n\n` +
+              `[drive Honesty/say_do_gap] You said "${honestyVerdict.matchedClaim}" but issued no tool call — ${honestyVerdict.evidence}\n\n` +
               `**Announcing a run is not running. Close the say-do gap NOW:**\n` +
               `  1. In THIS reply, call the shell / pariGp tool to actually run it — do not end the turn on "现在跑";\n` +
               `  2. If you cannot or will not run it, say so plainly — do not promise a run you will not perform;\n` +
               `  3. Never end a turn with "I'll run it now" and no tool call — that is the exact loop the user flagged.\n\n` +
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
-          } else if (honesty.reason === 'announced_action_without_doing') {
+          } else if (honestyVerdict.reason === 'announced_action_without_doing') {
             reminder =
-              `[drive Honesty/say_do_gap] You announced "${honesty.matchedClaim}" but issued no tool call — ${honesty.evidence}\n\n` +
+              `[drive Honesty/say_do_gap] You announced "${honestyVerdict.matchedClaim}" but issued no tool call — ${honestyVerdict.evidence}\n\n` +
               `**Announcing is not doing. Close the stall NOW (the turn is about to end = you yield and the in-progress "…" hangs forever):**\n` +
               `  1. In THIS reply, actually take the action you announced — call webSearch / webFetch for research, or start deep_explore — do not end on a trailing "…";\n` +
               `  2. If you genuinely cannot act now (missing input / not your call), say so plainly and ask the user — do not narrate progress you are not making;\n` +
               `  3. Never end a turn with a present-progressive "I'm researching…" / a trailing "…" and zero tool calls — that is the exact stall the user flagged.\n\n` +
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
-          } else if (honesty.reason === 'skill_forget_claim_without_call') {
+          } else if (honestyVerdict.reason === 'skill_forget_claim_without_call') {
             reminder =
-              `[drive Honesty/skill_forget] You said "${honesty.matchedClaim}" but issued no successful forget_skill / uninstallSkill call — ${honesty.evidence}\n\n` +
+              `[drive Honesty/skill_forget] You said "${honestyVerdict.matchedClaim}" but issued no successful forget_skill / uninstallSkill call — ${honestyVerdict.evidence}\n\n` +
               `**Pick one of two paths — do not straddle**:\n` +
               `  Path A · Actually delete: in THIS reply CALL forget_skill — forget_skill(contains="mycox") to bulk-delete every self-learned skill mentioning it, or forget_skill(name="<exact-slug>") for one. Then report the deleted names the tool returned (deleted=[…]).\n` +
               `    - forget_skill removes DB-only self-learned skills; file-backed (bundled/installed) skills are protected and must go through uninstallSkill instead.\n` +
               `  Path B · Correct yourself: honestly tell the user you have NOT deleted anything yet — do not write "已清除 / deleted" or narrate a forget_skill(…) call you did not issue.\n\n` +
               `Writing the tool call in a Work Log is NOT calling it. Nothing was deleted until forget_skill returns ✓ with deleted names.\n` +
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
-          } else if (honesty.severity === 'high') {
+          } else if (honestyVerdict.severity === 'high') {
             reminder =
-              `[drive Honesty/high] Your draft reply contains a completion claim "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
+              `[drive Honesty/high] Your draft reply contains a completion claim "${honestyVerdict.matchedClaim}", but ${honestyVerdict.evidence}\n\n` +
               `**Verification steps (execute in order)**:\n` +
               `  1. Re-read each tool_result prefix: ✓ TOOL OK / ⚠ TOOL FAILED;\n` +
               `  2. List the names of failing commands + exit code / error message (copy key sentences from ⚠ sections);\n` +
               `  3. In one sentence, distinguish: **what succeeded / what failed / what the user should do next**;\n` +
-              `  4. Do not repeat "${honesty.matchedClaim}" — a success claim inconsistent with the failure count is a falsehood;\n` +
+              `  4. Do not repeat "${honestyVerdict.matchedClaim}" — a success claim inconsistent with the failure count is a falsehood;\n` +
               `  5. If there is an untried reasonable path (different command / path / permissions), try one more tool call.\n\n` +
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
-          } else if (honesty.reason === 'memory_claim_without_write') {
+          } else if (honestyVerdict.reason === 'memory_claim_without_write') {
             reminder =
-              `[drive Honesty/memory_claim] You said "${honesty.matchedClaim}" but did not call store_fact — ${honesty.evidence}\n\n` +
+              `[drive Honesty/memory_claim] You said "${honestyVerdict.matchedClaim}" but did not call store_fact — ${honestyVerdict.evidence}\n\n` +
               `**Pick one of two paths — do not straddle**:\n` +
               `  Path A · Actually persist: call store_fact(namespace, key, value), then reply to the user;\n` +
               `    - Preference/constraint → namespace=user, key=preferences.X / constraints.X\n` +
@@ -9914,7 +9993,7 @@ async function runToolLoop(
               `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
           } else {
             reminder =
-              `[drive Honesty/${honesty.reason}] Your draft reply contains a completion claim "${honesty.matchedClaim}", but ${honesty.evidence}\n\n` +
+              `[drive Honesty/${honestyVerdict.reason}] Your draft reply contains a completion claim "${honestyVerdict.matchedClaim}", but ${honestyVerdict.evidence}\n\n` +
               `**Principle: your reply must state facts, not subjective assertions.**\n` +
               `  ✓ Factual: "wrote /tmp/out.json (2.3 KB); stat shows mtime=now"\n` +
               `  ✗ Subjective: "done" / "completed" / "handled" — the user cannot verify these\n\n` +
@@ -9937,8 +10016,8 @@ async function runToolLoop(
           messages.push({ role: 'user', content: reminder });
           onTrace?.({
             kind: 'internal-gate', tier: 4,
-            text: `Honesty gate triggered (${honesty.severity}), verifying / rewriting`,
-            meta: { gateName: 'Honesty', severity: honesty.severity },
+            text: `Honesty gate triggered (${honestyVerdict.severity}), verifying / rewriting`,
+            meta: { gateName: 'Honesty', severity: honestyVerdict.severity },
           });
           continue;
         }

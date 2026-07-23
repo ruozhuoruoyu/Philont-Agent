@@ -12,6 +12,7 @@ import {
   findOrderClaim,
   classifyToolResult,
   findSkillForgetClaim,
+  findReasoningSessionClaim,
 } from '../src/index.js';
 
 // ── findOrderClaim (estimate-honesty: asymptotic/quantitative bound assertions) ──────────────
@@ -1222,4 +1223,39 @@ test('evaluateHonesty: latch does not bite a session that actually executes', ()
     session: { unkeptRunPromise: false, priorViolations: 1, fabricatedExecClaim: true },
   });
   assert.equal(r, null, 'an armed latch must not fire on a turn that genuinely executed');
+});
+
+// ── fabricated_reasoning_session ────────────────────────────────────────────
+//
+// The hole the 2026-07-21 narrowing opened, arriving two days later. deep_explore(continue) returned
+// "No in-progress session", the next advance was blocked by the per-turn cap, and the reply said
+// "深度探索会话已启动，7个方向的全面评估框架已构建。本轮的收敛阶段已完成一轮评估" with a scoring table.
+// No session, no round. The turn after that claimed a full architecture design with ZERO tool calls.
+// Gating the round-result branch on an active session made that case exactly unreachable.
+
+test('findReasoningSessionClaim: 生产原文 —— 声称会话已启动', () => {
+  assert.ok(findReasoningSessionClaim('深度探索会话已启动，7个方向的全面评估框架已构建。'));
+  assert.ok(findReasoningSessionClaim('深度探索会话正在向方向6收敛。本回合完成了完整的架构设计'));
+  // The full production reply, which also contains "本轮的收敛阶段已完成一轮评估" — deliberately matched
+  // via the session claim rather than by a "本回合完成了…" rule, which an honest plan turn would trip.
+  assert.ok(findReasoningSessionClaim('深度探索会话已启动，7个方向的全面评估框架已构建。本轮的收敛阶段已完成一轮评估。'));
+  assert.equal(findReasoningSessionClaim('本回合完成了三个交付物的验证'), null, '普通 plan 轮次的真话不该被拦');
+});
+
+test('findReasoningSessionClaim: 英文表述', () => {
+  assert.ok(findReasoningSessionClaim('The deep_explore session has been started and one round completed.'));
+  assert.ok(findReasoningSessionClaim('I started a reasoning session on your question.'));
+});
+
+test('findReasoningSessionClaim: 编号例行任务不会被误判(这正是当初收窄的原因)', () => {
+  // A scheduled check-in numbering its own runs never claims a deep_explore SESSION — that is the
+  // discriminator that lets this branch exist without bringing back the false positive.
+  assert.equal(findReasoningSessionClaim('MycoX 第25轮巡检完成，热榜无变化'), null);
+  assert.equal(findReasoningSessionClaim('第25次运行，结果与上次相同'), null);
+});
+
+test('findReasoningSessionClaim: 未来意图与否定不算声称', () => {
+  assert.equal(findReasoningSessionClaim('我现在要启动一个深度探索会话'), null);
+  assert.equal(findReasoningSessionClaim('目前没有进行中的深度探索会话'), null);
+  assert.equal(findReasoningSessionClaim('No deep_explore session is running right now.'), null);
 });

@@ -679,8 +679,15 @@ export class SkillStore extends EventEmitter {
    * the cap has to evict something to make room.
    */
   untestedDraftCount(): number {
+    // Counts only what REFLECTION minted. The first version counted every draft, and importSkills does not
+    // set a maturity — so createSkill's default made all 68 disk-loaded skills "untested drafts", pushed the
+    // count past the cap on its own, and froze the reflector permanently. The number is an accusation
+    // against the generator, so it must only count the generator's own output.
     const row = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM memory_skills WHERE maturity = 'draft' AND COALESCE(offered_count, 0) = 0`)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM memory_skills
+         WHERE maturity = 'draft' AND COALESCE(offered_count, 0) = 0 AND COALESCE(from_disk, 0) = 0`,
+      )
       .get() as { n: number };
     return row.n;
   }
@@ -748,6 +755,32 @@ export class SkillStore extends EventEmitter {
          ORDER BY created_at DESC`,
       )
       .all() as SkillRow[];
+    return rows.map(rowToSkill);
+  }
+
+  /**
+   * Reflection-minted drafts nobody has ever been shown, oldest-offered first.
+   *
+   * The exploration slot's supply. offered_count exists to tell "never shown" apart from "shown and
+   * declined" — but production shows the same six mature skills offered on every single turn regardless of
+   * the query, so no draft ever moved off zero, and the distinction the column was added to make could
+   * never be made. Relevance ranking cannot rescue this on its own: for a Chinese query the tokenizer
+   * yields nothing to match on, jaccard is zero across the board, and the order collapses back to
+   * use_count — which every draft is at the bottom of by definition.
+   *
+   * So one slot is reserved and drawn from here. Ordering is least-recently-offered so the pool rotates
+   * rather than re-showing the same candidate, and disk skills are excluded because they are not
+   * hypotheses the reflector is on the hook for.
+   */
+  untestedDraftsForExploration(limit = 1): Skill[] {
+    const rows = this.db
+      .prepare<[number]>(
+        `SELECT * FROM memory_skills
+         WHERE maturity = 'draft' AND COALESCE(from_disk, 0) = 0 AND kind != 'negative'
+         ORDER BY COALESCE(offered_count, 0) ASC, COALESCE(last_used_at, 0) ASC, created_at ASC
+         LIMIT ?`,
+      )
+      .all(limit) as SkillRow[];
     return rows.map(rowToSkill);
   }
 

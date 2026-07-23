@@ -272,6 +272,7 @@ export {
   classifyToolResult,
   findExecutionClaim,
   findRunPromise,
+  findReasoningSessionClaim,
   findActionAnnouncement,
   findSkillForgetClaim,
   isExecutionTool,

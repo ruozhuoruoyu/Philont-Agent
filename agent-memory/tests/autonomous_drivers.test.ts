@@ -592,3 +592,11 @@ test('普通 pursuit 的判据不变:14 天 + 无产出', () => {
   });
   assert.deepEqual(proposeWith([staleWithOutput]), [], '有产出的顺带 pursuit 判据保持不变');
 });
+
+test('extractSpecificTokens: 《》里的自造小节标题不再成为研究目标', () => {
+  // 生产 2026-07-23:agent 在自己的回复里用《》标小节,于是去"研究"自己刚写的标题。
+  assert.deepEqual(extractSpecificTokens('本轮产出了《Barrier Survey》与《ES Quadratic Obstruction》两节'), []);
+  // 真正的作品名仍然保留 —— 中文作品,以及以单词命名的外文刊物。
+  assert.ok(extractSpecificTokens('参考《人月神话》').includes('人月神话'));
+  assert.ok(extractSpecificTokens('发表在《Nature》上').includes('Nature'));
+});

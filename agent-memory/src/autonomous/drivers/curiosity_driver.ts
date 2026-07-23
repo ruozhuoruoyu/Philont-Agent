@@ -110,12 +110,19 @@ export function extractSpecificTokens(text: string): string[] {
     }
   }
 
-  // 《》 book-title brackets: by convention these are book/work names; structural signal not required
+  // 《》 titles. The convention is CJK: a Chinese-language work, or a foreign publication named as one
+  // word (《Nature》). It used to accept anything at all — "structural signal not required, these are book
+  // names" — and production duly researched 《Barrier Survey》 and 《ES Quadratic Obstruction》, which were
+  // the agent's own section headings in its own reply. In a Chinese sentence 《》 marks any title, not only
+  // published works, so a multi-word ASCII phrase inside it is far more likely to be our own formatting
+  // than an external work worth looking up.
   const bookPattern = /《([^》]{2,40})》/g;
+  const CJK = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
   let bm: RegExpExecArray | null;
   while ((bm = bookPattern.exec(text)) !== null) {
     const inner = bm[1].trim();
-    if (inner.length >= 2) found.add(inner);
+    if (inner.length < 2) continue;
+    if (CJK.test(inner) || !/\s/.test(inner)) found.add(inner);
   }
 
   // Defence in depth: applied to every rule's output, not just the removed ones. A URL can carry a token
