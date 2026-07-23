@@ -98,6 +98,7 @@ import {
   shouldSkipHealthSend,
   nextHealthSendStamp,
   HEALTH_SEND_MAX_ATTEMPTS_PER_DAY,
+  dayCount,
 } from '../src/health_report.js';
 
 test('a delivered report is final for the day; a failed one may retry', () => {
@@ -145,4 +146,20 @@ test('retired rules are not evidence of failure — the denominator is the activ
   // But a genuinely unvalidating ACTIVE set still gets the honest interpretation.
   const [bad] = computeHealthRatios({ routingRules: { validated: 1, active: 200 } }, 'zh');
   assert.match(bad.line, /只增不学/);
+});
+
+test('dayCount: the boot-time blind spot — a restart must not erase the day', () => {
+  // At 16:53 the report carried two degenerate items; at 20:21, after a restart, the same day read
+  // "nothing degenerate" — partly real improvement, partly because the judge and autonomy windows were
+  // in-memory and the boot-time check runs 8 seconds in, when they are always empty. Day-keyed metrics
+  // rows survive the restart.
+  const snap = [
+    { key: 'judge.day.total.20260723', count: 12 },
+    { key: 'judge.day.verified.20260723', count: 0 },
+    { key: 'autonomy.day.found.20260723', count: 45 },
+  ];
+  assert.equal(dayCount(snap, 'judge.day.total', '20260723'), 12);
+  assert.equal(dayCount(snap, 'judge.day.verified', '20260723'), 0);
+  assert.equal(dayCount(snap, 'autonomy.day.eligible', '20260723'), 0, 'a key never written reads as zero');
+  assert.equal(dayCount(snap, 'judge.day.total', '20260724'), 0, 'yesterday does not leak into today');
 });

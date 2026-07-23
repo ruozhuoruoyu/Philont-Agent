@@ -293,3 +293,18 @@ export function nextHealthSendStamp(
   const attempts = prev && prev.ymd === today ? prev.attempts + 1 : 1;
   return { ymd: today, delivered: delivered || (prev?.ymd === today && prev.delivered === true), attempts };
 }
+
+/**
+ * Read a day-keyed counter out of a metrics snapshot.
+ *
+ * Why day-keyed counters exist at all: the judge tally and the autonomy-reach counter above are in-memory,
+ * and the boot-time health check runs eight seconds after start — so at every boot-time check those two
+ * ratios are EMPTY, the corresponding lines are omitted for lack of data, and a report that fired at 16:53
+ * with two degenerate items can honestly say "nothing degenerate" at 20:21 after a restart. With an owner
+ * who restarts several times a day, the two highest-signal ratios were structurally invisible to the very
+ * check meant to surface them. Day-keyed rows in the metrics store survive restarts; the in-memory
+ * versions stay for the /autonomy display, which wants a rolling window and a per-driver breakdown.
+ */
+export function dayCount(snapshot: ReadonlyArray<{ key: string; count: number }>, prefix: string, ymd: string): number {
+  return snapshot.find((r) => r.key === `${prefix}.${ymd}`)?.count ?? 0;
+}

@@ -285,7 +285,7 @@ import {
   renderHealthReport,
   shouldSendHealthReport,
   recordJudgeVerdict,
-  judgeWindowTally,
+  dayCount,
   shouldSkipHealthSend,
   nextHealthSendStamp,
   HEALTH_SEND_MAX_ATTEMPTS_PER_DAY,
@@ -890,7 +890,10 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
       return null;
     }
     const lang = currentPhraseLang() === 'en' ? 'en' : 'zh';
-    const reach = autonomyReachSummary();
+    // Day-keyed metrics, not the in-memory windows: the boot-time check runs 8s after start, when every
+    // in-memory window is empty — which silently deleted the judge and autonomy lines from every
+    // boot-time report. See dayCount in health_report.ts.
+    const metricsSnap = memory.metrics.snapshot();
     const rules = memory.routingRules.listAll();
     const compassFocus = loadedCompass?.focus ?? [];
     const compassPursuits = memory.pursuits
@@ -901,8 +904,14 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
 
     const ratios = computeHealthRatios(
       {
-        autonomy: { found: reach.found, eligible: reach.eligible },
-        judge: judgeWindowTally(),
+        autonomy: {
+          found: dayCount(metricsSnap, 'autonomy.day.found', today),
+          eligible: dayCount(metricsSnap, 'autonomy.day.eligible', today),
+        },
+        judge: {
+          verified: dayCount(metricsSnap, 'judge.day.verified', today),
+          total: dayCount(metricsSnap, 'judge.day.total', today),
+        },
         routingRules: {
           validated: rules.filter((r) => r.confidence === 'validated').length,
           active: rules.filter((r) => r.confidence !== 'retired').length,
@@ -3080,6 +3089,11 @@ const autonomousInterruptSink: InterruptSink = {
     // Count it for the OWNER-facing summary too. The console funnel below is watchable by whoever is
     // reading a terminal; /autonomy is where the person who asked "why do I never perceive this?" looks.
     recordAutonomyReach(payload.driver, severity === 'high');
+    try {
+      const ymd = utcDateString(Date.now());
+      memory.metrics.increment(`autonomy.day.found.${ymd}`);
+      if (severity === 'high') memory.metrics.increment(`autonomy.day.eligible.${ymd}`);
+    } catch { /* same */ }
     if (severity !== 'high') {
       console.log(
         `[autonomy-funnel] initiative=${payload.initiativeId} kind=${payload.kind} [${who}] DROPPED at gate 1/9 ` +
@@ -6085,8 +6099,15 @@ function shadowLearningJudge(
           `[learning-judge] shadow session=${sessionId} verdict=${v.outcome} basis=${v.basis} "${v.evidence}"`,
         );
         // ...and count it, so "0 verified out of 12" is a number something can read rather than one a
-        // human has to tally off a pasted log.
+        // human has to tally off a pasted log. Twice, deliberately: in-memory for the rolling /autonomy
+        // window, and day-keyed in the metrics store so the daily self-check still sees the day's verdicts
+        // after a restart — the boot-time check runs 8s in, when every in-memory window is empty.
         recordJudgeVerdict(v.outcome);
+        try {
+          const ymd = utcDateString(Date.now());
+          memory.metrics.increment(`judge.day.total.${ymd}`);
+          if (v.outcome === 'success') memory.metrics.increment(`judge.day.verified.${ymd}`);
+        } catch { /* counting must never affect the turn */ }
         // Carry an unconfirmed goal into the next run's outcome row (see JUDGE_GOAL_UNMET_SIGNATURE).
         // The judge stays shadow-only: this changes no control flow, it only makes a recurring
         // "goal not met" visible to the same detector that already watches for recurring blocks.
