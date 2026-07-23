@@ -6515,25 +6515,35 @@ export async function handleChatSend(
         return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
       }
     }
+
     // Pending-auth resume: restore the ORIGINAL message's intent decision (the router above was skipped
-    // because re-classifying the bare "ok" would produce a garbage `direct` route). Without this the
-    // deep_explore route is lost on resume and force-start can never fire. See carriedIntent.
-    if (pending) {
-      const carried = carriedIntent.get(sessionId);
-      if (carried && Date.now() - carried.ts <= INTENT_CARRY_TTL_MS) {
-        intentDecision = carried.decision;
-        signalBus.intentDecision = carried.decision;
-        signalBus.selfReferentialMeta = carried.selfReferentialMeta;
-        signalBus.carriedExploreGoal = carried.goal;
-        if (carried.decision) {
-          console.log(
-            `[intent-router] session=${sessionId} auth-resume: carried route=${carried.decision.route} conf=${carried.decision.confidence} (router skipped on resume)`,
-          );
-        }
+  // because re-classifying the bare "ok" would produce a garbage `direct` route). Without this the
+  // deep_explore route is lost on resume and force-start can never fire. See carriedIntent.
+  //
+  // 2026-07-23: this block spent its whole life as DEAD CODE. It shipped (7a34cec) nested inside the
+  // auto-task-mode block, whose guard includes `!pending` — an `if (pending)` inside an `if (!pending …)`
+  // can never run. Nothing crashed and nothing logged, so nothing noticed: the resume flows it was written
+  // for still limped through because the inflight messages happen to carry the deep_explore nudge. What
+  // finally exposed it was a side effect three fixes away — the learning judge printing "original goal not
+  // recoverable" on every ask-tier-approved resume, and the `auth-resume: carried route` line having never
+  // once appeared in any production log. A fix whose effect is invisible-by-default needs its success line
+  // watched at least once in production before it may be called shipped.
+  if (pending) {
+    const carried = carriedIntent.get(sessionId);
+    if (carried && Date.now() - carried.ts <= INTENT_CARRY_TTL_MS) {
+      intentDecision = carried.decision;
+      signalBus.intentDecision = carried.decision;
+      signalBus.selfReferentialMeta = carried.selfReferentialMeta;
+      signalBus.carriedExploreGoal = carried.goal;
+      if (carried.decision) {
+        console.log(
+          `[intent-router] session=${sessionId} auth-resume: carried route=${carried.decision.route} conf=${carried.decision.confidence} (router skipped on resume)`,
+        );
       }
     }
+  }
 
-    // Cleanup-turn scoping: (1) flag the turn so runToolLoop rejects external write http (clear
+  // Cleanup-turn scoping: (1) flag the turn so runToolLoop rejects external write http (clear
     // turns drifted into re-registering the service being cleared); (2) soft-pause schedules that
     // mention the cleanup target so a scheduled check-in can't fire mid-clear and resurrect the
     // half-deleted state (prod: check-in raced the clear three runs in a row).

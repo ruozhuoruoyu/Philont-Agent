@@ -121,10 +121,13 @@ test('SkillStore: pruneDraftsToCap 只淘汰有证据不利的 draft,保护未�
   assert.equal(skills.pruneDraftsToCap(2), 0, 'an untried hypothesis is not evicted to make room');
   assert.equal(skills.count(), 7);
 
-  // Offer three of them; declining is real negative evidence, and those become the evictable pool.
+  // ONE offer is not evidence — the day the exploration slot went live, a draft shown once on an
+  // unrelated turn was evicted 17 minutes later. Declined = DECLINED_MIN_OFFERS distinct showings.
   skills.recordSkillsOffered(['draft-skill-0', 'draft-skill-1', 'draft-skill-2']);
+  assert.equal(skills.pruneDraftsToCap(2), 0, 'a single showing must not make a draft evictable');
+  for (let i = 0; i < 2; i++) skills.recordSkillsOffered(['draft-skill-0', 'draft-skill-1', 'draft-skill-2']);
   const deleted = skills.pruneDraftsToCap(2);
-  assert.equal(deleted, 3, 'only the ones with evidence against them go');
+  assert.equal(deleted, 3, 'three showings, never chosen — that is a real verdict');
   assert.equal(skills.count(), 4); // 3 never-offered drafts + 1 playbook
   assert.ok(skills.getByName('curated-playbook'), 'promoted playbook must NOT be pruned');
   for (const n of ['draft-skill-3', 'draft-skill-4', 'draft-skill-5']) {
@@ -135,14 +138,19 @@ test('SkillStore: pruneDraftsToCap 只淘汰有证据不利的 draft,保护未�
   assert.equal(skills.pruneDraftsToCap(10), 0);
 });
 
-test('SkillStore: untestedDraftCount 只数没被 offer 过的 draft', () => {
+test('SkillStore: untestedDraftCount 数的是"未被证明"的反思草稿 —— 被 offer 不算被测试', () => {
+  // Contract changed 2026-07-23 night. The offered=0 filter meant every draft the exploration slot showed
+  // left this pool, minting unblocked, and the just-explored drafts were evicted to make room — churn in
+  // which no hypothesis survived to a second showing. Offering is a SHOWING; using is a test.
   const { skills } = openMemoryDb(':memory:');
   skills.createSkill({ name: 'a', description: 'd', triggerKeywords: ['k'], actionTemplate: 't' });
   skills.createSkill({ name: 'b', description: 'd', triggerKeywords: ['k'], actionTemplate: 't' });
   skills.createSkill({ name: 'p', description: 'd', triggerKeywords: ['k'], actionTemplate: 't', maturity: 'playbook' });
   assert.equal(skills.untestedDraftCount(), 2, 'a promoted skill is not an untested draft');
   skills.recordSkillsOffered(['a']);
-  assert.equal(skills.untestedDraftCount(), 1, 'being offered is what makes a draft tested');
+  assert.equal(skills.untestedDraftCount(), 2, 'a showing does not unblock minting');
+  skills.recordUsage('a');
+  assert.equal(skills.untestedDraftCount(), 1, 'actually being USED hands the draft to the maturity ladder');
 });
 
 test('SkillStore: search by keyword', () => {
@@ -1306,22 +1314,22 @@ test('pruneDraftsToCap evicts declined drafts before never-offered ones', () => 
 
   const declined = mk('declined-often');
   const untried = mk('never-offered');
-  const alsoDeclined = mk('declined-once');
+  const shownOnce = mk('shown-once');
 
-  // The model was shown these and did not pick them — real negative evidence.
+  // Shown DECLINED_MIN_OFFERS+ times and never picked — real negative evidence.
   for (let i = 0; i < 5; i++) skills.recordSkillsOffered([declined.name]);
-  skills.recordSkillsOffered([alsoDeclined.name]);
+  // Shown once, on one arbitrary turn — that measures the turn's relevance, not the skill's worth.
+  skills.recordSkillsOffered([shownOnce.name]);
   // `untried` was never offered: no evidence for OR against it.
 
   assert.equal(skills.getByName(declined.name)!.offeredCount, 5);
   assert.equal(skills.getByName(untried.name)!.offeredCount, 0);
 
-  // Cap to 1 → the two declined drafts must die first, most-declined first.
+  // Cap to 1 → only the genuinely declined draft dies; shown-once and never-offered both survive.
   const pruned = skills.pruneDraftsToCap(1);
-  assert.equal(pruned, 2);
+  assert.equal(pruned, 1);
   assert.equal(skills.getByName(declined.name), null);
-  assert.equal(skills.getByName(alsoDeclined.name), null);
-  // The untried hypothesis survives: it never lost a race, it was never entered in one.
+  assert.ok(skills.getByName(shownOnce.name), 'one showing must not be a death sentence — the exploration slot would be feeding the executioner');
   assert.ok(skills.getByName(untried.name), 'a never-offered draft must not be pruned while declined drafts remain');
 });
 

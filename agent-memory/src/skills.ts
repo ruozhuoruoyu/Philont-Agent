@@ -130,6 +130,11 @@ function parseRecipeJson<T>(raw: string | null | undefined): T | null {
   }
 }
 
+/**
+ * How many distinct showings an unchosen draft gets before it counts as declined. See pruneDraftsToCap.
+ */
+export const DECLINED_MIN_OFFERS = 3;
+
 export class SkillStore extends EventEmitter {
   constructor(private readonly db: Database.Database) {
     super();
@@ -634,8 +639,8 @@ export class SkillStore extends EventEmitter {
     // an untested hypothesis for losing a race it was never entered in. So: evict the declined ones FIRST,
     // and only fall back to the score once the declined pool is exhausted.
     const sorted = drafts.slice().sort((a, b) => {
-      const aDeclined = a.offeredCount > 0 && a.useCount === 0;
-      const bDeclined = b.offeredCount > 0 && b.useCount === 0;
+      const aDeclined = a.offeredCount >= DECLINED_MIN_OFFERS && a.useCount === 0;
+      const bDeclined = b.offeredCount >= DECLINED_MIN_OFFERS && b.useCount === 0;
       if (aDeclined !== bDeclined) return aDeclined ? -1 : 1;
       // Within the declined pool, the most-declined goes first (strongest evidence of uselessness).
       if (aDeclined && bDeclined && a.offeredCount !== b.offeredCount) {
@@ -649,7 +654,14 @@ export class SkillStore extends EventEmitter {
     // anyway, and the conveyor is back with better logging. Deleting an untested hypothesis to make room
     // for another untested hypothesis is not a trade worth making. The bound now lives on the CREATION
     // side (see untestedDraftCount): stop generating what there is no capacity to test.
-    const evictable = sorted.filter((s) => s.offeredCount > 0);
+    //
+    // "Declined" needs more than one showing. The day the exploration slot went live it fed this exact
+    // filter: a draft was rotated into the index once — on a turn about a completely unrelated topic —
+    // not chosen (of course), and evicted seventeen minutes later as "offered 1x, never chosen". One offer
+    // on one arbitrary turn measures the TURN's relevance, not the skill's worth; being explored must not
+    // be what makes a draft eviction-eligible, or the slot is just feeding the executioner. Three distinct
+    // showings is still a fast verdict at one exploration slot per chat turn.
+    const evictable = sorted.filter((s) => s.offeredCount >= DECLINED_MIN_OFFERS);
     const wanted = drafts.length - maxDrafts;
     const toDelete = evictable.slice(0, wanted);
     if (toDelete.length < wanted) {
@@ -679,14 +691,21 @@ export class SkillStore extends EventEmitter {
    * the cap has to evict something to make room.
    */
   untestedDraftCount(): number {
-    // Counts only what REFLECTION minted. The first version counted every draft, and importSkills does not
-    // set a maturity — so createSkill's default made all 68 disk-loaded skills "untested drafts", pushed the
-    // count past the cap on its own, and froze the reflector permanently. The number is an accusation
-    // against the generator, so it must only count the generator's own output.
+    // Counts what REFLECTION minted and nothing has yet PROVEN — the pool the creation-side bound reads.
+    // Two corrections, each from one production day:
+    //   - excludes from_disk (07-23 morning): importSkills sets no maturity, so all 68 disk skills counted
+    //     as "untested drafts" and froze the reflector permanently. The number is an accusation against
+    //     the generator; it must count only the generator's own output.
+    //   - no longer excludes offered-but-unchosen drafts (07-23 night): being OFFERED is not being tested.
+    //     With the offered=0 filter, every draft the exploration slot rotated through left this pool,
+    //     minting unblocked, cap pressure returned, and the just-explored drafts were the ones evicted —
+    //     an explore→evict→mint churn in which no hypothesis ever survived to a second showing. A draft
+    //     leaves this pool by being USED (the maturity ladder takes over) or by being evicted after
+    //     DECLINED_MIN_OFFERS showings.
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM memory_skills
-         WHERE maturity = 'draft' AND COALESCE(offered_count, 0) = 0 AND COALESCE(from_disk, 0) = 0`,
+         WHERE maturity = 'draft' AND COALESCE(use_count, 0) = 0 AND COALESCE(from_disk, 0) = 0`,
       )
       .get() as { n: number };
     return row.n;
