@@ -902,7 +902,11 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
       {
         autonomy: { found: reach.found, eligible: reach.eligible },
         judge: judgeWindowTally(),
-        routingRules: { validated: rules.filter((r) => r.confidence === 'validated').length, stored: rules.length },
+        routingRules: {
+          validated: rules.filter((r) => r.confidence === 'validated').length,
+          active: rules.filter((r) => r.confidence !== 'retired').length,
+          retired: rules.filter((r) => r.confidence === 'retired').length,
+        },
         // The ratio that would have shown the frozen skill ladder on day one. It was defined in
         // health_report.ts and then not passed in — an unused field is a check that does not exist.
         skills: (() => {

@@ -52,8 +52,15 @@ export interface HealthInput {
   autonomy?: { found: number; eligible: number };
   /** Learning-judge verdicts in the window. */
   judge?: { verified: number; total: number };
-  /** Routing rules that earned confidence, out of everything stored. */
-  routingRules?: { validated: number; stored: number };
+  /**
+   * Routing rules that earned confidence, out of the ACTIVE set — retired rules are excluded from the
+   * denominator and reported separately. The first version divided by everything ever stored, and the
+   * owner's report read "6 of 1139 — a store that grows but does not learn" while 997 of those 1139 had
+   * already been tried and RETIRED by decay. That machinery discarding what failed is the system working;
+   * counting its output as evidence of failure overstates the problem, and a report that overstates is a
+   * report that gets discounted — the exact rot this file's header warns about.
+   */
+  routingRules?: { validated: number; active: number; retired?: number };
   /** Skills that were offered to the model, out of the untested draft pool. */
   skills?: { offered: number; drafts: number };
   /** Owner-declared focus areas advanced in the window. */
@@ -97,17 +104,22 @@ export function computeHealthRatios(input: HealthInput, lang: 'zh' | 'en' = 'zh'
     });
   }
 
-  if (input.routingRules && input.routingRules.stored > 0) {
-    const { validated, stored } = input.routingRules;
+  if (input.routingRules && input.routingRules.active > 0) {
+    const { validated, active, retired } = input.routingRules;
+    const retiredNote = retired
+      ? en
+        ? ` (${retired} more were tried and retired — discarding is working)`
+        : `(另有 ${retired} 条已试过并被淘汰 —— 淘汰机制在工作)`
+      : '';
     out.push({
       key: 'rules',
       numerator: validated,
-      denominator: stored,
+      denominator: active,
       line: en
-        ? `Learned rules: ${validated}/${stored} have earned confidence. ` +
-          (validated / stored < 0.02 ? 'That is a store that grows but does not learn.' : '')
-        : `学到的规则:${stored} 条里 ${validated} 条挣到了置信度。` +
-          (validated / stored < 0.02 ? '这是一个只增不学的库。' : ''),
+        ? `Learned rules: ${validated}/${active} active rules have earned confidence${retiredNote}. ` +
+          (validated / active < 0.02 ? 'That is a store that grows but does not learn.' : '')
+        : `学到的规则:活跃 ${active} 条里 ${validated} 条挣到了置信度${retiredNote}。` +
+          (validated / active < 0.02 ? '这是一个只增不学的库。' : ''),
     });
   }
 

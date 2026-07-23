@@ -19,7 +19,7 @@ import {
 const THAT_NIGHT = {
   autonomy: { found: 45, eligible: 0 },
   judge: { verified: 0, total: 12 },
-  routingRules: { validated: 3, stored: 1094 },
+  routingRules: { validated: 3, active: 140, retired: 954 },
   focus: { advanced: 0, declared: 1 },
   push: { deliverable: 0, active: 1 },
 };
@@ -45,7 +45,7 @@ test('the report is sent when something is wrong, and NOT on a clean day', () =>
     {
       autonomy: { found: 4, eligible: 1 },
       judge: { verified: 6, total: 12 },
-      routingRules: { validated: 40, stored: 200 },
+      routingRules: { validated: 40, active: 200 },
       focus: { advanced: 1, declared: 1 },
       push: { deliverable: 1, active: 1 },
     },
@@ -70,7 +70,7 @@ test('the text states consequences, not just numbers', () => {
   );
   assert.match(text, /learning nothing/, 'judge 0/12 must say what it costs');
   assert.match(text, /None of what you told me to care about moved/, 'focus 0/1 must be stated in the owner\'s terms');
-  assert.match(text, /grows but does not learn/, '3/1094 must be interpreted, not just printed');
+  assert.match(text, /discarding is working/, 'the retired count must read as decay working, not as failure');
   assert.match(text, /silently doing nothing/, 'a broken reference must name the consequence');
   assert.match(text, /worth asking me about/, 'and it must tell the owner what to do with the zeros');
 });
@@ -84,7 +84,7 @@ test('Chinese rendering carries the same interpretations', () => {
   const text = renderHealthReport(computeHealthRatios(THAT_NIGHT, 'zh'), [], 'zh');
   assert.match(text, /每日自检/);
   assert.match(text, /一件都没动/);
-  assert.match(text, /只增不学/);
+  assert.match(text, /淘汰机制在工作/);
 });
 
 // ── The stamp records the outcome, not the intent ───────────────────────────
@@ -132,4 +132,17 @@ test('the legacy stamp shape (no attempts field) is treated as unsent, not as a 
   // worst, never to an exception inside the health path.
   const legacy = { ymd: '20260723' } as never;
   assert.equal(shouldSkipHealthSend(legacy, '20260723'), false);
+});
+
+test('retired rules are not evidence of failure — the denominator is the active set', () => {
+  // The owner's first real report read "6 of 1139 — a store that grows but does not learn" while 997 of
+  // the 1139 had been tried and RETIRED by decay. Discarding what failed is the machinery working.
+  const [r] = computeHealthRatios({ routingRules: { validated: 6, active: 142, retired: 997 } }, 'zh');
+  assert.equal(r.denominator, 142);
+  assert.match(r.line, /淘汰机制在工作/);
+  assert.doesNotMatch(r.line, /只增不学/, '6/142 = 4% earns no such verdict');
+
+  // But a genuinely unvalidating ACTIVE set still gets the honest interpretation.
+  const [bad] = computeHealthRatios({ routingRules: { validated: 1, active: 200 } }, 'zh');
+  assert.match(bad.line, /只增不学/);
 });
