@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 38;
+export const SCHEMA_VERSION = 39;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -178,7 +178,14 @@ CREATE TABLE IF NOT EXISTS memory_skills (
   verification     TEXT,   -- JSON RecipeVerification { kind, check }
   tool_policy      TEXT,   -- JSON string[] of allowed tool names
   -- v35 (H3): append-only revision history for reviseRecipe(); JSON SkillRevision[]. NULL = never revised.
-  revision_history TEXT
+  revision_history TEXT,
+  -- v39: stamped by importSkills, i.e. by the DISK importer itself. The reload-prune deletes rows whose
+  -- directory is gone, and it used to pick who was eligible by EXCLUDING known DB-only source prefixes —
+  -- a denylist, which failed silently the moment a new DB-only source appeared and nobody remembered to
+  -- add it (auto-recovery:*, a plan-failure playbook, was deleted by an unrelated file event). Positive
+  -- provenance instead of absence of evidence: only what the disk importer stamped may be deleted for
+  -- being absent from disk.
+  from_disk        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_skills_use_count ON memory_skills(use_count DESC);
@@ -1204,6 +1211,19 @@ function migrateV37ToV38(db: Database.Database): void {
   addColumnIfMissing(db, 'reasoning_nodes', 'check_criterion', 'TEXT');
 }
 
+/**
+ * v38→v39: memory_skills.from_disk — positive provenance for the reload-prune.
+ *
+ * Backfills to 0 for EVERY existing row, deliberately, rather than trying to reconstruct which old rows
+ * came from disk. The next hot-reload re-imports every real disk skill and stamps it within seconds of
+ * boot, and until then the only consequence is that nothing gets pruned. The failure direction of this
+ * backfill is therefore "we briefly keep a stale row", never "we delete a real one" — which is the whole
+ * point, since deleting a real one is the bug being fixed.
+ */
+function migrateV38ToV39(db: Database.Database): void {
+  addColumnIfMissing(db, 'memory_skills', 'from_disk', 'INTEGER NOT NULL DEFAULT 0');
+}
+
 function migrateV19ToV20(db: Database.Database): void {
   if (!tableExists(db, 'memory_plans')) return; // guard: fresh init already has the column
   const cols = db.prepare(`PRAGMA table_info(memory_plans)`).all() as Array<{
@@ -1463,6 +1483,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 38) {
     migrateV37ToV38(db);
+  }
+  if (current < 39) {
+    migrateV38ToV39(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

@@ -36,7 +36,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 38);
+  assert.equal(SCHEMA_VERSION, 39);
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
   assert.ok(tableExists(db, 'reasoning_sessions'));
@@ -471,7 +471,7 @@ test('migration v36 → v37: reasoning_sessions gets followup_asked_at, existing
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 38);
+  assert.equal(SCHEMA_VERSION, 39);
   assert.ok(hasColumn(db, 'reasoning_sessions', 'followup_asked_at'), 'v37 must add followup_asked_at');
   const row = db.prepare(`SELECT goal, followup_asked_at FROM reasoning_sessions WHERE id = 'rs-old'`).get() as
     { goal: string; followup_asked_at: number | null };
@@ -497,10 +497,37 @@ test('migration v37 → v38: reasoning_nodes gets check_criterion, existing node
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 38);
+  assert.equal(SCHEMA_VERSION, 39);
   assert.ok(hasColumn(db, 'reasoning_nodes', 'check_criterion'), 'v38 must add check_criterion');
   const row = db.prepare(`SELECT claim, check_criterion FROM reasoning_nodes WHERE id = 'rn-old'`).get() as
     { claim: string; check_criterion: string | null };
   assert.equal(row.claim, 'an old subgoal', 'pre-existing node survives the migration');
   assert.equal(row.check_criterion, null, 'backfills to null — a migrated node never stated one');
+});
+
+// v39: memory_skills.from_disk — positive provenance for the reload-prune. Backfills to 0 for every
+// existing row on purpose: the next hot-reload re-stamps every real disk skill within seconds, and until
+// then nothing is pruned. The failure direction is "briefly keep a stale row", never "delete a real one" —
+// which is exactly the bug being fixed (a plan-failure playbook deleted by an unrelated file event).
+test('migration v38 → v39: memory_skills gets from_disk, backfilled to 0', () => {
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.exec(`ALTER TABLE memory_skills DROP COLUMN from_disk;`);
+  db.prepare(`UPDATE memory_meta SET value = '38' WHERE key = 'schema_version'`).run();
+  assert.ok(!hasColumn(db, 'memory_skills', 'from_disk'), 'degraded state must really lack the column');
+
+  db.prepare(
+    `INSERT INTO memory_skills (id, name, description, trigger_keywords, action_template, source, created_at)
+     VALUES ('sk-old', 'playbook-recovery-009c8741-failed', 'a failure lesson', '[]', 'steps', 'auto-recovery:plan-1', 1000)`
+  ).run();
+
+  initSchema(db);
+
+  assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 39);
+  assert.ok(hasColumn(db, 'memory_skills', 'from_disk'), 'v39 must add from_disk');
+  const row = db.prepare(`SELECT name, from_disk FROM memory_skills WHERE id = 'sk-old'`).get() as
+    { name: string; from_disk: number };
+  assert.equal(row.name, 'playbook-recovery-009c8741-failed', 'the pre-existing skill survives');
+  assert.equal(row.from_disk, 0, 'and is NOT prunable until the disk importer says otherwise');
 });

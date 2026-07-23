@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test';
+import { describe, it, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openMemoryDb, importSkills } from '../src/index.js';
 
@@ -159,4 +159,22 @@ describe('importSkills', () => {
     assert.equal(result.errors.length, 1);
     db.db.close();
   });
+});
+
+test('importSkills 给它导入的每一条盖 from_disk 章 —— 包括冲突时跳过的', () => {
+  // 一条已存在的技能仍然在磁盘上;不盖章会让它在目录被删后永远无法 prune。
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill({ name: 'already-here', description: 'd', triggerKeywords: [], actionTemplate: 't', source: 'clawhub' });
+  assert.deepEqual(skills.listExternalSkills(), [], '前置:尚未盖章');
+
+  importSkills(skills, [
+    { name: 'already-here', description: 'd2', triggerKeywords: [], actionTemplate: 't2', source: 'clawhub' },
+    { name: 'brand-new', description: 'd', triggerKeywords: [], actionTemplate: 't', source: 'clawhub' },
+  ], { onConflict: 'skip' });
+
+  assert.deepEqual(
+    skills.listExternalSkills().map((s) => s.name).sort(),
+    ['already-here', 'brand-new'],
+    '导入器碰过的都算磁盘出处,skip 的也算',
+  );
 });

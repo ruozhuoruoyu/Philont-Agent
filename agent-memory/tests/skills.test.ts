@@ -1039,74 +1039,62 @@ test('SkillStore: updateSkill 显式 null 清空 source;省略保留原值', () 
 
 // ── listExternalSkills + prune diff 模式(给 chat-handler 用) ────────
 
-test('listExternalSkills: 只返回 source IS NOT NULL 的行', () => {
+test('listExternalSkills: 只返回 DISK 导入器盖过章的行(正向出处,不是排除名单)', () => {
+  // 契约变更 2026-07-23。判据曾是「source 非空且不以 self: 开头」—— 一份排除名单,要求每个新增 DB-only
+  // 来源的人记得回来更新它。auto-recovery:* 没被加进去,于是一条计划失败 playbook 被一次无关的文件事件
+  // 删掉。现在只有磁盘导入器 markFromDisk 盖过章的行才可能被 prune,没教过的来源默认安全。
   const { skills } = openMemoryDb(':memory:');
 
-  skills.createSkill({
-    name: 'local-a',
-    description: 'reflective',
-    triggerKeywords: [],
-    actionTemplate: 't',
-  });
-  skills.createSkill({
-    name: 'ext-b',
-    description: 'from clawhub',
-    triggerKeywords: [],
-    actionTemplate: 't',
-    source: 'clawhub:b@1',
-  });
-  skills.createSkill({
-    name: 'ext-c',
-    description: 'from github',
-    triggerKeywords: [],
-    actionTemplate: 't',
-    source: 'github:owner/c@abc',
-  });
+  skills.createSkill({ name: 'local-a', description: 'reflective', triggerKeywords: [], actionTemplate: 't' });
+  skills.createSkill({ name: 'ext-b', description: 'from clawhub', triggerKeywords: [], actionTemplate: 't', source: 'clawhub:b@1' });
+  skills.createSkill({ name: 'ext-c', description: 'from github', triggerKeywords: [], actionTemplate: 't', source: 'github:owner/c@abc' });
 
-  const externals = skills.listExternalSkills();
-  const names = externals.map((s) => s.name).sort();
-  assert.deepEqual(names, ['ext-b', 'ext-c']);
-  // 本地手写永远不出现 — prune 安全保证
-  assert.ok(!names.includes('local-a'));
+  // 光有 source 不够 —— 那正是旧判据的错。
+  assert.deepEqual(skills.listExternalSkills(), [], 'source 不是出处证据');
+
+  skills.markFromDisk(['ext-b', 'ext-c']);
+  assert.deepEqual(skills.listExternalSkills().map((x) => x.name).sort(), ['ext-b', 'ext-c']);
+  assert.ok(!skills.listExternalSkills().some((x) => x.name === 'local-a'));
 });
 
-test('listExternalSkills + prune 差集模式:磁盘消失的外部 skill 应被识别', () => {
-  // 模拟 chat-handler.reloadSkillsFromDisk 的 prune 逻辑
+test('那条被删的失败 playbook:带 source 但不来自磁盘 → 永不进 prune 候选', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill({
+    name: 'playbook-recovery-009c8741-failed',
+    description: '[auto-recovery playbook]',
+    triggerKeywords: [],
+    actionTemplate: 'steps',
+    maturity: 'playbook',
+    source: 'auto-recovery:plan-123',
+  });
+  skills.createSkill({ name: 'mycox-service', description: 'd', triggerKeywords: [], actionTemplate: 't', source: 'clawhub' });
+  skills.markFromDisk(['mycox-service']);
+
+  // 生产复现:一次无关的 change:mycox-service 事件触发热重载,磁盘上只有 mycox-service。
+  const parsedNames = new Set(['mycox-service']);
+  const orphans = skills.listExternalSkills().filter((x) => !parsedNames.has(x.name));
+
+  assert.deepEqual(orphans, [], 'DB-only 的失败教训不是孤儿,它从来就不在磁盘上');
+  assert.ok(skills.getByName('playbook-recovery-009c8741-failed'), 'playbook 必须活着');
+});
+
+test('listExternalSkills + prune 差集模式:磁盘消失的外部 skill 仍应被识别', () => {
   const { skills } = openMemoryDb(':memory:');
 
-  skills.createSkill({
-    name: 'kept',
-    description: 'still on disk',
-    triggerKeywords: [],
-    actionTemplate: 't',
-    source: 'clawhub:kept@1',
-  });
-  skills.createSkill({
-    name: 'removed',
-    description: 'rm by user',
-    triggerKeywords: [],
-    actionTemplate: 't',
-    source: 'clawhub:removed@1',
-  });
-  skills.createSkill({
-    name: 'local-untouched',
-    description: 'reflective',
-    triggerKeywords: [],
-    actionTemplate: 't',
-    // source: null (本地手写)
-  });
+  skills.createSkill({ name: 'kept', description: 'still on disk', triggerKeywords: [], actionTemplate: 't', source: 'clawhub:kept@1' });
+  skills.createSkill({ name: 'removed', description: 'rm by user', triggerKeywords: [], actionTemplate: 't', source: 'clawhub:removed@1' });
+  skills.createSkill({ name: 'local-untouched', description: 'reflective', triggerKeywords: [], actionTemplate: 't' });
+  // 两者都曾从磁盘导入过 —— 这才是 prune 有权删它们的理由。
+  skills.markFromDisk(['kept', 'removed']);
 
-  // 模拟 reload:磁盘上现在只剩 'kept' 和 'local-untouched','removed' 被 rm 了
   const parsedNames = new Set(['kept', 'local-untouched']);
-  const orphans = skills.listExternalSkills().filter((s) => !parsedNames.has(s.name));
+  const orphans = skills.listExternalSkills().filter((x) => !parsedNames.has(x.name));
 
   assert.equal(orphans.length, 1);
   assert.equal(orphans[0].name, 'removed');
 
-  // 执行 prune
   for (const o of orphans) skills.deleteSkill(o.name);
-
-  assert.equal(skills.getByName('removed'), null, 'removed 已 prune');
+  assert.equal(skills.getByName('removed'), null, 'removed 已 prune —— 真实用例没被削弱');
   assert.ok(skills.getByName('kept'), 'kept 保留');
   assert.ok(skills.getByName('local-untouched'), '本地手写永远不动');
 });

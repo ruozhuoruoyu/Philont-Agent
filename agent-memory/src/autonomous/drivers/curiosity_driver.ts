@@ -127,6 +127,17 @@ export function extractSpecificTokens(text: string): string[] {
 // ── Driver ───────────────────────────────────────────────────────────────
 
 export interface CuriosityDriverConfig {
+  /**
+   * Dormancy before an OWNER-DECLARED focus is picked up, in days. Separate from pursuitAgingDays because
+   * the two mean opposite things: an incidental pursuit going quiet for two weeks is probably stale, while
+   * a COMPASS focus going quiet means the thing the owner explicitly asked me to care about is being
+   * ignored — which is urgent almost immediately, not in a fortnight.
+   *
+   * Non-zero on purpose. A compass pursuit is seeded with last_touched = now precisely so that declaring
+   * five focus areas does not fire five sessions at startup; one day preserves that stagger while cutting
+   * the dead window from fourteen days to one.
+   */
+  compassAgingDays?: number;
   /** Minimum number of times a token must appear to be considered "recurring"; default 1. Snap is already deduplicated, so 1 suffices */
   minTokenMentions: number;
   /** Pursuit aging threshold (days); default 14 */
@@ -160,6 +171,7 @@ export interface CuriosityDriverConfig {
 export const DEFAULT_CURIOSITY_CONFIG: CuriosityDriverConfig = {
   minTokenMentions: 1,
   pursuitAgingDays: 14,
+  compassAgingDays: 1,
   pursuitMinStakeWeight: 7,
   maxProposals: 3,
   promoteToGoalLoop: true,
@@ -241,9 +253,15 @@ export class CuriosityDriver implements Driver {
       });
     }
 
-    // (B) Dormant high-stake pursuit: commitment made but never touched
-    const agingMs = this.cfg.pursuitAgingDays * 86_400_000;
-    const cutoff = snap.now - agingMs;
+    // (B) Dormant high-stake pursuit: commitment made but not being advanced.
+    //
+    // Two clocks, because a compass focus and an incidental pursuit are not the same claim on attention.
+    // Production 2026-07-23: the owner's single declared focus (stake 8) was seeded on 07-16 and therefore
+    // ineligible until 07-30, so for a fortnight the background loop had NOTHING owner-directed to do and
+    // spent every night on token curiosity instead. The dormancy gate was doing double duty — it was the
+    // anti-startup-storm mechanism AND the staleness filter — and one number could not serve both.
+    const cutoff = snap.now - this.cfg.pursuitAgingDays * 86_400_000;
+    const compassCutoff = snap.now - (this.cfg.compassAgingDays ?? 1) * 86_400_000;
     // Resolve traits once per propose() — the provider may hit the DB.
     const traits =
       typeof this.cfg.traits === 'function'
@@ -251,10 +269,15 @@ export class CuriosityDriver implements Driver {
         : this.cfg.traits ?? DEFAULT_TRAITS;
     for (const p of snap.activePursuits) {
       if (p.stakeWeight < this.cfg.pursuitMinStakeWeight) continue;
+      const fromCompass = p.origin === 'compass';
       const lastTouched = p.lastTouchedAt ?? p.updatedAt;
-      if (lastTouched > cutoff) continue;
-      // If there have been any outputs it doesn't count as "never touched" — evidenceRefs are the pursuit's output references
-      if (p.evidenceRefs.length > 0) continue;
+      if (lastTouched > (fromCompass ? compassCutoff : cutoff)) continue;
+      // Having produced output disqualifies an INCIDENTAL pursuit — it is not "never touched", so reviving
+      // it is not urgent. A compass focus is the opposite: sustained attention is the entire promise, so
+      // "we worked on it once and then dropped it for a day" is exactly when to pick it up again. Repeat
+      // proposals are already bounded by recentDoneTargetRefs (24h) and by lastTouched moving forward each
+      // time it is advanced, so the cadence this produces is roughly daily, not continuous.
+      if (!fromCompass && p.evidenceRefs.length > 0) continue;
       const targetRef = `pursuit:${p.id}`;
       if (snap.recentDoneTargetRefs.has(targetRef)) continue;
 

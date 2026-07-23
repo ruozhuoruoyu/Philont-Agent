@@ -531,3 +531,64 @@ test('extractSpecificTokens: 凭证形状的 token 永不外流(它会变成 web
   assert.deepEqual(extractSpecificTokens('community 7362d16f-cd31-4eab-a02e-1891fa888c66 was used'), []);
   assert.deepEqual(extractSpecificTokens('token "sk-ant-api03-abcdefghijklmnop12345"'), []);
 });
+
+// ── compass focus vs incidental pursuit: two clocks ─────────────────────────
+//
+// Production 2026-07-23: the owner's single declared focus (stake 8) was seeded 07-16 and therefore
+// ineligible until 07-30 under the 14-day dormancy gate, so for a fortnight the background loop had
+// nothing owner-directed to do and spent every night on token curiosity. The gate was doing double duty —
+// anti-startup-storm AND staleness filter — and one number could not serve both.
+
+function compassPursuit(over: Record<string, unknown> = {}) {
+  return {
+    id: 'compass-philont-itself-abc12345',
+    title: 'philont itself',
+    stakeWeight: 8,
+    origin: 'compass',
+    evidenceRefs: [],
+    lastTouchedAt: Date.now() - 2 * 86_400_000,
+    updatedAt: Date.now() - 2 * 86_400_000,
+    ...over,
+  } as never;
+}
+
+function proposeWith(pursuits: unknown[], now = Date.now()) {
+  const d = new CuriosityDriver({ ...DEFAULT_CURIOSITY_CONFIG, promoteToGoalLoop: false });
+  return d.propose({
+    facts: [], routingRules: [], skills: [],
+    activePursuits: pursuits as never,
+    recentTimelineTokens: [], recentDoneTargetRefs: new Set<string>(), now,
+  } as never);
+}
+
+test('compass 焦点闲置一天就被后台捡起(不必等 14 天)', () => {
+  const props = proposeWith([compassPursuit()]);
+  assert.ok(props.some((p) => p.targetRef.includes('compass-philont-itself')), '主人声明的焦点必须进入夜间回路');
+});
+
+test('刚播种的 compass 焦点当天不触发 —— 防启动风暴的性质保留', () => {
+  const props = proposeWith([compassPursuit({ lastTouchedAt: Date.now() - 3600_000, updatedAt: Date.now() - 3600_000 })]);
+  assert.deepEqual(props, [], '声明五个焦点不该在启动瞬间点燃五个会话');
+});
+
+test('已有产出的 compass 焦点仍会被推进 —— 持续关注正是它的承诺', () => {
+  const props = proposeWith([compassPursuit({ evidenceRefs: ['note:1', 'note:2'] })]);
+  assert.ok(props.length > 0, '「做过一次就再也不碰」正是 compass 要防的');
+});
+
+test('普通 pursuit 的判据不变:14 天 + 无产出', () => {
+  const incidental = compassPursuit({ id: 'p-incidental', origin: 'reflector', title: 'something I noticed' });
+  assert.deepEqual(proposeWith([incidental]), [], '闲置 2 天的顺带 pursuit 不该被当成紧急');
+
+  const stale = compassPursuit({
+    id: 'p-stale', origin: 'reflector', title: 'old',
+    lastTouchedAt: Date.now() - 20 * 86_400_000, updatedAt: Date.now() - 20 * 86_400_000,
+  });
+  assert.ok(proposeWith([stale]).length > 0, '真正陈旧的仍然会被捡起');
+
+  const staleWithOutput = compassPursuit({
+    id: 'p-out', origin: 'reflector', title: 'old with output', evidenceRefs: ['note:1'],
+    lastTouchedAt: Date.now() - 20 * 86_400_000, updatedAt: Date.now() - 20 * 86_400_000,
+  });
+  assert.deepEqual(proposeWith([staleWithOutput]), [], '有产出的顺带 pursuit 判据保持不变');
+});

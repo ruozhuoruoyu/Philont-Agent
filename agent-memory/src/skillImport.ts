@@ -71,6 +71,12 @@ export function importSkills(
     errors: [],
   };
 
+  // Everything this importer touches is, by definition, a disk skill — that is what makes it the only
+  // thing entitled to stamp from_disk. Collected across the loop and stamped once at the end, including
+  // rows that were SKIPPED on conflict: a skill that already existed is still on disk, and leaving it
+  // unstamped would make it unprunable forever after its directory is removed.
+  const seenOnDisk: string[] = [];
+
   for (const skill of skills) {
     if (!skill.name || !skill.actionTemplate) {
       result.errors.push({
@@ -83,6 +89,7 @@ export function importSkills(
     try {
       const existing = store.getByName(skill.name);
       let touched = false;
+      seenOnDisk.push(skill.name);
 
       if (!existing) {
         store.createSkill({
@@ -158,5 +165,6 @@ export function importSkills(
     }
   }
 
+  store.markFromDisk(seenOnDisk);
   return result;
 }

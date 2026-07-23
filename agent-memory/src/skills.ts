@@ -725,14 +725,18 @@ export class SkillStore extends EventEmitter {
   }
 
   /**
-   * List all external skills "loaded from disk SKILL.md", for chat-handler reload-prune.
+   * Skills the reload-prune may delete for being absent from disk: the ones the DISK IMPORTER stamped.
    *
-   * Excludes two types of skills that must not be pruned:
-   *   - source IS NULL: locally written / legacy
-   *   - source LIKE 'self:%': reflection-distilled self-generated (self:reflect-<id> etc.),
-   *     which have non-NULL source but no corresponding file on disk — disk scan will never find them →
-   *     if not excluded they would be mistakenly deleted by reload-prune, wasting the reflection "accumulation"
-   *     mechanism (fixed 2026-05-15)
+   * This used to be a denylist — everything with a non-null source except `self:%` — and the exclusion
+   * list was the bug. Its own comment explained the shape ("non-NULL source but no corresponding file on
+   * disk — disk scan will never find them → they would be mistakenly deleted"), noted it was fixed for
+   * `self:%` in May, and then `auto-recovery:*` was introduced elsewhere without joining the list. A
+   * plan-failure playbook was deleted by an unrelated file event, and the disk prune had no way to know it
+   * had never been a disk skill.
+   *
+   * The judgement is now positive provenance rather than absence of evidence: importSkills stamps
+   * from_disk, so a source nobody has taught this file about is safe BY DEFAULT. That is the direction
+   * that survives someone adding a new kind of skill without reading this comment.
    *
    * No scoring; sorted by createdAt DESC — prune does not need ranking.
    */
@@ -740,10 +744,20 @@ export class SkillStore extends EventEmitter {
     const rows = this.db
       .prepare(
         `SELECT * FROM memory_skills
-         WHERE source IS NOT NULL AND source NOT LIKE 'self:%'
+         WHERE from_disk = 1
          ORDER BY created_at DESC`,
       )
       .all() as SkillRow[];
     return rows.map(rowToSkill);
+  }
+
+  /** Stamp a skill as disk-imported. Called by importSkills; nothing else should set this. */
+  markFromDisk(names: readonly string[]): void {
+    if (names.length === 0) return;
+    const stmt = this.db.prepare<[string]>(`UPDATE memory_skills SET from_disk = 1 WHERE name = ?`);
+    const tx = this.db.transaction(() => {
+      for (const n of names) stmt.run(n);
+    });
+    tx();
   }
 }
