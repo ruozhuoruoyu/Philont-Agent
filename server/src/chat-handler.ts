@@ -288,6 +288,7 @@ import {
   judgeWindowTally,
   shouldSkipHealthSend,
   nextHealthSendStamp,
+  HEALTH_SEND_MAX_ATTEMPTS_PER_DAY,
   type HealthSendStamp,
 } from './health_report.js';
 import {
@@ -952,12 +953,27 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
         console.warn('[health] push dispatch threw', e);
         return { delivered: 0 } as { delivered: number };
       });
+    const newStamp = nextHealthSendStamp(stamp, today, (dispatch?.delivered ?? 0) > 0);
     memory.facts.storeFact({
       namespace: 'system',
       key: 'health_selfcheck_last_ymd',
-      value: nextHealthSendStamp(stamp, today, (dispatch?.delivered ?? 0) > 0),
+      value: newStamp,
       confidence: 1,
     });
+    // In-process retry on failed delivery. The boot-time send races the WeChat gateway warmup — the same
+    // +8s send succeeded at 11:36 and failed at 16:53 with "prepare failed" — and without this, a boot-time
+    // failure waits for the next restart or the 24h tick. Twenty minutes is comfortably past warmup; the
+    // attempt cap in shouldSkipHealthSend bounds the total, and the dispatcher's digest limiter is not an
+    // obstacle because markDigestSent advances only on SUCCESS.
+    if (!newStamp.delivered && newStamp.attempts < HEALTH_SEND_MAX_ATTEMPTS_PER_DAY) {
+      if (healthRetryTimer) clearTimeout(healthRetryTimer);
+      healthRetryTimer = setTimeout(() => {
+        healthRetryTimer = null;
+        void runDailyHealthCheck().catch(() => {});
+      }, 20 * 60_000);
+      healthRetryTimer.unref?.();
+      console.log(`[health] delivery failed (attempt ${newStamp.attempts}) — retrying in 20min`);
+    }
     return text;
   } catch (e) {
     // Reporting on health must never be the thing that breaks.
@@ -965,6 +981,9 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
     return null;
   }
 }
+
+/** Pending in-process retry for a health report whose delivery failed (see runDailyHealthCheck). */
+let healthRetryTimer: NodeJS.Timeout | null = null;
 
 /** Latest startup integrity result, for the owner-facing health report. */
 let lastIntegrityReport: IntegrityReport | null = null;
