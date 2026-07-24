@@ -624,8 +624,15 @@ export class SkillStore extends EventEmitter {
    */
   pruneDraftsToCap(maxDrafts: number): number {
     if (!Number.isFinite(maxDrafts) || maxDrafts < 0) return 0;
+    // Reflection drafts only. Most disk-installed skills also sit at maturity 'draft' (importSkills sets
+    // none, createSkill defaults), and counting them here made the cap permanently unreachable: production
+    // logged "cap 40: 12 over, only 0 have evidence — kept" on every idle cycle, forever, because ~40 of
+    // the counted drafts were disk skills the prune must not delete anyway (deleting the row is pointless —
+    // the next hot-reload re-imports it). A cap that is always exceeded and never enforceable is pure
+    // wolf-crying in the funnel log. Disk skills have their own lifecycle (the disk prune, keyed on the
+    // directory disappearing); this cap governs what REFLECTION minted.
     const drafts = (
-      this.db.prepare(`SELECT * FROM memory_skills WHERE maturity = 'draft'`).all() as SkillRow[]
+      this.db.prepare(`SELECT * FROM memory_skills WHERE maturity = 'draft' AND COALESCE(from_disk, 0) = 0`).all() as SkillRow[]
     ).map(rowToSkill);
     if (drafts.length <= maxDrafts) return 0;
     const now = Date.now();
@@ -801,6 +808,17 @@ export class SkillStore extends EventEmitter {
       )
       .all(limit) as SkillRow[];
     return rows.map(rowToSkill);
+  }
+
+  /** Offered-vs-total over REFLECTION drafts — the health report's skills ratio, matching the slot's supply. */
+  reflectionDraftStats(): { offered: number; drafts: number } {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS drafts, SUM(CASE WHEN COALESCE(offered_count, 0) > 0 THEN 1 ELSE 0 END) AS offered
+         FROM memory_skills WHERE maturity = 'draft' AND COALESCE(from_disk, 0) = 0`,
+      )
+      .get() as { drafts: number; offered: number | null };
+    return { offered: row.offered ?? 0, drafts: row.drafts };
   }
 
   /** Stamp a skill as disk-imported. Called by importSkills; nothing else should set this. */

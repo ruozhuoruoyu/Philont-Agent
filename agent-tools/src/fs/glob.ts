@@ -15,7 +15,7 @@
  */
 
 import { readdir, stat } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { join, relative, sep, isAbsolute } from 'node:path';
 import type { Tool } from '@agent/policy';
 
 /**
@@ -98,7 +98,12 @@ async function walkDir(
       const s = await stat(full).catch(() => null);
       if (!s) continue;
 
-      const rel = relative(root, full);
+      // The regex speaks forward slashes; on Windows path.relative speaks backslashes. Without this line
+      // any pattern containing a separator matched NOTHING on Windows — ever. Production spent a turn
+      // re-fetching three articles that were sitting on disk the whole time, because two globs over the
+      // fetched-store returned "No files matching", the re-fetches hit 403s, and the failure cascade got
+      // webFetch mechanism-disabled for the rest of the turn.
+      const rel = relative(root, full).split(sep).join('/');
 
       if (s.isFile()) {
         if (regex.test(rel)) {
@@ -129,8 +134,22 @@ export const globTool: Tool = {
   capability: 'read',
   domain: 'local',
   async execute(params) {
-    const pattern = params.pattern as string;
-    const cwd = (params.cwd as string) || '.';
+    // Normalise Windows separators in the PATTERN too: models on Windows hand this tool literal paths
+    // like C:\Users\me\.philont\workspace\fetched\* — in glob syntax every one of those backslashes
+    // is an escape character, so the pattern could never match anything.
+    const rawPattern = (params.pattern as string).split('\\').join('/');
+    let cwd = (params.cwd as string) || '.';
+    let pattern = rawPattern;
+    // An ABSOLUTE pattern was previously walked from the current directory, so it matched nothing by
+    // construction. Split it: everything before the first glob character is the root to walk from.
+    if (isAbsolute(rawPattern)) {
+      const firstGlob = rawPattern.search(/[*?[{]/);
+      const cut = firstGlob === -1 ? rawPattern.lastIndexOf('/') : rawPattern.lastIndexOf('/', firstGlob);
+      if (cut > 0) {
+        cwd = rawPattern.slice(0, cut) || '/';
+        pattern = rawPattern.slice(cut + 1);
+      }
+    }
     const maxResults = (params.maxResults as number) || 500;
 
     try {
@@ -138,7 +157,7 @@ export const globTool: Tool = {
       const files = await walkDir(cwd, regex, maxResults);
 
       if (files.length === 0) {
-        return { success: true, output: `No files matching "${pattern}"` };
+        return { success: true, output: `No files matching "${rawPattern}" (searched under ${cwd})` };
       }
 
       return {

@@ -215,3 +215,39 @@ describe('patch', () => {
     await rm(TMP, { recursive: true, force: true });
   });
 });
+
+// ── glob: Windows-shaped inputs (2026-07-24) ────────────────────────────────
+//
+// glob had never worked on Windows for any pattern containing a separator: path.relative returns
+// backslash paths there, the compiled regex expects forward slashes, and a backslash in the PATTERN is an
+// escape character in glob syntax. Production: two globs over the fetched-store returned "No files
+// matching" while the three fetched articles sat on disk; the agent re-fetched, hit 403s, and the cascade
+// got webFetch mechanism-disabled for the rest of the turn. Absolute patterns additionally walked from
+// the process cwd, matching nothing by construction.
+describe('glob on Windows-shaped inputs', () => {
+  const root = join(tmpdir(), `glob-win-${process.pid}`);
+  before(async () => {
+    await mkdir(join(root, 'fetched'), { recursive: true });
+    await writeFile(join(root, 'fetched', 'article-1.bin'), 'x');
+    await writeFile(join(root, 'fetched', 'article-2.bin'), 'x');
+  });
+  after(async () => rm(root, { recursive: true, force: true }));
+
+  it('normalises a backslash-separated pattern instead of treating it as escapes', async () => {
+    const r = await globTool.execute({ pattern: 'fetched\\*.bin', cwd: root });
+    assert.equal(r.success, true);
+    assert.match(r.output, /Found 2 file/);
+  });
+
+  it('walks an absolute pattern from its own root, not the process cwd', async () => {
+    const r = await globTool.execute({ pattern: join(root, 'fetched', '*.bin') });
+    assert.equal(r.success, true);
+    assert.match(r.output, /Found 2 file/, 'the production shape: an absolute path into the fetched store');
+  });
+
+  it('names where it searched when nothing matches, so a wrong root is visible', async () => {
+    const r = await globTool.execute({ pattern: join(root, 'nothing', '*.bin') });
+    assert.equal(r.success, true);
+    assert.match(r.output, /searched under/, 'a bare "No files matching" hid the wrong-root bug for months');
+  });
+});

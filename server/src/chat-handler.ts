@@ -919,10 +919,10 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
         },
         // The ratio that would have shown the frozen skill ladder on day one. It was defined in
         // health_report.ts and then not passed in — an unused field is a check that does not exist.
-        skills: (() => {
-          const drafts = memory.skills.listByMaturity('draft', 500);
-          return { offered: drafts.filter((d) => (d.offeredCount ?? 0) > 0).length, drafts: drafts.length };
-        })(),
+        // Reflection drafts only, matching both the exploration slot's supply and the mint bound — disk
+        // skills also sit at maturity 'draft' and would inflate the denominator with rows the exploration
+        // slot never offers (the same overstatement class as the retired-rules denominator).
+        skills: memory.skills.reflectionDraftStats(),
         focus: {
           // "Advanced" means touched in the last day — the same lastTouchedAt the dormancy branch reads,
           // so the report cannot disagree with the mechanism it is reporting on.
@@ -6063,11 +6063,22 @@ export function resolveJudgeGoal(
   carriedGoal: string | undefined,
   userMessage: string | undefined,
   resumedFromAuth: boolean,
+  lastRoutedGoal?: string,
 ): string | null {
   const carried = (carriedGoal ?? '').trim();
   if (carried) return carried;
   if (resumedFromAuth) return null;
-  return userMessage ?? '';
+  const msg = (userMessage ?? '').trim();
+  // A bare continuation word sent as a FRESH message — "ok", "继续" — is not a goal either; the auth-resume
+  // fix did not cover it, and the judge duly burned an aux call concluding 'The goal "ok" is too vague to
+  // determine what constitutes success' (2026-07-24 16:50, the second appearance of that exact sentence).
+  // The session's last routed substantive message is what such a turn is actually continuing. Length-based
+  // on purpose: a WORD LIST of continuation tokens is the trap this repo keeps documenting, and a real
+  // 4-character task is rare enough that judging it against the prior goal is the better error.
+  if (msg.length > 0 && msg.length <= 4 && (lastRoutedGoal ?? '').trim().length > msg.length) {
+    return lastRoutedGoal!.trim();
+  }
+  return msg;
 }
 
 function shadowLearningJudge(
@@ -6094,7 +6105,10 @@ function shadowLearningJudge(
     // resumed turns are the ones carrying the MOST tool evidence — the highest-signal sample, poisoned
     // wholesale. Phase 2 is gated on this distribution being trustworthy, so the gate could never open.
     // carriedIntent already stashes the original message for the router; reuse it here.
-    const resolved = resolveJudgeGoal(bus?.carriedExploreGoal, userMessage, resumedFromAuth);
+    const lastRouted = carriedIntent.get(sessionId);
+    const lastRoutedFresh =
+      lastRouted && Date.now() - lastRouted.ts <= INTENT_CARRY_TTL_MS ? lastRouted.goal : undefined;
+    const resolved = resolveJudgeGoal(bus?.carriedExploreGoal, userMessage, resumedFromAuth, lastRoutedFresh);
     if (!resolved) {
       // Nothing recoverable: emit no verdict rather than a meaningless one. A skipped sample is honest;
       // a could_not_verify about the word "ok" is noise that looks like data.

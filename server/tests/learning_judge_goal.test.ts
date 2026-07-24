@@ -33,3 +33,21 @@ test('a carried goal wins even on a fresh turn — it is the more specific signa
 test('a fresh turn with no message at all is still judged (scheduled/proactive turns)', () => {
   assert.equal(resolveJudgeGoal(undefined, undefined, false), '');
 });
+
+test('a bare continuation word as a FRESH message inherits the last routed goal', () => {
+  // 2026-07-24 16:50: 'The goal "ok" is too vague…' — the second production appearance of that exact
+  // sentence. The auth-resume fix did not cover "ok" sent as a NEW message.
+  assert.equal(resolveJudgeGoal(undefined, 'ok', false, '攻克 Gyárfás 路径染色问题'), '攻克 Gyárfás 路径染色问题');
+  assert.equal(resolveJudgeGoal(undefined, '继续', false, 'find a counterexample'), 'find a counterexample');
+});
+
+test('a real short message with no session history stays itself', () => {
+  assert.equal(resolveJudgeGoal(undefined, '继续', false, undefined), '继续');
+});
+
+test('a substantive fresh message is never overridden by history', () => {
+  assert.equal(
+    resolveJudgeGoal(undefined, '明天早上7点提醒我吃早饭', false, 'some older goal'),
+    '明天早上7点提醒我吃早饭',
+  );
+});
