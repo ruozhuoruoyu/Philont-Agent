@@ -389,7 +389,13 @@ const NONSTREAMING_MAX_TOKENS = 21000;
  * retries user aborts (turn deadline / stop) or non-transient errors (400/401/403 → real problems).
  * 2 retries (3 attempts total) is a sane universal default — no env knob.
  */
-const LLM_MAX_RETRIES = 2;
+// 5 attempts, backoffs 0.5s/1.1s/2.2s/4.5s — ~8.5s of cumulative patience. The previous value (2 →
+// ~1.6s total) was tuned for network blips and met its counterexample in a DeepSeek capacity storm
+// ("Service is too busy… switch providers"): the storm ran minutes with intermittent recovery, and two
+// consecutive USER messages each died in under 3 seconds while the per-call budget would happily have
+// afforded ten. Short blips belong to this ladder; genuine outages still belong to the breaker, which a
+// longer ladder actually helps — one call absorbing a 5-second storm never becomes a breaker strike.
+const LLM_MAX_RETRIES = 4;
 
 export function isTransientLlmError(e: unknown): boolean {
   const err = e as { status?: number; name?: string; message?: string; code?: string } | null;

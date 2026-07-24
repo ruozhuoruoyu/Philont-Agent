@@ -304,3 +304,15 @@ test('dormancy: 30 天封顶 —— 永不变成永久拉黑', () => {
   h2.close();
   handle.close();
 });
+
+test('dormancy: skipped 不算结算 —— 端点宕机不是对目标的证据', () => {
+  // A 503 storm during one tick made five untouched targets "failed" with 0 tokens and 0 tools. Under
+  // escalating dormancy that would double their sleep for an event that says nothing about them; the loop
+  // now marks endpoint-down failures as skipped, and skipped never enters the dormancy set.
+  const { handle, store } = setup();
+  const now = Date.now();
+  const i = store.insert({ kind: 'fact_gap', driver: 'gap', targetRef: 'fact:outage', rationale: 'r', utility: 0.5, budgetEstimate: 100 });
+  store.markSkipped(i.id, 'llm endpoint down — not an attempt');
+  assert.ok(!store.listDormantTargetRefs(now).has('fact:outage'), '跳过的目标下个 tick 就该重试');
+  handle.close();
+});

@@ -286,6 +286,15 @@ export function startAutonomousLoop(
     }
 
     if (result.status === 'failed') {
+      // An endpoint-down failure says nothing about the TARGET — zero tokens ran, zero tools ran; the
+      // initiative never actually happened. Marking it failed would count as a settle for the escalating
+      // dormancy (a 503 storm during one tick would put five untouched targets to double sleep) and burn a
+      // dedup slot on an event that carries no evidence. Skipped is the status with exactly the right
+      // semantics: "not really tried — retry when circumstances change" (it never enters the dedup set).
+      if (/LlmEndpointDownError/.test(result.error ?? '') || (result.error ?? '').includes('endpoint is not responding')) {
+        initiatives.markSkipped(initiative.id, 'llm endpoint down — not an attempt');
+        return { finalStatus: 'skipped', spent };
+      }
       const updated = initiatives.markFailed(initiative.id, result.error ?? 'unknown', spent.llmTokens);
       // Failed also spent tokens; must commit to prevent infinite retries
       if (spent.llmTokens > 0 || spent.toolCalls > 0) {
