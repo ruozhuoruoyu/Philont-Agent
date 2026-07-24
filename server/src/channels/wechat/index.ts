@@ -20,6 +20,7 @@
 
 import {
   readCredentials,
+  readPeerToken,
   resolveDefaultAccountId,
   type WeChatCredentials,
 } from './state.js';
@@ -124,9 +125,17 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
   const rawSender: RawSender = async (to, text) => {
     const startedAt = Date.now();
     logger.info('outbound sender starting', { to, len: text.length });
-    try {
+    // The push path's missing half (reference: hermes weixin.py — every outbound must echo the peer's
+    // latest context_token, from a disk cache updated on inbound). Twelve hours of production drew the
+    // line precisely: replies (which echo the inbound token) worked the whole time; tokenless pushes
+    // failed ret=-2 "prepare failed" at +8s, +20min and +40min. Same session, same client — the only
+    // difference between the working path and the dead one was this field.
+    //
+    // Hermes' fallback runs the other direction too: a send that fails WITH a token retries once
+    // without, so a stale cached token can never make pushes strictly worse than the old behaviour.
+    const attempt = async (contextToken: string | null) => {
       const r = await Promise.race([
-        client.sendText(to, text),
+        contextToken ? client.sendText(to, text, { contextToken }) : client.sendText(to, text),
         new Promise<never>((_, reject) =>
           setTimeout(
             () => reject(new Error(`outbound hard timeout after ${SEND_HARD_TIMEOUT_MS}ms`)),
@@ -134,6 +143,15 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
           ),
         ),
       ]);
+      return r;
+    };
+    try {
+      const cachedToken = readPeerToken(creds.accountId, to);
+      let r = await attempt(cachedToken);
+      if (r.ret !== 0 && cachedToken) {
+        logger.warn(`sendText with cached token ret=${r.ret} — retrying tokenless`, { to });
+        r = await attempt(null);
+      }
       const dur = Date.now() - startedAt;
       if (r.ret === 0) {
         logger.info('outbound sender ok', { to, durationMs: dur, messageId: r.message_id });

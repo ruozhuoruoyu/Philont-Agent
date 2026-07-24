@@ -276,3 +276,47 @@ export function resolveDefaultAccountId(): string | null {
   if (accounts.length === 1) return accounts[0];
   return null; // 0 or more than 1; let the caller decide
 }
+
+// ── Per-peer conversation tokens (the PUSH path's missing half) ─────────────────────────────────────
+//
+// Reference: hermes gateway/platforms/weixin.py — "Every outbound reply must echo the latest
+// context_token for the peer", backed by a disk cache keyed by account + peer, updated on every inbound.
+//
+// philont's port carried the reply half (gateway.ts echoes the inbound message's token) but not the
+// cache — so proactive pushes were always sent tokenless. iLink tolerates a tokenless send only sometimes
+// (one worked at boot 11:36; every later one failed ret=-2 "prepare failed" for twelve hours) while
+// replies kept working the whole time, which is exactly the signature of the missing half: same session,
+// same client, one path with a token and one without.
+
+export interface PeerTokenMap {
+  [peerId: string]: { token: string; updatedAt: number };
+}
+
+const PEER_TOKENS_FILE = '.peer-context-tokens.json';
+
+export function writePeerToken(accountId: string, peerId: string, token: string): void {
+  if (!token) return;
+  const dir = getAccountDir(accountId);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, PEER_TOKENS_FILE);
+  let map: PeerTokenMap = {};
+  try {
+    if (existsSync(path)) map = JSON.parse(readFileSync(path, 'utf8')) as PeerTokenMap;
+  } catch {
+    map = {}; // a corrupted cache is rebuilt from live traffic; never fatal
+  }
+  map[peerId] = { token, updatedAt: Date.now() };
+  writeFileSync(path, JSON.stringify(map), 'utf8');
+  try { chmodSync(path, 0o600); } catch { /* windows */ }
+}
+
+export function readPeerToken(accountId: string, peerId: string): string | null {
+  try {
+    const path = join(getAccountDir(accountId), PEER_TOKENS_FILE);
+    if (!existsSync(path)) return null;
+    const map = JSON.parse(readFileSync(path, 'utf8')) as PeerTokenMap;
+    return map[peerId]?.token ?? null;
+  } catch {
+    return null;
+  }
+}

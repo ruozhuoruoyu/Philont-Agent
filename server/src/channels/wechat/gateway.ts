@@ -49,6 +49,7 @@ import {
   type WeChatCredentials,
   readContextTokens,
   writeContextTokens,
+  writePeerToken,
   acquireLock,
   releaseLock,
   getInboxDir,
@@ -343,6 +344,14 @@ export class ILinkGateway {
       contextToken: msg.context_token,
       raw: msg,
     };
+    // Cache the peer's freshest conversation token for the PUSH path (reference: hermes weixin.py keeps a
+    // disk-backed token store updated on every inbound). Replies echo the token from the message they
+    // answer; a proactive push has no such message and reads this cache instead.
+    if (msg.context_token) {
+      try {
+        writePeerToken(this.accountId, groupId || fromUserId, msg.context_token);
+      } catch { /* cache write must never break inbound handling */ }
+    }
 
     this.logger.info(`inbound ${inboundIsGroup(msg) ? 'GROUP' : 'DM'}`, {
       from: fromUserId,
