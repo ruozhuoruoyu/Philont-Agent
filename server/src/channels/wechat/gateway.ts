@@ -147,6 +147,60 @@ const DEFAULT_BLOCKED_REPLY =
   'Sorry — this account is not authorized to talk to this agent. Ask the operator to add you to the allowlist.';
 
 /**
+ * The single-instance lock is held by a LIVE process. Correct refusal — two long-pollers would steal
+ * each other's messages — but a typed error so the supervisor can tell "wait for takeover" apart from
+ * a real crash.
+ */
+export class GatewayLockHeldError extends Error {
+  constructor(
+    readonly holder: { pid: number; startedAt: number },
+    accountId: string,
+  ) {
+    super(
+      `another gateway instance is running for ${accountId} (pid=${holder.pid}, started ${new Date(holder.startedAt).toISOString()})`,
+    );
+    this.name = 'GatewayLockHeldError';
+  }
+}
+
+/**
+ * Keep trying to start the gateway until it runs, the process shuts down, or it dies of a real error.
+ *
+ * Production 2026-07-24 20:47: the owner restarted with the 13:06 process still alive. The lock refused
+ * the new gateway — correctly — but the refusal was a single fire-and-forget throw, so when the old
+ * process later exited, NOBODY was polling WeChat and every message went unanswered until the next
+ * manual restart. A correct refusal with no retry turned a 30-second overlap into an open-ended outage.
+ */
+export async function superviseGatewayStart(
+  startOnce: () => Promise<void>,
+  opts: {
+    retryMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    shouldStop?: () => boolean;
+    onBlocked?: (e: GatewayLockHeldError) => void;
+    onCrash?: (e: unknown) => void;
+  } = {},
+): Promise<'stopped' | 'crashed' | 'shutdown'> {
+  const retryMs = opts.retryMs ?? 30_000;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (;;) {
+    if (opts.shouldStop?.()) return 'shutdown';
+    try {
+      await startOnce();
+      return 'stopped'; // clean stop() — do not resurrect
+    } catch (e) {
+      if (e instanceof GatewayLockHeldError) {
+        opts.onBlocked?.(e);
+        await sleep(retryMs);
+        continue;
+      }
+      opts.onCrash?.(e);
+      return 'crashed';
+    }
+  }
+}
+
+/**
  * Long-poll gateway.
  *
  * Usage:
@@ -210,9 +264,7 @@ export class ILinkGateway {
     if (!this.skipLock) {
       const existing = acquireLock(this.accountId);
       if (existing) {
-        throw new Error(
-          `another gateway instance is running for ${this.accountId} (pid=${existing.pid}, started ${new Date(existing.startedAt).toISOString()})`,
-        );
+        throw new GatewayLockHeldError(existing, this.accountId);
       }
     }
 

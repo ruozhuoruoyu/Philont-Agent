@@ -26,7 +26,7 @@ import {
 } from './state.js';
 import { ILinkClient } from './client.js';
 import {
-  ILinkGateway,
+  ILinkGateway, superviseGatewayStart,
   type InboundEvent,
   type GatewayLogger,
 } from './gateway.js';
@@ -230,13 +230,45 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
   registerPushChannel(pushChannel);
   logger.info('wechat push channel registered', { name: pushChannelName });
 
-  // Start loop in background; does not block server startup
-  void gw.start().catch((e) => {
-    logger.error(`gateway crashed: ${String(e)}`, { accountId });
+  // Start loop in background; does not block server startup. Supervised: if the single-instance
+  // lock is held by a live process (owner restarted while the old process lingered — production
+  // 2026-07-24 20:47), keep retrying until the old instance exits and take over, instead of giving
+  // up forever on the first refusal.
+  let shuttingDown = false;
+  let lastStartError = '';
+  void superviseGatewayStart(() => gw.start(), {
+    shouldStop: () => shuttingDown,
+    onBlocked: (e) => {
+      lastStartError = e.message;
+      logger.warn(
+        `gateway lock held by pid=${e.holder.pid} — WeChat stays with the OLD process; ` +
+          `will take over within 30s of it exiting`,
+        { accountId },
+      );
+    },
+    onCrash: (e) => {
+      lastStartError = String(e);
+      logger.error(`gateway crashed: ${lastStartError}`, { accountId });
+    },
   });
+
+  // Watched success line: the boot banner prints "gateway scheduled" before start() has actually run,
+  // and on 2026-07-24 it printed a green checkmark seconds after the gateway had already crashed on the
+  // lock. Ten seconds in, say which world we are in — a claim of health must consult the thing itself.
+  const healthProbe = setTimeout(() => {
+    if (!gw.isHealthy()) {
+      logger.error(
+        `gateway NOT polling 10s after scheduling${lastStartError ? ` — ${lastStartError}` : ''} ` +
+          `(inbound WeChat messages are not being received by this process)`,
+        { accountId },
+      );
+    }
+  }, 10_000);
+  healthProbe.unref?.();
 
   // Graceful shutdown: bind once to SIGINT/SIGTERM to call stop() and deregister channels
   const stopOnSignal = () => {
+    shuttingDown = true;
     unregisterMediaChannel(mediaChannel);
     unregisterPushChannel(pushChannelName);
     void gw.stop();

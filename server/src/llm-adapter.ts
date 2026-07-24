@@ -751,6 +751,8 @@ class MockAdapter implements LLMAdapter {
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content?: string | null;
+  /** DeepSeek thinking mode: assistant turns must echo their reasoning_content back verbatim. */
+  reasoning_content?: string;
   tool_calls?: Array<{
     id: string;
     type: 'function';
@@ -802,7 +804,7 @@ export function safeJsonParse(s: string): Record<string, unknown> {
 }
 
 /** Anthropic NativeMessage[] → OpenAI messages[] */
-function anthropicToOpenAI(msgs: NativeMessage[]): OpenAIMessage[] {
+export function anthropicToOpenAI(msgs: NativeMessage[]): OpenAIMessage[] {
   const out: OpenAIMessage[] = [];
   for (const m of msgs) {
     if (typeof m.content === 'string') {
@@ -816,9 +818,20 @@ function anthropicToOpenAI(msgs: NativeMessage[]): OpenAIMessage[] {
         .map((b) => String(b.text))
         .join('\n');
       const toolUses = blocks.filter((b) => b.type === 'tool_use');
+      // DeepSeek thinking over the OpenAI-compat path: an assistant turn's reasoning_content must be
+      // echoed back verbatim. This translation used to DROP thinking blocks entirely — the Anthropic
+      // path got the echo contract in June, this path never did (a cross-path asymmetry, same family as
+      // the missing pairing repair fixed above). Production 2026-07-24 17:46: a 537-second math turn died
+      // with HTTP 400 "The reasoning_content in the thinking mode must be passed back to the API".
+      const thinking = blocks
+        .filter((b) => b.type === 'thinking' || b.type === 'redacted_thinking')
+        .map((b) => String(b.thinking ?? ''))
+        .filter(Boolean)
+        .join('\n');
       out.push({
         role: 'assistant',
         content: text || null,
+        ...(thinking ? { reasoning_content: thinking } : {}),
         ...(toolUses.length
           ? {
               tool_calls: toolUses.map((t) => ({
@@ -950,7 +963,14 @@ class OpenAICompatAdapter implements LLMAdapter {
     // auth-pause leaves dangling tool_use → 400). Consistent with AnthropicAdapter:
     // the OpenAI-compat path previously missed this; anthropicToOpenAI would translate
     // dangling tool_use into tool_calls with no subsequent role:'tool' message.
-    const openaiMsgs = anthropicToOpenAI(repairToolResultPairing(messages));
+    // Mirror of the Anthropic path's guard: a harness-injected / reconstructed / compaction-rebuilt
+    // assistant turn can carry tool_use with NO thinking block. Under thinking mode that request 400s
+    // ("reasoning_content must be passed back") — and the reasoning is genuinely gone, so the only honest
+    // move is to disable thinking for THIS call and strip the remaining thinking blocks.
+    const syntheticToolUse = hasToolUseWithoutThinking(messages);
+    const openaiMsgs = anthropicToOpenAI(
+      repairToolResultPairing(syntheticToolUse ? stripThinkingBlocks(messages) : messages),
+    );
     const openaiTools = tools?.map((t) => ({
       type: 'function' as const,
       function: {
@@ -971,7 +991,8 @@ class OpenAICompatAdapter implements LLMAdapter {
       if (Number.isFinite(n) && n >= 256 && n <= 65536) return n;
       return 16000;
     })();
-    const wire = this.profile.buildReasoningWire(this.model, opts?.reasoning);
+    const effReasoning = syntheticToolUse ? { ...opts?.reasoning, enabled: false } : opts?.reasoning;
+    const wire = this.profile.buildReasoningWire(this.model, effReasoning);
     const maxTokens = this.profile.resolveMaxTokens(this.model, opts?.reasoning, baseMaxTokens);
 
     const body: Record<string, unknown> = {
@@ -1031,6 +1052,7 @@ class OpenAICompatAdapter implements LLMAdapter {
         message: {
           role: string;
           content?: string | null;
+          reasoning_content?: string | null;
           tool_calls?: Array<{
             id: string;
             type: string;
@@ -1063,6 +1085,14 @@ class OpenAICompatAdapter implements LLMAdapter {
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       // Backfill as Anthropic blocks so chat-handler history stays in a single format
       const anthropicBlocks: Anthropic.ContentBlock[] = [];
+      // Thinking block FIRST (Anthropic block order), so the loop's next request can echo it.
+      if (msg.reasoning_content) {
+        anthropicBlocks.push({
+          type: 'thinking',
+          thinking: msg.reasoning_content,
+          signature: '',
+        } as unknown as Anthropic.ContentBlock);
+      }
       if (msg.content) {
         anthropicBlocks.push({
           type: 'text',
