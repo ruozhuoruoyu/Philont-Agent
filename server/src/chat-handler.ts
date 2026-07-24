@@ -8271,7 +8271,7 @@ async function handleChatSendInner(
               }
             : undefined,
           observations: observations ?? { toolCalls: [] },
-          recentDoneTargetRefs: autonomousLoop.initiatives.listRecentSettledTargetRefs(),
+          recentDoneTargetRefs: autonomousLoop.initiatives.listDormantTargetRefs(),
           turnRef: `${sessionId}:${turnStartTs}`,
         });
         for (const p of proposals) {

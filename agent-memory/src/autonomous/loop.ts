@@ -217,10 +217,9 @@ export function startAutonomousLoop(
       }
     }
 
-    const recentDoneTargetRefs = initiatives.listRecentSettledTargetRefs(
-      24 * 60 * 60 * 1000,
-      now,
-    );
+    // Escalating dormancy, not a flat 24h window — see listDormantTargetRefs for the production day
+    // that motivated it (the same gap facts re-researched every 24h, forever).
+    const recentDoneTargetRefs = initiatives.listDormantTargetRefs(now);
 
     return {
       facts,

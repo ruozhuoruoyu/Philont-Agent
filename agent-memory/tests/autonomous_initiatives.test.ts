@@ -241,3 +241,66 @@ test('countByStatusGroup: 全 5 档,缺省 0', () => {
   assert.equal(counts.skipped, 0);
   handle.close();
 });
+
+// ── Escalating dormancy (listDormantTargetRefs) ─────────────────────────────
+//
+// The flat 24h window re-armed everything daily. Production, two consecutive days: the same ~40 gap facts
+// re-researched at the same clock positions, the same three article URLs fetched four times across two
+// days — ~57k tokens in one 45-minute stretch, none of it new. A repeat that keeps settling without
+// changing anything earns a longer sleep: min(30d, 24h × 2^(N−1)) from the last settle.
+
+const DAY = 24 * 60 * 60 * 1000;
+
+/** Settle one initiative for `ref` and backdate its completion. */
+function settleAt(handle: ReturnType<typeof openMemoryDb>, store: InitiativeStore, ref: string, completedAt: number) {
+  const i = store.insert({ kind: 'k', driver: 'd', targetRef: ref, rationale: 'r', utility: 0.5, budgetEstimate: 100 });
+  store.markRunning(i.id);
+  store.markDone(i.id, 's', { facts: [], notes: [], pursuits: [] }, 100);
+  handle.db.prepare(`UPDATE memory_initiatives SET completed_at = ? WHERE id = ?`).run(completedAt, i.id);
+}
+
+test('dormancy: 第一次结算保持今天的行为 —— 睡一天', () => {
+  const { handle, store } = setup();
+  const now = Date.now();
+  settleAt(handle, store, 't:once', now - 2 * DAY + 1000);
+  assert.ok(!store.listDormantTargetRefs(now).has('t:once'), '一天后醒来,与旧 24h 窗口一致');
+
+  settleAt(handle, store, 't:fresh', now - 3600_000);
+  assert.ok(store.listDormantTargetRefs(now).has('t:fresh'), '刚结算的仍在休眠');
+  handle.close();
+});
+
+test('dormancy: 无产出的重复按 2^n 退避 —— 生产里的每日重研究在第二次后就该停', () => {
+  const { handle, store } = setup();
+  const now = Date.now();
+  // The production shape: settled yesterday AND the day before (two settles, nothing changed).
+  settleAt(handle, store, 'fact:8a29010f', now - 2 * DAY + 3600_000);
+  settleAt(handle, store, 'fact:8a29010f', now - 1 * DAY + 3600_000);
+
+  // Under the flat window it would be proposable again now. Under backoff: N=2 → sleep 2 days from the
+  // last settle → still dormant today AND tomorrow.
+  assert.ok(store.listDormantTargetRefs(now).has('fact:8a29010f'), '第三天不该再研究同一个 gap fact');
+
+  // Five settles → 16-day sleep. Nine → capped at 30, not 256.
+  for (let d = 3; d <= 5; d++) settleAt(handle, store, 't:worn', now - (6 - d) * DAY);
+  settleAt(handle, store, 't:worn', now - 3 * DAY);
+  settleAt(handle, store, 't:worn', now - 2 * DAY);
+  assert.ok(store.listDormantTargetRefs(now).has('t:worn'), '5 次结算 → 睡 16 天,2 天前的最后一次远未到期');
+  handle.close();
+});
+
+test('dormancy: 30 天封顶 —— 永不变成永久拉黑', () => {
+  const { handle, store } = setup();
+  const now = Date.now();
+  // Nine settles, the last one 29 days ago: 2^8 days would be forever; the cap says 30d, so one more day
+  // and it wakes. At 29d it is still dormant; backdate the last to 31d and everything falls out of the
+  // 30d lookback entirely.
+  for (let k = 0; k < 9; k++) settleAt(handle, store, 't:cap', now - 29 * DAY - k * 3600_000);
+  assert.ok(store.listDormantTargetRefs(now).has('t:cap'), '29 天 < 30 天封顶,仍休眠');
+
+  const { handle: h2, store: s2 } = setup();
+  for (let k = 0; k < 9; k++) settleAt(h2, s2, 't:old', now - 31 * DAY - k * 3600_000);
+  assert.ok(!s2.listDormantTargetRefs(now).has('t:old'), '滑出 30 天回看窗后重新可提 —— 世界可能已经变了');
+  h2.close();
+  handle.close();
+});

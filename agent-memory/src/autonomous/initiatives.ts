@@ -222,6 +222,40 @@ export class InitiativeStore {
     return new Set(rows.map((r) => r.target_ref));
   }
 
+  /**
+   * Targets currently DORMANT under escalating backoff — the dedup set the loop should actually use.
+   *
+   * The flat 24h window above re-arms everything daily, and production showed what that buys: the same
+   * ~40 gap facts re-researched every day at the same clock positions, and the same three Jacobian
+   * article URLs fetched on the 23rd at 11:41, again at 12:16, and again on the 24th at 13:12 and 13:47 —
+   * about 57k tokens in one 45-minute stretch, none of it new. A lookup that keeps settling without
+   * changing anything is not information the system lacks; it is a question whose answer did not help,
+   * and asking it again tomorrow will not improve the answer.
+   *
+   * Backoff: a target settled N times in the last 30 days sleeps min(30d, 24h × 2^(N−1)) from its last
+   * settle. First settle keeps today's behaviour (1 day); unproductive repeats earn 2d, 4d, 8d… 30d cap.
+   * Escalation only ever bites the UNPRODUCTIVE repeats by construction: a lookup that produced a new
+   * fact removes its own target from the gap/token pools, so it is never re-proposed at all.
+   */
+  listDormantTargetRefs(now = Date.now()): Set<string> {
+    const LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
+    const CAP_MS = LOOKBACK_MS;
+    const rows = this.db
+      .prepare<[number]>(
+        `SELECT target_ref, COUNT(*) AS n, MAX(completed_at) AS last
+         FROM memory_initiatives
+         WHERE status IN ('done', 'failed') AND completed_at IS NOT NULL AND completed_at >= ?
+         GROUP BY target_ref`,
+      )
+      .all(now - LOOKBACK_MS) as Array<{ target_ref: string; n: number; last: number }>;
+    const dormant = new Set<string>();
+    for (const r of rows) {
+      const sleepMs = Math.min(CAP_MS, DEFAULT_DEDUPE_WINDOW_MS * 2 ** (r.n - 1));
+      if (now - r.last < sleepMs) dormant.add(r.target_ref);
+    }
+    return dormant;
+  }
+
   /** @deprecated Use listRecentSettledTargetRefs (failed also deduped) instead */
   listRecentDoneTargetRefs(windowMs = DEFAULT_DEDUPE_WINDOW_MS, now = Date.now()): Set<string> {
     return this.listRecentSettledTargetRefs(windowMs, now);
