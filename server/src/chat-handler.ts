@@ -8577,32 +8577,72 @@ function hasRecentlyActiveExploreSession(sessionId: string): boolean {
  * skip and the redo falls through to flat search (observed). A cheap aux call reads the recent transcript
  * and names the concrete topic being redone. Returns null when unconfigured / no context / no clear goal.
  */
-async function deriveRedoGoal(sessionId: string, currentMessage: string): Promise<string | null> {
-  if (!isAuxLLMConfigured()) return null;
+/**
+ * The goal a force-started deep_explore session should pursue — synthesized by the aux LLM from the
+ * user's message PLUS the recent conversation, never transcribed by a length test.
+ *
+ * Production 2026-07-24 17:34: the owner sent "找别人的论文有什么用呢？即使复现也是在别人的路线上而且肯定
+ * 没有解决问题。" — a CRITIQUE of the current approach (stop reproducing papers; attack the open problem
+ * originally). The old fork asked messageIsSelfContainedGoal, a ≥12-char length proxy, which any Chinese
+ * sentence passes — so force-start transcribed the rhetorical question verbatim as the session goal, and
+ * the engine spent forty minutes earnestly researching the sociology of literature review (Merton, Kuhn,
+ * "functions of reading papers") instead of returning to the Gyárfás problem with a new strategy. The
+ * route was right; the GOAL took the owner's words literally. Length measures neither of the things that
+ * matter here — whether the message stands alone, and whether it is a goal at all — so both questions go
+ * to the aux LLM (the owner's standing rule: user intent is judged by a model, not by a pattern).
+ *
+ * Parsing note: UNSUITABLE is OUR enum consumed by exact match on our own output slot — allowed. The
+ * message text itself is never pattern-matched.
+ */
+export async function synthesizeExploreGoal(
+  sessionId: string,
+  currentMessage: string,
+  deps: {
+    ask?: (req: { system: string; user: string; maxTokens: number }) => Promise<string | null>;
+    configured?: boolean;
+    transcript?: () => Array<{ role: string; content: string }>;
+  } = {},
+): Promise<string | null> {
+  const msg = (currentMessage ?? '').trim();
+  const verbatimFallback = messageIsSelfContainedGoal(msg) ? msg.slice(0, 2000) : null;
+  const configured = deps.configured ?? isAuxLLMConfigured();
+  if (!configured) return verbatimFallback; // pre-aux behavior: long → verbatim, short → no force-start
   let recent: Array<{ role: string; content: string }>;
   try {
-    recent = memory.raw.getMessages(sessionId).slice(-12) as Array<{ role: string; content: string }>;
+    recent = (deps.transcript?.() ?? memory.raw.getMessages(sessionId).slice(-12)) as Array<{
+      role: string;
+      content: string;
+    }>;
   } catch {
-    return null;
+    return verbatimFallback;
   }
   const transcript = recent
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => `${m.role}: ${String(m.content ?? '').slice(0, 300)}`)
     .join('\n');
-  if (!transcript.trim()) return null;
   try {
-    const raw = await callAuxLLM({
-      system: 'You extract a concrete research goal from a conversation. Output only the goal sentence.',
+    const raw = await (deps.ask ?? callAuxLLM)({
+      system:
+        'You determine what goal a deep reasoning session should pursue. Output only the goal, or the single word UNSUITABLE.',
       user:
-        `The user just said "${currentMessage}", which refers back to an earlier research topic (a redo / ` +
-        `"do it deeper"). From the conversation below, state in ONE concrete sentence the research goal they ` +
-        `want pursued. Output ONLY that sentence — no preamble, no quotes.\n\nConversation:\n${transcript}`,
-      maxTokens: 200,
+        `The user's latest message:\n"${msg}"\n\nRecent conversation:\n${transcript || '(none)'}\n\n` +
+        `Decide what the reasoning session should pursue:\n` +
+        `1. If the latest message IS itself a complete, self-contained research goal, output it VERBATIM — ` +
+        `do not paraphrase; mathematical or technical statements must not lose precision.\n` +
+        `2. If it is a critique, redirection, or new constraint on work already underway in the conversation ` +
+        `(e.g. questioning the current approach, "not X", "try an original route", "go deeper"), output ONE ` +
+        `sentence stating the ONGOING task's goal updated with the user's new direction. The goal must be ` +
+        `about the task, never about the user's sentence.\n` +
+        `3. If it is a question about the assistant itself or its previous output, or there is no research ` +
+        `goal at all, output exactly: UNSUITABLE\n` +
+        `Output ONLY the goal (or UNSUITABLE) — no preamble, no quotes.`,
+      maxTokens: 300,
     });
-    const goal = (raw ?? '').trim().replace(/^["'「『]|["'」』]$/g, '').trim().slice(0, 500);
-    return goal.length >= 12 ? goal : null;
+    const goal = (raw ?? '').trim().replace(/^["'「『]|["'」』]$/g, '').trim().slice(0, 2000);
+    if (/^UNSUITABLE\b/i.test(goal)) return null;
+    return goal.length >= 12 ? goal : verbatimFallback;
   } catch {
-    return null;
+    return verbatimFallback;
   }
 }
 
@@ -8660,7 +8700,6 @@ async function decideForcedDeepExploreCall(
   // Force-START. On a pending-auth resume the live userMessage is the bare "ok" that answered the auth
   // card, so goal / depth-signal / meta all run against the ORIGINAL message carried across the resume.
   const forceMessage = signalBus.carriedExploreGoal ?? signalBus.userMessage ?? '';
-  const selfContained = messageIsSelfContainedGoal(forceMessage);
   const routeTier = deepExploreRouteTier(signalBus.intentDecision ?? null);
   const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
   // Depth is ESTABLISHED, never inferred. The owner's yes (ask tier) is the only entry — the keyword
@@ -8677,12 +8716,9 @@ async function decideForcedDeepExploreCall(
     !signalBus.forcedDeepExploreStart &&
     !signalBus.forcedDeepExploreContinue &&
     !hasRecentlyActiveExploreSession(sessionId);
-  // Short context-dependent messages ("重做"/"深入点") name no goal — derive it from the transcript.
-  const forceGoal = baseEligible
-    ? selfContained
-      ? forceMessage.trim()
-      : await deriveRedoGoal(sessionId, forceMessage)
-    : null;
+  // The goal is SYNTHESIZED (aux LLM over message + transcript), never transcribed by length: a long
+  // critique of the current approach is not a goal, and a short "重做" names one. See synthesizeExploreGoal.
+  const forceGoal = baseEligible ? await synthesizeExploreGoal(sessionId, forceMessage) : null;
   if (
     deepExploreForceStartEnabled() &&
     shouldForceDeepExploreStart({
