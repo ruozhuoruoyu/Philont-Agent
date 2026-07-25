@@ -152,6 +152,7 @@ import {
   findRunPromise,
   findActionAnnouncement,
   turnDidExecute,
+  renderSkillOffer,
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
 import { classifyAuthIntent } from './auth_intent.js';
@@ -219,7 +220,7 @@ import { createAutoAdvanceLoop } from './deep_explore_autoadvance.js';
 import { createFollowUpLoop } from './deep_explore_followup.js';
 import { semanticToolPhrase, semanticToolFailPhrase, summarizingPhrase, type PhraseLang } from './channel_phrases.js';
 import { wrapSkillToolWithReload } from './skill_install_wrapper.js';
-import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
+import { recallRelevanceEnabled, selectRelevantSkills, selectRelevantSkillsDetailed } from './skill_recall.js';
 import { recentAttachments } from './channels/recent_attachments.js';
 import { persistToolResultIfFetched, parseWebFetchOutput } from './fetched_resources_hook.js';
 import { planLoopEnabled, runPlanExecuteLoop } from './plan_execute_loop.js';
@@ -4846,7 +4847,6 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
   // Regular skill index: exclude meta-skills already shown in the "extended capabilities" section to avoid duplication
   const META_SKILL_NAMES = new Set(['clawhub', 'github-skills']);
   const SKILL_INDEX_MAX_LINES = 15;
-  const SKILL_WHEN_TO_USE_TRUNC = 120;
   // P1: relevance-recall flag. When OFF (default), the four skill selections below stay byte-identical
   // to the historical global-top-N behavior. When ON (and a non-empty recall query is available), each
   // section is selected by jaccard relevance to the current task at SMALLER caps to fight context bloat.
@@ -4863,13 +4863,16 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
         // Otherwise playbooks would be sorted by useCount too; always 0 → ranked last, never making top-15, effectively invisible.
         && s.maturity !== 'playbook'
       );
-  const ranked = relevanceOn
-    ? selectRelevantSkills(memory.skills, recallQuery, {
+  const rankedSel = relevanceOn
+    ? selectRelevantSkillsDetailed(memory.skills, recallQuery, {
         pool: 'positive',
         k: POSITIVE_CAP,
         // META filter baked into fallback; selector result is already pool-filtered (positive predicate).
         fallback: positiveFallback,
-      }).filter((s) => !META_SKILL_NAMES.has(s.name))
+      })
+    : null;
+  const ranked = rankedSel
+    ? rankedSel.skills.filter((s) => !META_SKILL_NAMES.has(s.name))
     : positiveFallback().slice(0, SKILL_INDEX_MAX_LINES);
   // ONE slot of the index is reserved for a draft nobody has been shown yet.
   //
@@ -4897,31 +4900,25 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
     // Log what we OFFER, so the next production log can answer "does it not see them, or not want them?"
     // Persist the offer (v36). Without it, "shown and declined" and "never shown" both look like zero.
     memory.skills.recordSkillsOffered(positives.map((s) => s.name));
+    // Say what relevance DID, not merely that it is enabled: "on" while contributing zero matches is how
+    // an identical six-skill list went unquestioned for a week. See selectRelevantSkillsDetailed.
+    const relevanceNote = !relevanceOn
+      ? 'off'
+      : rankedSel && rankedSel.matchedByRelevance > 0
+        ? `on(matched ${rankedSel.matchedByRelevance})`
+        : 'on(matched 0 → global fallback)';
     console.log(
       `[skill-funnel] offered ${positives.length} skill(s) ` +
-        `(pool=${memory.skills.count()}, relevance=${relevanceOn ? 'on' : 'off'}): ` +
+        `(pool=${memory.skills.count()}, relevance=${relevanceNote}): ` +
         positives.map((s) => `${s.name}(${s.maturity})`).join(', '),
     );
-    lines.push('Available skills (use use_skill(name) to get details):');
-    for (const s of positives) {
-      // Source label: source looks like 'clawhub:foo@1.0.0' / 'github:owner/repo@sha' /
-      // 'url:https://...'; displayed as [clawhub] / [github] / [url]. Locally handwritten / reflection-generated
-      // (source IS NULL) have no label — keeps index lines concise.
-      const tag = s.source
-        ? ` [${s.source.split(':')[0]}]`
-        : '';
-      lines.push(`  - ${s.name}${tag}: ${s.description}`);
-      // 2026-05-09 v15: when when_to_use is present, append a scenario line (LLM semantic judgment of when to use this skill).
-      // Without it, only the description line is shown (reflection-generated skills / old SKILL.md without the field
-      // all gracefully degrade).
-      if (s.whenToUse && s.whenToUse.trim()) {
-        const trimmed = s.whenToUse.trim();
-        const display = trimmed.length > SKILL_WHEN_TO_USE_TRUNC
-          ? trimmed.slice(0, SKILL_WHEN_TO_USE_TRUNC) + '…'
-          : trimmed;
-        lines.push(`    When to use: ${display}`);
-      }
-    }
+    // The wording lives in agent-memory/src/skill_offer.ts, where the reason for every clause is written
+    // down. Short version: 7 days / 689 turns / 94 skills / use_skill called ZERO times. Every other rung
+    // of the funnel works; the one made purely of prompt text did not. The old block advertised the
+    // MECHANISM ("use_skill(name) to get details" — a lookup that costs a round-trip and returns details),
+    // hid the evidence the store already had (a 6/6 recipe rendered identically to last night's guess),
+    // and gave the exploration slot no reason to ever be picked.
+    for (const line of renderSkillOffer(positives)) lines.push(line);
   }
 
   // 2026-05-11 (v17 complex-task protocol Phase 5.5): dedicated "❌ My previous failure patterns" section.

@@ -54,6 +54,8 @@ export {
 export type { FailureCounted } from './failure_signatures.js';
 export { SkillStore, scoreSkill } from './skills.js';
 export type { SkillChangeEvent } from './skills.js';
+export { renderSkillOffer, skillEvidenceTag, hasUntried, SKILL_WHEN_TO_USE_TRUNC } from './skill_offer.js';
+export type { OfferableSkill } from './skill_offer.js';
 export {
   nextMaturity,
   isCallableMaturity,

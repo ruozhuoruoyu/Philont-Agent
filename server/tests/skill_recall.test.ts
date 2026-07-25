@@ -185,3 +185,37 @@ test('Chinese query with no FTS hits still fills from fallback (no worse than to
   assert.equal(got.length, k, 'fallback fills to k even with zero matches');
   assert.equal(new Set(got.map((s) => s.name)).size, got.length, 'no dup');
 });
+
+// ── What relevance actually DID (2026-07-25) ────────────────────────────────
+//
+// The funnel logged `relevance=on` every turn while the offered six never changed. Cause: a Chinese
+// query tokenizes to single CHARACTERS and the skill corpus is written in English, so jaccard is 0
+// against every row — and because single characters are non-empty tokens, the step-1 empty-query guard
+// does not fire either. The path proceeds to an empty match set and fills all six from the global
+// top-N. "The flag is on" was never the same claim as "the flag did anything".
+import { selectRelevantSkillsDetailed } from '../src/skill_recall.js';
+
+test('matchedByRelevance reports 0 when a CJK query cannot touch an English corpus', () => {
+  const store = makeStore();
+  add(store, 'send-wechat-files-and-verify-size', 'Send a file over WeChat and verify size');
+  add(store, 'test-mersenne-check', 'Check Mersenne primality with pariGp');
+  const r = selectRelevantSkillsDetailed(store, '脊线前诱导染色试探有机会吗', {
+    pool: 'positive',
+    k: 6,
+    fallback: () => store.listAll(40),
+  });
+  assert.equal(r.matchedByRelevance, 0, 'the honest number behind the frozen list');
+  assert.ok(r.skills.length > 0, 'the fallback still fills the slots — behaviour unchanged, only visible');
+});
+
+test('matchedByRelevance is non-zero when the query and the corpus share a language', () => {
+  const store = makeStore();
+  add(store, 'mersenne', 'Check Mersenne primality with pariGp');
+  add(store, 'wechat-files', 'Send a file over WeChat and verify size');
+  const r = selectRelevantSkillsDetailed(store, 'check mersenne primality', {
+    pool: 'positive',
+    k: 6,
+    fallback: () => store.listAll(40),
+  });
+  assert.ok(r.matchedByRelevance > 0, 'relevance works and now says so');
+});
