@@ -281,14 +281,19 @@ export function deepExploreRouteTier(
   return 'direct';
 }
 
-/** The one question the ask tier sends (the reply is classified grant/deny like an auth card). */
+/**
+ * The one question the ask tier sends (the reply is classified grant/deny like an auth card).
+ *
+ * Kept to one line with SINGLE-KEYSTROKE answers. The first version explained the engine in two
+ * sentences and asked the owner to type 进 or 直接 — and in production (2026-07-24 16:33 and 17:34) the
+ * owner typed 深度推理 instead, four characters, on a phone, twice. A question the recipient answers by
+ * retyping its subject line is asking too much: this fires on every borderline task, so the cost is paid
+ * over and over. The two digits are the primary answer; the words stay accepted (see
+ * classifyExploreAskReply) because someone who already learned them must not be punished for it.
+ */
 export function buildDeepExploreAskText(dec: IntentDecision | null): string {
   const mode = dec?.domain === 'formal' ? '形式化证明' : '循证推演';
-  return (
-    `🧭 这个任务看起来适合进入深度推理引擎(${mode}模式):会创建一个可跨天续跑、逐节点验证的推理会话,` +
-    `每轮约 10 分钟。
-回复"进"开始深度推理;回复"直接"就快速平铺作答。`
-  );
+  return `🧭 进深度推理引擎?(${mode}:跨天续跑、逐节点验证,每轮约 10 分钟)\n回 1 = 进 · 2 = 直接答`;
 }
 
 /**
@@ -309,8 +314,13 @@ export function buildDeepExploreAskText(dec: IntentDecision | null): string {
 export function classifyExploreAskReply(reply: string): 'grant' | 'deny' | null {
   const r = (reply ?? '').trim().toLowerCase().replace(/[。！？，,!?.\s]+/g, '');
   if (!r) return null;
-  // The offered words, plus the obvious near-synonyms a user types instead.
-  if (/^(进|进入|深度推理|深度|深入|深挖|推理)$/.test(r)) return 'grant';
+  // The offered answers FIRST — 1 and 2 are what the question now hands out, so they must be matched
+  // here and never inferred by a general classifier (a bare "2" means nothing to a model asked "did the
+  // user authorise this?"). Then the words the older question offered, plus the near-synonyms people
+  // type instead: someone who learned 进/直接 must not be punished for still using them.
+  if (/^[1１]$/.test(r)) return 'grant';
+  if (/^[2２]$/.test(r)) return 'deny';
+  if (/^(进|进入|深度推理|深度|深入|深挖|推理|开始深度推理)$/.test(r)) return 'grant';
   if (/^(直接|平铺|快速|快答|直接答|不用|不深入|简单说)$/.test(r)) return 'deny';
   return null; // anything else → generic classifier
 }

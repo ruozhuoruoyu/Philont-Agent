@@ -353,6 +353,29 @@ test('classifyExploreAskReply: the words the ask itself offered are matched, not
   assert.equal(classifyExploreAskReply(''), null);
 });
 
+test('the ask is one line and its digits are matched — the owner should not retype the subject line', async () => {
+  const { buildDeepExploreAskText, classifyExploreAskReply } = await import('../src/intent_router.js');
+  // Production 2026-07-24 16:33 and 17:34: the question offered 进 / 直接 and the owner typed 深度推理
+  // both times — four characters, on a phone, for a prompt that fires on every borderline task.
+  const ask = buildDeepExploreAskText({ route: 'deep_explore', confidence: 0.9, domain: 'deliberate' } as never);
+  assert.ok(ask.split('\n').length <= 2, 'two lines at most');
+  assert.ok(ask.length <= 90, `the ask must stay short, got ${ask.length}`);
+  assert.match(ask, /1/, 'the grant answer must appear in the question that offers it');
+  assert.match(ask, /2/, 'and the deny answer too');
+
+  // Every answer the question hands out is matched deterministically — the 2026-07-13 lesson.
+  assert.equal(classifyExploreAskReply('1'), 'grant');
+  assert.equal(classifyExploreAskReply('2'), 'deny');
+  assert.equal(classifyExploreAskReply('１'), 'grant', 'full-width digits come from Chinese IMEs');
+  assert.equal(classifyExploreAskReply('2.'), 'deny', 'trailing punctuation is stripped');
+  // The older vocabulary keeps working: a habit we taught must not become an error.
+  assert.equal(classifyExploreAskReply('进'), 'grant');
+  assert.equal(classifyExploreAskReply('直接'), 'deny');
+  assert.equal(classifyExploreAskReply('开始深度推理'), 'grant', 'what the owner actually typed');
+  // A digit that is not one of the two offered answers is NOT an answer.
+  assert.equal(classifyExploreAskReply('3'), null);
+});
+
 test('buildIntentPrompt: carries the "debugging our own artifact is NOT deep_explore" boundary', () => {
   const p = buildIntentPrompt('问题1就是定位不到检索的节点');
   assert.match(p, /debugging OUR OWN artifact is NOT deep_explore/i);
