@@ -6067,7 +6067,15 @@ export function resolveJudgeGoal(
 ): string | null {
   const carried = (carriedGoal ?? '').trim();
   if (carried) return carried;
-  if (resumedFromAuth) return null;
+  const lastRouted = (lastRoutedGoal ?? '').trim();
+  // An auth resume with no carried explore goal used to emit NOTHING. Honest, but it left the judge blind
+  // on exactly the turns most worth judging: an execute-class tool is what raises an auth card, so resumed
+  // turns carry the most tool evidence in the sample. Production 2026-07-25: four skips in one evening, one
+  // of them the best-grounded turn of the day (downloaded the House of Graphs 4-critical set and verified
+  // all 80 graphs) — while the day's judge total stood at 1. The session's last routed substantive message
+  // IS the goal those turns are executing; judging against it is right, and it is nothing like judging
+  // against the word "ok" that the 07-22 fix removed. With no such goal, still emit nothing.
+  if (resumedFromAuth) return lastRouted.length >= 12 ? lastRouted : null;
   const msg = (userMessage ?? '').trim();
   // A bare continuation word sent as a FRESH message — "ok", "继续" — is not a goal either; the auth-resume
   // fix did not cover it, and the judge duly burned an aux call concluding 'The goal "ok" is too vague to

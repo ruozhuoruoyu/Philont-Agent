@@ -26,6 +26,18 @@ test('an auth resume with no recoverable goal emits no verdict at all', () => {
   assert.equal(resolveJudgeGoal('   ', '同意', true), null);
 });
 
+test('an auth resume DOES recover the session goal when the router carried one', () => {
+  // 2026-07-25: four "skipped (auth resume, original goal not recoverable)" in one evening, including the
+  // best-grounded turn of the day — it downloaded the House of Graphs 4-critical set and verified all 80
+  // graphs, and the judge said nothing about it. Skipping was the right fix for judging the word "ok";
+  // it was never the right answer for a turn whose task the session plainly knows.
+  const goal = '脊线前(short path)诱导 χ=4 + S2 辅助染色试探有机会吗';
+  assert.equal(resolveJudgeGoal(undefined, 'ok', true, goal), goal);
+  // Still nothing when the session offers nothing either — no verdict beats a meaningless one.
+  assert.equal(resolveJudgeGoal(undefined, 'ok', true, '继续'), null, 'too short to be a goal');
+  assert.equal(resolveJudgeGoal(undefined, 'ok', true, undefined), null);
+});
+
 test('a carried goal wins even on a fresh turn — it is the more specific signal', () => {
   assert.equal(resolveJudgeGoal('the original task', 'continue', false), 'the original task');
 });
