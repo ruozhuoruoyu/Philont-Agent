@@ -3245,6 +3245,23 @@ export function createDeepExploreTool(
           `generation is not converging on this goal. Switch to action=continue to ${verb} a surviving ${noun}, ` +
           `or report honestly that this angle is exhausted — do not keep proposing near-duplicates.`
         : '';
+    // A round that hung NOTHING on the tree and left NOTHING alive did not explore — it burned. Saying
+    // "hit the iteration cap; you can explore again" about it invites an identical second burn, and the
+    // model duly reported the barren round to the owner as a completed survey.
+    //
+    // Production 2026-07-25 23:06: goal "探索其他可能的研究方向或解决方案。" (which names no object of study),
+    // six web searches, five fetches, three minutes, "0 new candidate ... 0 currently alive". A diverge
+    // round generates FROM the goal, so a goal naming nothing produces nothing — that is the first thing
+    // to suspect, and the only repair that helps is a goal with a subject in it.
+    const barren = newCandidates === 0 && survivors.length === 0 && refuted === 0;
+    const barrenNote = barren
+      ? `\n⛔ This round produced NOTHING — no candidate proposed, none alive, none ruled out. Do not report ` +
+        `it to the user as a survey or as progress; nothing was surveyed.\n` +
+        `The usual cause is the GOAL: a diverge round generates from the goal, so a goal that names no ` +
+        `concrete object of study ("explore other possible directions") can only generate generic search. ` +
+        `Check the goal above — if it does not name the thing being studied, do not re-run this round: ` +
+        `start a session whose goal names it, or tell the user plainly that the goal is too vague to explore.`
+      : '';
     const killLabel = profile.id === 'formal' ? 'killed by counterexample' : 'ruled out as incoherent';
     const parts: string[] = [];
     parts.push(`${newCandidates} new ${noun}(s) proposed (hung on the tree to ${verb} later)`);
@@ -3261,12 +3278,17 @@ export function createDeepExploreTool(
         : result.hitCap
           ? '\n(hit the iteration cap; you can explore again)'
           : '';
-    deps.onMilestone?.(`${profile.divergeMilestoneLabel}: ${parts.join('; ')}.`);
+    deps.onMilestone?.(
+      barren
+        ? `${profile.divergeMilestoneLabel}: produced nothing — the goal names no object of study.`
+        : `${profile.divergeMilestoneLabel}: ${parts.join('; ')}.`,
+    );
     return {
       success: true,
       output:
-        `${profile.divergeMilestoneLabel} — ${parts.join('; ')}.${tail}` +
+        `${profile.divergeMilestoneLabel} — ${parts.join('; ')}.${barren ? '' : tail}` +
         (list ? `\nAlive ${noun}(s) (run action=continue to ${verb} one):\n${list}` : '') +
+        barrenNote +
         divergeStuckNote +
         phaseNote +
         `\nsession id: ${session.id}`,

@@ -8645,10 +8645,54 @@ export async function synthesizeExploreGoal(
     });
     const goal = (raw ?? '').trim().replace(/^["'「『]|["'」』]$/g, '').trim().slice(0, 2000);
     if (/^UNSUITABLE\b/i.test(goal)) return null;
-    return goal.length >= 12 ? goal : verbatimFallback;
+    if (goal.length < 12) return verbatimFallback;
+    // ANCHORING. Length was the only check here, and length is precisely what cannot see the failure
+    // that follows. Production 2026-07-25 23:06, one day after this function replaced a length test:
+    // "还有其它方向可以尝试吗？" was synthesized into "探索其他可能的研究方向或解决方案。" — 18 characters, so it
+    // passed, and it names NOTHING. No Gyárfás, no Goldbach, no object of study at all. The engine then
+    // spent three minutes searching "how to find novel research directions" and "science slowdown publish
+    // or perish", fetched an HBS piece on why good ideas get stuck in universities, and hung ZERO nodes —
+    // the identical sociology-of-research detour this function was written to stop, arriving through the
+    // function itself. Twenty minutes earlier the same engine, given a goal that named its object, produced
+    // five candidates in one round.
+    //
+    // A real goal is anchored in the conversation: its subject was said out loud by someone. So require a
+    // run of >= 4 characters shared with the transcript. This is a substring test on OUR OWN aux output
+    // against real text — not semantic matching between languages, which is the thing that does not work.
+    // Unanchored → no goal at all: answering flat and asking beats burning three minutes on a void.
+    // Anchor against the current message TOO: case 1 (the message already IS the goal) echoes the user's
+    // own words back, and those words are the most anchored text there is.
+    const anchorText = `${transcript}\n${msg}`;
+    if (anchorText.trim() && longestCommonRun(goal, anchorText) < 4) {
+      console.warn(
+        `[force-start] synthesized goal is not anchored in the conversation — refusing it: "${goal.slice(0, 60)}"`,
+      );
+      return null;
+    }
+    return goal;
   } catch {
     return verbatimFallback;
   }
+}
+
+/** Longest run of characters occurring in both strings. Character-level on purpose: word tokenisation
+ *  is exactly what fails on Chinese, and this is comparing our own output against text we already hold. */
+export function longestCommonRun(a: string, b: string): number {
+  const x = a.toLowerCase(), y = b.toLowerCase();
+  if (!x || !y) return 0;
+  let prev = new Uint16Array(y.length + 1);
+  let best = 0;
+  for (let i = 1; i <= x.length; i++) {
+    const cur = new Uint16Array(y.length + 1);
+    for (let j = 1; j <= y.length; j++) {
+      if (x[i - 1] === y[j - 1]) {
+        cur[j] = prev[j - 1] + 1;
+        if (cur[j] > best) best = cur[j];
+      }
+    }
+    prev = cur;
+  }
+  return best;
 }
 
 /** First not-done step id of a plan — concrete id for gate hints (the model has often never seen
