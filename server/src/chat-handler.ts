@@ -1737,7 +1737,7 @@ const activeSessionMessages = new Map<string, NativeMessage[]>();
 // to prevent unit tests from hanging due to top-level DB side-effects when importing chat-handler.ts.
 // Uses import + re-export internally to keep call sites unchanged — `export ... from` alone does not bring the
 // binding into this module's scope, and the 4 gate call sites would get ReferenceError.
-import { isPlanGateExempt, isReadOnlyShellCommand, terminalPlanClosedThisTurn } from './plan_gate.js';
+import { autoRecoveryPlanScopeAllows, isPlanGateExempt, isReadOnlyShellCommand, terminalPlanClosedThisTurn } from './plan_gate.js';
 export { isPlanGateExempt, isReadOnlyShellCommand, terminalPlanClosedThisTurn };
 
 // Phase 10 M1 (2026-05-14): persist fetched resources to local disk.
@@ -9166,7 +9166,14 @@ async function runToolLoop(
       // approval and (prod 2026-07-07 09:06) left a narrated "sent" with nothing sent.
       const exempt = isPlanGateExempt(call.name, classification, call.input) ||
         signalBus.authApprovedCallId === call.id;
-      if (needsPlanReview && !exempt) {
+      // A recovery plan for X must not confiscate Y — see autoRecoveryScopedTool.
+      const recoveryScoped = needsPlanReview && !exempt && autoRecoveryPlanScopeAllows(lastPlan, call.name);
+      if (recoveryScoped) {
+        console.log(
+          `[plan_protocol_gate] session=${sessionId} auto-recovery plan (${lastPlan!.guideRef}) is scoped to its failing tool — ${call.name} allowed[first-iter]`,
+        );
+      }
+      if (needsPlanReview && !exempt && !recoveryScoped) {
         const baseReason = !lastPlan
           ? `slow 模式下尚未调 plan_draft 拆解任务。`
           : lastPlan.status === 'draft'
@@ -10961,7 +10968,14 @@ async function runToolLoop(
         // approval and (prod 2026-07-07 09:06) left a narrated "sent" with nothing sent.
         const exempt = isPlanGateExempt(call.name, classification, call.input) ||
           signalBus.authApprovedCallId === call.id;
-        if (needsPlanReview && !exempt) {
+        // A recovery plan for X must not confiscate Y — see autoRecoveryScopedTool.
+        const recoveryScoped = needsPlanReview && !exempt && autoRecoveryPlanScopeAllows(lastPlan, call.name);
+        if (recoveryScoped) {
+          console.log(
+            `[plan_protocol_gate] session=${sessionId} auto-recovery plan (${lastPlan!.guideRef}) is scoped to its failing tool — ${call.name} allowed`,
+          );
+        }
+        if (needsPlanReview && !exempt && !recoveryScoped) {
           const baseReason = !lastPlan
             ? `In slow mode, plan_draft has not been called to break down the task.`
             : lastPlan.status === 'draft'

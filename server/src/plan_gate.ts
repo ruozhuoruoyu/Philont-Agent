@@ -1,4 +1,42 @@
 /**
+ * An auto-recovery placeholder plan is SCOPED to the failure that created it.
+ *
+ * auto-revise-on-fail answers repeated same-root-cause failures (say webFetch 403ing twice on paywalled
+ * PDFs) by dropping to slow and creating a diagnose→revise→retry placeholder plan whose guideRef carries
+ * the signature: `auto-recovery:webFetch:http-403`. The gate then treated that placeholder like any
+ * draft plan and confiscated EVERY write/exec tool — including the ones doing the actual work.
+ *
+ * Three production occurrences in 32 hours (2026-07-24 16:46, 17:08, 2026-07-25 00:00), same shape each
+ * time: webFetch 403s during a math session → in-turn-tool-block already disables webFetch (the bleeding
+ * is stopped) → the placeholder plan then rejects writeFile/shell — the enumeration scripts that had
+ * nothing to do with the fetch failure. The third occurrence provoked a fabricated "shell → 跑完" claim
+ * about the blocked call; the honesty gate caught it, but the provocation was ours.
+ *
+ * A recovery plan for X must not confiscate Y. The scope of the discipline is the failing tool named in
+ * the signature; everything else keeps working. (A TASK-boundary placeholder — auto-plan-on-slow, guideRef
+ * not prefixed `auto-recovery:` — keeps full gating: that one IS the plan protocol proper.) The prefix is
+ * our own stored string, exact-matched on our own slot — no user text is pattern-matched here.
+ */
+export function autoRecoveryScopedTool(
+  plan: { isPlaceholder?: boolean; guideRef?: string | null } | null | undefined,
+): string | null {
+  if (!plan?.isPlaceholder) return null;
+  const ref = plan.guideRef ?? '';
+  if (!ref.startsWith('auto-recovery:')) return null;
+  const tool = ref.slice('auto-recovery:'.length).split(':')[0]?.trim();
+  return tool || null;
+}
+
+/** True when the active plan is an auto-recovery placeholder whose failing tool is NOT this call. */
+export function autoRecoveryPlanScopeAllows(
+  plan: { isPlaceholder?: boolean; guideRef?: string | null } | null | undefined,
+  toolName: string,
+): boolean {
+  const scoped = autoRecoveryScopedTool(plan);
+  return scoped !== null && scoped !== toolName;
+}
+
+/**
  * Pure-function helper layer for plan_protocol_gate.
  *
  * Decoupled from chat-handler.ts; **no side effects** — does not import any module that
