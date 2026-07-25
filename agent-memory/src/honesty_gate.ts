@@ -337,7 +337,8 @@ export interface HonestyEvaluation {
     | 'artifact_claim_without_tools'
     | 'fabricated_execution_claim'
     | 'run_promise_without_exec'
-    | 'announced_action_without_doing';
+    | 'announced_action_without_doing'
+    | 'deferred_promise_unarmed';
   /** Matched claim phrase (used as reference in reminder message) */
   matchedClaim: string;
   /**
@@ -676,6 +677,76 @@ export function findRunPromise(text: string): string | null {
     if (m) return m[0].slice(0, 60);
   }
   return null;
+}
+
+// ── Deferred promise ("几个小时内我会跑一轮 / I'll run it later tonight") ──────────────────────
+//
+// Every pattern above anchors on NOW — 现在/这就/马上/let me/i'll now. A promise pushed into the FUTURE
+// slipped through all of them, and it is the worse of the two: in an async channel (WeChat) the end of a
+// turn yields control until the owner speaks again, so "later" is a time that never arrives. Nothing in
+// the system wakes the agent to keep it.
+//
+// Production 2026-07-25 21:45: "我来原创构造… **几个小时内我会跑一轮**大规模搜索" — zero tools, gate passed,
+// turn ended. Eight minutes later the owner had to ask "你在编写python脚本吗？" ("还没有"), then "为啥你没跑
+// 一轮？" ("你说得对，我应该直接写"). The owner became the scheduler. At 21:59 the same shape again: "更新
+// deep_explore session" with the tool call written into a Work Log instead of called.
+//
+// The rule is not "never promise later" — philont HAS two mechanisms that genuinely run unattended
+// (deep_explore action=auto_on drives the auto-advance ticker; schedule_reminder wakes a turn). A deferred
+// promise is honest exactly when one of them was ARMED this turn. Unarmed, it is a claim about a future
+// that has no cause, which is the say-do gap with a longer fuse.
+const DEFERRED_RUN_PROMISE_PATTERNS: ReadonlyArray<RegExp> = [
+  // 时间状语 + 会/将/要 + 动作: "几个小时内我会跑一轮" / "今晚我会把脚本写完" / "稍后再跑一遍"
+  /(?:几|数|半|一|两|三)?\s*(?:个)?\s*(?:小时|分钟|天|晚上?|会儿)(?:内|后|之内|之后|里)[^。！？\n]{0,12}(?:会|将|要|再)?[^。！？\n]{0,6}(?:跑|执行|运行|算|写|构造|验证|搜索)/,
+  /(?:稍后|晚点|待会|一会儿|随后|今晚|明天|明早|过会)[^。！？\n]{0,14}(?:会|将|要|再)?[^。！？\n]{0,6}(?:跑|执行|运行|算|写|构造|验证|搜索)/,
+  /(?:我会|我将|我要)[^。！？\n]{0,14}(?:跑|执行|运行|算|构造|验证)[^。！？\n]{0,8}(?:一轮|一遍|一次|完)/,
+  /\b(?:in|within)\s+(?:a\s+)?(?:few|couple|several|\d+)\s*(?:hours?|minutes?|days?)\b[^.!?\n]{0,24}\b(?:i'?ll|i will|run|execute|write|search)\b/i,
+  // …and the same promise with the time phrase AFTER the verb ("I'll run the full search in a few hours").
+  /\b(?:i'?ll|i will)\b[^.!?\n]{0,32}\b(?:run|execute|compute|write|search)\b[^.!?\n]{0,32}\b(?:in|within)\s+(?:a\s+)?(?:few|couple|several|\d+)\s*(?:hours?|minutes?|days?)\b/i,
+  /\b(?:later|tonight|tomorrow|afterwards|shortly)\b[^.!?\n]{0,24}\b(?:i'?ll|i will)\b[^.!?\n]{0,16}\b(?:run|execute|compute|write|search)\b/i,
+];
+
+// A promise the OWNER triggers is not a promise about an unattended future — it is a handoff the owner
+// has agreed to, and the ask-tier / "reply continue" flows depend on saying exactly this.
+const DEFERRED_ON_USER_CUE =
+  /(?:你(?:说|回复|回|发)|等你|待你|如果你|需要的话|reply|say|tell me|when you)/i;
+
+// Only NEGATION is screened here. Deliberately NOT EXEC_ANTI_PATTERNS: that list exists to stop the
+// completion-claim gate from reading future intent as a done-claim, so it contains 稍后 / will run /
+// 接下来 — the very phrases a deferred promise is made of. Reusing it screened out three of the four
+// shapes this branch exists to catch, including "稍后我再跑一遍". A filter borrowed from a gate with the
+// opposite polarity cancels the gate borrowing it.
+const DEFERRED_NEGATION =
+  /(?:没|未|还没|尚未|不会|不打算|无法|不能)[^。！？\n]{0,8}(?:跑|执行|运行|算|写|构造|验证|搜索)|\b(?:will not|won'?t|can'?t|cannot|haven'?t|not going to)\b/i;
+
+export function findDeferredRunPromise(text: string): string | null {
+  for (const re of DEFERRED_RUN_PROMISE_PATTERNS) {
+    const m = re.exec(text);
+    if (!m) continue;
+    const ctx = text.slice(Math.max(0, m.index - 24), m.index + m[0].length + 12);
+    if (DEFERRED_ON_USER_CUE.test(ctx)) continue;
+    if (DEFERRED_NEGATION.test(ctx)) continue;
+    return m[0].slice(0, 60);
+  }
+  return null;
+}
+
+/** deep_explore(action=auto_on) and schedule_reminder are the only two tools that make "later" real. */
+const UNATTENDED_ARMING_TOOLS = new Set(['schedule_reminder', 'schedule_create']);
+
+export function unattendedWorkArmed(
+  records: ReadonlyArray<{ toolName: string; toolInput?: string | Record<string, unknown> }>,
+): boolean {
+  return records.some((r) => {
+    if (UNATTENDED_ARMING_TOOLS.has(r.toolName)) return true;
+    if (r.toolName !== 'deep_explore') return false;
+    // toolInput reaches the gate as an object on some paths and as raw JSON text on others. Reading only
+    // the object shape would silently answer "not armed" for half the call sites — the exact miss class
+    // this repo keeps rediscovering — so handle both and treat an unparseable input as NOT armed.
+    const raw = r.toolInput;
+    if (typeof raw === 'string') return /"action"\s*:\s*"auto_on"/.test(raw);
+    return (raw?.action as string) === 'auto_on';
+  });
 }
 
 // ── Action announcement (verb-agnostic "I'm doing it now" with no tool call) ───────────────────
@@ -1038,6 +1109,33 @@ export function evaluateHonesty(
           `execution tool calls (no shell / pariGp / z3Verify / deep_explore). The computation never ran — ` +
           `those numbers were not produced this turn. Actually run it, or tell the user plainly it has not run yet.`,
     };
+  }
+
+  // ── say-do gap: deferred_promise_unarmed ─────────────────────────────────
+  // A promise pushed into the FUTURE ("几个小时内我会跑一轮") with nothing armed to make that future
+  // happen. High on the FIRST occurrence, unlike the now-promise below: a "现在就跑" that did not run is
+  // at least still inside a turn the model can correct, whereas ending the turn on a deferred promise
+  // hands control back to the owner and no ticker ever picks the work up. See findDeferredRunPromise.
+  if (!ranExecution) {
+    const deferred = findDeferredRunPromise(assistantText);
+    if (deferred && !unattendedWorkArmed(records)) {
+      return {
+        severity: 'high',
+        reason: 'deferred_promise_unarmed',
+        matchedClaim: deferred,
+        okCount: ok,
+        failCount: fail,
+        unknownCount: unknown,
+        evidence:
+          `You promised work for later ("${deferred}") but armed nothing to carry it out, and this turn ran ` +
+          `no execution tool. Ending the turn yields control until the user speaks again — there is no "in a ` +
+          `few hours" for you, so that promise cannot be kept and the user is left waiting for something that ` +
+          `will never start. Do ONE of these in THIS reply: (a) CALL the tool now and report what it returned; ` +
+          `(b) arm the work for real — deep_explore({action:"auto_on"}) to let the auto-advance ticker keep ` +
+          `running it, or schedule_reminder to wake yourself; (c) say plainly that you will do it when the ` +
+          `user next says go. Do not restate "${deferred}".`,
+      };
+    }
   }
 
   // ── say-do gap: run_promise_without_exec ─────────────────────────────────
