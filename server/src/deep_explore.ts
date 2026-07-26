@@ -91,6 +91,9 @@ import {
   type ActionLog,
   type SkillStore,
   AGENT_SELF_REFERENCE_NOTE,
+  findPriorMatch,
+  renderRepeatNote,
+  type PriorMatch,
 } from '@agent/memory';
 import { currentSessionId } from './channels/turn_context.js';
 import { decidePhaseTransition, goalNeedsDecision, classifyGoal } from './phase_gate.js';
@@ -3253,6 +3256,37 @@ export function createDeepExploreTool(
     // six web searches, five fetches, three minutes, "0 new candidate ... 0 currently alive". A diverge
     // round generates FROM the goal, so a goal naming nothing produces nothing — that is the first thing
     // to suspect, and the only repair that helps is a goal with a subject in it.
+    // Novelty against the record. A fresh session used to start with no memory of the sessions before it,
+    // so the same approaches were re-proposed as new ideas and the only thing catching them was the owner
+    // saying "你在之前也试过" — three times in one evening on 2026-07-25, each time correctly. Compare only
+    // the candidates THIS round added, against every claim on every other tree plus this tree's settled
+    // ones. Reported, not deleted: repeating an approach is sometimes right (a new tool, a moved bound),
+    // presenting it as new never is. See claim_novelty.ts.
+    const beforeIds = new Set(before.map((n) => n.id));
+    const freshCandidates = after.filter((n) => candKinds.has(n.kind) && !beforeIds.has(n.id));
+    const repeats: Array<{ candidate: string; match: PriorMatch }> = [];
+    if (freshCandidates.length > 0) {
+      try {
+        const priors = reasoning.listPriorClaims({ excludeSessionId: session.id, limit: 400 });
+        for (const c of freshCandidates) {
+          const match = findPriorMatch(c.claim, priors);
+          if (match) repeats.push({ candidate: c.claim, match });
+        }
+        if (repeats.length > 0) {
+          console.warn(
+            `[deep-explore] ${repeats.length}/${freshCandidates.length} new candidate(s) repeat earlier ` +
+              `tree node(s): ` +
+              repeats
+                .map((r) => `"${r.candidate.slice(0, 30)}"≈"${r.match.prior.claim.slice(0, 30)}"(${r.match.prior.status},${r.match.similarity.toFixed(2)})`)
+                .join('; '),
+          );
+        }
+      } catch (e) {
+        console.warn(`[deep-explore] novelty check skipped: ${String(e)}`);
+      }
+    }
+    const repeatNote = renderRepeatNote(repeats);
+
     const barren = newCandidates === 0 && survivors.length === 0 && refuted === 0;
     const barrenNote = barren
       ? `\n⛔ This round produced NOTHING — no candidate proposed, none alive, none ruled out. Do not report ` +
@@ -3288,6 +3322,7 @@ export function createDeepExploreTool(
       output:
         `${profile.divergeMilestoneLabel} — ${parts.join('; ')}.${barren ? '' : tail}` +
         (list ? `\nAlive ${noun}(s) (run action=continue to ${verb} one):\n${list}` : '') +
+        repeatNote +
         barrenNote +
         divergeStuckNote +
         phaseNote +

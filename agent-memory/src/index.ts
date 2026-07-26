@@ -57,6 +57,14 @@ export type { SkillChangeEvent } from './skills.js';
 export { renderSkillOffer, skillEvidenceTag, hasUntried, SKILL_WHEN_TO_USE_TRUNC } from './skill_offer.js';
 export type { OfferableSkill } from './skill_offer.js';
 export {
+  charBigrams,
+  claimSimilarity,
+  findPriorMatch,
+  renderRepeatNote,
+  CLAIM_REPEAT_THRESHOLD,
+} from './claim_novelty.js';
+export type { PriorClaim, PriorMatch } from './claim_novelty.js';
+export {
   nextMaturity,
   isCallableMaturity,
   maturityCaveat,

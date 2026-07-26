@@ -355,6 +355,31 @@ export class ReasoningStore {
     return rows.map(rowToNode);
   }
 
+  /**
+   * Claims the agent has already hung on SOME reasoning tree — the memory a fresh session otherwise
+   * starts without. Returns nodes from every OTHER session, plus this session's settled ones
+   * (dead_end / refuted), newest first.
+   *
+   * Production 2026-07-25: three times in one evening the owner had to say "你在之前也试过" about a
+   * candidate the tree already held, and each time the agent agreed only after being told. Generation
+   * never consulted the record. See claim_novelty.ts.
+   */
+  listPriorClaims(
+    opts: { excludeSessionId?: string; limit?: number } = {},
+  ): Array<{ claim: string; status: string; sessionId: string }> {
+    const limit = Math.max(1, Math.min(opts.limit ?? 400, 2000));
+    const sid = opts.excludeSessionId ?? '';
+    const rows = this.db
+      .prepare<[string, number]>(
+        `SELECT claim, status, session_id FROM reasoning_nodes
+          WHERE claim IS NOT NULL AND length(claim) > 0
+            AND (session_id != ? OR status IN ('dead_end', 'refuted'))
+          ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(sid, limit) as Array<{ claim: string; status: string; session_id: string }>;
+    return rows.map((r) => ({ claim: r.claim, status: r.status, sessionId: r.session_id }));
+  }
+
   getTree(sessionId: string): { session: ReasoningSession; nodes: ReasoningNode[] } | null {
     const session = this.getSession(sessionId);
     if (!session) return null;
