@@ -95,6 +95,20 @@ export class RawStore {
   /**
    * Read all messages in a session (chronological order)
    */
+  /** Timestamp of the newest message in a session (optionally of one role), or null when there is none. */
+  lastMessageAt(sessionId: string, role?: RawMessage['role']): number | null {
+    const row = role
+      ? (this.db
+          .prepare<[string, string]>(
+            `SELECT MAX(timestamp) AS ts FROM memory_raw_messages WHERE session_id = ? AND role = ?`,
+          )
+          .get(sessionId, role) as { ts: number | null } | undefined)
+      : (this.db
+          .prepare<[string]>(`SELECT MAX(timestamp) AS ts FROM memory_raw_messages WHERE session_id = ?`)
+          .get(sessionId) as { ts: number | null } | undefined);
+    return row?.ts ?? null;
+  }
+
   getMessages(sessionId: string): RawMessage[] {
     const rows = this.db
       .prepare<[string]>(

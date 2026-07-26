@@ -5977,13 +5977,16 @@ function buildFreshMessages(
     recallBudgetTokens: TIMELINE_RECALL_BUDGET,
     recallQuery: userMessageForRecall,
     restrictToSessionIds,
+    // "Recent", in a chat, means THIS chat. Recall stays global so cross-channel continuity survives,
+    // but foreign lines arrive labelled instead of impersonating the live thread. See timeline.ts.
+    homeSessionId: sessionId,
   });
   for (const m of recalled.messages) {
     init.push({ role: m.role, content: m.content });
   }
   console.log(
     `[timeline] retrieved ${recalled.recencyCount} recent + ${recalled.recallCount} recall msgs (~${recalled.totalTokens} tokens${
-      isAutonomous ? `, scoped to ${sessionId}` : ''
+      isAutonomous ? `, scoped to ${sessionId}` : `, recent scoped to ${sessionId}`
     })`,
   );
 
@@ -6056,6 +6059,15 @@ function learningJudgeEnabled(): boolean {
  * Returns null when the turn cannot be judged at all — a pending-auth resume whose original message is no
  * longer recoverable. See shadowLearningJudge for why scoring the approval word is worse than not scoring.
  */
+/**
+ * How long an unanswered question stays bindable. A reply arriving minutes later is answering it; a reply
+ * arriving the next morning is starting the day. See the site below for what the 12-hour bind cost.
+ */
+export const SHORT_ANSWER_BINDING_TTL_MS = (() => {
+  const raw = Number(process.env.PHILONT_SHORT_ANSWER_BINDING_TTL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60_000;
+})();
+
 export function resolveJudgeGoal(
   carriedGoal: string | undefined,
   userMessage: string | undefined,
@@ -7646,9 +7658,30 @@ async function handleChatSendInner(
   const userIsItselfAQuestion = /[?？]\s*$/.test(userMessage.trim());
   // A bare greeting/opener ("hi", "你好") resets the conversation — it is not answering the prior question
   // (prod: "hi" bound to a stale deep_explore "回复继续"). Skip binding for it.
+  // …and a question the owner walks away from is not a live question. Production 2026-07-26: "继续" was
+  // bound to a menu asked 12 hours 17 minutes earlier, across an overnight gap and a process restart —
+  // the menu happened to offer philont self-maintenance, so the reply meant to continue the mathematics
+  // was executed as maintenance, cancelling a schedule and pruning a skill from disk. Every binding that
+  // ever worked in production fired within minutes. Age is checked from the stored message, not the
+  // in-memory array, because a restart empties one and not the other.
+  const bindingAgeMs = (() => {
+    try {
+      return Date.now() - (memory.raw.lastMessageAt(sessionId, 'assistant') ?? 0);
+    } catch {
+      return Number.POSITIVE_INFINITY; // unknown age → treat as stale; a missed hint beats a wrong one
+    }
+  })();
+  const bindingFresh = bindingAgeMs <= SHORT_ANSWER_BINDING_TTL_MS;
   if (priorAssistant && messages[0] && !userIsItselfAQuestion && !isConversationOpener(userMessage)) {
     const detected = detectUnclosedQuestion(priorAssistant);
-    if (detected.hasQuestion) {
+    if (detected.hasQuestion && !bindingFresh) {
+      console.log(
+        `[short-answer-binding] session=${sessionId} SKIPPED — the prior question is ` +
+          `${Math.round(bindingAgeMs / 60000)} min old (limit ${Math.round(SHORT_ANSWER_BINDING_TTL_MS / 60000)}); ` +
+          `treating this as a new message, not an answer`,
+      );
+    }
+    if (detected.hasQuestion && bindingFresh) {
       messages[0] = {
         ...messages[0],
         content: messages[0].content + renderBindingContext(detected.snippet, userMessage),

@@ -56,6 +56,38 @@ export interface RetrieveOptions {
    * short_answer_binding would cause heartbeat self-termination (happened in production mycox onboarding).
    */
   restrictToSessionIds?: string[];
+  /**
+   * The conversation this turn belongs to. When set, the RECENCY window is limited to it while RECALL
+   * stays global — and every recalled message from a different conversation is labelled with where it
+   * came from.
+   *
+   * 2026-07-26, production. A WeChat turn ("继续", after a night's gap) was assembled from the GLOBAL
+   * recency window, so a scheduled mycox-checkin turn from another session arrived as part of "the last
+   * 30 messages" — indistinguishable from what the owner had actually said. The agent read it as the
+   * live thread, cancelled the mycox schedule and pruned the mycox-service skill from disk, and reported
+   * it as completed work while the owner believed they were doing mathematics. Their words: "我们不是在
+   * 做数学吗？为什么突然跳转到自检了？"
+   *
+   * The comment on restrictToSessionIds above already describes this exact contamination — in the other
+   * direction, where a WeChat conversation leaked into a heartbeat and terminated it. That direction was
+   * closed in 2026-05; the mirror was left open, which is how a symmetric problem gets fixed once.
+   *
+   * Cross-channel continuity stays: the owner can raise something in the web UI and continue it in
+   * WeChat, because RECALL is still global. What ends is foreign material entering as "recent" and
+   * unlabelled — "recent", in a chat, means this chat.
+   */
+  homeSessionId?: string;
+}
+
+/** Human-readable origin of a session id, for labelling recalled cross-conversation lines. */
+export function describeSessionOrigin(sessionId: string): string {
+  if (sessionId.startsWith('wechat:')) return 'WeChat';
+  if (sessionId.startsWith('telegram:')) return 'Telegram';
+  if (sessionId.startsWith('system:scheduled:')) {
+    return `scheduled task ${sessionId.slice('system:scheduled:'.length) || '(unnamed)'}`;
+  }
+  if (sessionId.startsWith('system:')) return 'a background run';
+  return 'the web UI';
 }
 
 export interface RetrieveResult {
@@ -116,10 +148,12 @@ export class TimelineRetriever {
     const query = (opts.recallQuery ?? '').trim();
 
     // ── Recency section: take the newest N messages by timestamp DESC, then reverse to chronological order ──
+    const recencyScope =
+      opts.restrictToSessionIds ?? (opts.homeSessionId ? [opts.homeSessionId] : undefined);
     const recentDesc = this.raw.queryTimeline({
       order: 'desc',
       limit: recentLimit,
-      sessionIds: opts.restrictToSessionIds,
+      sessionIds: recencyScope,
     });
 
     let recentTokens = 0;
@@ -166,7 +200,13 @@ export class TimelineRetriever {
     const messages: TimelineMessage[] = [];
     for (const m of recallChosen) {
       const tm = rawToTimeline(m);
-      if (tm) messages.push(tm);
+      if (!tm) continue;
+      // A recalled line from ANOTHER conversation is memory, not this thread. Say so, or it reads as
+      // something the person in front of you just said.
+      if (opts.homeSessionId && m.sessionId !== opts.homeSessionId) {
+        tm.content = `[from another conversation — ${describeSessionOrigin(m.sessionId)}] ${tm.content}`;
+      }
+      messages.push(tm);
     }
     // Insert a separator between the two sections to let LLM know a period of time was skipped
     if (recallChosen.length > 0 && recentChosen.length > 0) {
