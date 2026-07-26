@@ -38,6 +38,7 @@ function rowToMessage(row: MessageRow): RawMessage {
     role: row.role,
     content: row.content,
     timestamp: row.timestamp,
+    originSessionId: (row as { origin_session_id?: string | null }).origin_session_id ?? null,
   };
 }
 
@@ -76,12 +77,13 @@ export class RawStore {
    */
   appendMessage(input: RawMessageInput): RawMessage {
     const timestamp = Date.now();
+    const origin = input.originSessionId ?? null;
     const result = this.db
-      .prepare<[string, string, string, number]>(
-        `INSERT INTO memory_raw_messages (session_id, role, content, timestamp)
-         VALUES (?, ?, ?, ?)`
+      .prepare<[string, string, string, number, string | null]>(
+        `INSERT INTO memory_raw_messages (session_id, role, content, timestamp, origin_session_id)
+         VALUES (?, ?, ?, ?, ?)`
       )
-      .run(input.sessionId, input.role, input.content, timestamp);
+      .run(input.sessionId, input.role, input.content, timestamp, origin);
 
     return {
       id: Number(result.lastInsertRowid),
@@ -89,7 +91,24 @@ export class RawStore {
       role: input.role,
       content: input.content,
       timestamp,
+      originSessionId: origin,
     };
+  }
+
+  /**
+   * Newest message belonging to a CONVERSATION, by origin. Rows written before v40 carry no origin and
+   * are counted as belonging to it — an unknown origin must not read as "this chat has never spoken",
+   * which is how a staleness check concluded a question was 56 years old.
+   */
+  lastMessageAtForOrigin(originSessionId: string, role?: RawMessage['role']): number | null {
+    const sql =
+      `SELECT MAX(timestamp) AS ts FROM memory_raw_messages
+        WHERE (origin_session_id = ? OR origin_session_id IS NULL)` +
+      (role ? ` AND role = ?` : '');
+    const row = (role
+      ? this.db.prepare<[string, string]>(sql).get(originSessionId, role)
+      : this.db.prepare<[string]>(sql).get(originSessionId)) as { ts: number | null } | undefined;
+    return row?.ts ?? null;
   }
 
   /**
@@ -195,6 +214,8 @@ export class RawStore {
     limit?: number;
     order?: 'asc' | 'desc';
     sessionIds?: string[];
+    /** Restrict to these CONVERSATIONS (origin_session_id); NULL-origin rows are always included. */
+    originSessionIds?: string[];
   } = {}): RawMessage[] {
     const limit = opts.limit ?? 200;
     const order = opts.order ?? 'desc';
@@ -212,6 +233,14 @@ export class RawStore {
       const ph = opts.sessionIds.map(() => '?').join(',');
       conds.push(`session_id IN (${ph})`);
       params.push(...opts.sessionIds);
+    }
+    // Filter by CONVERSATION. session_id is 'global' on every row, so it can never do this; only
+    // origin_session_id can, and rows written before v40 have none — include them rather than starve
+    // the caller, which is the failure this option was added to repair.
+    if (opts.originSessionIds && opts.originSessionIds.length > 0) {
+      const ph = opts.originSessionIds.map(() => '?').join(',');
+      conds.push(`(origin_session_id IN (${ph}) OR origin_session_id IS NULL)`);
+      params.push(...opts.originSessionIds);
     }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     const dir = order === 'asc' ? 'ASC' : 'DESC';

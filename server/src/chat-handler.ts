@@ -6873,6 +6873,9 @@ export async function handleChatSend(
     sessionId: GLOBAL_TIMELINE_SESSION_ID,
     role: 'user',
     content: userMessage,
+    // Which conversation said it. The bucket above is shared by every channel; this is the only field
+    // that can later answer "was this said in this chat" — see schema v40.
+    originSessionId: sessionId,
   });
 
   // Helpful for locating turn boundaries during testing: start log includes user message preview + whether it resumes pending
@@ -7666,7 +7669,10 @@ async function handleChatSendInner(
   // in-memory array, because a restart empties one and not the other.
   const bindingAgeMs = (() => {
     try {
-      return Date.now() - (memory.raw.lastMessageAt(sessionId, 'assistant') ?? 0);
+      // By ORIGIN, not by session_id: every row lives in the 'global' bucket, so asking session_id
+      // returns nothing and the age comes back as 56 years. Rows predating v40 have no origin and count
+      // as this conversation's — an unknown age must not silently disable a working mechanism.
+      return Date.now() - (memory.raw.lastMessageAtForOrigin(sessionId, 'assistant') ?? Date.now());
     } catch {
       return Number.POSITIVE_INFINITY; // unknown age → treat as stale; a missed hint beats a wrong one
     }
@@ -8118,7 +8124,12 @@ async function handleChatSendInner(
         const finalText = `## For User\n${loopResult.reply}`;
         messages.push({ role: 'assistant', content: finalText });
         onDelta(finalText);
-        memory.raw.appendMessage({ sessionId: GLOBAL_TIMELINE_SESSION_ID, role: 'assistant', content: finalText });
+        memory.raw.appendMessage({
+          sessionId: GLOBAL_TIMELINE_SESSION_ID,
+          role: 'assistant',
+          content: finalText,
+          originSessionId: sessionId,
+        });
         return { outcome: { outcomeType: 'response', text: finalText }, auditEvents: audit.length };
       }
     }
@@ -8268,6 +8279,7 @@ async function handleChatSendInner(
         sessionId: GLOBAL_TIMELINE_SESSION_ID,
         role: 'assistant',
         content: safeText,
+        originSessionId: sessionId,
       });
       return { outcome: { outcomeType: 'response', text: safeText }, auditEvents: audit.length };
     }
@@ -10739,6 +10751,7 @@ async function runToolLoop(
         sessionId: GLOBAL_TIMELINE_SESSION_ID,
         role: 'assistant',
         content: safeText,
+        originSessionId: sessionId,
       });
       // Phase 18 WS2: stop_and_report is a first-class, WINNABLE outcome (honest no-go + banked lemmas +
       // recommended reframe), not a failure. Counsel-only: the reasoning session is NOT auto-abandoned here;
@@ -11326,6 +11339,7 @@ async function runToolLoop(
         sessionId: GLOBAL_TIMELINE_SESSION_ID,
         role: 'assistant',
         content: safeText,
+        originSessionId: sessionId,
       });
       return {
         outcome: { outcomeType: 'response', text: safeText },
@@ -11352,6 +11366,7 @@ async function runToolLoop(
       sessionId: GLOBAL_TIMELINE_SESSION_ID,
       role: 'assistant',
       content: detSummary,
+      originSessionId: sessionId,
     });
     return {
       outcome: { outcomeType: 'response', text: detSummary },

@@ -148,12 +148,14 @@ export class TimelineRetriever {
     const query = (opts.recallQuery ?? '').trim();
 
     // ── Recency section: take the newest N messages by timestamp DESC, then reverse to chronological order ──
-    const recencyScope =
-      opts.restrictToSessionIds ?? (opts.homeSessionId ? [opts.homeSessionId] : undefined);
+    // The recency window belongs to THIS conversation — filtered by origin, never by session_id, which
+    // is 'global' on every row. 2026-07-26: filtering on session_id matched nothing and the window
+    // returned ZERO messages for an entire evening. Rows without an origin (pre-v40) are included.
     const recentDesc = this.raw.queryTimeline({
       order: 'desc',
       limit: recentLimit,
-      sessionIds: recencyScope,
+      sessionIds: opts.restrictToSessionIds,
+      originSessionIds: opts.homeSessionId ? [opts.homeSessionId] : undefined,
     });
 
     let recentTokens = 0;
@@ -203,8 +205,8 @@ export class TimelineRetriever {
       if (!tm) continue;
       // A recalled line from ANOTHER conversation is memory, not this thread. Say so, or it reads as
       // something the person in front of you just said.
-      if (opts.homeSessionId && m.sessionId !== opts.homeSessionId) {
-        tm.content = `[from another conversation — ${describeSessionOrigin(m.sessionId)}] ${tm.content}`;
+      if (opts.homeSessionId && m.originSessionId && m.originSessionId !== opts.homeSessionId) {
+        tm.content = `[from another conversation — ${describeSessionOrigin(m.originSessionId)}] ${tm.content}`;
       }
       messages.push(tm);
     }

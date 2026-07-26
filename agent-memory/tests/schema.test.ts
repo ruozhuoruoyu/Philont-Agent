@@ -36,7 +36,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 39);
+  assert.equal(SCHEMA_VERSION, 40);
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
   assert.ok(tableExists(db, 'reasoning_sessions'));
@@ -471,7 +471,7 @@ test('migration v36 → v37: reasoning_sessions gets followup_asked_at, existing
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 39);
+  assert.equal(SCHEMA_VERSION, 40);
   assert.ok(hasColumn(db, 'reasoning_sessions', 'followup_asked_at'), 'v37 must add followup_asked_at');
   const row = db.prepare(`SELECT goal, followup_asked_at FROM reasoning_sessions WHERE id = 'rs-old'`).get() as
     { goal: string; followup_asked_at: number | null };
@@ -497,7 +497,7 @@ test('migration v37 → v38: reasoning_nodes gets check_criterion, existing node
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 39);
+  assert.equal(SCHEMA_VERSION, 40);
   assert.ok(hasColumn(db, 'reasoning_nodes', 'check_criterion'), 'v38 must add check_criterion');
   const row = db.prepare(`SELECT claim, check_criterion FROM reasoning_nodes WHERE id = 'rn-old'`).get() as
     { claim: string; check_criterion: string | null };
@@ -524,10 +524,35 @@ test('migration v38 → v39: memory_skills gets from_disk, backfilled to 0', () 
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 39);
+  assert.equal(SCHEMA_VERSION, 40);
   assert.ok(hasColumn(db, 'memory_skills', 'from_disk'), 'v39 must add from_disk');
   const row = db.prepare(`SELECT name, from_disk FROM memory_skills WHERE id = 'sk-old'`).get() as
     { name: string; from_disk: number };
   assert.equal(row.name, 'playbook-recovery-009c8741-failed', 'the pre-existing skill survives');
   assert.equal(row.from_disk, 0, 'and is NOT prunable until the disk importer says otherwise');
+});
+
+// v40: memory_raw_messages.origin_session_id — which CONVERSATION a line came from.
+//
+// session_id has been 'global' on every row ever written, so it could never answer that question. On
+// 2026-07-26 a recency filter was written against it, matched nothing, and the agent ran an entire
+// evening with a ZERO-message context window. NULL on pre-v40 rows, and every reader must treat NULL as
+// "unknown, include it" — starving the window is the failure, not showing one extra line.
+test('migration v39 → v40: memory_raw_messages gets origin_session_id, existing rows intact', () => {
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.prepare(`INSERT INTO memory_raw_sessions (id, started_at) VALUES (?, ?)`).run('global2', 1000);
+  db.prepare(
+    `INSERT INTO memory_raw_messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)`,
+  ).run('global2', 'user', 'written before v40', 2000);
+  db.prepare(`UPDATE memory_meta SET value = '39' WHERE key = 'schema_version'`).run();
+
+  initSchema(db);
+  assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 40);
+  assert.ok(hasColumn(db, 'memory_raw_messages', 'origin_session_id'), 'v40 must add origin_session_id');
+  const row = db
+    .prepare(`SELECT content, origin_session_id FROM memory_raw_messages WHERE content = ?`)
+    .get('written before v40') as { content: string; origin_session_id: string | null };
+  assert.equal(row.origin_session_id, null, 'old rows carry no origin — readers must not drop them');
 });

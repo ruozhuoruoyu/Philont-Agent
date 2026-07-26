@@ -99,12 +99,20 @@ export interface RawMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
   timestamp: number;
+  /**
+   * Which CONVERSATION this line came from (v40+). sessionId above is 'global' for every row ever
+   * written, so this is the only field that can answer "was this said in this chat". NULL on rows
+   * written before v40 — readers must treat NULL as "unknown, include it".
+   */
+  originSessionId?: string | null;
 }
 
 export interface RawMessageInput {
   sessionId: string;
   role: RawMessage['role'];
   content: string;
+  /** The conversation this line belongs to; see RawMessage.originSessionId. */
+  originSessionId?: string | null;
 }
 
 // ── Layer 0.5: Action Log ────────────────────────────────────────────────

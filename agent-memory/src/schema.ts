@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 39;
+export const SCHEMA_VERSION = 40;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -53,7 +53,11 @@ CREATE TABLE IF NOT EXISTS memory_raw_messages (
   session_id TEXT NOT NULL REFERENCES memory_raw_sessions(id),
   role       TEXT NOT NULL,
   content    TEXT NOT NULL,
-  timestamp  INTEGER NOT NULL
+  timestamp  INTEGER NOT NULL,
+  -- Which CONVERSATION this line came from. session_id above is 'global' for every message ever
+  -- written (see GLOBAL_TIMELINE_SESSION_ID) — one bucket, no provenance — so until v40 there was no
+  -- way to ask "what did THIS chat say", and a filter written against session_id matched nothing.
+  origin_session_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_messages_session ON memory_raw_messages(session_id);
@@ -427,6 +431,11 @@ CREATE INDEX IF NOT EXISTS idx_facts_validity ON memory_facts(valid_until)
   WHERE forgotten_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_actions_skill ON memory_actions(linked_skill)
   WHERE linked_skill IS NOT NULL;
+
+-- v40: origin_session_id is added by migrateV39ToV40, so its index must run AFTER migrations —
+-- CREATE TABLE IF NOT EXISTS leaves an existing table untouched, so an index in DDL_BASE would hit
+-- "no such column" on every pre-v40 database.
+CREATE INDEX IF NOT EXISTS idx_raw_messages_origin ON memory_raw_messages(origin_session_id, timestamp);
 `;
 
 // ── Migration helpers ──────────────────────────────────────────────────────────
@@ -1224,6 +1233,19 @@ function migrateV38ToV39(db: Database.Database): void {
   addColumnIfMissing(db, 'memory_skills', 'from_disk', 'INTEGER NOT NULL DEFAULT 0');
 }
 
+/**
+ * v39 → v40. Records which conversation a raw message came from.
+ *
+ * Every message has always been stored under session_id='global'; the column existed but carried no
+ * information. On 2026-07-26 a filter was written against it to keep one chat's history out of another's
+ * — and matched nothing, so the recency window returned ZERO messages and the agent ran an entire
+ * evening with no conversational memory. Old rows keep origin_session_id NULL and readers must treat
+ * NULL as "unknown, show it": the failure to avoid is starving the window, not showing one extra line.
+ */
+function migrateV39ToV40(db: Database.Database): void {
+  addColumnIfMissing(db, 'memory_raw_messages', 'origin_session_id', 'TEXT');
+}
+
 function migrateV19ToV20(db: Database.Database): void {
   if (!tableExists(db, 'memory_plans')) return; // guard: fresh init already has the column
   const cols = db.prepare(`PRAGMA table_info(memory_plans)`).all() as Array<{
@@ -1486,6 +1508,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 39) {
     migrateV38ToV39(db);
+  }
+  if (current < 40) {
+    migrateV39ToV40(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns
