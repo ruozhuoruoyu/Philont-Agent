@@ -45,6 +45,12 @@ export interface HealthRatio {
    * report from crying wolf, which is what makes an honest report get ignored.
    */
   zeroIsNormal?: boolean;
+  /**
+   * True when the denominator is a SAMPLE (turns observed) rather than a count of declared things. A zero
+   * over a sample needs enough observations to mean anything; a zero over "the 1 focus area you declared"
+   * or "the 1 channel you subscribed" is meaningful at a denominator of one.
+   */
+  sampleBased?: boolean;
 }
 
 export interface HealthInput {
@@ -98,15 +104,19 @@ export function computeHealthRatios(input: HealthInput, lang: 'zh' | 'en' = 'zh'
 
   if (input.judge && input.judge.total > 0) {
     const { verified, total } = input.judge;
+    // The doom clause is earned only by a real sample. At 0/1 the honest reading is "one turn", and
+    // saying "I am learning nothing" about it is the overstatement that teaches the owner to skim.
+    const thin = total < MIN_EVIDENCE_DENOMINATOR;
     out.push({
       key: 'judge',
       numerator: verified,
       denominator: total,
+      sampleBased: true,
       line: en
         ? `Verified outcomes: ${verified}/${total} (${pct(verified, total)}) of my turns ended with proof that the goal was met. ` +
-          (verified === 0 ? 'At zero I am learning nothing from any of them.' : '')
+          (verified === 0 ? (thin ? 'Too few turns to read anything into it.' : 'At zero I am learning nothing from any of them.') : '')
         : `可验证成果:${total} 轮里有 ${verified} 轮(${pct(verified, total)})拿到了"目标达成"的证据。` +
-          (verified === 0 ? '为 0 时,我从这些轮次里什么也学不到。' : ''),
+          (verified === 0 ? (thin ? '轮次太少,读不出什么。' : '为 0 时,我从这些轮次里什么也学不到。') : ''),
     });
   }
 
@@ -176,12 +186,35 @@ export function computeHealthRatios(input: HealthInput, lang: 'zh' | 'en' = 'zh'
 }
 
 /**
- * The ratios that warrant the owner's attention: a zero (or near-zero) where zero is not the expected
- * outcome. Explicitly NOT a tunable threshold — the only judgement encoded is "this subsystem produced
- * nothing at all", which needs no calibration and cannot drift.
+ * Below this many observations a zero is not a finding. 0 of 1 is not "produced nothing" — it is one
+ * sample, and a report that treats it as a broken subsystem is crying wolf on arithmetic.
+ *
+ * Production 2026-07-26: the day's only degenerate item was the learning judge at 0/1, so the report
+ * interrupted the owner to say a subsystem was probably broken on the strength of a single turn. The
+ * owner's reaction — 每次都说这个 — is the exact rot this file's header warns about: a report that
+ * overstates gets discounted, and then the true findings go with it.
+ */
+export const MIN_EVIDENCE_DENOMINATOR = 5;
+
+/**
+ * The ratios that warrant the owner's attention: a zero where zero is not the expected outcome AND there
+ * were enough observations for the zero to mean something. Still not a tunable alarm threshold — the
+ * judgement is "this subsystem produced nothing across a real sample", which needs no calibration.
  */
 export function degenerateRatios(ratios: readonly HealthRatio[]): HealthRatio[] {
-  return ratios.filter((r) => !r.zeroIsNormal && r.denominator > 0 && r.numerator === 0);
+  return ratios.filter(
+    (r) =>
+      !r.zeroIsNormal &&
+      r.numerator === 0 &&
+      (r.sampleBased ? r.denominator >= MIN_EVIDENCE_DENOMINATOR : r.denominator > 0),
+  );
+}
+
+/** Sample-based ratios reported for completeness but too thin to conclude anything from. */
+export function thinEvidenceRatios(ratios: readonly HealthRatio[]): HealthRatio[] {
+  return ratios.filter(
+    (r) => !!r.sampleBased && r.denominator > 0 && r.denominator < MIN_EVIDENCE_DENOMINATOR,
+  );
 }
 
 export function renderHealthReport(
@@ -209,12 +242,20 @@ export function renderHealthReport(
     for (const b of brokenRefs.slice(0, 5)) lines.push(`· ${b.ref}: ${b.consequence}`);
   }
 
+  // The closing line used to be the same sentence every time, and it handed the owner homework: "the
+  // zeros above are the ones worth asking me about". A second brain that ends each report by telling the
+  // person to interrogate it has moved the work in the wrong direction — and repeated verbatim daily, it
+  // is the first thing a reader learns to skip. Name the ONE item and what I will do about it, or say
+  // nothing.
   const bad = degenerateRatios(ratios);
   if (bad.length > 0) {
+    const worst = bad[0];
     lines.push(
       en
-        ? `\nThe zeros above are the ones worth asking me about — a subsystem that produced nothing is usually broken rather than idle.`
-        : `\n上面为 0 的那几项值得追问我 —— 一个什么都没产出的子系统,通常是坏了,而不是闲着。`,
+        ? `\n→ ${worst.key}: ${worst.numerator} of ${worst.denominator}. I am treating this as broken rather ` +
+          `than idle and will look at it before adding anything new.`
+        : `\n→ ${worst.key}:${worst.denominator} 次里 ${worst.numerator} 次。我按"坏了"而不是"闲着"处理,` +
+          `在加新东西之前先查它。`,
     );
   }
   return lines.join('\n');

@@ -72,7 +72,11 @@ test('the text states consequences, not just numbers', () => {
   assert.match(text, /None of what you told me to care about moved/, 'focus 0/1 must be stated in the owner\'s terms');
   assert.match(text, /discarding is working/, 'the retired count must read as decay working, not as failure');
   assert.match(text, /silently doing nothing/, 'a broken reference must name the consequence');
-  assert.match(text, /worth asking me about/, 'and it must tell the owner what to do with the zeros');
+  // The closing line used to read "the zeros above are the ones worth asking me about" — the same
+  // sentence every day, and it handed the owner homework. 2026-07-26: "每次都说这个，最后一句话感觉不太好".
+  // A second brain that ends every report by asking to be interrogated has moved the work the wrong way.
+  assert.doesNotMatch(text, /worth asking me about/, 'no standing homework for the owner');
+  assert.match(text, /treating this as broken/, 'name the one item and what I will do about it');
 });
 
 test('a subsystem with no activity is omitted rather than reported as 0/0', () => {
@@ -175,4 +179,28 @@ test('a channel whose every send today failed is not "deliverable", and the line
   // And a healthy channel keeps the plain line.
   const [ok] = computeHealthRatios({ push: { deliverable: 1, active: 1 } }, 'zh');
   assert.doesNotMatch(ok.line, /失败/);
+});
+
+test('a zero over a SAMPLE of one is arithmetic, not a finding', () => {
+  // 2026-07-26: the day's only degenerate item was the learning judge at 0/1, so the report interrupted
+  // the owner to say a subsystem was probably broken on the strength of a single turn.
+  const thin = computeHealthRatios({ judge: { verified: 0, total: 1 } }, 'zh');
+  assert.equal(degenerateRatios(thin).length, 0, '0/1 must not raise an alarm');
+  assert.equal(shouldSendHealthReport(thin), false, 'and must not earn an interruption');
+  assert.match(thin[0].line, /轮次太少/, 'it is still reported, read honestly');
+  assert.doesNotMatch(thin[0].line, /什么也学不到/, 'the doom clause is earned by a real sample');
+
+  // A real sample still gets the real verdict.
+  const real = computeHealthRatios({ judge: { verified: 0, total: 12 } }, 'zh');
+  assert.equal(degenerateRatios(real).length, 1);
+  assert.match(real[0].line, /什么也学不到/);
+});
+
+test('a declared thing is not a sample — 0 of 1 focus area still counts', () => {
+  // "the one thing you told me to care about did not move" and "the one channel you subscribed cannot
+  // receive" are meaningful at a denominator of one; they are counts of declared things, not observations.
+  const focus = computeHealthRatios({ focus: { advanced: 0, declared: 1 } }, 'zh');
+  assert.equal(degenerateRatios(focus).length, 1);
+  const push = computeHealthRatios({ push: { deliverable: 0, active: 1 } }, 'zh');
+  assert.equal(degenerateRatios(push).length, 1);
 });
