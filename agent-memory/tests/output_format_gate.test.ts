@@ -48,6 +48,36 @@ test('evaluateOutputFormat: ## 给用户 大小写 / 空格变化', () => {
   assert.equal(r2.shouldRegenerate, false); // ## 后多个空格也认
 });
 
+// Production 2026-07-27 15:30:48. A deep_explore round ran for 6 minutes and returned
+// `refuted 1; +1 dead ends; 10 still open`; the entire reply that followed was 17 characters of small
+// talk — `你在看什么？你们那边的活动怎么样了…` — with no `## 给用户` section. The channel logged
+// `output_filter fallback (no '## 给用户' section) { fullLen: 17 }` and sent it as-is. The gate never
+// looked, because 17 < 500. The length exemption reads "short ⇒ simple query"; a finished reasoning
+// round says otherwise, and the round's findings were the only reason the user waited.
+test('reportable work: a short off-topic reply that drops the round is caught', () => {
+  const r = evaluateOutputFormat({
+    finalText: '你在看什么？你们那边的活动怎么样了…',
+    reportableWork: true,
+  });
+  assert.equal(r.shouldRegenerate, true);
+  assert.equal(r.reason, 'reportable_work_no_user_section');
+  assert.ok((r.detail?.finalTextLength ?? 0) < 500, 'well under the length threshold');
+});
+
+test('reportable work: a short reply that DOES report through ## 给用户 passes', () => {
+  const r = evaluateOutputFormat({
+    finalText: '## 给用户\n这轮否证 1 条,新增 1 个死胡同,仍有 10 个开放节点。',
+    reportableWork: true,
+  });
+  assert.equal(r.shouldRegenerate, false);
+});
+
+test('reportable work: absent, the length exemption still applies', () => {
+  const r = evaluateOutputFormat({ finalText: '好的,我看一下。' });
+  assert.equal(r.shouldRegenerate, false);
+  assert.equal(r.detail?.reportableWork, false);
+});
+
 test('evaluateOutputFormat: minLengthToTrigger 可调', () => {
   const r1 = evaluateOutputFormat({
     finalText: 'x'.repeat(200),

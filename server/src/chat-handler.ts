@@ -10468,7 +10468,15 @@ async function runToolLoop(
         process.env.PHILONT_OUTPUT_FORMAT_GATE !== '0' &&
         !sessionId.startsWith('system:scheduled:')
       ) {
-        const fmt = evaluateOutputFormat({ finalText: response.content });
+        // A completed deep_explore round is work the user is owed a report on, so it cancels the
+        // "short reply ⇒ simple query" exemption. Prod 2026-07-27 15:30:48: a 6-minute round
+        // (`refuted 1; +1 dead ends; 10 still open`) was followed by a 17-character off-topic reply
+        // with no section — under the length rule alone the gate never looked at it.
+        // Match on the round-summary line renderProgressText emits, i.e. a string we produce ourselves.
+        const reportableWork = extractRecentToolResults(messages).some(
+          (r) => r.toolName === 'deep_explore' && r.content.includes('This round:'),
+        );
+        const fmt = evaluateOutputFormat({ finalText: response.content, reportableWork });
         if (fmt.shouldRegenerate) {
           outputFormatAttempts++;
           audit.append('self_domain_write', {
@@ -10487,9 +10495,14 @@ async function runToolLoop(
           messages.push({
             role: 'user',
             content:
-              `[drive OutputFormat] Your reply was ${fmt.detail?.finalTextLength} characters but did not use the required two-section format ` +
-              `(missing \`## For User\` heading). The frontend extracts content from the \`## For User\` section to push to users; ` +
-              `without it, the full text is sent as a fallback (verbose and unfocused).\n\n` +
+              (fmt.reason === 'reportable_work_no_user_section'
+                ? `[drive OutputFormat] This turn RAN A REASONING ROUND and it returned a result, but your reply ` +
+                  `(${fmt.detail?.finalTextLength} characters) has no \`## For User\` section and does not report that round. ` +
+                  `The round's findings — what was decomposed, settled, refuted, ruled out, and what is still open — are the ` +
+                  `only reason the user waited. Do not change the subject and do not drop them.\n\n`
+                : `[drive OutputFormat] Your reply was ${fmt.detail?.finalTextLength} characters but did not use the required two-section format ` +
+                  `(missing \`## For User\` heading). The frontend extracts content from the \`## For User\` section to push to users; ` +
+                  `without it, the full text is sent as a fallback (verbose and unfocused).\n\n`) +
               `**Please rewrite your final reply** using the strict two-section format:\n` +
               `\n  ## For User\n` +
               `  (EVERYTHING the user should read. Status update → ≤ 200 chars, action result + key evidence + next step. ` +
