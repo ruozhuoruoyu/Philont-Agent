@@ -41,8 +41,13 @@ const COMPUTE_TOOLS = new Set<string>([
 
 // "I actually computed / verified / ran it and here is the result" — present/past tense assertions,
 // bilingual. These are claims of accomplished empirical work, not intentions.
+//
+// The ENUMERATION-REPORT shape was missing until 2026-07-27. "共测试 10 个子集，全部通过，0 反例" asserts
+// finished empirical work exactly as plainly as 跑通 does, but names no verb on this list — so two
+// fabricated Lonely Runner verification reports (k=9 and k=10, both with tools=0) went straight to the
+// owner, who had to catch them himself: 你真的做了吗？怎么这么快？ A pass/fail tally IS a computation claim.
 const COMPUTE_CLAIM_RE =
-  /(跑通|跑完|算完|计算完成|计算完毕|数值验证|实际计算|真实数据|真实计算|实测|算出|计算得到?|得出.*(比值|范数|谱半径|结果)|验证(通过|成立|了)|verified numerically|numerically verified|computed (?:that|the|to|it)|the computation (?:shows|gives|yields|confirms)|simulation (?:shows|gives)|ran the (?:computation|calculation|script|numbers)|results? (?:show|confirm|give))/i;
+  /(跑通|跑完|算完|计算完成|计算完毕|数值验证|实际计算|真实数据|真实计算|实测|算出|计算得到?|得出.*(比值|范数|谱半径|结果)|验证(通过|成立|了)|全部通过|均通过|全通过|无反例|\d+\s*个?反例|枚举(完成|完毕|通过)|verified numerically|numerically verified|computed (?:that|the|to|it)|the computation (?:shows|gives|yields|confirms)|simulation (?:shows|gives)|ran the (?:computation|calculation|script|numbers)|results? (?:show|confirm|give)|all\s+pass(?:ed)?\b|no counterexamples?\b|0\s+counterexamples?\b)/i;
 
 // Hedges / negations / intentions that mean NO accomplished-computation claim is being made — suppress.
 const ANTI_CLAIM_RE =
