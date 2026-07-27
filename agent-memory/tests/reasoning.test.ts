@@ -244,3 +244,28 @@ test('phase A: updateNode round-trips settleBasis; omitting it leaves the value 
   assert.equal(again!.result, 'grounded in user values');
   mem.close();
 });
+
+// ── When the thread you were on is gone (2026-07-27) ──────────────────────
+//
+// The agent closed the Lonely Runner session; the next bare "continue" resumed a graph-visualisation
+// session created three days earlier — the newest still-active one — and spent six minutes on 知识图谱 /
+// 思维导图 while the owner believed LRC was advancing: 这是跑偏到什么地方去了？
+//
+// The ordering is NOT the fix. Switching to updated_at reintroduces the ping-pong the test above pins,
+// because background work bumps updated_at on stale sessions. Neither column answers "which thread is
+// this conversation on"; both are proxies that fail in opposite conditions. So the substitution is made
+// LEGIBLE instead — every round result now names the question it advanced (renderSessionSubject in
+// deep_explore.ts). This test pins the behaviour that makes that necessary.
+test('with the live session closed, continue substitutes another one — which is why rounds name their subject', () => {
+  const mem = openMemoryDb(':memory:');
+  const owner = 'wechat:u:u';
+  const unrelated = mem.reasoning.createSession({ goal: '形成一个可查找可视化的图谱', ownerSessionId: owner }).session;
+  const live = mem.reasoning.createSession({ goal: '攻克孤独跑者猜想', ownerSessionId: owner }).session;
+  assert.equal(mem.reasoning.getMostRecentActiveSession(owner)!.id, live.id);
+
+  mem.reasoning.setSessionStatus(live.id, 'answered');
+  const resumed = mem.reasoning.getMostRecentActiveSession(owner);
+  assert.equal(resumed!.id, unrelated.id, 'it silently falls back to an unrelated thread');
+  assert.match(resumed!.goal, /图谱/, 'so the round MUST say which question it is advancing');
+  mem.close();
+});

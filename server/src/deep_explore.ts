@@ -1540,6 +1540,22 @@ export function shouldDeliberateAutoAnswer(input: {
   return !input.substantive && input.noProgressRounds >= (input.patience ?? DELIBERATE_ANSWER_PATIENCE);
 }
 
+/**
+ * Which question this round actually advanced, stated in the result.
+ *
+ * A bare `continue` resolves a session implicitly, so the model can advance a DIFFERENT problem than the
+ * one the conversation is about and never notice. 2026-07-27: after the Lonely Runner session was closed,
+ * `continue` silently resumed a graph-visualisation session from three days earlier and spent six minutes
+ * on 知识图谱 / 思维导图 while the owner believed LRC was progressing. The resolution bug is fixed
+ * upstream; this line is the tooth that makes any future mis-resolution visible in one glance instead of
+ * six minutes.
+ */
+export function renderSessionSubject(goal: string, id: string): string {
+  const g = (goal ?? '').replace(/\s+/g, ' ').trim();
+  const short = g.length > 70 ? `${g.slice(0, 70)}…` : g;
+  return `on: "${short}"\nsession id: ${id}`;
+}
+
 /** Nothing entered the tree this round: no decomposition, nothing settled, nothing ruled out. */
 export function committedNothing(s: ProgressSummary): boolean {
   return (
@@ -3151,7 +3167,10 @@ export function createDeepExploreTool(
         ? `\n⚠️ No substantive progress for ${noProgressRounds} consecutive rounds — this frontier looks stuck. ` +
           `Consider redirecting: start a fresh angle (a different framing of the problem), or tell me which sub-problem to focus on.`
         : '';
-    return { success: true, output: `${text}${tail}${churnNote}${stuckNote}\nsession id: ${session.id}` };
+    return {
+      success: true,
+      output: `${text}${tail}${churnNote}${stuckNote}\n${renderSessionSubject(session.goal, session.id)}`,
+    };
   }
 
   // Diverge round: GENERATIVE phase — open up the space (formal: experimental-math/conjecture via
@@ -3346,7 +3365,7 @@ export function createDeepExploreTool(
         barrenNote +
         divergeStuckNote +
         phaseNote +
-        `\nsession id: ${session.id}`,
+        `\n${renderSessionSubject(session.goal, session.id)}`,
     };
   }
 

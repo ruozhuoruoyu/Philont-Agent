@@ -296,6 +296,20 @@ export class ReasoningStore {
    * Omitting `ownerSessionId` falls back to the global most-recently-started (legacy).
    */
   getMostRecentActiveSession(ownerSessionId?: string | null): ReasoningSession | null {
+    // Ordered by created_at, NOT updated_at, and that is deliberate: background work (an autonomous tick,
+    // the idle consolidator, a previously mis-resolved continue) bumps updated_at on an OLD session, and
+    // ordering by it made `continue` ping-pong between threads. See the anti-ping-pong test.
+    //
+    // The cost of that choice showed up on 2026-07-27. The session the conversation was actually on had
+    // just been CLOSED, so it left the candidate set entirely — and this resolver silently substituted a
+    // graph-visualisation session created three days earlier, the newest still-active one. Six minutes of
+    // 知识图谱 / 思维导图 later the owner asked 这是跑偏到什么地方去了？
+    //
+    // Neither ordering is right, because neither answers the real question ("which thread is this
+    // conversation on") — both are proxies, and each fails where the other holds. Rather than trade one
+    // silent wrong answer for another, the substitution is now VISIBLE: every round result names the
+    // question it advanced (renderSessionSubject), so a wrong pick costs one glance instead of six
+    // minutes. A resolver that cannot be right in every case must at least be legible in every case.
     const row = (
       ownerSessionId == null
         ? this.db

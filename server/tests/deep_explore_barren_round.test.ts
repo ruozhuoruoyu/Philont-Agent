@@ -44,3 +44,29 @@ test('any single commitment makes a round non-barren', () => {
 test('open nodes alone are not progress — they are the backlog, not the work', () => {
   assert.equal(committedNothing(summary({ stillOpen: 999 })), true);
 });
+
+// ── Which question did this round advance? (2026-07-27) ─────────────────────
+//
+// The owner and the agent were on Lonely Runner. The agent closed that session; the next bare "continue"
+// silently resumed a graph-visualisation session created three days earlier, because getMostRecentActive
+// Session ordered by created_at while listActiveSessions had always ordered by updated_at — two functions
+// answering the same question two ways. The round then spent six minutes on 知识图谱 / 思维导图 / RDF
+// while the owner believed LRC was advancing, until: 这是跑偏到什么地方去了？
+import { renderSessionSubject } from '../src/deep_explore.js';
+
+test('every round result names the question it advanced', () => {
+  const out = renderSessionSubject('攻克「孤独跑者猜想」（Lonely Runner Conjecture）。根本约束：不能重复已知论文的路径', 'abc-123');
+  assert.match(out, /孤独跑者/, 'the subject must be readable at a glance');
+  assert.match(out, /session id: abc-123/);
+});
+
+test('a long goal is truncated but still identifies the problem', () => {
+  const out = renderSessionSubject('x'.repeat(500), 'id');
+  assert.ok(out.length < 130, 'one line, not a wall');
+  assert.match(out, /…/);
+});
+
+test('a goal with newlines stays on one line — the switch must be visible, not buried', () => {
+  const out = renderSessionSubject('攻克 LRC\n\n已知进展：\n- k<=12 已证', 'id');
+  assert.equal(out.split('\n').length, 2, 'subject line + id line');
+});
