@@ -1540,6 +1540,16 @@ export function shouldDeliberateAutoAnswer(input: {
   return !input.substantive && input.noProgressRounds >= (input.patience ?? DELIBERATE_ANSWER_PATIENCE);
 }
 
+/** Nothing entered the tree this round: no decomposition, nothing settled, nothing ruled out. */
+export function committedNothing(s: ProgressSummary): boolean {
+  return (
+    s.decomposedInto === 0 &&
+    s.newlyProved.length === 0 &&
+    s.newlyRefuted.length === 0 &&
+    s.newDeadEnds.length === 0
+  );
+}
+
 function renderProgressText(s: ProgressSummary, hitCap: boolean, status: ReasoningSessionStatus, settledVerb = 'proved'): string {
   const parts: string[] = [];
   if (s.decomposedInto > 0) parts.push(`+${s.decomposedInto} child nodes`);
@@ -1547,13 +1557,23 @@ function renderProgressText(s: ProgressSummary, hitCap: boolean, status: Reasoni
   if (s.newlyRefuted.length) parts.push(`refuted ${s.newlyRefuted.length}`);
   if (s.newDeadEnds.length) parts.push(`+${s.newDeadEnds.length} dead ends`);
   parts.push(`${s.stillOpen} still open`);
-  if (hitCap) parts.push('(hit this round\'s iteration cap; you can continue)');
+  // A round that committed nothing did not run out of iterations — it ran out of work it was willing to
+  // do. Blaming the cap invites the identical next round, which is what the owner watched happen five
+  // times in a row on 2026-07-27: every "继续" spent its calls on list_facts / search_notes /
+  // search_skills, committed nothing, and reported "Reasoning advanced ... you can continue".
+  const barren = committedNothing(s);
+  if (hitCap && !barren) parts.push('(hit this round\'s iteration cap; you can continue)');
   const head =
     status === 'solved'
       ? '✓ Root proposition proved; reasoning session solved.'
       : status === 'stuck'
         ? '⚠ Frontier is empty but the root is unproved; session stuck (add ideas and continue).'
-        : 'Reasoning advanced; session still active.';
+        : barren
+          ? '⛔ This round committed NOTHING to the tree — nothing decomposed, settled, or ruled out. ' +
+            'Reading memory (list_facts / search_notes / search_skills) is not advancing it. Do not ' +
+            'report this as progress: pick ONE open node and attack it with a real step (a computation, ' +
+            'a construction, a refutation attempt), or say plainly that the frontier is exhausted.'
+          : 'Reasoning advanced; session still active.';
   return `${head}\nThis round: ${parts.join('; ')}`;
 }
 
