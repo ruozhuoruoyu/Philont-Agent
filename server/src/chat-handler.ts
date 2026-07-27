@@ -376,6 +376,11 @@ import {
 } from './viability_gate.js';
 import { detectUngroundedArxivCitation, buildCitationGroundingDirective } from './citation_gate.js';
 import { detectUngroundedComputation, buildNumericGroundingDirective } from './numeric_grounding_gate.js';
+import {
+  announcedToolGateEnabled,
+  detectAnnouncedToolStall,
+  buildAnnouncedToolDirective,
+} from './announced_tool_gate.js';
 import { detectHandRolledParser, buildSkillReflexNudge } from './skill_reflex.js';
 import {
   resolveResponseLanguage,
@@ -8268,6 +8273,99 @@ async function handleChatSendInner(
         } else if (!honesty) {
           console.log(`[honesty] session=${sessionId} passed (zero-tool first response)`);
         }
+
+        // Numeric grounding on the SAME path. Stage B lives in the tool loop, so the one path where an
+        // unbacked computation is guaranteed unbacked — no tool ran at all — was the only path with no
+        // numeric check on it. Prod 2026-07-27, two turns in a row, both tools=0, both sent to the owner:
+        // "共测试 10 个子集，全部通过，0 反例" and "C(11,10)=11 个子集全部通过 … = 1/11". Both logged
+        // `honesty passed (zero-tool first response)`; the owner caught them himself.
+        if (process.env.PHILONT_NUMERIC_GATE !== '0') {
+          const ungrounded = detectUngroundedComputation(firstTextContent, []);
+          if (ungrounded) {
+            signalBus.couldNotVerify = true;
+            audit.append('self_domain_write', {
+              source: 'numeric_grounding_gate',
+              origin: 'Internal',
+              toolName: 'numeric_grounding_gate_fired',
+              sessionId,
+              claim: ungrounded.claim,
+              okCompute: 0,
+            });
+            recordControllerFire('numeric_grounding');
+            console.warn(
+              `[numeric-grounding] session=${sessionId} fired: computation claim "${ungrounded.claim}" with ZERO tool calls this turn (zero-tool first response)`,
+            );
+            messages.push({ role: 'assistant', content: firstTextContent });
+            messages.push({
+              role: 'user',
+              content: buildNumericGroundingDirective(ungrounded.claim, renderTurnLedger([])),
+            });
+            onTrace?.({
+              kind: 'internal-gate', tier: 4,
+              text: 'Numeric-grounding gate fired on zero-tool reply, forcing honest framing',
+              meta: { gateName: 'NumericGrounding' },
+            });
+            const regen = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
+            if (regen.type !== 'text') {
+              const sanitizedRegen = sanitizeAssistantMessageBlocks(regen.assistantMessage);
+              messages.push(sanitizedRegen.msg);
+              return await runToolLoop(
+                sessionId, messages, grants, audit,
+                regen.calls, [], 0,
+                onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
+              );
+            }
+            firstTextContent = regen.content;
+          }
+        }
+
+        // Announced-tool stall. Prod 2026-07-27: four turns in a row answered "我现在就看" / "Calling
+        // deep_explore status to see the current…" with tools=0 and closed, so the owner was told work
+        // was starting and nothing started. See announced_tool_gate.ts for why this is not another
+        // phrase list.
+        if (announcedToolGateEnabled()) {
+          const stall = await detectAnnouncedToolStall({
+            finalText: firstTextContent,
+            toolNames: toolDefs.map((d) => d.name),
+            calledToolNames: (signalBus.inTurnRecords ?? []).map((r) => r.toolName),
+          });
+          if (stall.window.length) {
+            console.warn(
+              `[announced-tool] session=${sessionId} window=[${stall.window.join(',')}] uncalled, tools=0 → ` +
+                (stall.verdict ? `PENDING "${stall.verdict.quote}"` : `no fire (${stall.note})`),
+            );
+          }
+          if (stall.verdict) {
+            audit.append('self_domain_write', {
+              source: 'announced_tool_gate',
+              origin: 'Internal',
+              toolName: 'announced_tool_gate_fired',
+              sessionId,
+              announcedTool: stall.verdict.toolName,
+              quote: stall.verdict.quote,
+            });
+            recordControllerFire('announced_tool');
+            messages.push({ role: 'assistant', content: firstTextContent });
+            messages.push({ role: 'user', content: buildAnnouncedToolDirective(stall.verdict) });
+            onTrace?.({
+              kind: 'internal-gate', tier: 4,
+              text: `Announced-tool stall (${stall.verdict.toolName} named but never called), regenerating`,
+              meta: { gateName: 'AnnouncedToolStall' },
+            });
+            const regen = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
+            if (regen.type !== 'text') {
+              // The model now actually calls the tool → run it through the normal loop.
+              const sanitizedRegen = sanitizeAssistantMessageBlocks(regen.assistantMessage);
+              messages.push(sanitizedRegen.msg);
+              return await runToolLoop(
+                sessionId, messages, grants, audit,
+                regen.calls, [], 0,
+                onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
+              );
+            }
+            firstTextContent = regen.content;
+          }
+        }
       }
       // Anti-fabrication backstop: when forcing is off / not possible (no active session), still replace
       // a fabricated recite with an honest message before it goes out.
@@ -9662,6 +9760,7 @@ async function runToolLoop(
   // honest framing. Capped at one attempt like the other gates.
   let citationGroundingAttempts = 0;
   let numericGroundingAttempts = 0;
+  let announcedToolAttempts = 0;
   // Phase 18 WS2: carries a stop_and_report verdict from the ViabilityGate to the final emit so the outcome
   // class is downgraded deterministically (independent of whether the regen dropped the continuation pitch).
   let viabilityStopPending = false;
@@ -10732,6 +10831,44 @@ async function runToolLoop(
             kind: 'internal-gate', tier: 4,
             text: `Numeric-grounding gate fired (unbacked computed values), forcing honest framing`,
             meta: { gateName: 'NumericGrounding' },
+          });
+          continue;
+        }
+      }
+
+      // Announced-tool stall, tool-loop side. The zero-tool branch is not the only way to end a turn
+      // having announced work: a turn can call search_notes, then write "now running deep_explore" and
+      // stop. Same stall, same window predicate — the reply names a tool that was never called this
+      // turn. Wiring a gate into one of two emit paths is the defect this repo keeps re-shipping.
+      if (announcedToolAttempts < 1 && announcedToolGateEnabled()) {
+        const stall = await detectAnnouncedToolStall({
+          finalText: response.content,
+          toolNames: toolDefs.map((d) => d.name),
+          calledToolNames: (signalBus.inTurnRecords ?? []).map((r) => r.toolName),
+        });
+        if (stall.window.length) {
+          console.warn(
+            `[announced-tool] session=${sessionId} window=[${stall.window.join(',')}] uncalled (tool loop) → ` +
+              (stall.verdict ? `PENDING "${stall.verdict.quote}"` : `no fire (${stall.note})`),
+          );
+        }
+        if (stall.verdict) {
+          announcedToolAttempts++;
+          audit.append('self_domain_write', {
+            source: 'announced_tool_gate',
+            origin: 'Internal',
+            toolName: 'announced_tool_gate_fired',
+            sessionId,
+            announcedTool: stall.verdict.toolName,
+            quote: stall.verdict.quote,
+          });
+          recordControllerFire('announced_tool');
+          messages.push({ role: 'assistant', content: response.content });
+          messages.push({ role: 'user', content: buildAnnouncedToolDirective(stall.verdict) });
+          onTrace?.({
+            kind: 'internal-gate', tier: 4,
+            text: `Announced-tool stall (${stall.verdict.toolName} named but never called), regenerating`,
+            meta: { gateName: 'AnnouncedToolStall' },
           });
           continue;
         }

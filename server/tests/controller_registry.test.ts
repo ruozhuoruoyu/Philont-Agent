@@ -31,6 +31,7 @@ const EXPECTED_IDS = [
   'output_format',
   'citation_grounding',
   'numeric_grounding',
+  'announced_tool',
   'viability',
   'conscience',
   'plan_protocol',
@@ -61,11 +62,12 @@ test('enumeration: each controller carries a real failure mode + source pointer'
 test('enumeration: the two per-call deciders are enumerated but not fire-counted', () => {
   assert.equal(getController('plan_protocol')?.countable, false);
   assert.equal(getController('phase')?.countable, false);
-  // the seven answer-time regen gates + conscience are fire-counted
+  // the answer-time regen gates + conscience are fire-counted
   const countable = listControllers().filter((c) => c.countable).map((c) => c.id);
   assert.deepEqual(
     countable.sort(),
     [
+      'announced_tool',
       'citation_grounding',
       'conscience',
       'empty_conclusion',
@@ -155,7 +157,7 @@ test('logRegisteredControllers emits a one-line summary of the registry', () => 
   const lines: string[] = [];
   logRegisteredControllers((m) => lines.push(m));
   assert.equal(lines.length, 1);
-  assert.ok(lines[0].includes('10 controllers registered'));
+  assert.ok(lines[0].includes('11 controllers registered'));
   assert.ok(lines[0].includes('fire-counted:'));
   assert.ok(lines[0].includes('enumerated-only:'));
   assert.ok(lines[0].includes('plan_protocol'));

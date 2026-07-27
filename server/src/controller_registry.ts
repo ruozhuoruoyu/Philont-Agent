@@ -145,6 +145,19 @@ const SPECS: readonly ControllerSpec[] = [
     envSwitch: 'PHILONT_NUMERIC_GATE',
   },
   {
+    id: 'announced_tool',
+    failureMode:
+      'told the user a tool was about to run ("我现在就看" / "Calling deep_explore status…") and ended the turn without calling it — in an async channel the announced work never starts',
+    module: 'server/src/announced_tool_gate.ts',
+    entry: 'detectAnnouncedToolStall',
+    layer: 'answer-time',
+    shape: 'regen',
+    firesWhen:
+      'the reply names a tool from this turn\'s schema that was never called this turn (deterministic window), and the aux judge confirms the text leaves that action pending',
+    countable: true,
+    envSwitch: 'PHILONT_ANNOUNCED_TOOL_GATE',
+  },
+  {
     id: 'viability',
     failureMode: 'pursuing a doomed / stalled reasoning goal and pitching "shall I continue?" as if progress were normal (false hope)',
     module: 'server/src/viability_gate.ts',
