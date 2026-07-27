@@ -533,6 +533,23 @@ export class ReasoningStore {
     return row?.no_progress_rounds ?? 0;
   }
 
+  /**
+   * Change a session's domain (formal ↔ deliberate) after it was created.
+   *
+   * The mode is not cosmetic — it selects the round's TOOL SET. `formal` gets pariGp / z3Verify /
+   * magnitude and no web; `deliberate` gets the web and no verifier. A session filed under the wrong
+   * one cannot do the work it was opened for, and until 2026-07-27 there was no way to correct it: a
+   * Lonely Runner proof session mis-filed as `deliberate` by the intent router spent its rounds running
+   * eleven web searches because a computation was not among the tools it had.
+   */
+  setMode(id: string, mode: ReasoningSessionMode): void {
+    this.db
+      .prepare<[string, number, string]>(
+        `UPDATE reasoning_sessions SET mode = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(mode, Date.now(), id);
+  }
+
   /** Set the exploration phase (diverge/converge). Set by the transition gate; ratchets diverge→converge. */
   setPhase(id: string, phase: ReasoningPhase): void {
     this.db

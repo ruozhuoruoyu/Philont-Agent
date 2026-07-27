@@ -21,6 +21,7 @@
  * existing plan protocol) is the caller's job. Default ON; PHILONT_INTENT_ROUTER=0/off/false/no disables it.
  */
 import { callAuxLLM, isAuxLLMConfigured, type AuxLLMRequest } from '@agent/tools';
+import { looksDeductive } from './phase_gate.js';
 
 export type IntentRoute = 'direct' | 'deep_explore' | 'plan';
 export type DeepExploreDomain = 'formal' | 'deliberate' | 'discover';
@@ -386,14 +387,32 @@ export function messageIsSelfContainedGoal(userMessage: string): boolean {
 }
 
 /** Build the synthetic deep_explore(start) input. mode is passed only for formal/deliberate (discover is an
- * action, not a mode); omitted → the engine auto-detects the domain from the goal. goal = the user message. */
+ * action, not a mode); omitted → the engine auto-detects the domain from the goal. goal = the user message.
+ *
+ * 2026-07-27. The mode is not a label — it picks the round's TOOL SET. `formal` gets pariGp / z3Verify /
+ * magnitude and deliberately NO web (web tools "degrade the reasoning loop to browsing"); `deliberate` gets
+ * the web and no verifier at all. And an explicitly passed mode outranks classifyGoal, the detector that
+ * reads the goal text.
+ *
+ * So a guess made here is permanent. Production: "继续LRC深度推理" — an acronym the aux model cannot
+ * resolve — came back `deep_explore:deliberate` (deliberate is also what parseIntentDecision falls back to
+ * whenever the domain is missing or unrecognised), and the Lonely Runner PROOF session was created with no
+ * way to compute anything. Its next round spent eleven web searches and one decomposition, proved nothing,
+ * and the owner said 你怎么又找回来其它的问题了.
+ *
+ * A guess must not outrank evidence. `looksDeductive` reads the goal itself and is deliberately
+ * conservative — it fires on 证明 / 猜想 / 定理 / prove / conjecture / theorem and math symbols, not on
+ * topic. When it fires and the router said `deliberate`, the router was defaulting; drop the pin and let
+ * the engine classify. `formal` from the router is kept as-is: it is a positive claim, not a fallback.
+ */
 export function buildForceStartInput(
   decision: IntentDecision | null,
   userMessage: string,
 ): { action: 'start'; goal: string; mode?: 'formal' | 'deliberate' } {
   const goal = (userMessage ?? '').trim().slice(0, 2000);
   const dom = decision?.domain;
-  const mode = dom === 'formal' || dom === 'deliberate' ? dom : undefined;
+  let mode = dom === 'formal' || dom === 'deliberate' ? dom : undefined;
+  if (mode === 'deliberate' && looksDeductive(goal)) mode = undefined;
   return mode ? { action: 'start', goal, mode } : { action: 'start', goal };
 }
 

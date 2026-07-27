@@ -96,7 +96,7 @@ import {
   type PriorMatch,
 } from '@agent/memory';
 import { currentSessionId } from './channels/turn_context.js';
-import { decidePhaseTransition, goalNeedsDecision, classifyGoal } from './phase_gate.js';
+import { decidePhaseTransition, goalNeedsDecision, classifyGoal, looksDeductive } from './phase_gate.js';
 import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
 
 const VALID_KINDS: ReadonlySet<string> = new Set([
@@ -1550,10 +1550,36 @@ export function shouldDeliberateAutoAnswer(input: {
  * upstream; this line is the tooth that makes any future mis-resolution visible in one glance instead of
  * six minutes.
  */
-export function renderSessionSubject(goal: string, id: string): string {
+/**
+ * The subject line printed under every round result.
+ *
+ * `mode` is on it because the mode silently decides what the round CAN do: `formal` has pariGp /
+ * z3Verify / magnitude and no web at all, `deliberate` has the web and no verifier. On 2026-07-27 a
+ * Lonely Runner proof session was sitting in `deliberate` — mis-filed at creation by the intent
+ * router's one-line guess — and spent a round on eleven web searches because a computation was not
+ * among the tools it had. Nothing in the round output said which profile was running, so the owner
+ * could see the browsing but not the reason for it.
+ *
+ * The mismatch note is deliberately advisory: `looksDeductive` reading the goal is better evidence than
+ * a router default, but it is not an oracle either (a research goal can mention 证明). So it is stated,
+ * with the one-line correction, and the decision stays with the reader.
+ */
+export function renderSessionSubject(goal: string, id: string, mode?: ReasoningSessionMode): string {
   const g = (goal ?? '').replace(/\s+/g, ' ').trim();
   const short = g.length > 70 ? `${g.slice(0, 70)}…` : g;
-  return `on: "${short}"\nsession id: ${id}`;
+  const modeLine = mode
+    ? `\nmode: ${mode}${
+        mode === 'formal'
+          ? ' (pariGp / z3Verify / magnitude; no web)'
+          : ' (webSearch / webFetch / memory; NO pariGp, z3 or magnitude)'
+      }`
+    : '';
+  const mismatch =
+    mode === 'deliberate' && looksDeductive(goal ?? '')
+      ? `\n⚠ this goal reads as a proof/derivation but the session cannot compute or verify anything. ` +
+        `To fix it: deep_explore({action:"continue", mode:"formal"}).`
+      : '';
+  return `on: "${short}"${modeLine}${mismatch}\nsession id: ${id}`;
 }
 
 /** Nothing entered the tree this round: no decomposition, nothing settled, nothing ruled out. */
@@ -3169,7 +3195,7 @@ export function createDeepExploreTool(
         : '';
     return {
       success: true,
-      output: `${text}${tail}${churnNote}${stuckNote}\n${renderSessionSubject(session.goal, session.id)}`,
+      output: `${text}${tail}${churnNote}${stuckNote}\n${renderSessionSubject(session.goal, session.id, session.mode)}`,
     };
   }
 
@@ -3365,7 +3391,7 @@ export function createDeepExploreTool(
         barrenNote +
         divergeStuckNote +
         phaseNote +
-        `\n${renderSessionSubject(session.goal, session.id)}`,
+        `\n${renderSessionSubject(session.goal, session.id, session.mode)}`,
     };
   }
 
@@ -3403,7 +3429,7 @@ export function createDeepExploreTool(
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['start', 'continue', 'discover', 'status', 'list', 'finalize', 'abandon', 'auto_on', 'auto_off'] },
-        mode: { type: 'string', enum: ['formal', 'deliberate'], description: 'action=start: "formal" (math/proof) or "deliberate" (general evidence-based judgment — decisions/diagnosis/due-diligence). Omit to auto-detect from the goal.' },
+        mode: { type: 'string', enum: ['formal', 'deliberate'], description: 'action=start: "formal" (math/proof — pariGp/z3Verify/magnitude, no web) or "deliberate" (evidence-based judgment — web/memory, no verifier). Omit to auto-detect from the goal. action=continue: pass it to CORRECT a mis-filed session; the tree is kept.' },
         phase: { type: 'string', enum: ['diverge', 'converge'], description: 'action=start (optional): "diverge" to begin by GENERATING candidate options/conjectures, "converge" to begin evaluating/proving. Omit to auto-detect (open-ended goals → diverge; a stated target → converge).' },
         goal: { type: 'string', description: 'action=start: the proposition to prove (formal) or the question to think through (deliberate)' },
         seed: { type: 'string', description: 'action=explore optional: the topic/object to focus this round on (e.g. a family of polynomials, a sequence)' },
@@ -3505,7 +3531,20 @@ export function createDeepExploreTool(
       }
 
       if (action === 'continue') {
-        const session = reasoning.getMostRecentActiveSession(owner);
+        let session = reasoning.getMostRecentActiveSession(owner);
+        // A mis-filed session was previously unfixable: the mode is chosen once, at creation, and it
+        // decides whether the round has a verifier or a browser. Correcting it must not require
+        // abandoning the tree — the whole point of a persistent session is the work already in it.
+        if (session && (params.mode === 'formal' || params.mode === 'deliberate') && params.mode !== session.mode) {
+          const from = session.mode;
+          reasoning.setMode(session.id, params.mode);
+          session = reasoning.getSession(session.id) ?? session;
+          console.warn(`[deep-explore] session ${session.id} mode ${from} → ${params.mode} (tree kept)`);
+          deps.onMilestone?.(
+            `Session domain changed ${from} → ${params.mode}. The tree is untouched; from this round on the ` +
+              `tools are ${params.mode === 'formal' ? 'pariGp / z3Verify / magnitude (no web)' : 'webSearch / webFetch / memory (no verifier)'}.`,
+          );
+        }
         if (!session) {
           return {
             success: false,
