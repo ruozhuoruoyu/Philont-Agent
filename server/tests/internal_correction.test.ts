@@ -15,6 +15,7 @@ import { INTERNAL_CORRECTION_FOOTER, INTERNAL_CORRECTION_FOOTER_NL } from '../sr
 import { buildNumericGroundingDirective } from '../src/numeric_grounding_gate.js';
 import { buildCitationGroundingDirective } from '../src/citation_gate.js';
 import { buildAnnouncedToolDirective } from '../src/announced_tool_gate.js';
+import { buildTurnLedgerContract } from '../src/chat-handler.js';
 
 test('the footer forbids the acknowledgement, not just the quoting', () => {
   // The old wording only banned surfacing the reminder, which the leak did not do.
@@ -49,4 +50,22 @@ test('the directives still say what they are for', () => {
     buildAnnouncedToolDirective({ toolName: 'deep_explore', quote: '我现在就看' }),
     /deep_explore/,
   );
+});
+
+// The envelope contract joined the per-iteration ledger block on 2026-07-28, because output_format was
+// firing on four of five substantive turns and each fire costs a full extra model call. The instruction
+// was never missing — it was STALE: the reply-format contract sits in the system prefix, nineteen tool
+// calls behind by the time a long analytical turn writes its answer. The regenerated replies proved the
+// model knows the format; it wrapped the same content correctly on the second pass.
+test('the generation-time contract restates the ## For User envelope', () => {
+  const block = buildTurnLedgerContract([{ toolName: 'pariGp', success: true, resultText: 'ok' }]);
+  assert.match(block, /## For User/);
+  assert.match(block, /## Work Log/);
+  assert.match(block, /CONTRACT 3\/3/);
+  // and it must say the rule survives a long, well-structured answer — that is the case that failed
+  assert.match(block, /###/);
+});
+
+test('an empty ledger injects nothing at all — no contract, no envelope nag', () => {
+  assert.equal(buildTurnLedgerContract([]), '');
 });

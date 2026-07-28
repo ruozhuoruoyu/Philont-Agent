@@ -6540,10 +6540,25 @@ export async function handleChatSend(
     // Stash for a possible pending-auth resume: if the model reaches for an execute tool before it ever
     // answers flat, this turn ends in auth_pending and the resumed turn re-enters with userMessage="ok"
     // and the router skipped. Without this the route (and the real goal) are lost. See carriedIntent.
+    // A CONTINUATION WORD MUST NOT ERASE THE GOAL IT IS CONTINUING.
+    //
+    // This map is the only surviving record of what a session is working on once an auth card splits a
+    // task across turns, and it was overwritten by every fresh turn — including "同意", "ok", "B". Then
+    // resolveJudgeGoal correctly refuses those as goals (a 12-character floor), and the learning judge
+    // skips. Prod 2026-07-28: "同意" at 14:49:42 replaced the real goal, and the two turns that followed
+    // — 65s and 453s of real work, 19 tool calls, pariGp and z3Verify — were both logged
+    // `skipped (auth resume, original goal not recoverable)`. The judge is blind on precisely the turns
+    // that carry the most evidence, which is the reason the daily report keeps reading 9 轮 1 轮.
+    //
+    // `messageIsSelfContainedGoal` is the same predicate force-start already uses to decide whether a
+    // message stands on its own. The DECISION is still overwritten every turn: a stale route must never
+    // force-start a later unrelated turn, and with decision=null force-start cannot fire at all — so
+    // keeping the goal alone is the safe half to keep.
+    const priorCarried = carriedIntent.get(sessionId);
     carriedIntent.set(sessionId, {
       decision: intentDecision,
       selfReferentialMeta: !!signalBus.selfReferentialMeta,
-      goal: userMessage,
+      goal: messageIsSelfContainedGoal(userMessage) ? userMessage : (priorCarried?.goal ?? userMessage),
       ts: Date.now(),
     });
     if (intentDecision) {
@@ -8619,7 +8634,23 @@ export function buildTurnLedgerContract(records: InTurnToolRecord[]): string {
     'none of that answers the user. Lead with the question the user ACTUALLY asked, answered directly and ' +
     'concretely; webSearch / webFetch findings in the ledger ARE solid evidence, so commit to a concrete ' +
     'recommendation rather than deflecting with "should I try it?". Reserve "I could not run/compile/verify X ' +
-    'here" for when it is genuinely germane — it is a valid answer, not a pre-emptive disclaimer to open with.'
+    'here" for when it is genuinely germane — it is a valid answer, not a pre-emptive disclaimer to open with.\n' +
+    // CONTRACT 3 exists because output_format was firing on FOUR OUT OF FIVE substantive turns
+    // (2026-07-28: finalLen 1135 / 1141 / 1123 / 593, all `long_text_no_user_section`), and each fire
+    // costs a full extra model call. A gate that fires most of the time is not a gate, it is a missing
+    // instruction — and the instruction was not missing, it was STALE: the reply-format contract sits in
+    // the system prefix, and by the time a long analytical turn writes its answer it is nineteen tool
+    // calls and tens of thousands of tokens behind. The regenerated replies prove the model knows the
+    // format; it just wrapped the same content correctly on the second pass.
+    //
+    // So the contract is restated in the block that is already rebuilt and re-injected on every
+    // iteration, at the moment it is needed rather than once at the top. Detection stays as the backstop
+    // it was meant to be; this is the prevention layer the ledger contract's own header describes.
+    'CONTRACT 3/3 (the envelope): your final natural-language reply MUST open with a literal `## For User` ' +
+    'heading and carry everything the user should read under it, followed by `## Work Log`. This holds no ' +
+    'matter how long or how well-structured the answer is — a report full of `###` sections still needs ' +
+    'the `## For User` envelope around it. WeChat and similar channels push ONLY that section; without the ' +
+    'heading the whole draft is dumped as a fallback, and the mechanism layer will make you write it again.'
   );
 }
 
