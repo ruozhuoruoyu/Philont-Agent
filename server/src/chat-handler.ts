@@ -1743,7 +1743,7 @@ const activeSessionMessages = new Map<string, NativeMessage[]>();
 // to prevent unit tests from hanging due to top-level DB side-effects when importing chat-handler.ts.
 // Uses import + re-export internally to keep call sites unchanged — `export ... from` alone does not bring the
 // binding into this module's scope, and the 4 gate call sites would get ReferenceError.
-import { autoRecoveryPlanScopeAllows, isPlanGateExempt, isReadOnlyShellCommand, terminalPlanClosedThisTurn } from './plan_gate.js';
+import { autoRecoveryPlanScopeAllows, autoRecoveryScopedTool, isPlanGateExempt, isReadOnlyShellCommand, terminalPlanClosedThisTurn } from './plan_gate.js';
 export { isPlanGateExempt, isReadOnlyShellCommand, terminalPlanClosedThisTurn };
 
 // Phase 10 M1 (2026-05-14): persist fetched resources to local disk.
@@ -8175,7 +8175,7 @@ async function handleChatSendInner(
           announceStallRaw === 'false' || announceStallRaw === 'no'
         );
         const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
-        const honesty = evaluateHonesty(firstTextContent, {
+        const honestyPatterns = evaluateHonesty(firstTextContent, {
           toolResults: recentToolResults,
           userMessage: signalBus.userMessage,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
@@ -8192,6 +8192,44 @@ async function handleChatSendInner(
               }
             : undefined,
         });
+        // Session-claim adjudicator on THIS path too. The tool-loop honesty site has had it since the
+        // pattern list was declared insufficient; the zero-tool first response — the path where a session
+        // claim is MOST likely to be invented, because nothing ran — had only the patterns. Prod
+        // 2026-07-28 07:13:12: tools=0, reply "✅ 深探新会话已建立(mode=deliberate, converge)", honesty
+        // passed; one minute later deep_explore(status) answered "No deep-exploreing session is in progress
+        // right now". Two turns earlier at 07:11:24 the SAME lie was caught — on the other path, by this
+        // adjudicator. One gate, two emit paths, wired into one of them.
+        let honesty = honestyPatterns;
+        if (
+          !honesty &&
+          shouldAdjudicateSessionClaim({
+            hasActiveSession: !!ownerReasoning,
+            deepExploreSucceededThisTurn: (signalBus.inTurnRecords ?? []).some(
+              (r) => r.success && r.toolName === 'deep_explore',
+            ),
+            textLength: firstTextContent.length,
+          })
+        ) {
+          const verdict = await adjudicateSessionClaim(firstTextContent);
+          if (verdict === 'asserts') {
+            console.warn(
+              `[honesty] session=${sessionId} adjudicator caught a session claim the patterns missed (zero-tool first response)`,
+            );
+            honesty = {
+              severity: 'high',
+              reason: 'fabricated_reasoning_session',
+              matchedClaim: '(adjudicated)',
+              okCount: 0,
+              failCount: 0,
+              unknownCount: 0,
+              evidence:
+                'You stated that a reasoning session exists or advanced, but there is no active session ' +
+                'and no deep_explore call succeeded this turn. If the call failed, say so and why; if you ' +
+                'want one, call deep_explore(action=start). Do not describe rounds, frontiers or ' +
+                'evaluations that did not happen.',
+            };
+          }
+        }
         // Fold this turn into the session latch. This site (the zero-tool first response) evaluated the gate
         // but NEVER wrote back — so a fabrication caught here armed nothing and did not even bump the
         // violation counter. The latch had a reader in one place and a writer in another, and they were not
@@ -8279,8 +8317,12 @@ async function handleChatSendInner(
         // numeric check on it. Prod 2026-07-27, two turns in a row, both tools=0, both sent to the owner:
         // "共测试 10 个子集，全部通过，0 反例" and "C(11,10)=11 个子集全部通过 … = 1/11". Both logged
         // `honesty passed (zero-tool first response)`; the owner caught them himself.
+        // The ledger passed here must be the REAL one, not a literal []. On an auth resume the model's
+        // first response carries no tool_use, but the turn's earlier segment may have run pariGp
+        // successfully before hitting the authorization card — hardcoding an empty ledger would call that
+        // a fabrication. `recentToolResults` is what the honesty gate above already read.
         if (process.env.PHILONT_NUMERIC_GATE !== '0') {
-          const ungrounded = detectUngroundedComputation(firstTextContent, []);
+          const ungrounded = detectUngroundedComputation(firstTextContent, recentToolResults);
           if (ungrounded) {
             signalBus.couldNotVerify = true;
             audit.append('self_domain_write', {
@@ -8298,7 +8340,10 @@ async function handleChatSendInner(
             messages.push({ role: 'assistant', content: firstTextContent });
             messages.push({
               role: 'user',
-              content: buildNumericGroundingDirective(ungrounded.claim, renderTurnLedger([])),
+              content: buildNumericGroundingDirective(
+                ungrounded.claim,
+                renderTurnLedger(signalBus.inTurnRecords ?? []),
+              ),
             });
             onTrace?.({
               kind: 'internal-gate', tier: 4,
@@ -8525,6 +8570,22 @@ async function handleChatSendInner(
             );
             if (closed) {
               signalBus.planAutoClosedFailure = true;
+              // auto-revise-on-fail flips TWO switches on a tool failure: fast→slow, and a placeholder
+              // recovery plan. Closing the plan here undid one of them, and the leftover half is a trap.
+              // Prod 2026-07-28 06:24→07:08: shell timed out → recovery plan (draft) + slow; the plan was
+              // never promoted, so this block closed it as `failed`; from then on the gate answered every
+              // shell call with "plan was closed as failed" — including shell, the one tool the recovery
+              // existed for (autoRecoveryPlanScopeAllows deliberately does NOT exempt the scoped tool).
+              // Nothing could execute, and forty minutes later the model reported 脚本运行成功 with the
+              // gate holding every call. The honesty gate caught the lie; the state that made lying the
+              // only available move was ours. A mechanism that sets two things must clear both.
+              const recoveryTool = autoRecoveryScopedTool(lastPlan);
+              if (recoveryTool) {
+                taskModeStore.set(sessionId, 'fast', `auto:recovery-plan-abandoned:${recoveryTool}`);
+                console.log(
+                  `[plan-auto-close] session=${sessionId} recovery plan for ${recoveryTool} abandoned → mode restored to fast (the recovery attempt is over; do not keep the session locked for it)`,
+                );
+              }
               internalAudit.append('self_domain_write', {
                 source: 'plan_auto_close_on_turn_end',
                 origin: 'Internal',
