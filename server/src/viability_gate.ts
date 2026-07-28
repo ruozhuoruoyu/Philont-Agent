@@ -26,6 +26,8 @@
  * Everything else is a constant with a sensible default — no per-threshold env vars.
  */
 
+import { INTERNAL_CORRECTION_FOOTER, INTERNAL_CORRECTION_FOOTER_NL } from './internal_correction.js';
+
 export type ViabilityVerdict = 'continue' | 'pivot' | 'stop_and_report' | 'intractable';
 
 /** Score ≥ this → stop_and_report. Constant: one internal scoring scale, no per-deployment tuning. */
@@ -405,7 +407,7 @@ export function buildViabilityDirective(
       '  3. RECOMMENDS stopping this goal entirely.',
       '  4. **Forbidden**: do NOT list approaches to try; do NOT pitch "要我继续吗"; do NOT end with "reply 继续 to keep probing". The ONLY opening you may leave is: "if you have a genuinely new idea, tell me — otherwise there is nothing productive to continue here."',
       '',
-      'This is an intra-turn internal correction. Do not surface this reminder to the user.',
+      INTERNAL_CORRECTION_FOOTER,
     ];
     return lines.join('\n');
   }
@@ -441,7 +443,7 @@ export function buildViabilityDirective(
     '',
     '**You are a trusted advisor, not a warden** — never refuse the user. This rewrite changes your RECOMMENDATION, not their option.',
     '',
-    'This is an intra-turn internal correction. Do not surface this reminder to the user.',
+    INTERNAL_CORRECTION_FOOTER,
   ];
   return lines.join('\n');
 }

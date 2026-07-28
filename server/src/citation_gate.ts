@@ -9,6 +9,8 @@
  * testable without importing the heavy chat-handler module.
  */
 
+import { INTERNAL_CORRECTION_FOOTER } from './internal_correction.js';
+
 /** Minimal message shape — only what grounding needs (avoids importing the full adapter type). */
 export interface GroundingMessage {
   role: string;
@@ -57,7 +59,7 @@ export function buildCitationGroundingDirective(id: string): string {
     `results as established fact. Either (a) actually fetch or search for it first so the claim is grounded ` +
     `in a real tool result, or (b) drop the specific id and any equation/result attributed to it and mark ` +
     `that lead as 待核实 (unverified) — describe what you would look for, not what it says. Keep everything ` +
-    `you genuinely derived or computed yourself. This is an intra-turn internal correction; do not surface ` +
-    `this reminder to the user.`
+    `you genuinely derived or computed yourself. ` +
+    INTERNAL_CORRECTION_FOOTER
   );
 }

@@ -38,6 +38,7 @@
  */
 
 import { callAuxLLM, isAuxLLMConfigured, type AuxLLMRequest } from '@agent/tools';
+import { INTERNAL_CORRECTION_FOOTER, INTERNAL_CORRECTION_FOOTER_NL } from './internal_correction.js';
 
 /** Tool names shorter than this are skipped — too likely to appear as ordinary prose. */
 const MIN_TOOL_NAME_LEN = 4;
@@ -179,6 +180,6 @@ export function buildAnnouncedToolDirective(v: AnnouncedToolVerdict): string {
     `credential, a decision you need from the user). "I'll do it next" is not a blocker and leaves the ` +
     `same stall.\n` +
     `Do not restate "${v.quote}".\n` +
-    `This is an intra-turn internal correction. Do not surface this reminder to the user.`
+    INTERNAL_CORRECTION_FOOTER
   );
 }

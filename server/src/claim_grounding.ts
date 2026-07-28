@@ -59,6 +59,7 @@ import {
   detectAnnouncedToolStall,
   buildAnnouncedToolDirective,
 } from './announced_tool_gate.js';
+import { INTERNAL_CORRECTION_FOOTER, INTERNAL_CORRECTION_FOOTER_NL } from './internal_correction.js';
 
 /** Controller ids, matching controller_registry.ts so recordControllerFire stays meaningful. */
 export type ClaimGroundingRule =
@@ -138,8 +139,7 @@ export async function evaluateClaimGrounding(
           'call failed, say so and why; if you want one, call deep_explore(action=start). Do not describe ' +
           'rounds, frontiers or evaluations that did not happen.\n\n' +
           '**Rewrite your final reply** without the session narration, or call deep_explore now and report ' +
-          'what it actually returns. This is an intra-turn internal correction; do not surface this ' +
-          'reminder to the user.',
+          'what it actually returns. ' + INTERNAL_CORRECTION_FOOTER,
       };
     }
   } catch {

@@ -185,6 +185,7 @@ import {
   quickSignatureHash as quickTaskSignatureHash,
   slowSessionAtTaskBoundary,
 } from './task_mode_classifier.js';
+import { INTERNAL_CORRECTION_FOOTER, INTERNAL_CORRECTION_FOOTER_NL } from './internal_correction.js';
 import {
   classifyIntent,
   planRouteWantsSlow,
@@ -8238,7 +8239,7 @@ async function handleChatSendInner(
                   `blocker and will be rejected.\n` +
                   `Do not repeat the claim "${honesty.matchedClaim}" — no process ran, so there is no result to ` +
                   `report.${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n` +
-                  `This is an intra-turn internal correction. Do not surface this reminder to the user.`
+                  INTERNAL_CORRECTION_FOOTER
                 : `[drive Honesty/${honesty.reason}] ${honesty.evidence}\n\n` +
                   `**Do ONE of these in your reply — do not straddle**:\n` +
                   `  A · Actually perform it NOW by CALLING the tool (e.g. forget_skill / store_fact / shell) — ` +
@@ -8246,7 +8247,7 @@ async function handleChatSendInner(
                   `  B · Correct yourself: tell the user honestly you have NOT done it yet.\n` +
                   `Do not repeat the claim "${honesty.matchedClaim}" unless a tool call THIS turn actually supports it.` +
                   `${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n` +
-                  `This is an intra-turn internal correction. Do not surface this reminder to the user.`,
+                  INTERNAL_CORRECTION_FOOTER,
           });
           onTrace?.({
             kind: 'internal-gate', tier: 4,
@@ -10189,7 +10190,7 @@ async function runToolLoop(
           `[drive iter-warning] You have used ${i}/${effectiveMax} tool-call rounds and are approaching the limit.\n` +
           `**Wrap up immediately**: organize the information you have collected into a reply for the user (## For User / ## Work Log two-section format). ` +
           `Do not make any more pointless tool calls. If you must call one more, pick the 1-2 most critical, then produce your final reply.\n` +
-          `This is an intra-turn internal correction. Do not surface this reminder to the user.`,
+          INTERNAL_CORRECTION_FOOTER,
       });
       onStatus?.(summarizingPhrase(statusLang));
     }
@@ -10321,7 +10322,7 @@ async function runToolLoop(
               `  3. When rewriting, use the number the tool actually returned (rounding is fine, but do not invent a number);\n` +
               `  4. If the tool returned an anomalous value (e.g. an 18-byte .docx — files < 256 bytes are usually a JSON error body, not real binary),\n` +
               `     tell the user honestly "this looks wrong — the API may have returned an error response" — **do not pretend success**.\n\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+              INTERNAL_CORRECTION_FOOTER;
           } else if (honestyVerdict.reason === 'fabricated_execution_claim') {
             // This is the branch that actually fired in prod (07-14), twice in one session — fabricate,
             // apologise, fabricate again. Step 4 below WAS the mechanism: "if you will not run it, say 'not
@@ -10341,7 +10342,7 @@ async function runToolLoop(
                 `which environment is missing, which credential you lack. "I have not run it yet" is a ` +
                 `restatement, not a blocker, and will be rejected;\n` +
                 `  4.${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n\n` +
-                `This is an intra-turn internal correction. Do not surface this reminder to the user.`
+                INTERNAL_CORRECTION_FOOTER
               : `[drive Honesty/fabricated_execution] You wrote "${honestyVerdict.matchedClaim}", but ${honestyVerdict.evidence}\n\n` +
                 `**This is the most serious dishonesty: reporting results of a computation that never ran this turn.**\n` +
                 `  1. Do NOT narrate numbers / eigenvalues / ratios / "shell 返回" you did not get from a tool THIS turn;\n` +
@@ -10349,7 +10350,7 @@ async function runToolLoop(
                 `  3. Report ONLY what the tool returned — if it failed, say it failed;\n` +
                 `  4. If you will not run it now, tell the user plainly "not run yet" — never invent the result;\n` +
                 `  5.${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n\n` +
-                `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+                INTERNAL_CORRECTION_FOOTER;
           } else if (honestyVerdict.reason === 'run_promise_without_exec') {
             reminder =
               `[drive Honesty/say_do_gap] You said "${honestyVerdict.matchedClaim}" but issued no tool call — ${honestyVerdict.evidence}\n\n` +
@@ -10357,7 +10358,7 @@ async function runToolLoop(
               `  1. In THIS reply, call the shell / pariGp tool to actually run it — do not end the turn on "现在跑";\n` +
               `  2. If you cannot or will not run it, say so plainly — do not promise a run you will not perform;\n` +
               `  3. Never end a turn with "I'll run it now" and no tool call — that is the exact loop the user flagged.\n\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+              INTERNAL_CORRECTION_FOOTER;
           } else if (honestyVerdict.reason === 'announced_action_without_doing') {
             reminder =
               `[drive Honesty/say_do_gap] You announced "${honestyVerdict.matchedClaim}" but issued no tool call — ${honestyVerdict.evidence}\n\n` +
@@ -10365,7 +10366,7 @@ async function runToolLoop(
               `  1. In THIS reply, actually take the action you announced — call webSearch / webFetch for research, or start deep_explore — do not end on a trailing "…";\n` +
               `  2. If you genuinely cannot act now (missing input / not your call), say so plainly and ask the user — do not narrate progress you are not making;\n` +
               `  3. Never end a turn with a present-progressive "I'm researching…" / a trailing "…" and zero tool calls — that is the exact stall the user flagged.\n\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+              INTERNAL_CORRECTION_FOOTER;
           } else if (honestyVerdict.reason === 'skill_forget_claim_without_call') {
             reminder =
               `[drive Honesty/skill_forget] You said "${honestyVerdict.matchedClaim}" but issued no successful forget_skill / uninstallSkill call — ${honestyVerdict.evidence}\n\n` +
@@ -10374,7 +10375,7 @@ async function runToolLoop(
               `    - forget_skill removes DB-only self-learned skills; file-backed (bundled/installed) skills are protected and must go through uninstallSkill instead.\n` +
               `  Path B · Correct yourself: honestly tell the user you have NOT deleted anything yet — do not write "已清除 / deleted" or narrate a forget_skill(…) call you did not issue.\n\n` +
               `Writing the tool call in a Work Log is NOT calling it. Nothing was deleted until forget_skill returns ✓ with deleted names.\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+              INTERNAL_CORRECTION_FOOTER;
           } else if (honestyVerdict.severity === 'high') {
             reminder =
               `[drive Honesty/high] Your draft reply contains a completion claim "${honestyVerdict.matchedClaim}", but ${honestyVerdict.evidence}\n\n` +
@@ -10384,7 +10385,7 @@ async function runToolLoop(
               `  3. In one sentence, distinguish: **what succeeded / what failed / what the user should do next**;\n` +
               `  4. Do not repeat "${honestyVerdict.matchedClaim}" — a success claim inconsistent with the failure count is a falsehood;\n` +
               `  5. If there is an untried reasonable path (different command / path / permissions), try one more tool call.\n\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+              INTERNAL_CORRECTION_FOOTER;
           } else if (honestyVerdict.reason === 'memory_claim_without_write') {
             reminder =
               `[drive Honesty/memory_claim] You said "${honestyVerdict.matchedClaim}" but did not call store_fact — ${honestyVerdict.evidence}\n\n` +
@@ -10394,7 +10395,7 @@ async function runToolLoop(
               `    - Project-related → namespace=project\n` +
               `    - Before writing, call get_fact to check existing value and merge rather than overwrite\n` +
               `  Path B · Correct yourself: honestly tell the user "I cannot persist that — please remind me next time" — do not pretend to have remembered.\n\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+              INTERNAL_CORRECTION_FOOTER;
           } else {
             reminder =
               `[drive Honesty/${honestyVerdict.reason}] Your draft reply contains a completion claim "${honestyVerdict.matchedClaim}", but ${honestyVerdict.evidence}\n\n` +
@@ -10415,7 +10416,7 @@ async function runToolLoop(
               `     ✓ "POST /register returned 201, user_id=abc123, stored via store_fact to project.<svc>.user_id"\n` +
               `     ✓ "wrote /tmp/out.json 2.3 KB, inspectPath confirms mtime=now + size > 0"\n` +
               `     ✗ "registration done" — no facts, same as saying nothing\n\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`;
+              INTERNAL_CORRECTION_FOOTER;
           }
           messages.push({ role: 'user', content: reminder });
           onTrace?.({
@@ -10459,7 +10460,7 @@ async function runToolLoop(
               `[drive EmptyConclusion] You made ${totalToolCallsThisTurn} tool calls this turn, but your final reply was ` +
               (empty.reason === 'empty_after_tools' ? 'completely empty' : `too short (only "${response.content.trim()}")`) +
               `. In one sentence, tell the user: what those calls did, what the result was, and what happens next.\n` +
-              `This is an intra-turn internal correction. Do not surface this reminder to the user.`,
+              INTERNAL_CORRECTION_FOOTER,
           });
           onTrace?.({
             kind: 'internal-gate', tier: 4,
@@ -10529,7 +10530,7 @@ async function runToolLoop(
                 `1. Make real progress — call plan_revise to split deliverables → plan_update_step("doing") → tool calls → plan_close\n` +
                 `2. Genuinely blocked — call askUserQuestion (specifying what user input is missing) or plan_close(failure, "<specific blocker>")\n\n` +
                 `**Do not repeat** promise-style phrases / "let me / I'll / next / later" etc. Reorganize your response.\n\n` +
-                `This is an intra-turn internal correction. Do not surface this reminder to the user.`,
+                INTERNAL_CORRECTION_FOOTER,
             });
             onTrace?.({
               kind: 'internal-gate', tier: 4,
@@ -10604,7 +10605,7 @@ async function runToolLoop(
                 `2. Honestly state which deliverables failed, which were not done, and the root cause (from tool error / circuit-breaker reason)\n` +
                 `3. If user action is needed (e.g. new invite_code / new credential / different param) → use \`## For User\` to write clearly "please provide X"\n` +
                 `4. If some steps (e.g. schedule_reminder) succeeded while others failed → say honestly "setup partially succeeded, but register failed → heartbeat not started"\n\n` +
-                `This is an intra-turn internal correction. Do not surface this reminder to the user.`,
+                INTERNAL_CORRECTION_FOOTER,
             });
             onTrace?.({
               kind: 'internal-gate', tier: 4,
@@ -10675,7 +10676,7 @@ async function runToolLoop(
               `and "the report is in the previous message" is false if that message was never delivered)\n` +
               `\n  ## Work Log\n` +
               `  (Full process / tool call details / intermediate data — goes into timeline; user does not see this)\n` +
-              `\nThis is an intra-turn internal correction. Do not surface this reminder to the user.`,
+              INTERNAL_CORRECTION_FOOTER_NL,
           });
           onTrace?.({
             kind: 'internal-gate', tier: 4,
@@ -11423,7 +11424,7 @@ async function runToolLoop(
         `\n  - Which commands / paths you tried (list the 3-5 most important ones)` +
         `\n  - The specific reason each one failed (copy key phrases from the tool_result)` +
         `\n  - What the user can do next (try manually / change approach / provide more information)` +
-        `\nThis is an intra-turn internal correction. Do not surface this reminder to the user.`,
+        INTERNAL_CORRECTION_FOOTER_NL,
     });
     // Call LLM, pass no tools, force text-only output
     let summary = await sendLlmWithRescue(messages, [], sessionId, onTrace);

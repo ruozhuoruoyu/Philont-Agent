@@ -20,6 +20,8 @@
  * outputs is a future tightening, noted but intentionally out of scope here.
  */
 
+import { INTERNAL_CORRECTION_FOOTER } from './internal_correction.js';
+
 /** A tool result as produced by extractRecentToolResults: content starts with ✓ (ok) or ⚠ (failed). */
 export interface GroundingToolResult {
   toolName: string;
@@ -102,7 +104,7 @@ export function buildNumericGroundingDirective(claim: string, ledger?: string): 
     `angle, or "verified/跑通/数值验证" claim as real. Either (a) actually run the computation now via a ` +
     `compute tool and report ONLY the values it returns, or (b) state honestly that you could not verify ` +
     `it this turn — name what failed and what you would run next — and drop every unbacked number. Keep ` +
-    `only claims grounded in a ✓ ledger entry. This is an intra-turn internal correction; do not surface ` +
-    `this reminder to the user.`
+    `only claims grounded in a ✓ ledger entry. ` +
+    INTERNAL_CORRECTION_FOOTER
   );
 }
