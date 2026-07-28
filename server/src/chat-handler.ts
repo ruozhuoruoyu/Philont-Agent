@@ -8299,19 +8299,7 @@ async function handleChatSendInner(
           }
         }
       }
-      // Anti-fabrication backstop: when forcing is off / not possible (no active session), still replace
-      // a fabricated recite with an honest message before it goes out.
-      const safeText = guardDeepExploreFabrication(firstTextContent, signalBus, sessionId);
-      messages.push({ role: 'assistant', content: safeText });
-      onDelta(safeText);
-      // Layer 0 append: assistant text response goes into the global timeline
-      memory.raw.appendMessage({
-        sessionId: GLOBAL_TIMELINE_SESSION_ID,
-        role: 'assistant',
-        content: safeText,
-        originSessionId: sessionId,
-      });
-      return { outcome: { outcomeType: 'response', text: safeText }, auditEvents: audit.length };
+      return emitFinalText({ sessionId, text: firstTextContent, messages, audit, signalBus, onDelta });
     }
 
     // 2026-05-07 #1 cont: tool_use.input in the assistantMessage returned by the LLM provider
@@ -9217,6 +9205,92 @@ async function applyClaimGrounding(opts: {
     meta: { gateName: finding.rule },
   });
   return true;
+}
+
+/**
+ * The single way a turn delivers its final text.
+ *
+ * There were three copies of this ritual — the zero-tool first response, the tool loop's natural text
+ * exit, and the maxIterations fallback — and they had drifted, silently, in the way copies do:
+ *
+ *   · the maxIterations copy once omitted onDelta, so its summary reached nobody; the comment left at
+ *     that site is the scar.
+ *   · it still omitted the assistant message push, so the transcript ended without the reply in it.
+ *   · and the OUTCOME LABEL was computed at the tool-loop exit only. The numeric-grounding rule arms
+ *     `signalBus.couldNotVerify` on every exit, and steering a turn into an honest "I could not verify
+ *     this" is exactly what that flag is for — but on two of the three exits the flag was armed and then
+ *     never read, so the turn was reported as an ordinary successful `response`. Prod 2026-07-28
+ *     07:09:52 fired the rule on the zero-tool path and closed `outcome=response`, while the identical
+ *     fire inside the tool loop closed `outcome=could_not_verify`. The learning judge and the daily
+ *     health report both read that label, so half the honest non-answers were being counted as answers.
+ *
+ * Three copies of an eight-line ritual is how that happens. There is one now, and adding a step to it
+ * cannot reach only two exits.
+ */
+function emitFinalText(opts: {
+  sessionId: string;
+  text: string;
+  messages: NativeMessage[];
+  audit: AuditLog;
+  signalBus: TurnSignalBus;
+  onDelta: (text: string) => void;
+  /** Tool-loop only: a viability stop is its own deliberate concede and outranks could_not_verify. */
+  viabilityStop?: { pending: boolean; reasoningSessionId?: string | null };
+}): { outcome: { outcomeType: string; text: string }; auditEvents: number } {
+  const { sessionId, messages, audit, signalBus, onDelta } = opts;
+  // Anti-fabrication backstop: replace a fabricated deep_explore recite with an honest message before
+  // it goes out, whichever exit produced it.
+  const safeText = guardDeepExploreFabrication(opts.text, signalBus, sessionId);
+  messages.push({ role: 'assistant', content: safeText });
+  // Invariant: onDelta BEFORE returning outcome.text — the frontend treats a final `outcome=response`
+  // as "already delivered via the delta stream" and stays silent otherwise.
+  onDelta(safeText);
+  memory.raw.appendMessage({
+    sessionId: GLOBAL_TIMELINE_SESSION_ID,
+    role: 'assistant',
+    content: safeText,
+    originSessionId: sessionId,
+  });
+
+  // Phase 18 WS2: stop_and_report is a first-class WINNABLE outcome (honest no-go + banked lemmas +
+  // recommended reframe), not a failure. Counsel-only — the reasoning session is NOT auto-abandoned;
+  // it stays resumable, and the next turn closes it iff the user explicitly accepts stopping.
+  if (opts.viabilityStop?.pending && opts.viabilityStop.reasoningSessionId) {
+    viabilityStopRecommended.set(sessionId, {
+      reasoningSessionId: opts.viabilityStop.reasoningSessionId,
+      at: Date.now(),
+    });
+  }
+  const outcomeType = resolveFinalOutcomeType({
+    viabilityStopPending: opts.viabilityStop?.pending === true,
+    couldNotVerify: signalBus.couldNotVerify === true,
+    inTurnRecords: signalBus.inTurnRecords ?? [],
+  });
+  return { outcome: { outcomeType, text: safeText }, auditEvents: audit.length };
+}
+
+/** Tools whose SUCCESS means the turn really did compute something. */
+const OUTCOME_COMPUTE_TOOLS = ['pariGp', 'z3Verify', 'leanCheck', 'magnitude', 'shell', 'process'];
+
+/**
+ * How a delivered turn is LABELLED. Pure, so the one rule that used to exist at one of three exits can
+ * be pinned by tests rather than by whichever exit a reader happens to open.
+ *
+ * `stop_and_report` outranks everything: a viability stop is a deliberate concede with banked results,
+ * not a failure to verify. `could_not_verify` is the honest non-answer the numeric-grounding rule steers
+ * a turn into — but only when no compute tool actually succeeded, since a turn that DID compute and then
+ * hedged about something else is an ordinary response.
+ */
+export function resolveFinalOutcomeType(input: {
+  viabilityStopPending: boolean;
+  couldNotVerify: boolean;
+  inTurnRecords: ReadonlyArray<{ toolName: string; success: boolean }>;
+}): 'stop_and_report' | 'could_not_verify' | 'response' {
+  if (input.viabilityStopPending) return 'stop_and_report';
+  const okCompute = input.inTurnRecords.some(
+    (r) => r.success && OUTCOME_COMPUTE_TOOLS.includes(r.toolName),
+  );
+  return input.couldNotVerify && !okCompute ? 'could_not_verify' : 'response';
 }
 
 async function runToolLoop(
@@ -10791,42 +10865,15 @@ async function runToolLoop(
         }
       }
 
-      // Anti-fabrication: block a tool-loop text response that claims deep_explore round/session
-      // results when no deep_explore tool actually ran this turn (e.g. it called list_facts then
-      // invented "第N轮/时间帽"). A response that did call deep_explore reports legitimately.
-      const safeText = guardDeepExploreFabrication(response.content, signalBus, sessionId);
-      messages.push({ role: 'assistant', content: safeText });
-      onDelta(safeText);
-      // Layer 0 append: assistant text response goes into the global timeline
-      memory.raw.appendMessage({
-        sessionId: GLOBAL_TIMELINE_SESSION_ID,
-        role: 'assistant',
-        content: safeText,
-        originSessionId: sessionId,
+      return emitFinalText({
+        sessionId,
+        text: response.content,
+        messages,
+        audit,
+        signalBus,
+        onDelta,
+        viabilityStop: { pending: viabilityStopPending, reasoningSessionId: viabilityStopReasoningId },
       });
-      // Phase 18 WS2: stop_and_report is a first-class, WINNABLE outcome (honest no-go + banked lemmas +
-      // recommended reframe), not a failure. Counsel-only: the reasoning session is NOT auto-abandoned here;
-      // it stays resumable so the next "继续" runs another round (user keeps agency). We only ARM the abandon —
-      // the next turn closes it iff the user explicitly accepts stopping (handleChatSendInner WS2 check).
-      if (viabilityStopPending && viabilityStopReasoningId) {
-        viabilityStopRecommended.set(sessionId, { reasoningSessionId: viabilityStopReasoningId, at: Date.now() });
-      }
-      // Stage A (2026-06-22): when the numeric-grounding gate steered this turn to an honest
-      // no-verification reply (and no compute/exec tool actually succeeded), label it
-      // `could_not_verify` — a first-class honest outcome, not a failure. Viability stop takes
-      // precedence (it is its own deliberate concede).
-      const okComputeThisTurn = (signalBus.inTurnRecords ?? []).some(
-        (r) => r.success && ['pariGp', 'z3Verify', 'leanCheck', 'magnitude', 'shell', 'process'].includes(r.toolName),
-      );
-      const outcomeType = viabilityStopPending
-        ? 'stop_and_report'
-        : signalBus.couldNotVerify && !okComputeThisTurn
-          ? 'could_not_verify'
-          : 'response';
-      return {
-        outcome: { outcomeType, text: safeText },
-        auditEvents: audit.length,
-      };
     }
 
     // Same as #1: subsequent loop iterations also need to sanitize assistantMessage tool_use blocks
@@ -11398,21 +11445,7 @@ async function runToolLoop(
       if (fired) summary = await sendLlmWithRescue(messages, [], sessionId, onTrace);
     }
     if (summary.type === 'text') {
-      // Invariant: must call onDelta before returning outcome.text — the frontend treats
-      // `final outcome=response` as "content already delivered via delta stream" and stays silent.
-      // This line was once omitted here, causing the maxIterations fallback summary to never reach the frontend.
-      const safeText = guardDeepExploreFabrication(summary.content, signalBus, sessionId);
-      onDelta(safeText);
-      memory.raw.appendMessage({
-        sessionId: GLOBAL_TIMELINE_SESSION_ID,
-        role: 'assistant',
-        content: safeText,
-        originSessionId: sessionId,
-      });
-      return {
-        outcome: { outcomeType: 'response', text: safeText },
-        auditEvents: audit.length,
-      };
+      return emitFinalText({ sessionId, text: summary.content, messages, audit, signalBus, onDelta });
     }
     // If the LLM still wants to call tools (theoretically should not, since toolDefs is empty), it falls to the original maxIterations
   } catch (e) {
