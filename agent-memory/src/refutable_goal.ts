@@ -25,9 +25,26 @@ export interface RefutableGoal {
   cue: string;
 }
 
-/** An explicit universal quantifier, in either language, including the symbol. */
+/**
+ * An explicit universal quantifier, in either language, including the symbol.
+ *
+ * The `i` flag is load-bearing and was missing until 2026-07-28. Its two siblings below both carry one;
+ * this one did not, so the detector matched "for all n" and missed "For all n" — i.e. it missed every
+ * goal that OPENS with its quantifier, which is how a mathematical proposition is normally written.
+ *
+ * What that cost: the LRC session's root was `Prove: For any set S of k positive integers whose residues
+ * modulo (k+1) are a permutation of {1,...,k}, if S ≠ {1,...,k}, then there exists t with min distance >
+ * 1/(k+1)`. Capital F, no pairing, no refutation node — so the tree never held a node a machine could
+ * decide, and six consecutive sessions ground on the proof side and reported "structural mismatch between
+ * the tool and the problem".
+ *
+ * The proposition is FALSE. S = {1,3,4,7} has residues {1,3,4,2} mod 5, is not {1,2,3,4}, and its best t
+ * achieves exactly 1/5 — never more (verified two ways: exact critical-point enumeration, and brute force
+ * over every p/q with q ≤ 400). A counterexample search would have returned it in seconds. That search is
+ * precisely the node this function exists to create.
+ */
 const UNIVERSAL_RE =
-  /∀|\bfor\s+(?:all|every|each|any)\b|\bfor\s+arbitrary\b|\b(?:holds|true|valid)\s+for\s+(?:all|every)\b|\balways\b|\bnever\b|\bno\s+\w+\s+(?:exists|satisfies)\b|\bthere\s+is\s+no\b|对(?:所有|任意|任一|每(?:一)?个)|任意|所有|每(?:一)?个|恒(?:成立|等|为)|总是|从不|不存在/;
+  /∀|\bfor\s+(?:all|every|each|any)\b|\bfor\s+arbitrary\b|\b(?:holds|true|valid)\s+for\s+(?:all|every)\b|\balways\b|\bnever\b|\bno\s+\w+\s+(?:exists|satisfies)\b|\bthere\s+is\s+no\b|对(?:所有|任意|任一|每(?:一)?个)|任意|所有|每(?:一)?个|恒(?:成立|等|为)|总是|从不|不存在/i;
 
 /** Conjecture-shaped: the claim is asserted as generally true and awaits proof or refutation. */
 const CONJECTURE_RE = /\bconjectur|\bhypothesis\b|\btheorem\b|猜想|假说|定理/i;

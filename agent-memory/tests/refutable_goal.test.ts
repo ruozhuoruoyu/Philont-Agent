@@ -77,3 +77,43 @@ test('the owner-facing note explains the asymmetry it exploits', () => {
   assert.match(renderRefutationNote('quantifier'), /witness/);
   assert.match(renderRefutationNote('conjecture'), /conjecture-shaped/);
 });
+
+// 2026-07-28. The `i` flag was missing from UNIVERSAL_RE while both of its siblings had one, so the
+// detector matched "for all n" and missed "For all n" — every goal that OPENS with its quantifier, which
+// is how a mathematical proposition is normally written.
+//
+// The LRC session's root was `Prove: For any set S of k positive integers whose residues modulo (k+1)
+// are a permutation of {1,...,k}, if S ≠ {1,...,k}, then there exists t with min distance > 1/(k+1)`.
+// Capital F → no pairing → the tree never held a node a machine could decide → six consecutive sessions
+// ground on the proof side and concluded "structural mismatch between the tool and the problem".
+//
+// The proposition is false: S = {1,3,4,7} satisfies the hypothesis and its best t achieves exactly 1/5.
+// The node this function creates is the counterexample search that would have found it.
+test('a goal that OPENS with its quantifier is paired — the normal way to write a proposition', () => {
+  const lrc =
+    'Prove: For any set S of k positive integers whose residues modulo (k+1) are a permutation of ' +
+    '{1,...,k}, if S ≠ {1,2,...,k}, then there exists t with min distance > 1/(k+1)';
+  assert.equal(findRefutableGoal(lrc)?.reason, 'quantifier');
+});
+
+test('capitalisation never decides whether a quantifier is one', () => {
+  for (const [cap, low] of [
+    ['For all n, P(n) holds', 'for all n, P(n) holds'],
+    ['For every prime p, Q(p)', 'for every prime p, Q(p)'],
+    ['For each n > 2, R(n)', 'for each n > 2, R(n)'],
+    ['Always true for n odd', 'always true for n odd'],
+    ['Never zero on the strip', 'never zero on the strip'],
+  ]) {
+    const hi = findRefutableGoal(cap);
+    const lo = findRefutableGoal(low);
+    assert.ok(hi, `"${cap}" should pair`);
+    assert.ok(lo, `"${low}" should pair`);
+    // `cue` echoes the matched text verbatim for the log, so it differs by case; the VERDICT must not.
+    assert.equal(hi!.reason, lo!.reason, `"${cap}" and "${low}" must pair for the same reason`);
+    assert.equal(hi!.cue.toLowerCase(), lo!.cue.toLowerCase());
+  }
+});
+
+test('a capitalised DECISION goal is still screened out — the fix must not widen the net', () => {
+  assert.equal(findRefutableGoal('Should we always pick the cheaper vendor for every region?'), null);
+});
