@@ -278,10 +278,6 @@ import {
 } from './autonomy_status.js';
 import { recordAutonomyReach, autonomyReachSummary, renderAutonomyReach } from './autonomy_reach.js';
 import {
-  adjudicateSessionClaim,
-  shouldAdjudicateSessionClaim,
-} from './session_claim_adjudicator.js';
-import {
   computeHealthRatios,
   renderHealthReport,
   shouldSendHealthReport,
@@ -374,13 +370,11 @@ import {
   VIABILITY_CONTINUE_RE,
   decideTurnAnchors,
 } from './viability_gate.js';
-import { detectUngroundedArxivCitation, buildCitationGroundingDirective } from './citation_gate.js';
-import { detectUngroundedComputation, buildNumericGroundingDirective } from './numeric_grounding_gate.js';
 import {
-  announcedToolGateEnabled,
-  detectAnnouncedToolStall,
-  buildAnnouncedToolDirective,
-} from './announced_tool_gate.js';
+  evaluateClaimGrounding,
+  isGroundingFire,
+  type ClaimGroundingFinding,
+} from './claim_grounding.js';
 import { detectHandRolledParser, buildSkillReflexNudge } from './skill_reflex.js';
 import {
   resolveResponseLanguage,
@@ -8192,44 +8186,7 @@ async function handleChatSendInner(
               }
             : undefined,
         });
-        // Session-claim adjudicator on THIS path too. The tool-loop honesty site has had it since the
-        // pattern list was declared insufficient; the zero-tool first response — the path where a session
-        // claim is MOST likely to be invented, because nothing ran — had only the patterns. Prod
-        // 2026-07-28 07:13:12: tools=0, reply "✅ 深探新会话已建立(mode=deliberate, converge)", honesty
-        // passed; one minute later deep_explore(status) answered "No deep-exploreing session is in progress
-        // right now". Two turns earlier at 07:11:24 the SAME lie was caught — on the other path, by this
-        // adjudicator. One gate, two emit paths, wired into one of them.
-        let honesty = honestyPatterns;
-        if (
-          !honesty &&
-          shouldAdjudicateSessionClaim({
-            hasActiveSession: !!ownerReasoning,
-            deepExploreSucceededThisTurn: (signalBus.inTurnRecords ?? []).some(
-              (r) => r.success && r.toolName === 'deep_explore',
-            ),
-            textLength: firstTextContent.length,
-          })
-        ) {
-          const verdict = await adjudicateSessionClaim(firstTextContent);
-          if (verdict === 'asserts') {
-            console.warn(
-              `[honesty] session=${sessionId} adjudicator caught a session claim the patterns missed (zero-tool first response)`,
-            );
-            honesty = {
-              severity: 'high',
-              reason: 'fabricated_reasoning_session',
-              matchedClaim: '(adjudicated)',
-              okCount: 0,
-              failCount: 0,
-              unknownCount: 0,
-              evidence:
-                'You stated that a reasoning session exists or advanced, but there is no active session ' +
-                'and no deep_explore call succeeded this turn. If the call failed, say so and why; if you ' +
-                'want one, call deep_explore(action=start). Do not describe rounds, frontiers or ' +
-                'evaluations that did not happen.',
-            };
-          }
-        }
+        const honesty = honestyPatterns;
         // Fold this turn into the session latch. This site (the zero-tool first response) evaluated the gate
         // but NEVER wrote back — so a fabrication caught here armed nothing and did not even bump the
         // violation counter. The latch had a reader in one place and a writer in another, and they were not
@@ -8312,94 +8269,24 @@ async function handleChatSendInner(
           console.log(`[honesty] session=${sessionId} passed (zero-tool first response)`);
         }
 
-        // Numeric grounding on the SAME path. Stage B lives in the tool loop, so the one path where an
-        // unbacked computation is guaranteed unbacked — no tool ran at all — was the only path with no
-        // numeric check on it. Prod 2026-07-27, two turns in a row, both tools=0, both sent to the owner:
-        // "共测试 10 个子集，全部通过，0 反例" and "C(11,10)=11 个子集全部通过 … = 1/11". Both logged
-        // `honesty passed (zero-tool first response)`; the owner caught them himself.
-        // The ledger passed here must be the REAL one, not a literal []. On an auth resume the model's
-        // first response carries no tool_use, but the turn's earlier segment may have run pariGp
-        // successfully before hitting the authorization card — hardcoding an empty ledger would call that
-        // a fabrication. `recentToolResults` is what the honesty gate above already read.
-        if (process.env.PHILONT_NUMERIC_GATE !== '0') {
-          const ungrounded = detectUngroundedComputation(firstTextContent, recentToolResults);
-          if (ungrounded) {
-            signalBus.couldNotVerify = true;
-            audit.append('self_domain_write', {
-              source: 'numeric_grounding_gate',
-              origin: 'Internal',
-              toolName: 'numeric_grounding_gate_fired',
-              sessionId,
-              claim: ungrounded.claim,
-              okCompute: 0,
-            });
-            recordControllerFire('numeric_grounding');
-            console.warn(
-              `[numeric-grounding] session=${sessionId} fired: computation claim "${ungrounded.claim}" with ZERO tool calls this turn (zero-tool first response)`,
-            );
-            messages.push({ role: 'assistant', content: firstTextContent });
-            messages.push({
-              role: 'user',
-              content: buildNumericGroundingDirective(
-                ungrounded.claim,
-                renderTurnLedger(signalBus.inTurnRecords ?? []),
-              ),
-            });
-            onTrace?.({
-              kind: 'internal-gate', tier: 4,
-              text: 'Numeric-grounding gate fired on zero-tool reply, forcing honest framing',
-              meta: { gateName: 'NumericGrounding' },
-            });
-            const regen = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
-            if (regen.type !== 'text') {
-              const sanitizedRegen = sanitizeAssistantMessageBlocks(regen.assistantMessage);
-              messages.push(sanitizedRegen.msg);
-              return await runToolLoop(
-                sessionId, messages, grants, audit,
-                regen.calls, [], 0,
-                onDelta, onAuthRequest, signalBus, onStatus, onTrace, statusLang,
-              );
-            }
-            firstTextContent = regen.content;
-          }
-        }
-
-        // Announced-tool stall. Prod 2026-07-27: four turns in a row answered "我现在就看" / "Calling
-        // deep_explore status to see the current…" with tools=0 and closed, so the owner was told work
-        // was starting and nothing started. See announced_tool_gate.ts for why this is not another
-        // phrase list.
-        if (announcedToolGateEnabled()) {
-          const stall = await detectAnnouncedToolStall({
-            finalText: firstTextContent,
+        // Claim grounding — the same chain the tool loop runs, and the reason this branch no longer
+        // carries its own copies of the numeric and announced-tool gates (and previously lacked the
+        // citation one entirely). One list, one regeneration, no per-exit subset.
+        {
+          const fired = await applyClaimGrounding({
+            sessionId,
+            text: firstTextContent,
+            messages,
             toolNames: toolDefs.map((d) => d.name),
-            calledToolNames: (signalBus.inTurnRecords ?? []).map((r) => r.toolName),
+            audit,
+            signalBus,
+            ownerReasoningActive: !!ownerReasoning,
+            onTrace,
           });
-          if (stall.window.length) {
-            console.warn(
-              `[announced-tool] session=${sessionId} window=[${stall.window.join(',')}] uncalled, tools=0 → ` +
-                (stall.verdict ? `PENDING "${stall.verdict.quote}"` : `no fire (${stall.note})`),
-            );
-          }
-          if (stall.verdict) {
-            audit.append('self_domain_write', {
-              source: 'announced_tool_gate',
-              origin: 'Internal',
-              toolName: 'announced_tool_gate_fired',
-              sessionId,
-              announcedTool: stall.verdict.toolName,
-              quote: stall.verdict.quote,
-            });
-            recordControllerFire('announced_tool');
-            messages.push({ role: 'assistant', content: firstTextContent });
-            messages.push({ role: 'user', content: buildAnnouncedToolDirective(stall.verdict) });
-            onTrace?.({
-              kind: 'internal-gate', tier: 4,
-              text: `Announced-tool stall (${stall.verdict.toolName} named but never called), regenerating`,
-              meta: { gateName: 'AnnouncedToolStall' },
-            });
+          if (fired) {
             const regen = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
             if (regen.type !== 'text') {
-              // The model now actually calls the tool → run it through the normal loop.
+              // The model now actually calls a tool → run it through the normal loop.
               const sanitizedRegen = sanitizeAssistantMessageBlocks(regen.assistantMessage);
               messages.push(sanitizedRegen.msg);
               return await runToolLoop(
@@ -9256,6 +9143,82 @@ function forceTierClassifyRedirect(
   );
 }
 
+/**
+ * The single application point for the claim-grounding chain (see claim_grounding.ts).
+ *
+ * Evaluates the chain against the text about to be emitted and, on a fire, does everything that used to
+ * be copy-pasted per gate per exit: audit row, controller fire count, console line, the assistant +
+ * directive message pair, the trace event, and the two flags a rule can arm. Returns true when the
+ * caller must regenerate.
+ *
+ * The caller keeps ownership of HOW it regenerates, because that genuinely differs: the tool loop
+ * `continue`s, the zero-tool branch calls the model directly and may hand off to the tool loop. What must
+ * NOT differ — which rules run, in what order, with what side effects — now lives in one place.
+ */
+async function applyClaimGrounding(opts: {
+  sessionId: string;
+  text: string;
+  messages: NativeMessage[];
+  toolNames: readonly string[];
+  audit: AuditLog;
+  signalBus: TurnSignalBus;
+  ownerReasoningActive: boolean;
+  onTrace?: TraceFn;
+}): Promise<boolean> {
+  const { sessionId, text, messages, audit, signalBus, onTrace } = opts;
+  let finding: ClaimGroundingFinding | null = null;
+  try {
+    finding = await evaluateClaimGrounding({
+      text,
+      toolResults: extractRecentToolResults(messages),
+      messages,
+      toolNames: opts.toolNames,
+      calledToolNames: (signalBus.inTurnRecords ?? []).map((r) => r.toolName),
+      hasActiveReasoningSession: opts.ownerReasoningActive,
+      deepExploreSucceededThisTurn: (signalBus.inTurnRecords ?? []).some(
+        (r) => r.success && r.toolName === 'deep_explore',
+      ),
+      renderedLedger: renderTurnLedger(signalBus.inTurnRecords ?? []),
+    });
+  } catch (e) {
+    console.warn('[claim-grounding] chain failed (ignored):', (e as Error)?.message);
+    return false;
+  }
+  if (!finding) return false;
+  // A log-only observation (the announced-tool window that found no verdict) is reported and dropped:
+  // the window exists so a miss is readable rather than silent.
+  console.warn(`[${finding.rule}] session=${sessionId} ${finding.log}`);
+  if (!isGroundingFire(finding)) return false;
+
+  audit.append('self_domain_write', {
+    source: `claim_grounding:${finding.rule}`,
+    origin: 'Internal',
+    toolName: `${finding.rule}_fired`,
+    sessionId,
+    ...finding.audit,
+  });
+  recordControllerFire(finding.rule === 'session_claim' ? 'honesty' : finding.rule);
+  if (finding.armsCouldNotVerify) signalBus.couldNotVerify = true;
+  if (finding.armsHonestyLatch && process.env.PHILONT_HONESTY_SESSION !== '0') {
+    // Preserved from when this rule WAS an honesty verdict: it must still bump the violation counter
+    // that removes the apology exit on a repeat offence.
+    honestySessionStore.update(sessionId, {
+      promisedRun: false,
+      didExecute: turnDidExecute(extractRecentToolResults(messages)),
+      fired: true,
+    });
+  }
+  messages.push({ role: 'assistant', content: text });
+  messages.push({ role: 'user', content: finding.directive });
+  onTrace?.({
+    kind: 'internal-gate',
+    tier: 4,
+    text: `Claim-grounding rule ${finding.rule} fired, regenerating`,
+    meta: { gateName: finding.rule },
+  });
+  return true;
+}
+
 async function runToolLoop(
   sessionId: string,
   messages: NativeMessage[],
@@ -9819,9 +9782,9 @@ async function runToolLoop(
   // Citation-grounding gate (2026-06-17): the model fabricates a specific arXiv id (and its attributed
   // equation/result) from memory when no source was actually retrieved this conversation. One regen forces
   // honest framing. Capped at one attempt like the other gates.
-  let citationGroundingAttempts = 0;
-  let numericGroundingAttempts = 0;
-  let announcedToolAttempts = 0;
+  // One counter for the whole claim-grounding chain: the point of merging four gates is one
+  // regeneration per turn, not up to three stacked on each other.
+  let claimGroundingAttempts = 0;
   // Phase 18 WS2: carries a stop_and_report verdict from the ViabilityGate to the final emit so the outcome
   // class is downgraded deterministically (independent of whether the regen dropped the continuation pitch).
   let viabilityStopPending = false;
@@ -10211,43 +10174,11 @@ async function runToolLoop(
               }
             : undefined,
         });
-        // Pattern floor → model ceiling. evaluateHonesty's session-claim rule matches a few phrasings and
-        // will never match them all; asking whether a paragraph ASSERTS something is inference, and this
-        // repo has already paid once for handing inference to a keyword list (the authorization classifier
-        // that read three ordinary questions as consent). So when the deterministic precondition holds —
-        // no session exists, no deep_explore succeeded — and the patterns found nothing, the aux model is
-        // asked the reading-comprehension question the list cannot answer. It returns `unknown` on every
-        // failure path, so an unconfigured or broken aux leaves exactly today's behaviour rather than
-        // silently deleting the guard.
-        let honestyVerdict = honesty;
-        if (
-          !honestyVerdict &&
-          shouldAdjudicateSessionClaim({
-            hasActiveSession: !!ownerReasoning,
-            deepExploreSucceededThisTurn: (signalBus.inTurnRecords ?? []).some(
-              (r) => r.success && r.toolName === 'deep_explore',
-            ),
-            textLength: response.content.length,
-          })
-        ) {
-          const verdict = await adjudicateSessionClaim(response.content);
-          if (verdict === 'asserts') {
-            console.warn(`[honesty] session=${sessionId} adjudicator caught a session claim the patterns missed`);
-            honestyVerdict = {
-              severity: 'high',
-              reason: 'fabricated_reasoning_session',
-              matchedClaim: '(adjudicated)',
-              okCount: 0,
-              failCount: 0,
-              unknownCount: 0,
-              evidence:
-                'You stated that a reasoning session exists or advanced, but there is no active session ' +
-                'and no deep_explore call succeeded this turn. If the call failed, say so and why; if you ' +
-                'want one, call deep_explore(action=start). Do not describe rounds, frontiers or ' +
-                'evaluations that did not happen.',
-            };
-          }
-        }
+        // The session-claim adjudicator used to live here, inline, and nowhere else — which is how a
+        // fabricated session sailed through the zero-tool exit on 2026-07-28 while the identical claim was
+        // caught here two turns earlier. It is now a rule in the claim-grounding chain, evaluated the same
+        // way on every exit. See claim_grounding.ts.
+        const honestyVerdict = honesty;
 
         // Fold this turn into the latch BEFORE acting on the verdict: a fresh "现在跑" / announced-but-
         // did-nothing (0 tools) arms it; an actual execution clears it; a fire bumps the violation counter.
@@ -10824,113 +10755,22 @@ async function runToolLoop(
         }
       }
 
-      // Citation-grounding gate (2026-06-17): block a reply that asserts a specific arXiv id (and the
-      // equations/results it attributes to that paper) when no source backing it was ever retrieved or
-      // supplied by the user — a memory-recalled id is how fabricated citations enter. Regen once to force
-      // honest framing (待核实) or an actual fetch. env PHILONT_CITATION_GATE=0 to disable.
-      if (citationGroundingAttempts < 1 && process.env.PHILONT_CITATION_GATE !== '0') {
-        const ungroundedId = detectUngroundedArxivCitation(response.content, messages);
-        if (ungroundedId) {
-          citationGroundingAttempts++;
-          audit.append('self_domain_write', {
-            source: 'citation_grounding_gate',
-            origin: 'Internal',
-            toolName: 'citation_grounding_gate_fired',
-            sessionId,
-            arxivId: ungroundedId,
-          });
-          recordControllerFire('citation_grounding');
-          console.warn(
-            `[citation-grounding] session=${sessionId} fired: cited arXiv:${ungroundedId} with no retrieved/user-supplied source`,
-          );
-          messages.push({ role: 'assistant', content: response.content });
-          messages.push({ role: 'user', content: buildCitationGroundingDirective(ungroundedId) });
-          onTrace?.({
-            kind: 'internal-gate', tier: 4,
-            text: `Citation-grounding gate fired (arXiv:${ungroundedId} unsourced), forcing honest framing`,
-            meta: { gateName: 'CitationGrounding' },
-          });
-          continue;
-        }
-      }
-
-      // Stage B (2026-06-22 anti-fabrication): block a reply that reports an accomplished
-      // computation/verification with numeric results when NO compute/exec tool succeeded this turn.
-      // Fills the honesty gate's blind spot (it has no "I ran the math, here are the numbers"
-      // category). Regen once to force an honest "could not verify" framing. env
-      // PHILONT_NUMERIC_GATE=0 to disable.
-      if (numericGroundingAttempts < 1 && process.env.PHILONT_NUMERIC_GATE !== '0') {
-        const ungroundedCompute = detectUngroundedComputation(
-          response.content,
-          extractRecentToolResults(messages),
-        );
-        if (ungroundedCompute) {
-          numericGroundingAttempts++;
-          // Stage A: arm the honest-end label. If the regen drops the unbacked numbers and ends with
-          // an honest "could not verify", the turn closes as `could_not_verify` (a sanctioned outcome),
-          // not as a fake `response`.
-          signalBus.couldNotVerify = true;
-          audit.append('self_domain_write', {
-            source: 'numeric_grounding_gate',
-            origin: 'Internal',
-            toolName: 'numeric_grounding_gate_fired',
-            sessionId,
-            claim: ungroundedCompute.claim,
-            okCompute: ungroundedCompute.okCompute,
-          });
-          recordControllerFire('numeric_grounding');
-          console.warn(
-            `[numeric-grounding] session=${sessionId} fired: computation claim "${ungroundedCompute.claim}" with 0 successful compute/exec tools`,
-          );
-          messages.push({ role: 'assistant', content: response.content });
-          const ledgerText = renderTurnLedger(signalBus.inTurnRecords ?? []);
-          messages.push({
-            role: 'user',
-            content: buildNumericGroundingDirective(ungroundedCompute.claim, ledgerText),
-          });
-          onTrace?.({
-            kind: 'internal-gate', tier: 4,
-            text: `Numeric-grounding gate fired (unbacked computed values), forcing honest framing`,
-            meta: { gateName: 'NumericGrounding' },
-          });
-          continue;
-        }
-      }
-
-      // Announced-tool stall, tool-loop side. The zero-tool branch is not the only way to end a turn
-      // having announced work: a turn can call search_notes, then write "now running deep_explore" and
-      // stop. Same stall, same window predicate — the reply names a tool that was never called this
-      // turn. Wiring a gate into one of two emit paths is the defect this repo keeps re-shipping.
-      if (announcedToolAttempts < 1 && announcedToolGateEnabled()) {
-        const stall = await detectAnnouncedToolStall({
-          finalText: response.content,
+      // Claim grounding — one chain, one regeneration. Formerly three hand-wired blocks here (citation,
+      // numeric, announced-tool) and a different subset of them on every other exit; see
+      // claim_grounding.ts for the coverage table that produced three shipped defects in three days.
+      if (claimGroundingAttempts < 1) {
+        const fired = await applyClaimGrounding({
+          sessionId,
+          text: response.content,
+          messages,
           toolNames: toolDefs.map((d) => d.name),
-          calledToolNames: (signalBus.inTurnRecords ?? []).map((r) => r.toolName),
+          audit,
+          signalBus,
+          ownerReasoningActive: !!memory.reasoning.getMostRecentActiveSession(sessionId),
+          onTrace,
         });
-        if (stall.window.length) {
-          console.warn(
-            `[announced-tool] session=${sessionId} window=[${stall.window.join(',')}] uncalled (tool loop) → ` +
-              (stall.verdict ? `PENDING "${stall.verdict.quote}"` : `no fire (${stall.note})`),
-          );
-        }
-        if (stall.verdict) {
-          announcedToolAttempts++;
-          audit.append('self_domain_write', {
-            source: 'announced_tool_gate',
-            origin: 'Internal',
-            toolName: 'announced_tool_gate_fired',
-            sessionId,
-            announcedTool: stall.verdict.toolName,
-            quote: stall.verdict.quote,
-          });
-          recordControllerFire('announced_tool');
-          messages.push({ role: 'assistant', content: response.content });
-          messages.push({ role: 'user', content: buildAnnouncedToolDirective(stall.verdict) });
-          onTrace?.({
-            kind: 'internal-gate', tier: 4,
-            text: `Announced-tool stall (${stall.verdict.toolName} named but never called), regenerating`,
-            meta: { gateName: 'AnnouncedToolStall' },
-          });
+        if (fired) {
+          claimGroundingAttempts++;
           continue;
         }
       }
@@ -11539,7 +11379,24 @@ async function runToolLoop(
         `\nThis is an intra-turn internal correction. Do not surface this reminder to the user.`,
     });
     // Call LLM, pass no tools, force text-only output
-    const summary = await sendLlmWithRescue(messages, [], sessionId, onTrace);
+    let summary = await sendLlmWithRescue(messages, [], sessionId, onTrace);
+    // Claim grounding on the THIRD exit. This one had no controllers at all — not honesty, not numeric,
+    // not citation — and decideForcedDeepExploreCall's own header notes that a flat-searching model
+    // "reliably exits via that last one". A turn that burned its whole iteration budget failing is
+    // exactly the turn most tempted to summarise work it did not do.
+    if (summary.type === 'text') {
+      const fired = await applyClaimGrounding({
+        sessionId,
+        text: summary.content,
+        messages,
+        toolNames: [],
+        audit,
+        signalBus,
+        ownerReasoningActive: !!memory.reasoning.getMostRecentActiveSession(sessionId),
+        onTrace,
+      });
+      if (fired) summary = await sendLlmWithRescue(messages, [], sessionId, onTrace);
+    }
     if (summary.type === 'text') {
       // Invariant: must call onDelta before returning outcome.text — the frontend treats
       // `final outcome=response` as "content already delivered via delta stream" and stays silent.
