@@ -62,11 +62,17 @@ test('every round result names the question it advanced', () => {
 
 test('a long goal is truncated but still identifies the problem', () => {
   const out = renderSessionSubject('x'.repeat(500), 'id');
-  assert.ok(out.length < 130, 'one line, not a wall');
+  assert.ok(out.split('\n')[0].length < 130, 'the subject is one line, not a wall');
   assert.match(out, /…/);
 });
 
+// The auto-advance line joined this block on 2026-07-28. It is held to the same standard the subject is:
+// the round result is read by a person on a phone, so anything added here must be one short line or it
+// becomes the noise it was meant to reduce.
 test('a goal with newlines stays on one line — the switch must be visible, not buried', () => {
   const out = renderSessionSubject('攻克 LRC\n\n已知进展：\n- k<=12 已证', 'id');
-  assert.equal(out.split('\n').length, 2, 'subject line + id line');
+  const lines = out.split('\n');
+  assert.equal(lines.length, 3, 'subject line + auto line + id line');
+  assert.match(lines[0], /^on: "攻克 LRC 已知进展/, 'the goal is first and unwrapped');
+  assert.ok(lines[1].length < 60, 'the auto-advance offer is a marker, not a paragraph');
 });

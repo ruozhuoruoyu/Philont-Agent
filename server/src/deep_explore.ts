@@ -1564,7 +1564,12 @@ export function shouldDeliberateAutoAnswer(input: {
  * a router default, but it is not an oracle either (a research goal can mention 证明). So it is stated,
  * with the one-line correction, and the decision stays with the reader.
  */
-export function renderSessionSubject(goal: string, id: string, mode?: ReasoningSessionMode): string {
+export function renderSessionSubject(
+  goal: string,
+  id: string,
+  mode?: ReasoningSessionMode,
+  autoAdvance?: boolean,
+): string {
   const g = (goal ?? '').replace(/\s+/g, ' ').trim();
   const short = g.length > 70 ? `${g.slice(0, 70)}…` : g;
   const modeLine = mode
@@ -1579,7 +1584,23 @@ export function renderSessionSubject(goal: string, id: string, mode?: ReasoningS
       ? `\n⚠ this goal reads as a proof/derivation but the session cannot compute or verify anything. ` +
         `To fix it: deep_explore({action:"continue", mode:"formal"}).`
       : '';
-  return `on: "${short}"${modeLine}${mismatch}\nsession id: ${id}`;
+  // The hand-off offer. deep_explore_autoadvance.ts has advanced sessions on its own since it was
+  // written — a 30s ticker, a 20-round budget, stuck-stop, proactive milestone reports, and no auth card
+  // per round because the per-session opt-in IS the authorization. It is on by default globally. It has
+  // essentially never run, because nothing ever mentioned it: `auto_on` appears in the tool's action enum
+  // and in no sentence of its description, while ELEVEN places in this file end a round by telling the
+  // owner to reply "continue". We built the loop and then trained its user to be the ticker. Two days of
+  // 继续 / OK / 继续 / OK, and he finally asked 不能让它自己跑下去吗?
+  //
+  // Offered, not assumed. Auto-advance skips the interactive authorization gate, so switching it on stays
+  // a deliberate act — but it should cost one word, not archaeology.
+  // Kept to ONE short line. The complaint being answered is "too many interruptions"; a paragraph of
+  // nag on every round would be a new one. The real unlock is the tool description, which now tells the
+  // model what auto_on does and when to offer it — this line just keeps the switch in sight.
+  const handoff = autoAdvance
+    ? '\nauto: ON — I advance this myself, no 继续 needed'
+    : '\nauto: off — say 自动 and I run it myself (auto_on)';
+  return `on: "${short}"${modeLine}${mismatch}${handoff}\nsession id: ${id}`;
 }
 
 /** Nothing entered the tree this round: no decomposition, nothing settled, nothing ruled out. */
@@ -3195,7 +3216,7 @@ export function createDeepExploreTool(
         : '';
     return {
       success: true,
-      output: `${text}${tail}${churnNote}${stuckNote}\n${renderSessionSubject(session.goal, session.id, session.mode)}`,
+      output: `${text}${tail}${churnNote}${stuckNote}\n${renderSessionSubject(session.goal, session.id, session.mode, session.autoAdvance)}`,
     };
   }
 
@@ -3391,7 +3412,7 @@ export function createDeepExploreTool(
         barrenNote +
         divergeStuckNote +
         phaseNote +
-        `\n${renderSessionSubject(session.goal, session.id, session.mode)}`,
+        `\n${renderSessionSubject(session.goal, session.id, session.mode, session.autoAdvance)}`,
     };
   }
 
@@ -3424,6 +3445,7 @@ export function createDeepExploreTool(
       '**Use this whenever the user asks HOW MANY explorations are open / to LIST them — never guess the count or assume there is only one; there are often several.**\n' +
       'action="finalize": produce a wrap-up report of the whole tree so far (established lemmas, refuted/dead-end branches, most promising open directions), without advancing. ' +
       'Use this to give the user a conclusion when they ask to wrap up / for results, or for an open-ended problem that will not converge to a clean "solved" on its own.\n' +
+      'action="auto_on": hand the session off — a background ticker advances it round by round with NO further user message and reports milestones, stopping automatically on solved / stuck / round budget. **Offer this the moment the user sounds tired of typing "continue", or asks the exploration to run on its own / keep going by itself / not interrupt them.** action="auto_off" hands it back.\n' +
       'action="abandon": CLOSE a session for good (it stops being resumable). Pass sessionId (id/prefix from action=list) to close a SPECIFIC backlog session, or omit to close the most-recent one. Use when the user asks to close/drop/stop an exploration — finalize alone does NOT close anything.',
     schema: {
       type: 'object',

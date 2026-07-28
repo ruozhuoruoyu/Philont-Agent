@@ -74,3 +74,19 @@ test('the subject line stays usable when no mode is supplied', () => {
   assert.match(s, /session id: sess-4/);
   assert.doesNotMatch(s, /mode:/);
 });
+
+// The hands-off loop existed the whole time and nothing pointed at it: `auto_on` was in the action enum
+// and in no sentence of the tool description, while eleven places in deep_explore.ts ended a round by
+// telling the owner to reply "continue". He typed 继续 / OK for two days before asking whether the
+// exploration could just run itself. It could, the entire time.
+test('a round that is not auto-advancing offers the hand-off', () => {
+  const s = renderSessionSubject(LRC_GOAL, 'sess-5', 'formal', false);
+  assert.match(s, /auto_on/);
+  assert.match(s, /自动/);
+});
+
+test('once handed off, the line says so instead of re-offering', () => {
+  const s = renderSessionSubject(LRC_GOAL, 'sess-6', 'formal', true);
+  assert.match(s, /auto: ON/);
+  assert.doesNotMatch(s, /auto_on/);
+});
