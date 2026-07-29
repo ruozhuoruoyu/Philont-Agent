@@ -48,7 +48,16 @@
  * checks; unifying the emit path itself is a separate piece of work.
  */
 
-import { detectUngroundedComputation, buildNumericGroundingDirective, type GroundingToolResult } from './numeric_grounding_gate.js';
+import {
+  detectUngroundedComputation,
+  buildNumericGroundingDirective,
+  buildAdjudicatedComputationDirective,
+  computeToolsNamedIn,
+  shouldAdjudicateComputationClaim,
+  adjudicateComputationClaim,
+  countOkComputeResults,
+  type GroundingToolResult,
+} from './numeric_grounding_gate.js';
 import { detectUngroundedArxivCitation, buildCitationGroundingDirective, type GroundingMessage } from './citation_gate.js';
 import {
   adjudicateSessionClaim,
@@ -173,9 +182,31 @@ export async function evaluateClaimGrounding(
           rule: 'numeric_grounding',
           claim: ungrounded.claim,
           log: `fired: computation claim "${ungrounded.claim}" with 0 successful compute/exec tools`,
-          audit: { claim: ungrounded.claim, okCompute: ungrounded.okCompute },
+          audit: { claim: ungrounded.claim, okCompute: ungrounded.okCompute, basis: 'pattern' },
           armsCouldNotVerify: true,
           directive: buildNumericGroundingDirective(ungrounded.claim, ctx.renderedLedger),
+        };
+      }
+      // Model ceiling over the pattern floor. The phrase list has been one phrase short three times in
+      // three days — most recently "本轮实际执行：… PARI/GP 验证假设 A … 结果：… 在 k=6 上被证…" with tools=0,
+      // which every gate passed. The window below is runtime ground truth: nothing computed successfully
+      // this turn, and the reply names a compute tool by our own identifier.
+      const named = computeToolsNamedIn(ctx.text);
+      if (
+        shouldAdjudicateComputationClaim({
+          okComputeThisTurn: countOkComputeResults(ctx.toolResults),
+          namedComputeTools: named,
+          textLength: ctx.text.length,
+        }) &&
+        (await adjudicateComputationClaim(ctx.text, named)) === 'asserts'
+      ) {
+        return {
+          rule: 'numeric_grounding',
+          claim: '(adjudicated)',
+          log: `fired: adjudicated computation claim naming [${named.join(',')}] with 0 successful compute/exec tools`,
+          audit: { namedComputeTools: named, okCompute: 0, basis: 'adjudicated' },
+          armsCouldNotVerify: true,
+          directive: buildAdjudicatedComputationDirective(named, ctx.renderedLedger),
         };
       }
     }

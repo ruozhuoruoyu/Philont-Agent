@@ -44,6 +44,18 @@ import { INTERNAL_CORRECTION_FOOTER, INTERNAL_CORRECTION_FOOTER_NL } from './int
 const MIN_TOOL_NAME_LEN = 4;
 
 /**
+ * Split an identifier into the pieces a human might separate in prose. `pariGp` has no separator of its
+ * own, so camelCase boundaries count too — otherwise `PARI/GP` can never be matched against it.
+ */
+export function splitToolNameSegments(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[_\-\s/.]+/)
+    .filter(Boolean)
+    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+}
+
+/**
  * Which of this turn's schema tool names appear in the reply text. Tool names are our own identifiers,
  * so this is exact matching, not interpretation. `deep_explore` is also written `deep explore` and
  * `deep-explore` by the model, so separators are normalised on BOTH sides before comparing.
@@ -56,12 +68,12 @@ export function findNamedTools(text: string, toolNames: readonly string[]): stri
     // Segments of the identifier, rejoined with a flexible separator so `deep_explore` also matches
     // "deep explore" and "deep-explore". Bounded by non-identifier characters so `search_notes` does
     // not match inside `search_notes_v2`.
-    const segments = name
-      .split(/[_\-\s]+/)
-      .filter(Boolean)
-      .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    // Separators include `/` and `.` because the model writes tool names the way a human would in prose:
+    // production 2026-07-29 06:45 named `PARI/GP`, which no amount of underscore/space tolerance matches
+    // against `pariGp`. A tool the reply names but the matcher cannot see is a window that never opens.
+    const segments = splitToolNameSegments(name);
     if (!segments.length) continue;
-    const re = new RegExp(`(?<![a-z0-9_])${segments.join('[_\\-\\s]*')}(?![a-z0-9_])`, 'i');
+    const re = new RegExp(`(?<![a-z0-9_])${segments.join('[_\\-\\s/.]*')}(?![a-z0-9_])`, 'i');
     if (re.test(text)) hits.push(name);
   }
   return hits;

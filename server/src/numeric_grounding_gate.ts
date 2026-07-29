@@ -20,6 +20,8 @@
  * outputs is a future tightening, noted but intentionally out of scope here.
  */
 
+import { callAuxLLM, isAuxLLMConfigured } from '@agent/tools';
+import { findNamedTools } from './announced_tool_gate.js';
 import { INTERNAL_CORRECTION_FOOTER } from './internal_correction.js';
 
 /** A tool result as produced by extractRecentToolResults: content starts with ✓ (ok) or ⚠ (failed). */
@@ -105,6 +107,121 @@ export function buildNumericGroundingDirective(claim: string, ledger?: string): 
     `compute tool and report ONLY the values it returns, or (b) state honestly that you could not verify ` +
     `it this turn — name what failed and what you would run next — and drop every unbacked number. Keep ` +
     `only claims grounded in a ✓ ledger entry. ` +
+    INTERNAL_CORRECTION_FOOTER
+  );
+}
+
+
+// ── Model ceiling over the pattern floor ─────────────────────────────────────────────────────────
+//
+// COMPUTE_CLAIM_RE is a vocabulary list, and in three days it has been one phrase short three times:
+// 跑通 was there but 全部通过 was not (2026-07-27); 实际计算 was there but 实际执行 was not (2026-07-29
+// 06:45:37, tools=0, reply opening "本轮实际执行：修正会话模式 → PARI/GP 验证假设 A … 结果：假设 A 在 k=6 上被证…"
+// — the strongest possible phrasing of "I did this", with nothing behind it, and every gate passed it).
+//
+// Enumeration will keep losing to paraphrase; that is the treadmill this repo has written down twice.
+// So the same floor-and-ceiling shape the session-claim and announced-tool rules already use: a
+// DETERMINISTIC window made of facts we own, and inside it one reading-comprehension question for the aux
+// model. The window here is strong — this turn ran no successful compute tool, and the reply names a
+// compute tool by its own identifier — so a fabricated computation report is nearly the only thing it can
+// contain.
+//
+// The question is what the TEXT asserts, never "did you fabricate". `unknown` on every failure path, so
+// an unconfigured or broken aux leaves exactly the pattern floor rather than silently deleting the guard.
+
+export type ComputationClaimVerdict = 'asserts' | 'does_not_assert' | 'unknown';
+
+const CLAIM_SYSTEM = 'You judge what a piece of text asserts. Answer with one word.';
+
+export function buildComputationClaimPrompt(text: string, tools: readonly string[]): string {
+  return (
+    'Below is an assistant\'s complete reply to its user. Two facts you can rely on: while producing it ' +
+    'the assistant successfully ran NO computation or execution tool at all, and the reply mentions ' +
+    `${tools.join(', ')}.\n\n` +
+    'Judge ONLY what the text says — not whether it is correct, not whether the assistant did well.\n\n' +
+    'Question: does the text tell the reader that a computation, verification, enumeration or program run ' +
+    'was ACTUALLY CARRIED OUT (by the assistant, in this exchange), and report or rely on its outcome?\n\n' +
+    'Answer ASSERTS for "I ran it and got X", "verified on k=6", "the search found no counterexample", ' +
+    'and for any conclusion presented as resting on a run that just happened.\n' +
+    'Answer DOES_NOT_ASSERT when the text only PROPOSES to compute, explains what a tool would do, ' +
+    'reports what it could NOT run, quotes a result from a clearly earlier session while saying so, or ' +
+    'discusses the mathematics without claiming to have executed anything.\n\n' +
+    'Reply with exactly one word: ASSERTS or DOES_NOT_ASSERT.\n\n' +
+    'The reply:\n"""\n' +
+    text.slice(0, 3000) +
+    '\n"""'
+  );
+}
+
+export function parseComputationClaimVerdict(raw: string): ComputationClaimVerdict {
+  const t = (raw ?? '').trim().toUpperCase();
+  if (t.startsWith('ASSERTS')) return 'asserts';
+  if (t.startsWith('DOES_NOT_ASSERT')) return 'does_not_assert';
+  return 'unknown';
+}
+
+/** PHILONT_NUMERIC_ADJUDICATOR=0 disables the ceiling and leaves the pattern floor. */
+export function computationClaimAdjudicatorEnabled(): boolean {
+  const v = (process.env.PHILONT_NUMERIC_ADJUDICATOR ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/** How many results this turn are a SUCCESSFUL compute/exec tool — the window's ground truth. */
+export function countOkComputeResults(toolResults: readonly GroundingToolResult[]): number {
+  return toolResults.filter((r) => r.content.startsWith('✓') && COMPUTE_TOOLS.has(r.toolName)).length;
+}
+
+/** Compute tools named in the text — our own identifiers, matched exactly (PARI/GP included). */
+export function computeToolsNamedIn(text: string): string[] {
+  return findNamedTools(text, [...COMPUTE_TOOLS]);
+}
+
+/**
+ * Is the ceiling worth consulting? Both conditions are runtime ground truth, not readings of the text.
+ * Outside this window a computation claim either has backing or names nothing we can check.
+ */
+export function shouldAdjudicateComputationClaim(input: {
+  okComputeThisTurn: number;
+  namedComputeTools: readonly string[];
+  textLength: number;
+}): boolean {
+  if (!computationClaimAdjudicatorEnabled()) return false;
+  if (input.okComputeThisTurn > 0) return false;
+  if (input.namedComputeTools.length === 0) return false;
+  // A one-line reply has no room to report a run it did not do.
+  return input.textLength >= 80;
+}
+
+/** Never throws. Returns `unknown` when the judge is unreachable or answers junk. */
+export async function adjudicateComputationClaim(
+  text: string,
+  tools: readonly string[],
+  call?: (req: { system: string; user: string; maxTokens?: number }) => Promise<string>,
+): Promise<ComputationClaimVerdict> {
+  const fn = call ?? (isAuxLLMConfigured() ? callAuxLLM : null);
+  if (!fn) return 'unknown';
+  try {
+    return parseComputationClaimVerdict(
+      await fn({ system: CLAIM_SYSTEM, user: buildComputationClaimPrompt(text, tools), maxTokens: 8 }),
+    );
+  } catch {
+    return 'unknown';
+  }
+}
+
+/** Directive for a claim the ceiling caught — the pattern found no phrase to quote back. */
+export function buildAdjudicatedComputationDirective(tools: readonly string[], ledger?: string): string {
+  const ledgerBlock = ledger
+    ? `\n\nThis turn's tool ledger (the ONLY admissible source of empirical facts):\n${ledger}\n`
+    : '';
+  return (
+    `[numeric-grounding] Your draft reports a computation involving ${tools.join(' / ')} as something that ` +
+    `was carried out, and presents or relies on its outcome. This turn's ledger contains NO successful ` +
+    `compute or exec result. Nothing ran, so there is no outcome to report.` +
+    ledgerBlock +
+    `\n**Rewrite your final reply.** Either (a) actually run it now and report ONLY what the tool returns, ` +
+    `or (b) say plainly that it has not been run this turn, drop every result presented as obtained, and ` +
+    `keep only what a ✓ ledger entry or an explicitly-dated earlier record supports. ` +
     INTERNAL_CORRECTION_FOOTER
   );
 }
