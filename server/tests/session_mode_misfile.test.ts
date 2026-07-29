@@ -90,3 +90,29 @@ test('once handed off, the line says so instead of re-offering', () => {
   assert.match(s, /auto: ON/);
   assert.doesNotMatch(s, /auto_on/);
 });
+
+// 2026-07-28 23:17:51 — the same misfile, from the other direction. buildForceStartInput guards the
+// ROUTER's guess, but the model passed the parameter itself:
+//
+//   deep_explore({action:"start", mode:"deliberate", goal:"Analyze the c-vector structure of LRC tight
+//   sets… Known tight sets: {1,2,3,4} → c=(0,0,0,0)…"})
+//
+// A goal whose own wording made findRefutableGoal match "conjectur", filed under the profile with no
+// verifier. The next three minutes: ten webSearches, zero tree commits, `hit max iters (6)`, a
+// 3727-character dump. Nothing in the code looked at the combination, and nothing said anything.
+const CVECTOR_GOAL =
+  'Analyze the c-vector structure of LRC tight sets. Given speed set S={v_1,...,v_k}, write ' +
+  'v_i = r_i + (k+1)·c_i. Conjecture: tight sets are exactly those with c constant or a single lift.';
+
+test('a caller-chosen deliberate on a deductive goal is a detectable mismatch', () => {
+  assert.equal(looksDeductive(CVECTOR_GOAL), true, 'the goal names a conjecture');
+  // the pairing the engine must flag: deductive goal + the profile that cannot compute
+  assert.match(renderSessionSubject(CVECTOR_GOAL, 'sess-7', 'deliberate'), /cannot compute or verify/);
+  assert.doesNotMatch(renderSessionSubject(CVECTOR_GOAL, 'sess-7', 'formal'), /cannot compute or verify/);
+});
+
+test('a genuine survey goal filed as deliberate stays quiet', () => {
+  const survey = '调研一下目前主流的向量数据库，给出选型建议。';
+  assert.equal(looksDeductive(survey), false);
+  assert.doesNotMatch(renderSessionSubject(survey, 'sess-8', 'deliberate'), /cannot compute or verify/);
+});

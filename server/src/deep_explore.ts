@@ -3487,6 +3487,28 @@ export function createDeepExploreTool(
         const explicitPhase = params.phase === 'diverge' || params.phase === 'converge';
         const auto = PHASES_ENABLED && (!explicitMode || !explicitPhase) ? classifyGoal(goal) : null;
         const mode: ReasoningSessionMode = explicitMode ? (params.mode as ReasoningSessionMode) : (auto?.mode ?? 'formal');
+        // A CALLER-CHOSEN `deliberate` on a deductive goal is the one combination that cannot work.
+        //
+        // buildForceStartInput already refuses to let the intent router's `deliberate` outrank the goal
+        // text, but that only covers the synthetic start the harness builds. When the MODEL passes the
+        // parameter itself nothing looked at it — and prod 2026-07-28 23:17:51 did exactly that:
+        //   deep_explore({action:"start", mode:"deliberate", goal:"Analyze the c-vector structure of LRC
+        //   tight sets…"})
+        // a goal whose own wording made findRefutableGoal match "conjectur". DELIBERATE_RESEARCH_ALLOW is
+        // web + memory: no pariGp, no z3Verify, no magnitude. The next three minutes were ten webSearches
+        // and zero tree commits, then `hit max iters (6)` and a 3727-character dump.
+        //
+        // The parameter is HONOURED — silently rewriting a caller's explicit argument is a worse contract
+        // than a loud warning, and `continue` now takes a mode so the correction is one call away. But it
+        // is stated, at start, before the first round burns time. A resolver that cannot be right in every
+        // case must at least be legible in every case.
+        const modeMismatch = explicitMode && mode === 'deliberate' && looksDeductive(goal);
+        if (modeMismatch) {
+          console.warn(
+            `[deep-explore] caller passed mode="deliberate" for a goal that reads as a proof/derivation — ` +
+              `this session has NO pariGp / z3Verify / magnitude. Fix with deep_explore({action:"continue", mode:"formal"}).`,
+          );
+        }
         const initialPhase: ReasoningPhase = !PHASES_ENABLED
           ? 'converge'
           : explicitPhase
@@ -3540,6 +3562,14 @@ export function createDeepExploreTool(
             mode === 'deliberate'
               ? renderLiteratureCards(litCards, DELIBERATE_LIT_TYPE_LABEL, '## Known about this question going in (cited)').join('\n')
               : renderLiteratureCards(litCards).join('\n'),
+          );
+        }
+        if (modeMismatch) {
+          noteParts.push(
+            `⚠ Domain check — you asked for mode="deliberate", but this goal reads as a proof/derivation. ` +
+              `A deliberate session has webSearch / webFetch / memory and NO pariGp, z3Verify or magnitude, ` +
+              `so it cannot compute or verify anything. If that is not what you meant, switch it without ` +
+              `losing the tree: deep_explore({action:"continue", mode:"formal"}).`,
           );
         }
         if (refutationNote) noteParts.push(refutationNote);
