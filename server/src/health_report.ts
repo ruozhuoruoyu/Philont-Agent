@@ -56,8 +56,8 @@ export interface HealthRatio {
 export interface HealthInput {
   /** 24h autonomous findings vs how many reached the owner. */
   autonomy?: { found: number; eligible: number };
-  /** Learning-judge verdicts in the window. */
-  judge?: { verified: number; total: number };
+  /** Learning-judge verdicts in the window. `total` excludes not-applicable turns; they come separately. */
+  judge?: { verified: number; total: number; notApplicable?: number };
   /**
    * Routing rules that earned confidence, out of the ACTIVE set — retired rules are excluded from the
    * denominator and reported separately. The first version divided by everything ever stored, and the
@@ -104,19 +104,29 @@ export function computeHealthRatios(input: HealthInput, lang: 'zh' | 'en' = 'zh'
 
   if (input.judge && input.judge.total > 0) {
     const { verified, total } = input.judge;
+    const na = input.judge.notApplicable ?? 0;
     // The doom clause is earned only by a real sample. At 0/1 the honest reading is "one turn", and
     // saying "I am learning nothing" about it is the overstatement that teaches the owner to skim.
     const thin = total < MIN_EVIDENCE_DENOMINATOR;
+    // Excluded turns are NAMED, never silently dropped. The owner must be able to see that the
+    // denominator shrank and why — a quietly filtered metric is worth less than a discouraging one.
+    const naNote = na > 0
+      ? (en
+          ? ` (${na} more turns had no checkable goal — "continue", "go ahead" — so there was nothing to verify.)`
+          : `(另有 ${na} 轮的目标本身没有可检验的结果——"继续""你看着办"——没有东西可验。)`)
+      : '';
     out.push({
       key: 'judge',
       numerator: verified,
       denominator: total,
       sampleBased: true,
       line: en
-        ? `Verified outcomes: ${verified}/${total} (${pct(verified, total)}) of my turns ended with proof that the goal was met. ` +
-          (verified === 0 ? (thin ? 'Too few turns to read anything into it.' : 'At zero I am learning nothing from any of them.') : '')
-        : `可验证成果:${total} 轮里有 ${verified} 轮(${pct(verified, total)})拿到了"目标达成"的证据。` +
-          (verified === 0 ? (thin ? '轮次太少,读不出什么。' : '为 0 时,我从这些轮次里什么也学不到。') : ''),
+        ? `Verified outcomes: ${verified}/${total} (${pct(verified, total)}) of the turns that HAD a checkable goal ended with proof it was met. ` +
+          (verified === 0 ? (thin ? 'Too few turns to read anything into it.' : 'At zero I am learning nothing from any of them.') : '') +
+          naNote
+        : `可验证成果:有可检验目标的 ${total} 轮里,${verified} 轮(${pct(verified, total)})拿到了"目标达成"的证据。` +
+          (verified === 0 ? (thin ? '轮次太少,读不出什么。' : '为 0 时,我从这些轮次里什么也学不到。') : '') +
+          naNote,
     });
   }
 
@@ -285,22 +295,43 @@ export function shouldSendHealthReport(
 interface JudgeEvent {
   ts: number;
   verified: boolean;
+  /** The goal had no checkable outcome, or the turn claimed nothing — never a question, so never a miss. */
+  notApplicable: boolean;
 }
 const judgeEvents: JudgeEvent[] = [];
 const JUDGE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const JUDGE_MAX = 2000;
 
 export function recordJudgeVerdict(outcome: string, now = Date.now()): void {
-  judgeEvents.push({ ts: now, verified: outcome === 'success' });
+  judgeEvents.push({
+    ts: now,
+    verified: outcome === 'success',
+    notApplicable: outcome === 'not_applicable',
+  });
   const cutoff = now - JUDGE_WINDOW_MS;
   while (judgeEvents.length > 0 && (judgeEvents[0].ts < cutoff || judgeEvents.length > JUDGE_MAX)) {
     judgeEvents.shift();
   }
 }
 
-export function judgeWindowTally(now = Date.now()): { verified: number; total: number } {
+/**
+ * `total` counts only turns that HAD a checkable outcome. `notApplicable` is reported alongside rather
+ * than folded in: a turn whose goal was "继续" was never a learning sample, and counting it as one drags
+ * the ratio to zero no matter how well the agent performed. Nothing is hidden — the excluded count is
+ * carried out to the report and printed.
+ */
+export function judgeWindowTally(now = Date.now()): {
+  verified: number;
+  total: number;
+  notApplicable: number;
+} {
   const live = judgeEvents.filter((e) => e.ts >= now - JUDGE_WINDOW_MS);
-  return { verified: live.filter((e) => e.verified).length, total: live.length };
+  const na = live.filter((e) => e.notApplicable);
+  return {
+    verified: live.filter((e) => e.verified).length,
+    total: live.length - na.length,
+    notApplicable: na.length,
+  };
 }
 
 /** For tests. */

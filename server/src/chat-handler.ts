@@ -909,10 +909,15 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
           found: dayCount(metricsSnap, 'autonomy.day.found', today),
           eligible: dayCount(metricsSnap, 'autonomy.day.eligible', today),
         },
-        judge: {
-          verified: dayCount(metricsSnap, 'judge.day.verified', today),
-          total: dayCount(metricsSnap, 'judge.day.total', today),
-        },
+        judge: (() => {
+          const na = dayCount(metricsSnap, 'judge.day.na', today);
+          return {
+            verified: dayCount(metricsSnap, 'judge.day.verified', today),
+            // Turns that HAD a checkable goal. See judgeWindowTally for why the split exists.
+            total: Math.max(0, dayCount(metricsSnap, 'judge.day.total', today) - na),
+            notApplicable: na,
+          };
+        })(),
         routingRules: {
           validated: rules.filter((r) => r.confidence === 'validated').length,
           active: rules.filter((r) => r.confidence !== 'retired').length,
@@ -6158,6 +6163,10 @@ function shadowLearningJudge(
           const ymd = utcDateString(Date.now());
           memory.metrics.increment(`judge.day.total.${ymd}`);
           if (v.outcome === 'success') memory.metrics.increment(`judge.day.verified.${ymd}`);
+          // Counted separately, not skipped: `judge.day.total` stays the raw count of verdicts so the
+          // learning-stats dump keeps its meaning, and the daily report subtracts this to get the turns
+          // that actually had a checkable goal. A turn whose goal was "继续" was never a learning sample.
+          if (v.outcome === 'not_applicable') memory.metrics.increment(`judge.day.na.${ymd}`);
         } catch { /* counting must never affect the turn */ }
         // Carry an unconfirmed goal into the next run's outcome row (see JUDGE_GOAL_UNMET_SIGNATURE).
         // The judge stays shadow-only: this changes no control flow, it only makes a recurring

@@ -38,7 +38,24 @@
 import { callAuxLLM, isAuxLLMConfigured } from '@agent/tools';
 import { findExecutionClaim, isExecutionTool } from '@agent/memory';
 
-export type RunOutcome = 'success' | 'failure' | 'could_not_verify';
+/**
+ * `not_applicable` is not a fourth degree of doubt — it is the absence of a question.
+ *
+ * The health report divides verified by TOTAL verdicts, and the total was swallowing two things that are
+ * not failures to verify: a turn that never claimed anything a tool could ground (this module's own
+ * comment calls it out — "pure-reasoning deliverables (proofs, analysis, writing) also land here"), and a
+ * turn whose GOAL states no checkable outcome at all. The judge has been saying the second one in prose
+ * for a week — 'The goal "继续推进验证" is vague', 'The goal "做这个方向" is vague', '"你继续尝试吧，我没有
+ * 什么倾向" — a passive, non-directive statement... no objective criterion to check against' — and every
+ * one of those still counted as a turn we failed to verify.
+ *
+ * 2026-07-29's report: 18 轮里 0 轮, "我按坏了而不是闲着处理". Over seven days: 103 verdicts, 3 verified.
+ * A ratio whose denominator contains unanswerable questions reads as a broken agent when the truth is an
+ * unmeasurable sample — and this repo has already paid for that exact shape twice in this same report
+ * (997 retired routing rules in the denominator; the 0/1 doom clause). An exaggerated report gets
+ * discounted, which is how the console died.
+ */
+export type RunOutcome = 'success' | 'failure' | 'could_not_verify' | 'not_applicable';
 
 export interface RunVerdict {
   outcome: RunOutcome;
@@ -83,7 +100,7 @@ const SYSTEM = [
   'You judge whether an AI agent turn actually ACHIEVED its goal. You are a skeptic, not a cheerleader.',
   '',
   'Reply in EXACTLY this format:',
-  '  VERDICT: success | failure | could_not_verify',
+  '  VERDICT: success | failure | could_not_verify | not_applicable',
   '  GROUNDS: tool #<N>   (REQUIRED for success — the 1-based index of the SUCCESSFUL tool that proves it)',
   '  WHY: <one short line>',
   '',
@@ -93,7 +110,13 @@ const SYSTEM = [
   '                     build, or a registration). If you cannot cite such a tool, it is NOT success.',
   '  failure          — the trace shows the goal was not achieved (the relevant tool failed, or the claim',
   '                     contradicts what the tools returned).',
-  '  could_not_verify — you cannot tell from the trace. This is the DEFAULT. Prefer it over guessing.',
+  '  could_not_verify — the goal HAS a checkable outcome and you cannot tell from the trace whether it was',
+  '                     reached. This is the DEFAULT between success and failure. Prefer it over guessing.',
+  '  not_applicable   — the GOAL ITSELF states no checkable outcome, so there is nothing to be right or',
+  '                     wrong about: a continuation ("继续", "做这个方向"), a passive hand-off ("你继续尝试',
+  '                     吧，我没有什么倾向"), an open question, or a request to discuss. Use this instead of',
+  '                     could_not_verify when the problem is the goal, not the trace — it keeps the',
+  '                     could_not_verify signal meaningful.',
   '',
   'Hard rules:',
   '  - A claim is not evidence. "I computed X" / "accuracy is 92%" with no successful tool that produced it',
@@ -185,6 +208,22 @@ export async function judgeRun(
         evidence: 'claimed a result but the execution/verifier tool failed — not a success',
       };
     }
+    // Was there ever a question? Asked about the GOAL ALONE, never about the reply.
+    //
+    // The first version of this keyed on `!claimsAResult(assistantClaim)` — and that is a phrase list,
+    // which a test caught immediately: 「我跑了 pariGp，k=6 全部通过，0 反例」 does not match it. Keying an
+    // EXCLUSION on a detector that can miss is strictly worse than the problem it solves — every claim
+    // the list fails to see would move from a visible could_not_verify into an invisible, excluded
+    // bucket. An exclusion rule must be unable to launder a fabrication, so this one never looks at what
+    // the agent said; it looks at what was ASKED. `unknown` falls through to the unchanged behaviour.
+    const criterion = await goalStatesCheckableOutcome(input.goal, deps.call);
+    if (criterion === 'no') {
+      return {
+        outcome: 'not_applicable',
+        basis: 'llm',
+        evidence: 'the goal states no checkable outcome — nothing to verify, not a failure to verify',
+      };
+    }
     return {
       outcome: 'could_not_verify',
       basis: 'deterministic',
@@ -244,12 +283,16 @@ export async function judgeRun(
 /** Parse the VERDICT token robustly (red-team Finding 5). Looks for the explicit marker, then a standalone
  * verdict word; never matches narrative prose like "Successfully verified…". Defaults could_not_verify. */
 function parseVerdict(raw: string): RunOutcome {
-  const marker = raw.match(/VERDICT\s*:\s*(success|failure|could[_\s-]?not[_\s-]?verify)/i);
-  const token = (marker?.[1] ?? '').toLowerCase();
+  const marker = raw.match(
+    /VERDICT\s*:\s*(success|failure|could[_\s-]?not[_\s-]?verify|not[_\s-]?applicable)/i,
+  );
+  const token = (marker?.[1] ?? '').toLowerCase().replace(/[\s-]/g, '_');
   if (token.startsWith('success')) return 'success';
   if (token.startsWith('failure')) return 'failure';
+  if (token.startsWith('not_applicable')) return 'not_applicable';
   if (token) return 'could_not_verify';
   // No marker (aux ignored the format). Fall back to a conservative scan of standalone verdict words.
+  if (/\bnot[_\s-]?applicable\b/i.test(raw)) return 'not_applicable';
   if (/\bcould[_\s-]?not[_\s-]?verify\b/i.test(raw)) return 'could_not_verify';
   if (/\bfailure\b|\bfailed\b/i.test(raw)) return 'failure';
   // Deliberately do NOT infer success from loose prose — success must come via the marker above.
@@ -266,4 +309,66 @@ function parseCitedToolIndex(raw: string): number | null {
 function extractWhy(raw: string): string {
   const m = raw.match(/WHY\s*:\s*([^\n]+)/i);
   return (m?.[1] ?? raw.replace(/\n/g, ' ')).trim().slice(0, 240) || '(no evidence line)';
+}
+
+
+// ── Did the GOAL ever state something checkable? ─────────────────────────────────────────────────
+//
+// A week of verdicts said this in prose and nothing could read it: 'The goal "继续推进验证" is vague',
+// 'The goal "做这个方向" is vague', '"你继续尝试吧，我没有什么倾向" — a passive, non-directive statement...
+// no objective criterion to check against'. Each one still counted as a turn the agent failed to verify,
+// and the daily report duly concluded 18 轮里 0 轮 · 我按"坏了"处理.
+//
+// Deliberately narrow: this function is shown the GOAL and nothing else. It cannot see the trace and it
+// cannot see the agent's claims, so no answer it gives can excuse a fabrication — the worst it can do is
+// drop a turn from a ratio. Any failure path returns `unknown`, which leaves the previous behaviour
+// exactly as it was.
+export type GoalCriterion = 'yes' | 'no' | 'unknown';
+
+const CRITERION_SYSTEM = 'You judge whether a stated goal has a checkable outcome. Answer with one word.';
+
+export function buildGoalCriterionPrompt(goal: string): string {
+  return (
+    'Here is the goal a turn was working toward. Judge ONLY the goal text. You are not being shown what ' +
+    'was done, and you must not speculate about it.\n\n' +
+    'Question: does this goal state an outcome that could, in principle, be checked as achieved or not?\n\n' +
+    'Answer YES when there is something to be right or wrong about: prove X, compute Y, register Z, ' +
+    'find whether P holds, produce a report on Q.\n' +
+    'Answer NO when the goal states no outcome at all: a bare continuation ("继续", "ok", "做这个方向"), a ' +
+    'hand-off with no target ("你继续尝试吧，我没有什么倾向"), an open-ended invitation to discuss, or a ' +
+    'question about the assistant itself.\n\n' +
+    'Reply with exactly one word: YES or NO.\n\n' +
+    'The goal:\n"""\n' +
+    goal.slice(0, 600) +
+    '\n"""'
+  );
+}
+
+export function parseGoalCriterion(raw: string): GoalCriterion {
+  const t = (raw ?? '').trim().toUpperCase();
+  if (t.startsWith('YES')) return 'yes';
+  if (t.startsWith('NO')) return 'no';
+  return 'unknown';
+}
+
+/** PHILONT_JUDGE_GOAL_CRITERION=0 disables the split; every verdict then counts as it did before. */
+export function goalCriterionEnabled(): boolean {
+  const v = (process.env.PHILONT_JUDGE_GOAL_CRITERION ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+export async function goalStatesCheckableOutcome(
+  goal: string,
+  call?: (req: { system: string; user: string; maxTokens: number }) => Promise<string>,
+): Promise<GoalCriterion> {
+  if (!goalCriterionEnabled()) return 'unknown';
+  const fn = call ?? (isAuxLLMConfigured() ? callAuxLLM : null);
+  if (!fn) return 'unknown';
+  try {
+    return parseGoalCriterion(
+      await fn({ system: CRITERION_SYSTEM, user: buildGoalCriterionPrompt(goal), maxTokens: 4 }),
+    );
+  } catch {
+    return 'unknown';
+  }
 }
