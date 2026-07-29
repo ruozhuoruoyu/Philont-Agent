@@ -56,3 +56,39 @@ test('a session with no prior goal at all still keeps today’s behaviour', () =
   assert.equal(carryGoal('同意', undefined), '同意');
   assert.equal(resolveJudgeGoal(undefined, 'ok', true, '同意'), null);
 });
+
+// The second half, found in the 2026-07-29 log. Only FRESH turns wrote the carry; a pending-auth resume
+// read it and left the clock alone. So a long approval chain aged the carry out WHILE THE TASK WAS STILL
+// RUNNING:
+//
+//   12:18:44  fresh "做"  → carry written (goal inherited from the 11:34:43 instruction), ts = 12:18:44
+//   12:43 / 12:47 / 12:49  "ok" resumes → carry read, ts untouched
+//   12:48:13  judge verdict=could_not_verify basis=llm on the real goal   ← 29.9 min, inside the window
+//   12:50:21  judge `skipped (auth resume, original goal not recoverable)` ← 31.6 min, just outside
+//
+// The mechanism worked and then timed out mid-task. A resume is not a later task; it is the middle of
+// this one, so it resets the clock.
+const TTL_MS = 30 * 60_000;
+
+test('a resume inside the window keeps the goal — as it did at 12:48:13', () => {
+  const carried = { goal: REAL_GOAL, ts: Date.now() - 29 * 60_000 };
+  const fresh = Date.now() - carried.ts <= TTL_MS ? carried.goal : undefined;
+  assert.equal(resolveJudgeGoal(undefined, 'ok', true, fresh), REAL_GOAL);
+});
+
+test('without a clock reset the same chain expires two minutes later — the 12:50:21 skip', () => {
+  const carried = { goal: REAL_GOAL, ts: Date.now() - 31.6 * 60_000 };
+  const fresh = Date.now() - carried.ts <= TTL_MS ? carried.goal : undefined;
+  assert.equal(fresh, undefined, 'aged out');
+  assert.equal(resolveJudgeGoal(undefined, 'ok', true, fresh), null);
+});
+
+test('a resume that resets the clock keeps the task alive indefinitely while it is being worked', () => {
+  // each resume re-stamps ts, so the window measures silence, not elapsed task time
+  let carry = { goal: REAL_GOAL, ts: Date.now() - 29 * 60_000 };
+  for (const _ of [1, 2, 3]) {
+    assert.ok(Date.now() - carry.ts <= TTL_MS, 'still live');
+    carry = { ...carry, ts: Date.now() }; // what the resume branch now does
+  }
+  assert.equal(resolveJudgeGoal(undefined, 'ok', true, carry.goal), REAL_GOAL);
+});

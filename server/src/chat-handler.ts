@@ -6597,6 +6597,16 @@ export async function handleChatSend(
   if (pending) {
     const carried = carriedIntent.get(sessionId);
     if (carried && Date.now() - carried.ts <= INTENT_CARRY_TTL_MS) {
+      // A RESUME IS THE SAME TASK, SO IT MUST RESET THE CLOCK.
+      //
+      // The TTL exists to stop an unrelated LATER task inheriting a stale goal. A pending-auth resume is
+      // not a later task — it is the middle of this one — but only FRESH turns wrote the carry, so a long
+      // approval chain aged out while the work was still in progress. Prod 2026-07-29: the carry was last
+      // written at 12:18:44; the owner then sent only "ok" at 12:43, 12:47 and 12:49, and at 12:50:21 —
+      // 31.6 minutes, just past the cap — the judge printed `skipped (original goal not recoverable)`.
+      // Two minutes earlier, at 12:48:13, the same carried goal was still inside the window and the judge
+      // returned a real llm verdict on it. The mechanism worked; it timed out mid-task.
+      carriedIntent.set(sessionId, { ...carried, ts: Date.now() });
       intentDecision = carried.decision;
       signalBus.intentDecision = carried.decision;
       signalBus.selfReferentialMeta = carried.selfReferentialMeta;
