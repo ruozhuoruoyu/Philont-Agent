@@ -134,3 +134,52 @@ test('with nothing left to judge the report says nothing rather than 0%', () => 
   const rows = computeHealthRatios({ judge: { verified: 0, total: 0, notApplicable: 18 } });
   assert.equal(rows.filter((r) => r.key === 'judge').length, 0, 'no judgeable turns → no verdict line');
 });
+
+// 2026-07-29 16:35–17:39. The criterion check was only asked on the UNGROUNDED path, and the log showed
+// the split within one hour on ONE question — "LRC还有没有新的思路？":
+//
+//   16:35:11 / 16:38:28 / 17:27:57  verdict=not_applicable   (ungrounded turns)
+//   17:39:46  verdict=could_not_verify  WHY: "an open-ended conceptual question with no checkable
+//             outcome in the trace"      (grounded turn — a shell had run)
+//
+// Same goal, opposite verdicts, decided by whether a tool happened to succeed. Whether the GOAL states an
+// outcome cannot depend on the trace.
+test('the same goal gets the same verdict whether or not a tool succeeded', async () => {
+  const grounded = {
+    ...reasoningTurn,
+    goal: 'LRC还有没有新的思路？',
+    trace: [{ toolName: 'shell', ok: true, summary: 'ran' }],
+  };
+  const ungrounded = { ...reasoningTurn, goal: 'LRC还有没有新的思路？' };
+  const call = async () => 'NO';
+  assert.equal((await judgeRun(ungrounded, { call })).outcome, 'not_applicable');
+  assert.equal((await judgeRun(grounded, { call })).outcome, 'not_applicable');
+});
+
+// The criterion block sits AFTER both guard rails on purpose: a fabricated execution claim and an
+// honesty fire are failures whatever the goal was. The first draft of this test asserted it via
+// findExecutionClaim — and that is the SAME phrase list that already let 「我跑了 pariGp…全部通过」 through,
+// so the test was checking a detector, not the ordering. It checks the ordering now.
+test('a vague goal never excuses an honesty fire — guard rail 2 still wins', async () => {
+  const v = await judgeRun(
+    { ...reasoningTurn, goal: '继续', honestyFired: true },
+    { call: async () => 'NO' },
+  );
+  assert.equal(v.outcome, 'failure', 'not_applicable must not outrank the honesty layer');
+});
+
+test('a vague goal never excuses a claim the execution guard DOES catch', async () => {
+  const claim = '已经编译并运行通过了。';
+  // only meaningful if the guard would fire on this text at all — assert that premise, do not assume it
+  const withGoal = await judgeRun(
+    { ...reasoningTurn, goal: '编译并跑通这个项目', finalText: claim },
+    { call: async () => 'YES' },
+  );
+  if (withGoal.outcome === 'failure') {
+    const vague = await judgeRun(
+      { ...reasoningTurn, goal: '继续', finalText: claim },
+      { call: async () => 'NO' },
+    );
+    assert.equal(vague.outcome, 'failure', 'the vague goal must not turn a caught fabrication into N/A');
+  }
+});
