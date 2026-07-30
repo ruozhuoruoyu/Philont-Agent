@@ -27,3 +27,42 @@ export const INTERNAL_CORRECTION_FOOTER =
 
 /** Same instruction, prefixed with a newline for builders that append it to a paragraph. */
 export const INTERNAL_CORRECTION_FOOTER_NL = `\n${INTERNAL_CORRECTION_FOOTER}`;
+
+
+/**
+ * A gate directive is pushed as a `role: 'user'` message — the only slot a mid-turn instruction fits
+ * into — and extractRecentToolResults defines the turn boundary as "the most recent user message with
+ * STRING content". So the moment ANY gate fires, every later gate in the same turn reads an EMPTY tool
+ * ledger.
+ *
+ * The log shows it plainly (2026-07-30 12:21):
+ *
+ *   12:21:05  [honesty] passed (8 ok / 2 fail / 10 total)
+ *   12:21:05  [output-format] fired            ← pushes a string-content user message
+ *   12:21:13  [honesty] passed (0 ok / 0 fail / 0 total)     ← the ledger is now empty
+ *   12:21:15  [numeric_grounding] fired: adjudicated computation claim naming [shell]
+ *             with 0 successful compute/exec tools
+ *
+ * That turn ran `tools=10 ok=8 (exec=3)`. The model's rewrite pushed back — "#8 shell DID succeed" — and
+ * it was right. A false positive on the fabrication layer, manufactured by an earlier gate.
+ *
+ * renderTurnLedger's own comment already names this hazard: "a standalone string-content user message
+ * would be misread as the turn boundary by extractRecentToolResults() and blind the honesty/numeric
+ * gates". The ledger contract was routed into messages[0] to avoid it. The directives never were.
+ *
+ * So directives carry a zero-width sentinel — our own string, exact-matched on our own slot, invisible
+ * in the prompt — and the boundary scan skips them. Marking is deliberately opt-IN: over-marking would
+ * pull a PREVIOUS turn's tools into this turn's ledger, which turns a false positive into a false
+ * negative on the honesty layer, and that is the worse direction.
+ */
+export const INTERNAL_DIRECTIVE_MARK = '\u200b\u2060';
+
+/** Tag a mid-turn gate directive so the ledger scan does not mistake it for the user speaking. */
+export function markInternalDirective(text: string): string {
+  return INTERNAL_DIRECTIVE_MARK + text;
+}
+
+/** Is this string one of our own mid-turn directives rather than something the user said? */
+export function isInternalDirective(content: unknown): boolean {
+  return typeof content === 'string' && content.startsWith(INTERNAL_DIRECTIVE_MARK);
+}

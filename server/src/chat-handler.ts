@@ -185,7 +185,12 @@ import {
   quickSignatureHash as quickTaskSignatureHash,
   slowSessionAtTaskBoundary,
 } from './task_mode_classifier.js';
-import { INTERNAL_CORRECTION_FOOTER, INTERNAL_CORRECTION_FOOTER_NL } from './internal_correction.js';
+import {
+  INTERNAL_CORRECTION_FOOTER,
+  INTERNAL_CORRECTION_FOOTER_NL,
+  isInternalDirective,
+  markInternalDirective,
+} from './internal_correction.js';
 import {
   classifyIntent,
   planRouteWantsSlow,
@@ -521,14 +526,26 @@ function summarizeToolResult(result: { success: boolean; output?: string; error?
  *
  * Exported for testing only.
  */
+/**
+ * Push a mid-turn gate directive. The mark is what keeps the NEXT gate in this turn from reading an
+ * empty tool ledger — see INTERNAL_DIRECTIVE_MARK. Every gate that regenerates must use this rather than
+ * pushing a bare user message.
+ */
+function pushGateDirective(messages: NativeMessage[], content: string): void {
+  messages.push({ role: 'user', content: markInternalDirective(content) });
+}
+
 export function extractRecentToolResults(
   messages: NativeMessage[],
 ): Array<{ toolName: string; content: string; toolInput?: Record<string, unknown> }> {
-  // Find the start of the current turn (scan backwards from tail for the most recent string-content user message)
+  // Find the start of the current turn (scan backwards from tail for the most recent string-content user
+  // message). OUR OWN mid-turn directives are skipped: they go in the user slot because that is the only
+  // slot a mid-turn instruction fits, and treating one as the boundary empties the ledger for every gate
+  // that runs after it. See INTERNAL_DIRECTIVE_MARK for the production trace.
   let turnStart = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m.role === 'user' && typeof m.content === 'string') {
+    if (m.role === 'user' && typeof m.content === 'string' && !isInternalDirective(m.content)) {
       turnStart = i + 1; // current turn starts immediately after this user message
       break;
     }
@@ -8253,9 +8270,8 @@ async function handleChatSendInner(
             `failCount=${honesty.failCount} okCount=${honesty.okCount} claim="${honesty.matchedClaim}" (zero-tool first response)`,
           );
           messages.push({ role: 'assistant', content: firstTextContent });
-          messages.push({
-            role: 'user',
-            content:
+          pushGateDirective(
+            messages,
               honesty.repeatOffense
                 ? // REPEAT. The menu below is the mechanism that TAUGHT apologise-and-move-on: option B is a
                   // free exit — it costs nothing, satisfies the gate, and changes no behaviour, while the
@@ -8282,7 +8298,7 @@ async function handleChatSendInner(
                   `Do not repeat the claim "${honesty.matchedClaim}" unless a tool call THIS turn actually supports it.` +
                   `${buildLanguageDirective(resolveResponseLanguage({ channel: sessionId, userLocale: readUserLanguage() }))}\n` +
                   INTERNAL_CORRECTION_FOOTER,
-          });
+          );
           onTrace?.({
             kind: 'internal-gate', tier: 4,
             text: `Honesty gate triggered (${honesty.severity}) on zero-tool reply, regenerating`,
@@ -9248,7 +9264,7 @@ async function applyClaimGrounding(opts: {
     });
   }
   messages.push({ role: 'assistant', content: text });
-  messages.push({ role: 'user', content: finding.directive });
+  pushGateDirective(messages, finding.directive);
   onTrace?.({
     kind: 'internal-gate',
     tier: 4,
@@ -9986,9 +10002,8 @@ async function runToolLoop(
             planFailures,
             wasMode,
           });
-          messages.push({
-            role: 'user',
-            content:
+          pushGateDirective(
+            messages,
               `[plan-circuit-breaker] 你已经在本 turn 内累计 ${planFailures} 次 plan_* 工具失败` +
               `(plan_draft / plan_revise / plan_close 之类)。机制层判定 plan 协议在本 turn 已不可恢复,` +
               `**降级回 fast 模式** + 不再强制 plan 协议。\n\n` +
@@ -9997,7 +10012,7 @@ async function runToolLoop(
               `  2. 若需要持续性任务(周期 check-in 等)→ 调 schedule_reminder 设定,然后再 \`## For User\` 段\n` +
               `  3. **禁止**继续 plan_draft / plan_revise / plan_close — 已被本 turn 拉黑\n\n` +
               `下次同类任务时,reflection 路径会蒸馏出 routing_rule 帮你绕过本次的失败模式。`,
-          });
+          );
           onTrace?.({
             kind: 'loop-control', tier: 4,
             text: `plan 工具失败 ${planFailures}x,机制层降级收尾`,
@@ -10024,12 +10039,12 @@ async function runToolLoop(
         // tools → deadlock (prod 2026-06-17). For mechanical errors: give the fix-it reminder, skip the gates.
         const mechanicalFailure = isMechanicalFailure(reflection.signature);
         if (mechanicalFailure) memory.metrics.increment('inturn.mechanical');
-        messages.push({
-          role: 'user',
-          content: mechanicalFailure
+        pushGateDirective(
+          messages,
+          mechanicalFailure
             ? buildMechanicalFixReminder(reflection.signature!, reflection.count!)
             : reflection.reminder!,
-        });
+        );
         onTrace?.({
           kind: 'loop-control', tier: 4,
           text: `同根因失败 ${reflection.count}x,触发反思提醒${mechanicalFailure ? '(机械错:仅提示修复,不锁工具)' : ''}`,
@@ -10209,7 +10224,7 @@ async function runToolLoop(
                 `**立即调 plan_revise({ plan_id: "${lastPlan.id}", new_steps: [...], reason: "${reflection.signature} 同根因失败" })** 替换 steps,绕过此根因。`,
                 `revise 后 plan 回 draft,调 plan_update_step(status="doing") 重新执行。`,
               ].join('\n');
-              messages.push({ role: 'user', content: guide });
+              pushGateDirective(messages, guide);
               audit.append('self_domain_write', {
                 source: 'auto_revise_on_fail',
                 origin: 'Internal',
@@ -10234,14 +10249,13 @@ async function runToolLoop(
     // Approaching limit warning: insert a system reminder at max-3
     if (!iterWarningInjected && i >= effectiveMax - 3) {
       iterWarningInjected = true;
-      messages.push({
-        role: 'user',
-        content:
+      pushGateDirective(
+        messages,
           `[drive iter-warning] You have used ${i}/${effectiveMax} tool-call rounds and are approaching the limit.\n` +
           `**Wrap up immediately**: organize the information you have collected into a reply for the user (## For User / ## Work Log two-section format). ` +
           `Do not make any more pointless tool calls. If you must call one more, pick the 1-2 most critical, then produce your final reply.\n` +
           INTERNAL_CORRECTION_FOOTER,
-      });
+      );
       onStatus?.(summarizingPhrase(statusLang));
     }
 
@@ -10468,7 +10482,7 @@ async function runToolLoop(
               `     ✗ "registration done" — no facts, same as saying nothing\n\n` +
               INTERNAL_CORRECTION_FOOTER;
           }
-          messages.push({ role: 'user', content: reminder });
+          pushGateDirective(messages, reminder);
           onTrace?.({
             kind: 'internal-gate', tier: 4,
             text: `Honesty gate triggered (${honestyVerdict.severity}), verifying / rewriting`,
@@ -10504,14 +10518,13 @@ async function runToolLoop(
             `[empty-conclusion] session=${sessionId} fired reason=${empty.reason} toolCalls=${totalToolCallsThisTurn} finalLen=${empty.detail?.finalTextLength}`,
           );
           messages.push({ role: 'assistant', content: response.content });
-          messages.push({
-            role: 'user',
-            content:
+          pushGateDirective(
+            messages,
               `[drive EmptyConclusion] You made ${totalToolCallsThisTurn} tool calls this turn, but your final reply was ` +
               (empty.reason === 'empty_after_tools' ? 'completely empty' : `too short (only "${response.content.trim()}")`) +
               `. In one sentence, tell the user: what those calls did, what the result was, and what happens next.\n` +
               INTERNAL_CORRECTION_FOOTER,
-          });
+          );
           onTrace?.({
             kind: 'internal-gate', tier: 4,
             text: 'EmptyConclusion gate triggered, adding summary',
@@ -10569,9 +10582,8 @@ async function runToolLoop(
               `[half-finished] session=${sessionId} fired reason=${hf.reason} phrase="${hf.matchedPhrase}" planUpdateOk=${planUpdateStepOk}`,
             );
             messages.push({ role: 'assistant', content: response.content });
-            messages.push({
-              role: 'user',
-              content:
+            pushGateDirective(
+              messages,
                 `[drive HalfFinished] You just output "${hf.matchedPhrase}" — but this turn has a placeholder plan for a slow task,` +
                 ` no plan_revise to promote it, and 0 plan_update_steps — equivalent to leaving without doing anything.\n\n` +
                 `**This channel is fire-and-forget** — the user sends a message and moves on. "Let me look at this first / I'll do it next..." = task left hanging.\n\n` +
@@ -10581,7 +10593,7 @@ async function runToolLoop(
                 `2. Genuinely blocked — call askUserQuestion (specifying what user input is missing) or plan_close(failure, "<specific blocker>")\n\n` +
                 `**Do not repeat** promise-style phrases / "let me / I'll / next / later" etc. Reorganize your response.\n\n` +
                 INTERNAL_CORRECTION_FOOTER,
-            });
+            );
             onTrace?.({
               kind: 'internal-gate', tier: 4,
               text: 'HalfFinished gate triggered, forcing substantive progress this turn',
@@ -10641,9 +10653,8 @@ async function runToolLoop(
               `[plan-failure-false-claim] session=${sessionId} fired reason=${reason} claim="${claim}"`,
             );
             messages.push({ role: 'assistant', content: response.content });
-            messages.push({
-              role: 'user',
-              content:
+            pushGateDirective(
+              messages,
                 `[drive PlanFailureFalseClaim] Your final text contains "${claim}", but the mechanism layer determined that this turn's plan failed ` +
                 `(${
                   circuitBroken
@@ -10656,7 +10667,7 @@ async function runToolLoop(
                 `3. If user action is needed (e.g. new invite_code / new credential / different param) → use \`## For User\` to write clearly "please provide X"\n` +
                 `4. If some steps (e.g. schedule_reminder) succeeded while others failed → say honestly "setup partially succeeded, but register failed → heartbeat not started"\n\n` +
                 INTERNAL_CORRECTION_FOOTER,
-            });
+            );
             onTrace?.({
               kind: 'internal-gate', tier: 4,
               text: 'PlanFailureFalseClaim gate triggered, forcing honest failure acknowledgement',
@@ -10708,9 +10719,8 @@ async function runToolLoop(
             `[output-format] session=${sessionId} fired reason=${fmt.reason} finalLen=${fmt.detail?.finalTextLength}`,
           );
           messages.push({ role: 'assistant', content: response.content });
-          messages.push({
-            role: 'user',
-            content:
+          pushGateDirective(
+            messages,
               (fmt.reason === 'reportable_work_no_user_section'
                 ? `[drive OutputFormat] This turn RAN A REASONING ROUND and it returned a result, but your reply ` +
                   `(${fmt.detail?.finalTextLength} characters) has no \`## For User\` section and does not report that round. ` +
@@ -10727,7 +10737,7 @@ async function runToolLoop(
               `\n  ## Work Log\n` +
               `  (Full process / tool call details / intermediate data — goes into timeline; user does not see this)\n` +
               INTERNAL_CORRECTION_FOOTER_NL,
-          });
+          );
           onTrace?.({
             kind: 'internal-gate', tier: 4,
             text: 'OutputFormat gate triggered, rewriting two-section format',
@@ -10847,15 +10857,14 @@ async function runToolLoop(
               `[viability] session=${sessionId} fired verdict=${v.verdict} score=${v.score} reasons=${v.reasons.join(',')} hasSession=${!!ownerSession}`,
             );
             messages.push({ role: 'assistant', content: response.content });
-            messages.push({
-              role: 'user',
-              content: buildViabilityDirective(v, {
+            pushGateDirective(
+              messages, buildViabilityDirective(v, {
                 provedCount: vSummary?.provedCount ?? 0,
                 openProblemNote: openMatch?.barrier.circumvention,
                 hasReasoningSession: !!ownerSession,
                 taskHint: (signalBus.userMessage ?? '').replace(/\s+/g, ' ').trim().slice(0, 100),
               }),
-            });
+            );
             onTrace?.({
               kind: 'internal-gate', tier: 4,
               text: `Viability gate ${v.verdict} (score=${v.score}), reframing recommendation`,
@@ -11466,16 +11475,15 @@ async function runToolLoop(
     });
   }
   try {
-    messages.push({
-      role: 'user',
-      content:
+    pushGateDirective(
+      messages,
         `[drive maxIterations fallback] You have made ${totalToolCallsThisTurn} consecutive tool calls without giving the user a text reply.` +
         `\n**No more tool calls are allowed.** Write a paragraph telling the user:` +
         `\n  - Which commands / paths you tried (list the 3-5 most important ones)` +
         `\n  - The specific reason each one failed (copy key phrases from the tool_result)` +
         `\n  - What the user can do next (try manually / change approach / provide more information)` +
         INTERNAL_CORRECTION_FOOTER_NL,
-    });
+    );
     // Call LLM, pass no tools, force text-only output
     let summary = await sendLlmWithRescue(messages, [], sessionId, onTrace);
     // Claim grounding on the THIRD exit. This one had no controllers at all — not honesty, not numeric,
