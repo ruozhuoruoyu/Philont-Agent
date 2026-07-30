@@ -240,8 +240,19 @@ export function keywordOverlap(a: string[], b: string[]): number {
  *
  * Simplified implementation: contextKeywords count + carveout length (longer carveout means clearer boundaries).
  */
-export function specificity(rule: RoutingRule): number {
+export function specificity(rule: { contextKeywords: string[]; carveout: string }): number {
   return rule.contextKeywords.length + Math.min(rule.carveout.length / 50, 5);
+}
+
+/** context_keywords is stored as a JSON array; a malformed or NULL cell must not take the scan down. */
+function safeParseKeywords(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((k): k is string => typeof k === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 // ── Store ───────────────────────────────────────────────────────────────
@@ -313,6 +324,25 @@ export class RoutingRuleStore extends EventEmitter {
     //    inserting a near-duplicate.
     // 2. CAP: at most N active rules per task_signature (PHILONT_ROUTING_RULES_PER_SIG_CAP,
     //    default 5); over cap, the oldest lowest-confidence sibling is retired to make room.
+    //
+    // 2026-07-30: dedup used to require an EXACT task_signature match, and task_signature is a
+    // "<short task label>" the model writes freehand at every reflection. "researching the concept of
+    // tool calls", "research tool-call concept" and "调研 tool call 概念" are three buckets, so the dedup
+    // could almost never fire and the table grew one row per reflection — 1265 of them. Producer mints
+    // a fresh identifier, consumer exact-matches it: the same split as the section headings and the
+    // channel ids. The signature is a label, not a key, so it no longer gates the check. What decides
+    // sameness is what the rule SAYS: a >=0.7 trigger-keyword overlap with an identical preferSkill.
+    const dupCandidates = this.db
+      .prepare<[string | null]>(
+        `SELECT id, context_keywords FROM routing_rules
+          WHERE confidence != 'retired' AND prefer_skill IS ?`,
+      )
+      .all(input.preferSkill ?? null) as Array<{ id: number; context_keywords: string | null }>;
+    // Same trigger but a DIFFERENT preferSkill is contradictory advice, not a duplicate — merging
+    // would silently keep the stale recommendation. Dedup requires the same preferSkill (the SQL above).
+    const dup = dupCandidates.find(
+      (s) => keywordOverlap(keywords, safeParseKeywords(s.context_keywords)) >= 0.7,
+    );
     const siblings = (
       this.db
         .prepare<[string]>(
@@ -320,13 +350,6 @@ export class RoutingRuleStore extends EventEmitter {
         )
         .all(input.taskSignature) as RoutingRuleRow[]
     ).map(rowToRule);
-    // Same trigger but a DIFFERENT preferSkill is contradictory advice, not a duplicate — merging
-    // would silently keep the stale recommendation. Dedup requires the same preferSkill too.
-    const dup = siblings.find(
-      (s) =>
-        s.preferSkill === (input.preferSkill ?? null) &&
-        keywordOverlap(keywords, s.contextKeywords) >= 0.7,
-    );
     if (dup) {
       this.db
         .prepare<[string, number, number]>(
@@ -408,15 +431,38 @@ export class RoutingRuleStore extends EventEmitter {
    * Search for matching rules.
    *
    * Strategy:
-   *   1. If taskSignature provided, rough-filter by exact / LIKE prefix; null/empty → full table (active status)
-   *   2. JS layer scores with keywordOverlap against given contextKeywords
-   *   3. Keep only rules with score >= minScore
-   *   4. Sort by (confidenceRank, score, specificity) and take top-N
-   *   5. retired never participates
+   *   1. Score EVERY active rule with keywordOverlap against the given contextKeywords
+   *   2. Keep only rules with score >= minScore
+   *   3. Sort by (confidenceRank, score, specificity) and take top-N
+   *   4. retired never participates
    *
    * Use cases:
-   *   - Task start with known task_signature (provided at reflection write time) → pass exact match
+   *   - Task start with known task_signature (provided at reflection write time) → sig hit boosts score
    *   - User message incoming, not yet classified → taskSignature=null, pure keyword search
+   *
+   * ── why there is no SQL pre-filter any more (2026-07-30) ────────────────────────────────────────
+   *
+   * There was one, and it was the reason the confidence machine never promoted anything. The 7-day
+   * report read `routing rules: 1265 stored / 7 validated`, and the search for the cause kept landing
+   * on the feedback side — the strong-failure set has been narrowed twice for exactly this symptom.
+   * The feedback side was not the problem. This was:
+   *
+   *     SELECT * FROM routing_rules WHERE confidence != 'retired'
+   *     ORDER BY updated_at DESC LIMIT 100
+   *
+   * Pre-filter by RECENCY, then rank by RELEVANCE. With 1265 active rules, 1165 of them were never
+   * loaded into the scorer at all — not outscored, never seen. And createRule stamps updated_at = now,
+   * so every new rule pushed an older one out of the window permanently. A rule can only earn
+   * confidence while it is being injected; once it fell off the belt its tier froze at provisional
+   * forever, and reflection kept minting replacements that would fall off in turn.
+   *
+   * A FIFO conveyor belt in front of a relevance ranker throws away precisely the rows relevance
+   * would have chosen. The skill-recall cap was the same mechanism with a different table.
+   *
+   * So the ranker sees everything now. The scan reads only the columns scoring and sorting need, so
+   * the cost is a projection over a few thousand short rows — the full row is fetched for the winners
+   * only. If the table ever outgrows the scan cap the truncation is LOGGED, never silent: a cap that
+   * says nothing is how this one survived long enough to be measured in the weekly report.
    */
   match(
     taskSignature: string | null,
@@ -426,32 +472,37 @@ export class RoutingRuleStore extends EventEmitter {
     const limit = options.limit ?? 3;
     const minScore = options.minScore ?? 0.1; // rough filter threshold
 
-    let rows: RoutingRuleRow[];
-    if (taskSignature && taskSignature.trim()) {
-      const sig = taskSignature.trim();
-      const sigPattern = `${sig.split('-')[0]}%`;
-      rows = this.db
-        .prepare<[string, string]>(
-          `SELECT * FROM routing_rules
-           WHERE confidence != 'retired'
-             AND (task_signature = ? OR task_signature LIKE ?)
-           ORDER BY updated_at DESC
-           LIMIT 50`,
-        )
-        .all(sig, sigPattern) as RoutingRuleRow[];
-    } else {
-      rows = this.db
-        .prepare(
-          `SELECT * FROM routing_rules
-           WHERE confidence != 'retired'
-           ORDER BY updated_at DESC
-           LIMIT 100`,
-        )
-        .all() as RoutingRuleRow[];
+    const scanCap = Math.max(100, Number(process.env.PHILONT_ROUTING_MATCH_SCAN_CAP) || 20000);
+    const candidates = this.db
+      .prepare<[number]>(
+        `SELECT id, task_signature, confidence, context_keywords, carveout
+           FROM routing_rules
+          WHERE confidence != 'retired'
+          ORDER BY id ASC
+          LIMIT ?`,
+      )
+      .all(scanCap) as Array<{
+      id: number;
+      task_signature: string;
+      confidence: string;
+      context_keywords: string | null;
+      carveout: string;
+    }>;
+    if (candidates.length >= scanCap) {
+      console.warn(
+        `[routing-rules] match() scanned the cap of ${scanCap} active rules — rules beyond it were NOT ` +
+          `considered. Raise PHILONT_ROUTING_MATCH_SCAN_CAP or prune retired rules.`,
+      );
     }
 
-    const scored = rows
-      .map(rowToRule)
+    const scored = candidates
+      .map((row) => ({
+        id: row.id,
+        taskSignature: row.task_signature,
+        confidence: parseConfidence(row.confidence, 'provisional'),
+        contextKeywords: safeParseKeywords(row.context_keywords),
+        carveout: row.carveout ?? '',
+      }))
       .map((rule) => {
         // taskSig hit gives 0.5 + 0.5 * keyword overlap score;
         // taskSig not given (=null) gives 1.0 * keyword overlap score (avoids halving score when user input is unclassified).
@@ -472,7 +523,14 @@ export class RoutingRuleStore extends EventEmitter {
       })
       .slice(0, limit);
 
-    return scored.map((x) => x.rule);
+    // Full rows for the winners only — the scan above deliberately never loaded trigger_condition or
+    // evidence, which are the long columns and are needed by nobody until a rule has actually won.
+    const out: RoutingRule[] = [];
+    for (const x of scored) {
+      const full = this.getById(x.rule.id);
+      if (full) out.push(full);
+    }
+    return out;
   }
 
   /**
