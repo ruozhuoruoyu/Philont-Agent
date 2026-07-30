@@ -37,6 +37,18 @@
  * And the safety property that was missing entirely: **uncertainty must never grant**. If the aux model is
  * unconfigured, errors, times out, or returns anything unexpected, the answer is `unclear` — which leaves the
  * pending auth open and re-asks. Asking again is free. Authorising by accident is not.
+ *
+ * ## 2026-07-30 — the same defect, pointed the other way
+ *
+ * The instructions above guarded one direction only: "a QUESTION is not consent". Nothing said a question
+ * is not a REFUSAL, and in production a question about the pending request came back `deny` — which is
+ * terminal. The tool is dropped, the model is told the user rejected the operation, and it replies
+ * "操作已被您取消。" The owner's question is never answered; from their side the agent simply ignored them.
+ *
+ * A wrong grant and a wrong deny are both expensive, and only `unclear` is free. So the instruction is
+ * symmetric now — and, because no prompt makes a classifier infallible, the deny BRANCH was changed to
+ * survive being wrong: it carries the owner's actual message into the follow-up call, so a misread deny
+ * still answers the question instead of eating it.
  */
 
 import { callAuxLLM, isAuxLLMConfigured } from '@agent/tools';
@@ -66,11 +78,15 @@ const SYSTEM = [
   '  deny    — the user clearly refuses, or wants it stopped/postponed',
   '  unclear — anything else',
   '',
-  'CRITICAL: a QUESTION is not consent. "Can I think about it?", "What does this tool do?",',
-  '"Are you sure this is safe?", "Why do you need that?" are NOT grants — they are unclear (the user is',
-  'still deciding, and answering their question is the correct next move, not running the tool).',
+  'CRITICAL: a QUESTION is neither consent NOR refusal. "Can I think about it?", "What does this tool',
+  'do?", "Are you sure this is safe?", "Why do you need that?" are unclear — the user is still deciding,',
+  'and ANSWERING them is the correct next move. This holds in both directions: a question that sounds',
+  'skeptical or critical of the request is still a question, not a refusal.',
+  'Only answer deny when the user actually tells you to stop, cancel, skip it, or not do it.',
   'Hedging ("maybe later", "hold on") is deny or unclear, never grant.',
-  'When in doubt, answer unclear. Re-asking costs nothing; authorizing by mistake is not recoverable.',
+  'When in doubt, answer unclear. Both mistakes are expensive: a wrong grant runs a tool the user did',
+  'not approve, and a wrong deny throws away the tool AND replies "cancelled" to a user who asked a',
+  'question — their message is never answered at all. Unclear costs nothing: the turn proceeds normally.',
 ].join('\n');
 
 /**

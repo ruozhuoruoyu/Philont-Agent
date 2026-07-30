@@ -7478,6 +7478,13 @@ async function handleChatSendInner(
         })),
       ];
       messages.push({ role: 'user', content: allResults });
+      // The owner's actual words go in too. Without this the model sees only "the user rejected it" and
+      // answers "操作已被您取消。" — so a misread `deny` does not merely skip a tool, it EATS the message.
+      // Production 2026-07-30: a question about the pending request came back as outcome=denied and was
+      // never answered. Prompt wording alone cannot make a classifier infallible, so the mechanism is
+      // built to survive being wrong: if it really was a refusal this line is the word "拒绝" and changes
+      // nothing, and if it was a question the turn still answers it.
+      messages.push({ role: 'user', content: userMessage });
       const resp = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
       if (resp.type === 'text') {
         messages.push({ role: 'assistant', content: resp.content });

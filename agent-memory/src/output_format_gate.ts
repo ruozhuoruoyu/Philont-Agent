@@ -51,21 +51,49 @@ export interface OutputFormatInput {
   reportableWork?: boolean;
 }
 
-const USER_SECTION_PATTERN = /##\s*给用户/i;
+/**
+ * The two headings, defined ONCE for the whole system.
+ *
+ * They were not. This gate matched `/##\s*给用户/` and nothing else, while every producer prompt —
+ * the system prompt, the priming assistant turn, max_iter_summary, viability_gate's rewrite
+ * instruction, CONTRACT 3/3 — asks for `## For User`, and the WeChat delivery filter accepts BOTH.
+ * So the gate fired on replies that were CORRECT: the model wrote exactly the heading it was told to
+ * write, the channel found the section and delivered it, and the gate meanwhile declared the section
+ * missing and burned a full regeneration. 129 fires in seven days, every one of them a reply that
+ * already complied.
+ *
+ * This is the producer/exact-match-consumer split the repo keeps re-shipping (channel ids, tool names,
+ * and now section headings). The i18n pass flipped the prompts to English and moved the delivery filter
+ * to bilingual; the gate was the one consumer nobody re-read. The fix is not "add the English heading
+ * here" — it is that there is now one definition and both consumers import it.
+ */
+export const USER_SECTION_HEADING = /^##\s*(?:给用户|For User)\s*$/i;
+export const WORK_LOG_HEADING = /^##\s*(?:工作日志|Work Log)\s*$/i;
+
+/**
+ * Does the text carry a user section the delivery filter will actually be able to extract?
+ *
+ * Line-anchored on purpose, and identical to what extractUserSection() uses: this gate's whole job is
+ * to predict whether the channel will find a section, so a looser test here would pass replies the
+ * channel then falls back on — which is the failure the gate exists to prevent, arriving silently.
+ */
+export function hasUserSection(text: string): boolean {
+  return text.split('\n').some((line) => USER_SECTION_HEADING.test(line));
+}
 
 export function evaluateOutputFormat(input: OutputFormatInput): OutputFormatResult {
   const trimmed = input.finalText.trim();
   const minLen = input.minLengthToTrigger ?? 500;
-  const hasUserSection = USER_SECTION_PATTERN.test(trimmed);
+  const sectionPresent = hasUserSection(trimmed);
   const reportableWork = input.reportableWork === true;
   const detail = {
     finalTextLength: trimmed.length,
-    hasUserSection,
+    hasUserSection: sectionPresent,
     reportableWork,
   };
 
-  // Long text + no `## 给用户` section → trigger
-  if (trimmed.length > minLen && !hasUserSection) {
+  // Long text + no user section → trigger
+  if (trimmed.length > minLen && !sectionPresent) {
     return {
       shouldRegenerate: true,
       reason: 'long_text_no_user_section',
@@ -73,9 +101,9 @@ export function evaluateOutputFormat(input: OutputFormatInput): OutputFormatResu
     };
   }
 
-  // Reportable work this turn + no `## 给用户` section → trigger at ANY length. A finished reasoning
+  // Reportable work this turn + no user section → trigger at ANY length. A finished reasoning
   // round that the reply never mentions is work thrown away, whether the reply is 17 chars or 1700.
-  if (reportableWork && !hasUserSection) {
+  if (reportableWork && !sectionPresent) {
     return {
       shouldRegenerate: true,
       reason: 'reportable_work_no_user_section',

@@ -315,7 +315,12 @@ export type {
   DetectHalfFinishedOptions,
 } from './half_finished_gate.js';
 export { evaluateEmptyConclusion } from './empty_conclusion_gate.js';
-export { evaluateOutputFormat } from './output_format_gate.js';
+export {
+  evaluateOutputFormat,
+  hasUserSection,
+  USER_SECTION_HEADING,
+  WORK_LOG_HEADING,
+} from './output_format_gate.js';
 export type {
   OutputFormatInput,
   OutputFormatResult,

@@ -38,13 +38,17 @@
  */
 
 import { currentPhraseLang } from './response_language.js';
+import { USER_SECTION_HEADING, WORK_LOG_HEADING } from '@agent/memory';
 
 // Bilingual headings (i18n open-source transition): accept both the English headings used by the
 // English system prompt and the legacy Chinese headings, so the prompt can flip to
 // English without breaking the WeChat reply split. Keep both indefinitely — harmless,
 // and the model may emit either depending on the user-facing reply language.
-const USER_SECTION_HEADING = /^##\s*(?:给用户|For User)\s*$/i;
-const WORK_LOG_HEADING = /^##\s*(?:工作日志|Work Log)\s*$/i;
+//
+// IMPORTED, not re-declared. This file had the bilingual pair and OutputFormatGate had a Chinese-only
+// lookalike, so for seven days the gate demanded a rewrite of every reply this filter was delivering
+// perfectly well — 129 wasted regenerations. Two copies of "what counts as a section" is one copy too
+// many; the definition lives in the gate's module and both consumers read it from there.
 const ANY_H2_HEADING = /^##\s+/;
 
 export interface FilterResult {
