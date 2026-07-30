@@ -252,6 +252,7 @@ import {
 } from './in_turn_reflection.js';
 import { scheduledTurnMadeProgress } from './schedule_progress.js';
 import { maybeRunReflection } from './reflection_runner.js';
+import { distillMechanicalFix, learnedCheatsheet } from './mechanical_fix_learning.js';
 import {
   buildAutonomousProgressInjection,
   buildK7BridgeReviewSection,
@@ -7172,6 +7173,22 @@ export async function handleChatSend(
         );
       }
 
+      // A mechanical error this turn REPAIRED is the one thing the reflection JSON has no type for:
+      // routing_rule carries an avoidance clause, new_skill wants a whole workflow, playbook wants an
+      // abstract principle. So 71 recurrences of pariGp:gp-syntax produced 71 ways to say "avoid it" and
+      // not one repair. This runs beside reflection, gated on the trace showing a real recovery — see
+      // mechanical_fix_learning.ts. Fire-and-forget: it must never delay or fail a turn close.
+      void distillMechanicalFix(extractRecentToolResults(messages), memory.facts)
+        .then((learned) => {
+          if (learned) {
+            console.log(
+              `[mechanical-fix] learned a repair for ${learned.signature}: ${learned.line}`,
+            );
+            memory.metrics.increment('mechanical_fix.learned');
+          }
+        })
+        .catch((e) => console.warn('[mechanical-fix] distillation failed, ignored:', (e as Error)?.message));
+
       // 2026-05-15: turnDegraded signal synthesis — if any mechanism-layer "forced wrap-up" signal fires,
       // reflection takes the negative distillation path and rejects new_skill / skill_refine.
       const turnDegraded =
@@ -10049,7 +10066,11 @@ async function runToolLoop(
         pushGateDirective(
           messages,
           mechanicalFailure
-            ? buildMechanicalFixReminder(reflection.signature!, reflection.count!)
+            ? buildMechanicalFixReminder(
+                reflection.signature!,
+                reflection.count!,
+                learnedCheatsheet(reflection.signature!, memory.facts),
+              )
             : reflection.reminder!,
         );
         onTrace?.({

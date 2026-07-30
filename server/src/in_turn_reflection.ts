@@ -227,8 +227,23 @@ function authoringCheatsheet(signature: string): string[] {
   return [];
 }
 
-/** Reminder for a mechanical failure: fix the code and re-run — do not research or make a plan. */
-export function buildMechanicalFixReminder(signature: string, count: number): string {
+/**
+ * Reminder for a mechanical failure: fix the code and re-run — do not research or make a plan.
+ *
+ * `learned` carries lines distilled from turns where this exact signature was actually repaired (see
+ * mechanical_fix_learning.ts). authoringCheatsheet() above is the hand-written half of the same table —
+ * it only ever knows the mistakes someone sat and watched, which is why `pariGp:gp-syntax` still led the
+ * failure chart at ×71 four weeks after that table was written.
+ */
+export function buildMechanicalFixReminder(
+  signature: string,
+  count: number,
+  learned: string[] = [],
+): string {
+  const learnedBlock =
+    learned.length > 0
+      ? ['', `Learned from your own past repairs of ${signature}:`, ...learned.map((l) => `  • ${l}`)]
+      : [];
   return [
     '',
     `[drive reflection-trigger] You have hit the same MECHANICAL error ${count} times this turn (signature=${signature}).`,
@@ -239,6 +254,7 @@ export function buildMechanicalFixReminder(signature: string, count: number): st
     '  2. Fix the script with `writeFile` / `patch` (correct the syntax, the missing arg, the bad function name).',
     '  3. Re-run it. Iterate until it runs — this is normal scripting, not a wall.',
     ...authoringCheatsheet(signature),
+    ...learnedBlock,
     '',
     'If after a few honest fix attempts the SAME error persists, then reconsider the tool/approach — but first, just fix the bug.',
     '',
