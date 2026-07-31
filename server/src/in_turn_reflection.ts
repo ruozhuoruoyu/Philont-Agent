@@ -203,7 +203,7 @@ export function isMechanicalFailure(signature: string | undefined): boolean {
  * the concrete fix for THAT signature, not just "fix the bug" — so the correction lands instead of
  * the agent guessing again.
  */
-function authoringCheatsheet(signature: string): string[] {
+export function authoringCheatsheet(signature: string): string[] {
   if (/^pariGp:/i.test(signature)) {
     return [
       '',

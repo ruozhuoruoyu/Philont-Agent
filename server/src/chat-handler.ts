@@ -7429,9 +7429,22 @@ async function handleChatSendInner(
       // deep_explore runs multi-round sessions where a single round can outlast the default
       // 10-min grant (round deadline is 12 min), forcing a re-auth every round. Give it a longer
       // window so one approval covers the session.
-      const grantTtlMs = pending.toolName === 'deep_explore' ? DEEP_EXPLORE_GRANT_TTL_MS : undefined;
+      // The approved tool must not expire BEFORE the tools its approval granted as a side effect.
+      //
+      // It did, for weeks. `undefined` here falls through to GrantStore's DEFAULT_TTL_MS = 10 min, while
+      // localWorkflowGrants below hands the siblings WORKFLOW_GRANT_TTL_MS = 30 min. So approving `shell`
+      // bought 10 minutes of shell and 30 minutes of writeFile/patch/pariGp — the one tool the owner
+      // actually said yes to got the shortest window of all, and the workflow grant that exists to end the
+      // "继续→授权→ok" treadmill kept every sibling alive while the primary died under them.
+      //
+      // Production 2026-07-31 shows the period exactly. shell approved 10:18:48 → auth card 10:33:20 →
+      // approved 10:34:04 → card 10:44:13 → approved 10:49:26 → card 11:04:39 → approved 11:04:41 → card
+      // 11:22:06. Ten-minute clockwork; the owner typed OK twelve times in one morning for a workflow he
+      // had already authorised.
+      const grantTtlMs =
+        pending.toolName === 'deep_explore' ? DEEP_EXPLORE_GRANT_TTL_MS : WORKFLOW_GRANT_TTL_MS;
       grants.grant(pending.toolName, pending.capability as any, pending.domain as any, userMessage, grantTtlMs);
-      const grantMinutes = Math.round((grantTtlMs ?? 10 * 60_000) / 60_000);
+      const grantMinutes = Math.round(grantTtlMs / 60_000);
       onTrace?.({
         kind: 'auth-decision', tier: 4,
         text: `Granted ${pending.toolName} (valid for ${grantMinutes} min)`,

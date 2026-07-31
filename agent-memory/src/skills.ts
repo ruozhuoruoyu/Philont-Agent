@@ -668,7 +668,17 @@ export class SkillStore extends EventEmitter {
     // on one arbitrary turn measures the TURN's relevance, not the skill's worth; being explored must not
     // be what makes a draft eviction-eligible, or the slot is just feeding the executioner. Three distinct
     // showings is still a fast verdict at one exploration slot per chat turn.
-    const evictable = sorted.filter((s) => s.offeredCount >= DECLINED_MIN_OFFERS);
+    // `useCount === 0` as well as the offer count. The sort key above already knew that being CHOSEN is
+    // not being declined; this filter did not, and it is the one that decides who can die.
+    //
+    // Production 2026-07-31: `verify-lrc-by-enumeration` was offered, ACCEPTED via use_skill at 11:11:00,
+    // and used to run the enumeration. At 13:06:24 the cap evicted it — logged as `(score 0.548)`, the
+    // useCount>0 branch, so the store knew it had been used while it deleted it. It was the only skill in
+    // the entire day's log that the agent chose. Being chosen is the strongest positive evidence this
+    // funnel can collect, and the cap was eating exactly that.
+    //
+    // A used draft leaves through the maturity ladder (recordSkillOutcome), never through the cap.
+    const evictable = sorted.filter((s) => s.offeredCount >= DECLINED_MIN_OFFERS && s.useCount === 0);
     const wanted = drafts.length - maxDrafts;
     const toDelete = evictable.slice(0, wanted);
     if (toDelete.length < wanted) {

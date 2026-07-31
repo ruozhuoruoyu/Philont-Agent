@@ -38,12 +38,18 @@
  *   given the script that failed, the error, and the script that then worked, state the rule in one line.
  *   The model is never asked whether a fix happened — the trace already settled that.
  *
- * Every failure path (aux unconfigured, error, unparseable, over-long) returns null and stores nothing.
- * PHILONT_MECHANICAL_FIX_LEARNING=0 disables the whole thing.
+ * VERIFY (added 2026-07-31, after the first thing this module learned was false):
+ *   a second, independent call is shown the proposed line and prompted to knock it down. The floor can
+ *   certify that a fix HAPPENED; it cannot certify the model's account of WHY, and the account is what
+ *   gets injected forever. See buildMechanicalFixVerifyPrompt for the line that made this necessary.
+ *
+ * Every failure path (aux unconfigured, error, unparseable, over-long, verifier unreachable) returns null
+ * and stores nothing. PHILONT_MECHANICAL_FIX_LEARNING=0 disables the whole thing.
  */
 
 import { extractFailureSignature } from '@agent/memory';
 import { callAuxLLM, isAuxLLMConfigured } from '@agent/tools';
+import { authoringCheatsheet } from './in_turn_reflection.js';
 
 /** Facts namespace holding the learned lines, keyed by failure signature. */
 export const MECHANICAL_FIX_NAMESPACE = 'mechanical_fix';
@@ -136,6 +142,60 @@ export function buildMechanicalFixPrompt(r: MechanicalRecovery): { system: strin
   };
 }
 
+/**
+ * Second opinion, prompted to REFUTE. The distiller alone is not safe enough, and one production day
+ * proved it.
+ *
+ * 2026-07-31 12:16:00, the first thing this module ever learned:
+ *
+ *   [mechanical-fix] learned a repair for pariGp:gp-syntax:
+ *     "Wrap top-level loops in a function; PARI/GP forbids bare for() at top level."
+ *
+ * PARI/GP permits nothing of the sort — `for(i=1,10,print(i))` at top level is ordinary GP. The turn's
+ * actual error was `syntax error, unexpected end of file, expecting )`, an unbalanced paren. A real
+ * repair happened, so the floor let it through correctly; the model then misattributed WHY it worked and
+ * wrote a false statement about the language.
+ *
+ * The floor can only certify that a fix occurred. It cannot certify the explanation, and an explanation
+ * is what gets injected into every future turn that hits this signature. So a separate call is shown the
+ * proposed line and asked to knock it down — false about the tool, unrelated to this error, generic
+ * advice, or already in the cheatsheet all mean reject. Uncertainty rejects too: storing nothing costs a
+ * signature that keeps recurring, storing a lie costs every future turn.
+ */
+export function buildMechanicalFixVerifyPrompt(
+  r: MechanicalRecovery,
+  line: string,
+  existing: string[],
+): { system: string; user: string } {
+  const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n…(truncated)` : s);
+  return {
+    system:
+      'You are checking a proposed authoring-cheatsheet line before it is written into an agent\'s ' +
+      'permanent prompt for this error signature. Your job is to KNOCK IT DOWN.\n' +
+      'Answer REJECT if ANY of these hold:\n' +
+      '  - it states something FALSE about the tool or language (invented restrictions are the main risk);\n' +
+      '  - it is not what THIS error was about;\n' +
+      '  - it is generic advice ("check your syntax", "be careful") that names no concrete construct;\n' +
+      '  - it repeats something already in the existing lines.\n' +
+      'Answer ACCEPT only if the line is true, specific, and would have prevented this exact error.\n' +
+      'If you are unsure, answer REJECT. A rejected line costs nothing; a false one is injected into ' +
+      'every future turn that hits this signature.\n' +
+      'Answer with exactly one word: ACCEPT or REJECT.',
+    user:
+      `Tool: ${r.toolName}\nSignature: ${r.signature}\n\n` +
+      `PROPOSED LINE:\n${line}\n\n` +
+      `--- the error ---\n${clip(r.errorText, 800)}\n\n` +
+      `--- script that FAILED ---\n${clip(r.failedSource, 1200)}\n\n` +
+      `--- script that then WORKED ---\n${clip(r.workingSource, 1200)}\n\n` +
+      `--- lines already in the cheatsheet ---\n${existing.length ? existing.map((l) => `• ${l}`).join('\n') : '(none)'}\n`,
+  };
+}
+
+/** Only our own two words are accepted; anything else is a rejection. */
+export function parseMechanicalFixVerdict(raw: string | null | undefined): boolean {
+  return /^ACCEPT\b/i.test((raw ?? '').trim());
+}
+
 /** Accepts one short imperative line, or nothing. Our own NONE sentinel is exact-matched. */
 export function parseMechanicalFix(raw: string | null | undefined): string | null {
   const line = (raw ?? '')
@@ -195,17 +255,32 @@ export async function distillMechanicalFix(
   if (!recovery) return null;
   if (!(deps.configured ?? isAuxLLMConfigured())) return null;
 
+  const ask = deps.ask ?? callAuxLLM;
   let line: string | null;
   try {
     const { system, user } = buildMechanicalFixPrompt(recovery);
-    line = parseMechanicalFix(await (deps.ask ?? callAuxLLM)({ system, user, maxTokens: 120 }));
+    line = parseMechanicalFix(await ask({ system, user, maxTokens: 120 }));
   } catch {
     return null;
   }
   if (!line) return null;
 
+  // Everything the model would already be shown for this signature — the hand-written table plus what
+  // has been learned so far — so the verifier can reject a line that adds nothing.
+  const existing = learnedCheatsheet(recovery.signature, facts);
+  const shownToday = [...authoringCheatsheet(recovery.signature).filter((l) => l.trim()), ...existing];
+
   try {
-    const existing = learnedCheatsheet(recovery.signature, facts);
+    const { system, user } = buildMechanicalFixVerifyPrompt(recovery, line, shownToday);
+    if (!parseMechanicalFixVerdict(await ask({ system, user, maxTokens: 8 }))) {
+      console.log(`[mechanical-fix] rejected a proposed repair for ${recovery.signature}: ${line}`);
+      return null;
+    }
+  } catch {
+    return null; // a verifier we could not reach has not accepted anything
+  }
+
+  try {
     if (existing.some((l) => l.toLowerCase() === line!.toLowerCase())) return null;
     const next = [...existing, line].slice(-MAX_LINES_PER_SIGNATURE);
     facts.storeFact({

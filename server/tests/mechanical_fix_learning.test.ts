@@ -18,9 +18,18 @@ import {
   parseMechanicalFix,
   learnedCheatsheet,
   buildMechanicalFixPrompt,
+  buildMechanicalFixVerifyPrompt,
+  parseMechanicalFixVerdict,
   MECHANICAL_FIX_NAMESPACE,
 } from '../src/mechanical_fix_learning.js';
+
 import { buildMechanicalFixReminder } from '../src/in_turn_reflection.js';
+
+/** ask() for the two-call flow: the first call distils the line, every later call is the verifier. */
+function asks(line: string, verdict = 'ACCEPT') {
+  let n = 0;
+  return async () => (n++ === 0 ? line : verdict);
+}
 
 /** Minimal stand-in for the fact store: namespace/key → value. */
 function fakeFacts() {
@@ -91,7 +100,7 @@ test('the learned line is stored under the signature and read back', async () =>
   const facts = fakeFacts();
   const got = await distillMechanicalFix([failed, worked], facts, {
     configured: true,
-    ask: async () => 'Close every "(" you open: for( needs its own ")" before the statement ends.',
+    ask: asks('Close every "(" you open: for( needs its own ")" before the statement ends.'),
   });
   assert.ok(got);
   assert.equal(got.signature, 'pariGp:gp-syntax');
@@ -101,9 +110,9 @@ test('the learned line is stored under the signature and read back', async () =>
 
 test('the same line is not stored twice', async () => {
   const facts = fakeFacts();
-  const ask = async () => 'Close every "(" you open before the statement ends, including for( and sum(.';
-  await distillMechanicalFix([failed, worked], facts, { configured: true, ask });
-  const second = await distillMechanicalFix([failed, worked], facts, { configured: true, ask });
+  const ask = () => asks('Close every "(" you open before the statement ends, including for( and sum(.');
+  await distillMechanicalFix([failed, worked], facts, { configured: true, ask: ask() });
+  const second = await distillMechanicalFix([failed, worked], facts, { configured: true, ask: ask() });
   assert.equal(second, null);
   assert.equal(learnedCheatsheet('pariGp:gp-syntax', facts).length, 1);
 });
@@ -155,7 +164,7 @@ test('the switch restores the previous behaviour wholesale', async () => {
   try {
     const facts = fakeFacts();
     assert.equal(
-      await distillMechanicalFix([failed, worked], facts, { configured: true, ask: async () => 'a real rule here' }),
+      await distillMechanicalFix([failed, worked], facts, { configured: true, ask: asks('a real rule here') }),
       null,
     );
     assert.deepEqual(learnedCheatsheet('pariGp:gp-syntax', facts), []);
@@ -179,4 +188,79 @@ test('no learned lines leaves the reminder exactly as it was', () => {
   const before = buildMechanicalFixReminder('pariGp:gp-syntax', 3);
   assert.equal(buildMechanicalFixReminder('pariGp:gp-syntax', 3, []), before);
   assert.doesNotMatch(before, /Learned from your own past repairs/);
+});
+
+// ── the verify pass ──────────────────────────────────────────────────────────────────────────────
+//
+// 2026-07-31 12:16:00, the first thing this module ever learned in production:
+//
+//   [mechanical-fix] learned a repair for pariGp:gp-syntax:
+//     "Wrap top-level loops in a function; PARI/GP forbids bare for() at top level."
+//
+// PARI/GP permits nothing of the sort. A real repair DID happen, so the floor admitted the turn
+// correctly — the model then misattributed why the second script worked and stated something false about
+// the language. The floor can certify that a fix occurred; it cannot certify the account of WHY, and the
+// account is what gets injected into every future turn hitting the signature.
+
+test('a line the verifier knocks down is not stored', async () => {
+  const facts = fakeFacts();
+  const got = await distillMechanicalFix([failed, worked], facts, {
+    configured: true,
+    ask: asks('Wrap top-level loops in a function; PARI/GP forbids bare for() at top level.', 'REJECT'),
+  });
+  assert.equal(got, null);
+  assert.equal(facts._dump.size, 0, 'a false rule must not reach the cheatsheet');
+});
+
+test('only our own ACCEPT counts — anything else is a rejection', () => {
+  assert.equal(parseMechanicalFixVerdict('ACCEPT'), true);
+  assert.equal(parseMechanicalFixVerdict('accept\n'), true);
+  assert.equal(parseMechanicalFixVerdict('REJECT'), false);
+  assert.equal(parseMechanicalFixVerdict('probably fine'), false, 'unsure is a rejection');
+  assert.equal(parseMechanicalFixVerdict(''), false);
+  assert.equal(parseMechanicalFixVerdict(null), false);
+});
+
+test('a verifier we cannot reach has not accepted anything', async () => {
+  const facts = fakeFacts();
+  let n = 0;
+  const got = await distillMechanicalFix([failed, worked], facts, {
+    configured: true,
+    ask: async () => {
+      if (n++ === 0) return 'Balance every "(" — for( must be closed before the statement ends.';
+      throw new Error('aux down');
+    },
+  });
+  assert.equal(got, null);
+  assert.equal(facts._dump.size, 0);
+});
+
+test('the verifier is told to refute, and to reject when unsure', () => {
+  const r = findMechanicalRecovery([failed, worked])!;
+  const { system } = buildMechanicalFixVerifyPrompt(r, 'some line', []);
+  assert.match(system, /KNOCK IT DOWN/);
+  assert.match(system, /FALSE about the tool/);
+  assert.match(system, /unsure, answer REJECT/);
+});
+
+test('the verifier sees the lines already in the cheatsheet, so it can reject a duplicate', () => {
+  const r = findMechanicalRecovery([failed, worked])!;
+  const { user } = buildMechanicalFixVerifyPrompt(r, 'Braces cannot nest.', ['Braces can NOT nest.']);
+  assert.match(user, /already in the cheatsheet/);
+  assert.match(user, /Braces can NOT nest\./);
+});
+
+test('the hand-written table is among the lines the verifier is shown', async () => {
+  const facts = fakeFacts();
+  const seen: string[] = [];
+  await distillMechanicalFix([failed, worked], facts, {
+    configured: true,
+    ask: async (req) => {
+      seen.push(req.user);
+      return seen.length === 1 ? 'Balance every "(" you open in for( and sum(.' : 'ACCEPT';
+    },
+  });
+  assert.equal(seen.length, 2);
+  assert.match(seen[1], /Balance every "\("/, 'the proposal must be quoted to the verifier');
+  assert.match(seen[1], /PARI\/GP authoring rules|Balance every "\("/);
 });
