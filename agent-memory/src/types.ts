@@ -191,6 +191,8 @@ export interface Skill {
    * The gap between the two IS the learning loop's real conversion rate — and it was previously invisible.
    */
   offeredCount: number;
+  /** v41: of those showings, how many were relevance matches rather than global-fallback rotation. */
+  matchedCount: number;
   /** Most recent use time */
   lastUsedAt: number | null;
   createdAt: number;

@@ -90,3 +90,70 @@ test('a cap made entirely of used drafts deletes nothing', () => {
   assert.equal(skills.pruneDraftsToCap(1), 0);
   for (const n of ['used-a', 'used-b', 'used-c']) assert.ok(skills.getByName(n));
 });
+
+// ── v41: an arbitrary showing is not evidence ────────────────────────────────────────────────────
+//
+// 2026-08-04 pruned exact-rational-lrc-tightness-verification, timeout-safe-combinatorial-enumeration,
+// optimize-enumeration-after-timeout and incremental-script-refactoring-on-computation-failure — the four
+// skills most obviously about the week's work — each logged "offered 3x, never chosen". Every one of
+// those offers came from `relevance=on(matched 0 → global fallback)`: the ranker matched nothing, so the
+// top-N by score filled the slots on whatever turn happened to be running.
+//
+// Being shown on an unrelated turn and passed over says something about the TURN. Being shown BECAUSE it
+// matched, and passed over, says something about the skill.
+
+test('three showings the ranker never chose do not condemn a draft', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill(draft('exact-rational-lrc-tightness-verification'));
+  offer(skills, 'exact-rational-lrc-tightness-verification', 3); // global-fallback rotation
+  seedDeclined(skills, 12);
+
+  skills.pruneDraftsToCap(5);
+
+  assert.ok(
+    skills.getByName('exact-rational-lrc-tightness-verification'),
+    'the ranker matched nothing that turn — that is not a verdict on the skill',
+  );
+});
+
+test('three showings the ranker DID choose do', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill(draft('matched-and-passed-over'));
+  for (let i = 0; i < 3; i++) {
+    skills.recordSkillsOffered(['matched-and-passed-over'], ['matched-and-passed-over']);
+  }
+  skills.createSkill(draft('never-shown-at-all'));
+
+  assert.equal(skills.pruneDraftsToCap(1), 1);
+  assert.equal(skills.getByName('matched-and-passed-over'), null);
+  assert.ok(skills.getByName('never-shown-at-all'));
+});
+
+// Not zero, or nothing ever drains: a draft leaves the untested pool by being used or evicted, and while
+// it sits there the creation-side bound stops the reflector minting.
+test('enough arbitrary showings still add up to a verdict', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill(draft('shown-forever-never-picked'));
+  offer(skills, 'shown-forever-never-picked', 12);
+  skills.createSkill(draft('shown-thrice'));
+  offer(skills, 'shown-thrice', 3);
+
+  assert.equal(skills.pruneDraftsToCap(1), 1);
+  assert.equal(skills.getByName('shown-forever-never-picked'), null);
+  assert.ok(skills.getByName('shown-thrice'));
+});
+
+test('the prune log says how many showings were real matches', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill(draft('doomed'));
+  for (let i = 0; i < 3; i++) skills.recordSkillsOffered(['doomed'], ['doomed']);
+  const before = skills.getByName('doomed')!;
+  assert.equal(before.offeredCount, 3);
+  assert.equal(before.matchedCount, 3, 'the two counters move together only when it was a match');
+
+  skills.createSkill(draft('fallback-only'));
+  offer(skills, 'fallback-only', 3);
+  const f = skills.getByName('fallback-only')!;
+  assert.equal(f.offeredCount, 3);
+  assert.equal(f.matchedCount, 0, 'a fallback rotation is a showing but not a match');
+});

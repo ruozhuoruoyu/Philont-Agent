@@ -36,7 +36,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 40);
+  assert.equal(SCHEMA_VERSION, 41);
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
   assert.ok(tableExists(db, 'reasoning_sessions'));
@@ -471,7 +471,7 @@ test('migration v36 → v37: reasoning_sessions gets followup_asked_at, existing
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 40);
+  assert.equal(SCHEMA_VERSION, 41);
   assert.ok(hasColumn(db, 'reasoning_sessions', 'followup_asked_at'), 'v37 must add followup_asked_at');
   const row = db.prepare(`SELECT goal, followup_asked_at FROM reasoning_sessions WHERE id = 'rs-old'`).get() as
     { goal: string; followup_asked_at: number | null };
@@ -497,7 +497,7 @@ test('migration v37 → v38: reasoning_nodes gets check_criterion, existing node
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 40);
+  assert.equal(SCHEMA_VERSION, 41);
   assert.ok(hasColumn(db, 'reasoning_nodes', 'check_criterion'), 'v38 must add check_criterion');
   const row = db.prepare(`SELECT claim, check_criterion FROM reasoning_nodes WHERE id = 'rn-old'`).get() as
     { claim: string; check_criterion: string | null };
@@ -524,7 +524,7 @@ test('migration v38 → v39: memory_skills gets from_disk, backfilled to 0', () 
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 40);
+  assert.equal(SCHEMA_VERSION, 41);
   assert.ok(hasColumn(db, 'memory_skills', 'from_disk'), 'v39 must add from_disk');
   const row = db.prepare(`SELECT name, from_disk FROM memory_skills WHERE id = 'sk-old'`).get() as
     { name: string; from_disk: number };
@@ -549,10 +549,35 @@ test('migration v39 → v40: memory_raw_messages gets origin_session_id, existin
 
   initSchema(db);
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 40);
   assert.ok(hasColumn(db, 'memory_raw_messages', 'origin_session_id'), 'v40 must add origin_session_id');
   const row = db
     .prepare(`SELECT content, origin_session_id FROM memory_raw_messages WHERE content = ?`)
     .get('written before v40') as { content: string; origin_session_id: string | null };
   assert.equal(row.origin_session_id, null, 'old rows carry no origin — readers must not drop them');
+});
+
+// v41: memory_skills.matched_count — of a skill's showings, how many were RELEVANCE matches.
+//
+// offered_count counts every showing and the cap evicts a draft at three showings with no use. On
+// 2026-08-04 that deleted exact-rational-lrc-tightness-verification and three siblings — the skills most
+// obviously about the week's work — each "offered 3x, never chosen", and every one of those offers came
+// from `relevance=on(matched 0 → global fallback)` on an unrelated turn. Being shown because the ranker
+// had nothing is evidence about the TURN, not about the skill.
+test('migration v40 → v41: memory_skills gets matched_count, existing rows keep their offers', () => {
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.prepare(
+    `INSERT INTO memory_skills (id, name, description, trigger_keywords, action_template, created_at, offered_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run('s41', 'written-before-v41', 'd', '[]', 'a', 1000, 7);
+  db.prepare(`UPDATE memory_meta SET value = '40' WHERE key = 'schema_version'`).run();
+
+  initSchema(db);
+  assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
+  assert.ok(hasColumn(db, 'memory_skills', 'matched_count'), 'v41 must add matched_count');
+  const row = db
+    .prepare(`SELECT offered_count, matched_count FROM memory_skills WHERE name = ?`)
+    .get('written-before-v41') as { offered_count: number; matched_count: number };
+  assert.equal(row.offered_count, 7, 'the offer history survives the migration');
+  assert.equal(row.matched_count, 0, 'no pre-v41 showing can be claimed as a relevance match');
 });

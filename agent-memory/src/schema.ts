@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 40;
+export const SCHEMA_VERSION = 41;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -168,6 +168,10 @@ CREATE TABLE IF NOT EXISTS memory_skills (
   -- negative evidence) and "never shown" (no evidence at all) both score identically at zero, and the
   -- draft-cap prune deletes them alike. It was deleting skills for losing a race they never ran.
   offered_count    INTEGER NOT NULL DEFAULT 0,
+  -- v41: of those showings, how many were RELEVANCE MATCHES rather than global-fallback rotation.
+  -- offered_count alone cannot tell "shown because it fit, and passed over" from "shown because the
+  -- ranker had nothing and filled the slot"; the eviction rule needs the first and was using the sum.
+  matched_count    INTEGER NOT NULL DEFAULT 0,
   created_at       INTEGER NOT NULL,
   -- v3: feedback loop fields
   success_count    INTEGER NOT NULL DEFAULT 0,
@@ -1242,6 +1246,25 @@ function migrateV38ToV39(db: Database.Database): void {
  * evening with no conversational memory. Old rows keep origin_session_id NULL and readers must treat
  * NULL as "unknown, show it": the failure to avoid is starving the window, not showing one extra line.
  */
+/**
+ * v40 → v41: memory_skills.matched_count — offers that were RELEVANCE matches.
+ *
+ * `offered_count` counts every showing, and the cap evicts a draft at three showings with no use. On
+ * 2026-08-04 that deleted `exact-rational-lrc-tightness-verification`, `timeout-safe-combinatorial-
+ * enumeration`, `optimize-enumeration-after-timeout` and `incremental-script-refactoring-on-computation-
+ * failure` — the four skills most obviously about what the owner was doing that week — each logged
+ * "offered 3x, never chosen". Every one of those offers came from `relevance=on(matched 0 → global
+ * fallback)`: the ranker matched nothing, so the top-N by score filled the slots on whatever turn
+ * happened to be running.
+ *
+ * Being shown on an unrelated turn and not picked is not evidence against a skill. Being shown BECAUSE
+ * it matched, and passed over, is. The store has to be able to tell those apart, so it counts them
+ * separately.
+ */
+function migrateV40ToV41(db: Database.Database): void {
+  addColumnIfMissing(db, 'memory_skills', 'matched_count', 'INTEGER NOT NULL DEFAULT 0');
+}
+
 function migrateV39ToV40(db: Database.Database): void {
   addColumnIfMissing(db, 'memory_raw_messages', 'origin_session_id', 'TEXT');
 }
@@ -1511,6 +1534,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 40) {
     migrateV39ToV40(db);
+  }
+  if (current < 41) {
+    migrateV40ToV41(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

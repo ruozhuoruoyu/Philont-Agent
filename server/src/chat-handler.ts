@@ -252,6 +252,7 @@ import {
 } from './in_turn_reflection.js';
 import { scheduledTurnMadeProgress } from './schedule_progress.js';
 import { maybeRunReflection } from './reflection_runner.js';
+import { selectSkillsByAux } from './skill_relevance_llm.js';
 import { distillMechanicalFix, learnedCheatsheet } from './mechanical_fix_learning.js';
 import {
   buildAutonomousProgressInjection,
@@ -4912,7 +4913,21 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
   const explore = memory.skills
     .untestedDraftsForExploration(1)
     .filter((s) => !META_SKILL_NAMES.has(s.name) && !ranked.some((r) => r.name === s.name));
-  const positives = explore.length > 0 ? [...ranked.slice(0, Math.max(0, POSITIVE_CAP - 1)), ...explore] : ranked;
+  // The aux selector's picks come FIRST when it had an opinion — it is the only layer in this stack that
+  // can tell a Chinese task from an English skill name. The exploration slot survives beside it: a
+  // selector that only ever picks what it recognises would freeze the ladder exactly as the lexical
+  // ranker did. See skill_relevance_llm.
+  const auxPicks = signalBus?.skillRelevanceNames ?? [];
+  const auxSkills = auxPicks
+    .map((n) => memory.skills.getByName(n))
+    .filter((s): s is NonNullable<typeof s> => !!s && !META_SKILL_NAMES.has(s.name));
+  const rankedWithAux =
+    auxSkills.length > 0
+      ? [...auxSkills, ...ranked.filter((r) => !auxSkills.some((a) => a.name === r.name))]
+      : ranked;
+  const positives = explore.length > 0
+    ? [...rankedWithAux.slice(0, Math.max(0, POSITIVE_CAP - 1)), ...explore]
+    : rankedWithAux;
   if (positives.length > 0) {
     // SKILL FUNNEL VISIBILITY (2026-07-14). Measured over 7 days / 462 turns: 64 skills, use_skill called
     // 10 times, validated=0, draft pinned at exactly the prune cap (40). The maturity ladder's ONLY rung is
@@ -4922,14 +4937,23 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
     // failing, because the offer (this index) was never logged — only the (rare) acceptance was.
     // Log what we OFFER, so the next production log can answer "does it not see them, or not want them?"
     // Persist the offer (v36). Without it, "shown and declined" and "never shown" both look like zero.
-    memory.skills.recordSkillsOffered(positives.map((s) => s.name));
+    // Only a showing the ranker CHOSE counts as evidence against the skill. A global-fallback rotation
+    // says something about the turn, not about the skill — see isDeclinedDraft. The aux selector's picks
+    // are matches: it was shown the task and named this skill.
+    const matchedNames = new Set<string>(auxSkills.map((s) => s.name));
+    if (rankedSel && rankedSel.matchedByRelevance > 0) {
+      for (const s of ranked.slice(0, rankedSel.matchedByRelevance)) matchedNames.add(s.name);
+    }
+    memory.skills.recordSkillsOffered(positives.map((s) => s.name), [...matchedNames]);
     // Say what relevance DID, not merely that it is enabled: "on" while contributing zero matches is how
     // an identical six-skill list went unquestioned for a week. See selectRelevantSkillsDetailed.
-    const relevanceNote = !relevanceOn
-      ? 'off'
-      : rankedSel && rankedSel.matchedByRelevance > 0
-        ? `on(matched ${rankedSel.matchedByRelevance})`
-        : 'on(matched 0 → global fallback)';
+    const relevanceNote = auxSkills.length > 0
+      ? `aux(picked ${auxSkills.length})`
+      : !relevanceOn
+        ? 'off'
+        : rankedSel && rankedSel.matchedByRelevance > 0
+          ? `on(matched ${rankedSel.matchedByRelevance})`
+          : 'on(matched 0 → global fallback)';
     console.log(
       `[skill-funnel] offered ${positives.length} skill(s) ` +
         `(pool=${memory.skills.count()}, relevance=${relevanceNote}): ` +
@@ -7032,6 +7056,25 @@ export async function handleChatSend(
   // Helpful for locating turn boundaries during testing: start log includes user message preview + whether it resumes pending
   const turnStartedAt = Date.now();
   turnDeadlines.set(sessionId, turnStartedAt + TURN_HARD_DEADLINE_MS);
+
+  // Ask the aux model which stored skills this turn is about, BEFORE the (synchronous) prefix build.
+  // The lexical ranker returns `matched 0 → global fallback` on nearly every turn here — the owner writes
+  // Chinese and the skill corpus is English, so token overlap is zero by construction. See
+  // skill_relevance_llm. Best-effort: no opinion → the existing ranking stands untouched.
+  try {
+    const pool = memory.skills.listAllForMaintenance(400);
+    const picked = await selectSkillsByAux(
+      userMessage,
+      pool.map((s) => ({ name: s.name, description: s.description, whenToUse: s.whenToUse })),
+      6,
+    );
+    if (picked && picked.length > 0) {
+      signalBus.skillRelevanceNames = picked;
+      console.log(`[skill-relevance] aux picked ${picked.length}: ${picked.join(', ')}`);
+    }
+  } catch (e) {
+    console.warn('[skill-relevance] selector failed, keeping lexical ranking:', (e as Error)?.message);
+  }
   // plan_protocol_gate reads this to distinguish a terminal plan closed THIS turn (same-task follow-up →
   // auto-fast ok) from a STALE terminal plan left by a prior task (must not downgrade a new slow task).
   signalBus.turnStartedAt = turnStartedAt;
@@ -9090,6 +9133,12 @@ interface TurnSignalBus {
   authApprovedCallId?: string;
   /** The user message that opened this turn (for correction-aware honesty branches). */
   userMessage?: string;
+  /**
+   * Skill names the aux selector judged relevant to THIS turn, in its order. Computed before the
+   * (synchronous) prefix build and read by the skill funnel. Absent = no opinion, keep the lexical
+   * ranking. See skill_relevance_llm.
+   */
+  skillRelevanceNames?: string[];
   /**
    * Tools this turn tried to call and the autonomous-turn blacklist rejected. Feeds the
    * unsatisfiable-goal detector: a scheduled task whose goal needs a tool it can never call fails

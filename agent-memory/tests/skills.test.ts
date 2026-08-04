@@ -123,9 +123,12 @@ test('SkillStore: pruneDraftsToCap 只淘汰有证据不利的 draft,保护未�
 
   // ONE offer is not evidence — the day the exploration slot went live, a draft shown once on an
   // unrelated turn was evicted 17 minutes later. Declined = DECLINED_MIN_OFFERS distinct showings.
-  skills.recordSkillsOffered(['draft-skill-0', 'draft-skill-1', 'draft-skill-2']);
+  // v41: an offer is evidence only when the ranker MATCHED the skill. These three were chosen for the
+  // turn and passed over — a real verdict. See isDeclinedDraft.
+  const shown = ['draft-skill-0', 'draft-skill-1', 'draft-skill-2'];
+  skills.recordSkillsOffered(shown, shown);
   assert.equal(skills.pruneDraftsToCap(2), 0, 'a single showing must not make a draft evictable');
-  for (let i = 0; i < 2; i++) skills.recordSkillsOffered(['draft-skill-0', 'draft-skill-1', 'draft-skill-2']);
+  for (let i = 0; i < 2; i++) skills.recordSkillsOffered(shown, shown);
   const deleted = skills.pruneDraftsToCap(2);
   assert.equal(deleted, 3, 'three showings, never chosen — that is a real verdict');
   assert.equal(skills.count(), 4); // 3 never-offered drafts + 1 playbook
@@ -635,19 +638,19 @@ test('scoreSkill: frequent success > rare success > frequent failure', () => {
 
   const winner = {
     id: '1', name: 'winner', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 10, offeredCount: 0, lastUsedAt: recent, createdAt: 0,
+    useCount: 10, offeredCount: 0, matchedCount: 0, lastUsedAt: recent, createdAt: 0,
     successCount: 10, failureCount: 0, lastFailureAt: null, lastSuccessAt: recent,
     consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const rare = {
     id: '2', name: 'rare', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 1, offeredCount: 0, lastUsedAt: recent, createdAt: 0,
+    useCount: 1, offeredCount: 0, matchedCount: 0, lastUsedAt: recent, createdAt: 0,
     successCount: 1, failureCount: 0, lastFailureAt: null, lastSuccessAt: recent,
     consecutiveFailures: 0, whenToUse: '', maturity: 'draft' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const loser = {
     id: '3', name: 'loser', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 10, offeredCount: 0, lastUsedAt: recent, createdAt: 0,
+    useCount: 10, offeredCount: 0, matchedCount: 0, lastUsedAt: recent, createdAt: 0,
     successCount: 2, failureCount: 8, lastFailureAt: recent, lastSuccessAt: recent,
     consecutiveFailures: 0, whenToUse: '', maturity: 'deprecated' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
@@ -661,13 +664,13 @@ test('scoreSkill: recency decay discounts long-unused skills', () => {
   const now = Date.parse('2026-04-17T12:00:00Z');
   const old = {
     id: '1', name: 'old', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 5, offeredCount: 0, lastUsedAt: now - 90 * 86_400_000, createdAt: 0,
+    useCount: 5, offeredCount: 0, matchedCount: 0, lastUsedAt: now - 90 * 86_400_000, createdAt: 0,
     successCount: 5, failureCount: 0, lastFailureAt: null, lastSuccessAt: now - 90 * 86_400_000,
     consecutiveFailures: 0, whenToUse: '', maturity: 'stable' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
   const fresh = {
     id: '2', name: 'fresh', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 2, offeredCount: 0, lastUsedAt: now, createdAt: 0,
+    useCount: 2, offeredCount: 0, matchedCount: 0, lastUsedAt: now, createdAt: 0,
     successCount: 2, failureCount: 0, lastFailureAt: null, lastSuccessAt: now,
     consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
@@ -870,7 +873,7 @@ test('scoreSkill: negative 比 positive 衰减更慢(同参数下分数更高)',
   const daysAgo60 = now - 60 * 86_400_000;
   const positive = {
     id: '1', name: 'p', description: '', triggerKeywords: [], actionTemplate: '',
-    useCount: 3, offeredCount: 0, lastUsedAt: daysAgo60, createdAt: 0,
+    useCount: 3, offeredCount: 0, matchedCount: 0, lastUsedAt: daysAgo60, createdAt: 0,
     successCount: 3, failureCount: 0, lastFailureAt: null, lastSuccessAt: daysAgo60,
     consecutiveFailures: 0, whenToUse: '', maturity: 'confirmed' as const, kind: 'positive' as const, source: null, verification: null, toolPolicy: null, revisionHistory: [],
   };
@@ -1317,7 +1320,7 @@ test('pruneDraftsToCap evicts declined drafts before never-offered ones', () => 
   const shownOnce = mk('shown-once');
 
   // Shown DECLINED_MIN_OFFERS+ times and never picked — real negative evidence.
-  for (let i = 0; i < 5; i++) skills.recordSkillsOffered([declined.name]);
+  for (let i = 0; i < 5; i++) skills.recordSkillsOffered([declined.name], [declined.name]);
   // Shown once, on one arbitrary turn — that measures the turn's relevance, not the skill's worth.
   skills.recordSkillsOffered([shownOnce.name]);
   // `untried` was never offered: no evidence for OR against it.

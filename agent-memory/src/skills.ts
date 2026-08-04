@@ -32,6 +32,8 @@ interface SkillRow {
   action_template: string;
   use_count: number;
   offered_count: number | null;
+  /** v41: of those showings, how many were relevance matches rather than fallback rotation. */
+  matched_count: number | null;
   last_used_at: number | null;
   created_at: number;
   success_count: number;
@@ -104,6 +106,7 @@ function rowToSkill(row: SkillRow): Skill {
     actionTemplate: row.action_template,
     useCount: row.use_count,
     offeredCount: row.offered_count ?? 0,
+    matchedCount: row.matched_count ?? 0,
     lastUsedAt: row.last_used_at,
     createdAt: row.created_at,
     successCount: row.success_count,
@@ -134,6 +137,32 @@ function parseRecipeJson<T>(raw: string | null | undefined): T | null {
  * How many distinct showings an unchosen draft gets before it counts as declined. See pruneDraftsToCap.
  */
 export const DECLINED_MIN_OFFERS = 3;
+
+/**
+ * How many arbitrary (global-fallback) showings stand in for one relevance match.
+ *
+ * Not zero, or nothing ever drains: a draft leaves the untested pool by being USED or by being evicted,
+ * and while it sits there the creation-side bound stops the reflector minting. Not three either, which is
+ * what 2026-08-04 did — `exact-rational-lrc-tightness-verification` and three siblings, the skills most
+ * obviously about the week's work, deleted at "offered 3x, never chosen" when all three showings were
+ * `relevance=on(matched 0 → global fallback)` on unrelated turns.
+ */
+export const DECLINED_MIN_FALLBACK_OFFERS = 12;
+
+/**
+ * Has this skill earned its deletion?
+ *
+ * Being CHOSEN is not being declined (the sort key knew that; the eviction filter did not, and deleted
+ * the one skill the agent used all day on 2026-07-31). Being shown BECAUSE it matched, and passed over,
+ * is real evidence. Being shown because the ranker matched nothing and the top-N filled the slot is
+ * evidence about the turn, not about the skill — so it takes many more of those to add up to the same
+ * verdict.
+ */
+export function isDeclinedDraft(s: Skill): boolean {
+  if (s.useCount > 0) return false;
+  if (s.matchedCount >= DECLINED_MIN_OFFERS) return true;
+  return s.offeredCount >= DECLINED_MIN_FALLBACK_OFFERS;
+}
 
 export class SkillStore extends EventEmitter {
   constructor(private readonly db: Database.Database) {
@@ -173,6 +202,7 @@ export class SkillStore extends EventEmitter {
       description: input.description,
       whenToUse,
       offeredCount: 0,
+      matchedCount: 0,
       triggerKeywords: input.triggerKeywords,
       actionTemplate: input.actionTemplate,
       useCount: 0,
@@ -646,8 +676,8 @@ export class SkillStore extends EventEmitter {
     // an untested hypothesis for losing a race it was never entered in. So: evict the declined ones FIRST,
     // and only fall back to the score once the declined pool is exhausted.
     const sorted = drafts.slice().sort((a, b) => {
-      const aDeclined = a.offeredCount >= DECLINED_MIN_OFFERS && a.useCount === 0;
-      const bDeclined = b.offeredCount >= DECLINED_MIN_OFFERS && b.useCount === 0;
+      const aDeclined = isDeclinedDraft(a);
+      const bDeclined = isDeclinedDraft(b);
       if (aDeclined !== bDeclined) return aDeclined ? -1 : 1;
       // Within the declined pool, the most-declined goes first (strongest evidence of uselessness).
       if (aDeclined && bDeclined && a.offeredCount !== b.offeredCount) {
@@ -678,7 +708,7 @@ export class SkillStore extends EventEmitter {
     // funnel can collect, and the cap was eating exactly that.
     //
     // A used draft leaves through the maturity ladder (recordSkillOutcome), never through the cap.
-    const evictable = sorted.filter((s) => s.offeredCount >= DECLINED_MIN_OFFERS && s.useCount === 0);
+    const evictable = sorted.filter(isDeclinedDraft);
     const wanted = drafts.length - maxDrafts;
     const toDelete = evictable.slice(0, wanted);
     if (toDelete.length < wanted) {
@@ -690,7 +720,7 @@ export class SkillStore extends EventEmitter {
     let deleted = 0;
     for (const s of toDelete) {
       const why = s.useCount === 0
-        ? `offered ${s.offeredCount}x, never chosen`
+        ? `offered ${s.offeredCount}x (${s.matchedCount} by relevance), never chosen`
         : `score ${scoreSkill(s, now).toFixed(3)}`;
       if (this.deleteSkill(s.name)) {
         deleted++;
@@ -735,14 +765,19 @@ export class SkillStore extends EventEmitter {
    * the model never picked was indistinguishable from a skill the model never saw — and the loop could
    * neither promote nor honestly reject anything. Best-effort: never throw into the prompt-build path.
    */
-  recordSkillsOffered(names: string[]): void {
+  recordSkillsOffered(names: string[], matchedNames: readonly string[] = []): void {
     if (!names.length) return;
     try {
-      const stmt = this.db.prepare<[string]>(
+      const matched = new Set(matchedNames);
+      const bump = this.db.prepare<[string]>(
         `UPDATE memory_skills SET offered_count = offered_count + 1 WHERE name = ?`,
       );
+      const bumpMatched = this.db.prepare<[string]>(
+        `UPDATE memory_skills SET offered_count = offered_count + 1, matched_count = matched_count + 1
+          WHERE name = ?`,
+      );
       const tx = this.db.transaction((ns: string[]) => {
-        for (const n of ns) stmt.run(n);
+        for (const n of ns) (matched.has(n) ? bumpMatched : bump).run(n);
       });
       tx(names);
     } catch {
