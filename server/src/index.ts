@@ -32,6 +32,9 @@ import './proxy-bootstrap.js'; // second: install global outbound proxy before a
 // the file. See boot_logging.ts.
 import './boot_logging.js';
 
+// Wall-clock watchdog — must load after the tee like everything else. See suspend_detector.
+import { startSuspendDetector } from './suspend_detector.js';
+
 // Force stdout/stderr into blocking mode — on Windows + PowerShell, Node defaults to
 // non-blocking writes for piped/pty stdout; in some cases log output is OS-level buffered
 // until process exit before flushing, making the server look hung (the server is actually
@@ -863,6 +866,10 @@ wss.on('connection', (ws) => {
     });
   });
 });
+
+// Wall-clock watchdog. Not a timer that does work — one that notices when NO timer got to run, which
+// is the only way to tell a suspended host from a hung agent. See suspend_detector.
+startSuspendDetector();
 
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);

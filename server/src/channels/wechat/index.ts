@@ -53,6 +53,7 @@ import { extractUserSection, recordFilterCall } from '../../output_section_filte
 import { runConscienceGate } from '../../conscience_gate.js';
 import { recordControllerFire } from '../../controller_registry.js';
 import { renderForWeChat, renderAuthPromptForWeChat } from './wechat_render.js';
+import { explainSuspension } from '../../suspend_detector.js';
 import { currentPhraseLang } from '../../response_language.js';
 
 /** AuthRequest structure from chat-handler (provided by handleChatSend) */
@@ -405,16 +406,23 @@ function makeDispatcher(opts: {
       });
     };
 
+    const turnStartedAt = Date.now();
     try {
       await chatSend(sessionId, event.text, onDelta, onAuthRequest, onStatus);
     } catch (e) {
       logger.error(`chatSend threw: ${String(e)}`, { sessionId, from: event.fromUserId });
-      // Send a fallback to the user to avoid a completely silent failure
+      // Send a fallback to the user to avoid a completely silent failure.
+      //
+      // 2026-08-04: three of these in five hours, each 19 characters, each in fact caused by the HOST
+      // being suspended mid-turn — the owner had no way to tell a sleeping laptop from a broken agent.
+      // When the clock says the process stopped running during this turn, say so. See suspend_detector.
+      const en = currentPhraseLang('wechat') === 'en';
+      const suspended = explainSuspension(turnStartedAt, Date.now(), en);
       void outbound.sendText(
         replyTo,
-        currentPhraseLang('wechat') === 'en'
+        (en
           ? `Sorry — something went wrong: ${truncate(String((e as any)?.message ?? e), 200)}`
-          : `抱歉,刚才出错了:${truncate(String((e as any)?.message ?? e), 200)}`,
+          : `抱歉,刚才出错了:${truncate(String((e as any)?.message ?? e), 200)}`) + (suspended ?? ''),
       );
       return;
     }

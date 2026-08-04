@@ -171,6 +171,64 @@ export function checkGpParenBalance(script: string): string | null {
 }
 
 /**
+ * The whole-script balance check above is not enough, and seven weeks of logs say so:
+ * `pariGp:gp-syntax` has led the failure chart every single week, ×71 then ×26.
+ *
+ * Production 2026-08-04 09:44:35, three consecutive failures in one deep_explore round:
+ *
+ *   ***   syntax error, unexpected end of file, expecting )-> or ',' or ')':
+ *   ***   for(i=1,8,
+ *   ***            ^-
+ *
+ * Those scripts are PERFECTLY BALANCED overall — checkGpParenBalance passes them. The mistake is that
+ * the `for(` opens on one line and closes several lines later, and **gp reading a script line-by-line
+ * treats each LINE as a complete statement unless it is inside a `{ }` block**. So it reaches the end
+ * of `for(i=1,8,` and reports end-of-file, with the caret pointing at a comma that looks fine.
+ *
+ * This is the whole ×26. It is also invisible to the two mechanisms aimed at it: the hand-written
+ * cheatsheet says "multi-statement body → wrap in braces", which the model reads as being about `;`
+ * rather than about spanning LINES, and the repair learner keeps proposing "PARI/GP forbids bare
+ * top-level loops" — false, and correctly rejected by its verifier, twice.
+ *
+ * The rule is mechanical, so it belongs here rather than in a prompt: outside `{ }`, a line must end
+ * with its parens closed.
+ */
+export function checkGpLineSpanningParens(script: string): string | null {
+  const stripped = script
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\\\\[^\n]*/g, ' ')
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""');
+
+  let round = 0;
+  let curly = 0;
+  let line = 1;
+  let openedAtLine = 0;
+  for (let i = 0; i < stripped.length; i++) {
+    const c = stripped[i];
+    if (c === '(') {
+      if (round === 0) openedAtLine = line;
+      round++;
+    } else if (c === ')') round = Math.max(0, round - 1);
+    else if (c === '{') curly++;
+    else if (c === '}') curly = Math.max(0, curly - 1);
+    else if (c === '\n') {
+      // A trailing backslash is GP's explicit line continuation — that one is legal unbraced.
+      const isContinued = /\\\s*$/.test(stripped.slice(0, i));
+      if (curly === 0 && round > 0 && !isContinued) {
+        return (
+          `line ${openedAtLine} opens a "(" that is still unclosed at the end of line ${line} — ` +
+          'gp reads one LINE at a time, so a multi-line for( / sum( / if( dies with ' +
+          '"unexpected end of file, expecting )". Either put the whole construct on ONE line, or wrap ' +
+          'it in a brace block: { for(i=1,n,\\n  ...\\n) }'
+        );
+      }
+      line++;
+    }
+  }
+  return null;
+}
+
+/**
  * PARI/GP prints BOTH fatal errors and benign warnings with the same `***` marker, e.g.
  *   "***   Warning: increasing stack size to 1000000."   (benign — stack auto-grew, script ran fine)
  *   "***   syntax error, unexpected ..."                 (fatal)
@@ -226,7 +284,10 @@ export const pariGpTool: Tool = {
           'GP script (PARI/GP language). E.g.: print(factor(2^67-1)) — outputs the factorization of that Mersenne number (proving it composite); ' +
           'print(isprime(2^61-1)) — a primality test. Use print() to explicitly output your conclusion.\n' +
           'Authoring rules (these recur - get them right the first time):\n' +
-          '  - Count your parentheses: every for( / forstep( / forprime( / sum( / if( must be closed. An unclosed open-paren gives "unexpected end of file, expecting )".\n' +
+          '  - **gp reads ONE LINE at a time.** A for( / sum( / if( whose ")" is on a LATER line dies with ' +
+          '"unexpected end of file, expecting )" even though the script is balanced overall. Put the construct on one line, ' +
+          'or wrap it in a brace block: { for(i=1,n,\n      ...\n  ) }\n' +
+          '  - Count your parentheses: every for( / forstep( / forprime( / sum( / if( must be closed.\n' +
           '  - Multi-statement body: wrap it in braces { a = ...; b = ...; print(b) } and balance them. Statements are separated by ";".\n' +
           '  - Define a helper as f(x) = { ...; value } on its own line, then call it on the next line.\n' +
           '  - A "*** Warning: increasing stack size" line is NOT an error - your script ran; read the printed result.',
@@ -257,6 +318,12 @@ export const pariGpTool: Tool = {
     const nested = checkGpNestedBraces(script);
     if (nested) {
       return { success: false, output: '', error: `PARI/GP pre-check: ${nested}. Not executed — fix and resend.` };
+    }
+    // Pre-flight: a construct whose parens span LINES outside a brace block. Balanced overall, fatal to
+    // gp, and the single most repeated failure signature in the logs. See checkGpLineSpanningParens.
+    const spanning = checkGpLineSpanningParens(script);
+    if (spanning) {
+      return { success: false, output: '', error: `PARI/GP pre-check: ${spanning}. Not executed — fix and resend.` };
     }
     const rawTimeout =
       typeof params.timeoutMs === 'number' && Number.isFinite(params.timeoutMs)
