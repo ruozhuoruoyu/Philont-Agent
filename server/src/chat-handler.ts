@@ -5548,6 +5548,75 @@ export class LlmTimeoutError extends Error {
 // Extended to 20 min to let the LLM finish. Simple tasks are unaffected (naturally a few seconds to tens of seconds).
 const TURN_HARD_DEADLINE_MS = 20 * 60_000;
 
+/**
+ * Stop taking NEW tool calls this long before the hard deadline, and spend what is left writing the user
+ * a reply.
+ *
+ * The hard deadline is a Promise.race at the top of the turn: it rejects, the error propagates, and
+ * everything the turn accumulated is discarded. Production 2026-08-04 20:39:33, `durationMs=1200011`
+ * — a real deadline, not a suspended host, on a turn the owner had explicitly approved ("继续lrc证明"
+ * → OK). After the z3 version check at 20:19:35 it ran for twenty minutes without a single further tool
+ * call and delivered a 46-character error. Whatever it had worked out is gone, and there is nothing to
+ * continue from.
+ *
+ * runToolLoop already knows how to end well — the maxIterations fallback forces a text-only reply that
+ * narrates what was tried. The iteration cap gets that treatment and the clock does not, which is the
+ * whole defect: two ways to run out, one graceful exit. So the clock now stops the loop with headroom
+ * and lands on the same fallback.
+ *
+ * Three minutes: an LLM text call under this config can take minutes (call timeout is 7.3 min), and a
+ * wrap-up that itself blows the deadline would be worse than useless. The hard deadline stays as the
+ * backstop behind it.
+ */
+const TURN_WRAPUP_HEADROOM_MS = 3 * 60_000;
+
+/**
+ * When does this session's current turn run out of time?
+ *
+ * The wrap-up above is worthless on its own, and the turn that prompted it proves why: the loop can only
+ * check its watch when control comes back to the top of the loop, and on 2026-08-04 it did not come back
+ * for twenty minutes. It was inside ONE logical LLM call.
+ *
+ * The arithmetic nobody had done: the per-call timeout is adaptive (30s + 4096 tokens x 100ms = 439.6s),
+ * and sendLlmWithRescue retries once on timeout, so a single call can legitimately occupy 2 x 7.3 = 14.6
+ * minutes of a 20-minute turn. Add the tool calls before it and the turn is dead with nothing delivered.
+ * 20:19:35 + 439.6s lands at 20:26:54, which is exactly where the log shows the retry firing.
+ *
+ * Neither number was wrong on its own; they were chosen in different files with no reference to each
+ * other. So the call budget is now derived from what the TURN has left, and the loop is guaranteed to get
+ * control back before the hard deadline instead of being killed inside an await.
+ *
+ * Background callers (autonomous ticks, idle consolidation) have no turn and get Infinity — unchanged.
+ */
+const turnDeadlines = new Map<string, number>();
+
+/** A small margin so the call returns BEFORE the budget it was given is fully gone. */
+const LLM_BUDGET_SAFETY_MS = 20_000;
+/** Log any LLM call at least this slow — the evidence a latency death needs and never had. */
+const LLM_SLOW_CALL_LOG_MS = 30_000;
+/** Never shrink a call below this: a budget too small to answer in is the same as no call at all. */
+const LLM_BUDGET_FLOOR_MS = 45_000;
+
+export function turnRemainingMs(sessionId: string, now: number = Date.now()): number {
+  const deadline = turnDeadlines.get(sessionId);
+  return deadline === undefined ? Number.POSITIVE_INFINITY : deadline - now;
+}
+
+/** The timeout one LLM call may take, given how much of the turn is left. Exported for testing. */
+export function llmCallBudgetMs(
+  remainingMs: number,
+  callTimeoutMs: number = LLM_CALL_TIMEOUT_MS,
+): number {
+  if (!Number.isFinite(remainingMs)) return callTimeoutMs;
+  return Math.max(LLM_BUDGET_FLOOR_MS, Math.min(callTimeoutMs, remainingMs - LLM_BUDGET_SAFETY_MS));
+}
+
+/** Is there room for another full-length attempt after one already timed out? */
+export function hasRoomForTimeoutRetry(remainingMs: number): boolean {
+  if (!Number.isFinite(remainingMs)) return true;
+  return remainingMs - LLM_BUDGET_SAFETY_MS >= LLM_BUDGET_FLOOR_MS;
+}
+
 export class TurnDeadlineError extends Error {
   constructor(ms: number) {
     super(`turn exceeded ${ms}ms hard deadline`);
@@ -5613,8 +5682,28 @@ async function sendLlmWithRescue(
   // 2026-06-07: send an explicit per-turn reasoning config (see mainTurnReasoning) instead of relying on the
   // provider's implicit always-on thinking; tunable via PHILONT_CHAT_REASONING.
   const reasoning = mainTurnReasoning(findLastUserText(messages));
-  const call = () =>
-    withTimeout(llm.send(messages, tools, { signal, reasoning }), LLM_CALL_TIMEOUT_MS, () => new LlmTimeoutError(LLM_CALL_TIMEOUT_MS));
+  // The budget is what the TURN has left, not a constant computed in isolation. See turnDeadlines.
+  const budgetMs = () => llmCallBudgetMs(turnRemainingMs(sessionId));
+  const call = async () => {
+    const ms = budgetMs();
+    const startedAt = Date.now();
+    try {
+      return await withTimeout(llm.send(messages, tools, { signal, reasoning }), ms, () => new LlmTimeoutError(ms));
+    } finally {
+      // How long did THIS call take? The 2026-08-04 20:19-20:39 turn burned its entire 20-minute budget
+      // with zero tool calls, and the log cannot say why: there is no `[llm] timeout` line, so nothing
+      // exceeded the per-call timeout — several calls simply took a long time each, and not one of them
+      // is recorded anywhere. A turn that dies of accumulated latency must leave the latency behind.
+      const took = Date.now() - startedAt;
+      if (took >= LLM_SLOW_CALL_LOG_MS) {
+        const left = turnRemainingMs(sessionId);
+        console.warn(
+          `[llm] slow call session=${sessionId} took ${Math.round(took / 1000)}s ` +
+            `(budget ${Math.round(ms / 1000)}s, turn left ${Number.isFinite(left) ? Math.round(left / 1000) + 's' : 'n/a'})`,
+        );
+      }
+    }
+  };
   try {
     return await call();
   } catch (e) {
@@ -5625,6 +5714,16 @@ async function sendLlmWithRescue(
       // Real scenario: Anthropic stream occasionally returns only after waiting tens of seconds for the first token.
       // After the first 60s timeout fires, retry once directly — the dangling old request is GC'd by the SDK;
       // the new request returns in a second or two in most cases. Only when both timeout does it propagate to the outer layer.
+      // The retry is what turns one slow call into 14.6 minutes of a 20-minute turn. Only take it when
+      // the turn can still afford a full attempt; otherwise give the remaining time back to the loop,
+      // which will spend it writing the user a reply instead of on a second wait.
+      if (!hasRoomForTimeoutRetry(turnRemainingMs(sessionId))) {
+        console.warn(
+          `[llm] timeout session=${sessionId} after ${LLM_CALL_TIMEOUT_MS}ms — NOT retrying, ` +
+            `${Math.round(turnRemainingMs(sessionId) / 1000)}s left of the turn (wrap-up needs it)`,
+        );
+        throw e;
+      }
       console.warn(`[llm] timeout session=${sessionId} after ${LLM_CALL_TIMEOUT_MS}ms — retrying once`);
       onTrace?.({
         kind: 'system-event',
@@ -6932,6 +7031,7 @@ export async function handleChatSend(
 
   // Helpful for locating turn boundaries during testing: start log includes user message preview + whether it resumes pending
   const turnStartedAt = Date.now();
+  turnDeadlines.set(sessionId, turnStartedAt + TURN_HARD_DEADLINE_MS);
   // plan_protocol_gate reads this to distinguish a terminal plan closed THIS turn (same-task follow-up →
   // auto-fast ok) from a STALE terminal plan left by a prior task (must not downgrade a new slow task).
   signalBus.turnStartedAt = turnStartedAt;
@@ -9999,9 +10099,29 @@ async function runToolLoop(
   // inject wrap-up hint. env PHILONT_PLAN_CIRCUIT_BREAKER_AT to set threshold (default 3; set 0 to disable).
   // Triggered only once per turn.
   let planCircuitBroken = false;
+  // Set when the wall clock, not the iteration counter, ended the loop. See TURN_WRAPUP_HEADROOM_MS.
+  let outOfTime = false;
   for (let i = startIteration + 1; i < effectiveMax; i++) {
     // Interrupt teeth: user stopped → exit before the next LLM call.
     if (stopped()) return interruptedReturn();
+
+    // Clock teeth. Running out of time and running out of iterations are the same situation, and until
+    // now only one of them had a graceful exit: the cap fell through to a forced summary, the clock threw
+    // TurnDeadlineError and discarded the turn. Leave the loop with headroom and take the same exit.
+    const turnAgeMs = Date.now() - (signalBus.turnStartedAt ?? Date.now());
+    if (turnAgeMs > TURN_HARD_DEADLINE_MS - TURN_WRAPUP_HEADROOM_MS) {
+      outOfTime = true;
+      console.warn(
+        `[turn-wrapup] session=${sessionId} ${Math.round(turnAgeMs / 1000)}s elapsed of the ` +
+          `${Math.round(TURN_HARD_DEADLINE_MS / 1000)}s turn budget — no more tool calls; writing the ` +
+          `reply with the ${Math.round(TURN_WRAPUP_HEADROOM_MS / 1000)}s that are left`,
+      );
+      onTrace?.({
+        kind: 'loop-control', tier: 4,
+        text: `时间预算用尽(${Math.round(turnAgeMs / 60_000)}min),停止调工具,改为收尾汇报`,
+      });
+      break;
+    }
     // 2026-05-13: within the tool loop, compaction only triggers at the hard-cap (default 250K) as a safety net
     // to prevent the LLM context window from truly overflowing. Soft-threshold (default 180K) compaction is reserved
     // for the "quiet period" at turn entry — to avoid compaction mid-plan/tool chain breaking precise IDs like plan_id.
@@ -10305,7 +10425,22 @@ async function runToolLoop(
     // agnostically, as opposed to the post-hoc honesty gate that has to enumerate phrasings.
     refreshTurnLedgerContract(messages, signalBus.inTurnRecords ?? []);
 
-    const response = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
+    let response: LLMResponse;
+    try {
+      response = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
+    } catch (e) {
+      // A call that timed out with no turn budget left for another attempt is not an error to hand the
+      // owner — it is the clock, and the clock has a graceful exit. Anything else still propagates.
+      if (e instanceof LlmTimeoutError && !hasRoomForTimeoutRetry(turnRemainingMs(sessionId))) {
+        outOfTime = true;
+        console.warn(
+          `[turn-wrapup] session=${sessionId} the LLM call timed out with no budget for a retry — ` +
+            `wrapping up instead of failing the turn`,
+        );
+        break;
+      }
+      throw e;
+    }
 
     if (response.type === 'text') {
       // K2 HonestyGate: verify "completion claim vs actual tool results" **before** onDelta pushes text to the user.
@@ -11469,7 +11604,9 @@ async function runToolLoop(
   // assistant text means only force-START can fire here (force-CONTINUE keys off recited round text,
   // which does not exist yet at the cap) — correct: there is no narration to catch, only a missing engine.
   {
-    const forced = await decideForcedDeepExploreCall(sessionId, '', signalBus, Date.now());
+    // Never when the CLOCK ended the loop: a forced round is a fresh 15-minute engine call, and the whole
+    // point of stopping early was that there is no time left to spend.
+    const forced = outOfTime ? null : await decideForcedDeepExploreCall(sessionId, '', signalBus, Date.now());
     if (forced) {
       messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: forced.id, name: forced.name, input: forced.input }] });
       return await runToolLoop(
@@ -11488,7 +11625,9 @@ async function runToolLoop(
   onStatus?.(summarizingPhrase(statusLang));
   onTrace?.({
     kind: 'loop-control', tier: 4,
-    text: `Reached the ${effectiveMax}-round tool limit, forcing a summary`,
+    text: outOfTime
+      ? 'Out of time for this turn, forcing a summary'
+      : `Reached the ${effectiveMax}-round tool limit, forcing a summary`,
     meta: { iteration: effectiveMax },
   });
 
@@ -11518,7 +11657,11 @@ async function runToolLoop(
   try {
     pushGateDirective(
       messages,
-        `[drive maxIterations fallback] You have made ${totalToolCallsThisTurn} consecutive tool calls without giving the user a text reply.` +
+        (outOfTime
+          ? `[drive time-budget wrap-up] This turn has used its whole time budget (${Math.round(TURN_HARD_DEADLINE_MS / 60_000)} min) ` +
+            `after ${totalToolCallsThisTurn} tool calls, and there is only enough left for this one reply. ` +
+            `Say plainly that you ran out of time, and report what you ACTUALLY established — not what you intended to do.`
+          : `[drive maxIterations fallback] You have made ${totalToolCallsThisTurn} consecutive tool calls without giving the user a text reply.`) +
         `\n**No more tool calls are allowed.** Write a paragraph telling the user:` +
         `\n  - Which commands / paths you tried (list the 3-5 most important ones)` +
         `\n  - The specific reason each one failed (copy key phrases from the tool_result)` +
