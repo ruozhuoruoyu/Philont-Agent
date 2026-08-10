@@ -491,7 +491,17 @@ const REASONING_ROUND_RESULT_PATTERNS: ReadonlyArray<RegExp> = [
 export function findReasoningTerminalClaim(text: string): string | null {
   for (const re of REASONING_TERMINAL_PATTERNS) {
     const m = re.exec(text);
-    if (m) return m[0].slice(0, 60);
+    if (m) {
+      const matched = m[0];
+      // Positive terminal words inside an explicit denial are not terminal claims. Production example:
+      // “定理、未编译，我不声称已证” previously fired fabricated_reasoning_state on the word 已证.
+      const deniesPositiveClaim =
+        /(?:未|没有|尚未|并非|不(?:会|能)?声称|不能说|无法确认)[^。！？\n]{0,20}(?:已证|成立|proved|proven|solved)/i.test(matched) ||
+        /(?:not|never|cannot|can'?t|do not claim)[^.!?\n]{0,20}(?:proved|proven|solved)/i.test(matched);
+      const isExplicitImpossibilityConclusion = /(?:不能|无法|不可能).*(?:证明|证明路径)/.test(matched);
+      if (deniesPositiveClaim && !isExplicitImpossibilityConclusion) continue;
+      return matched.slice(0, 60);
+    }
   }
   return null;
 }

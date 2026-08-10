@@ -76,6 +76,24 @@ export function sanitizeToolInput(raw: unknown): SanitizeResult {
   };
 }
 
+/** Validate the security-relevant required-field subset before an invalid call can request approval. */
+export function validateRequiredToolInput(
+  input: SanitizedInput,
+  schema: Record<string, unknown> | undefined,
+): { valid: true } | { valid: false; reason: string } {
+  const required = Array.isArray(schema?.required)
+    ? schema.required.filter((v): v is string => typeof v === 'string')
+    : [];
+  const missing = required.filter((key) => {
+    if (!Object.prototype.hasOwnProperty.call(input, key)) return true;
+    const value = input[key];
+    return value === undefined || value === null;
+  });
+  return missing.length > 0
+    ? { valid: false, reason: `missing required field(s): ${missing.join(', ')}` }
+    : { valid: true };
+}
+
 function sanitizeStringInput(s: string): SanitizeResult {
   const trimmed = s.trim();
   if (trimmed.length === 0) {

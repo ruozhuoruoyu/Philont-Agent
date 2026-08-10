@@ -928,7 +928,9 @@ export function shouldTriggerReflection(
   const reasons: string[] = [];
 
   if (input.taskClosing) reasons.push('task_closing');
-  if (input.sameRootCauseFailures >= 3) reasons.push('same_root_cause_failures');
+  // Cross-turn history is context, not current-turn evidence. A clean turn must not inherit a
+  // failure trigger merely because an older episode used the same tool/signature.
+  if (input.sameRootCauseFailures >= 3 && input.toolFailures >= 1) reasons.push('same_root_cause_failures');
   if (input.honestyFired) reasons.push('honesty_fired');
   if (input.interruptDrained) reasons.push('interrupt_drained');
   if (input.turnCount >= 15) reasons.push('long_turn_count');

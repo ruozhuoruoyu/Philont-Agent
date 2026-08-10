@@ -366,6 +366,7 @@ import {
 import {
   sanitizeToolInput,
   sanitizeAssistantMessageBlocks,
+  validateRequiredToolInput,
 } from './sanitize_tool_input.js';
 import { renderDeterministicMaxIterSummary } from './max_iter_summary.js';
 import {
@@ -3531,6 +3532,8 @@ const TIMELINE_RECALL_BUDGET = Number(process.env.TIMELINE_RECALL_BUDGET) || 4_0
 
 /** Paused state: waiting for the user to authorize a tool call */
 interface PendingAuth {
+  /** Stable task goal captured before the authorization boundary; continuation words never replace it. */
+  goal: string;
   capability: string;
   domain:     string;
   toolName:   string;
@@ -3693,6 +3696,8 @@ const DEEP_EXPLORE_GRANT_TTL_MS = 60 * 60_000;
  * read/local path will not trigger pendingAuth), but outer handleChatSend checks pendingAuth first.
  */
 interface PendingQuestion {
+  /** Stable task goal captured before the question boundary. */
+  goal: string;
   toolCallId: string;
   question: string;
   options: ReadonlyArray<{ label: string; description?: string }>;
@@ -6635,8 +6640,38 @@ export async function handleChatSend(
   // K0: rebuild messages fresh each turn — prefer the inflight saved in pending-auth /
   // pending-question state (those carry tool_use that must have matching tool_result to resume),
   // otherwise recall from the global timeline.
+  let intentDecision: IntentDecision | null = null;
   const pending = pendingAuth.get(sessionId);
   const pendingQ = pendingQuestion.get(sessionId);
+  if (pendingQ?.goal) {
+    const carried = carriedIntent.get(sessionId);
+    signalBus.carriedExploreGoal = pendingQ.goal;
+    carriedIntent.set(sessionId, {
+      decision: carried?.decision ?? null,
+      selfReferentialMeta: carried?.selfReferentialMeta ?? false,
+      goal: pendingQ.goal,
+      ts: Date.now(),
+    });
+  }
+  if (pending) {
+    const carried = carriedIntent.get(sessionId);
+    const pendingGoal = pending.goal || carried?.goal || userMessage;
+    signalBus.carriedExploreGoal = pendingGoal;
+    carriedIntent.set(sessionId, {
+      decision: carried?.decision ?? null,
+      selfReferentialMeta: carried?.selfReferentialMeta ?? false,
+      goal: pendingGoal,
+      ts: Date.now(),
+    });
+    intentDecision = carried?.decision ?? null;
+    signalBus.intentDecision = carried?.decision ?? null;
+    signalBus.selfReferentialMeta = carried?.selfReferentialMeta ?? false;
+    if (carried?.decision) {
+      console.log(
+        `[intent-router] session=${sessionId} auth-resume: carried route=${carried.decision.route} conf=${carried.decision.confidence} (router skipped on resume)`,
+      );
+    }
+  }
 
   // 2026-05-12 Phase 7 hardened 1: automatic task mode classifier.
   // Evaluated before buildFreshMessages so that the "task mode self-assessment" section
@@ -6650,7 +6685,6 @@ export async function handleChatSend(
   // Misclassify fast→slow = soft cost (turn runs longer); misclassify slow→fast = impossible (one-directional).
   // intentDecision (aux-LLM 3-way router) is computed in the same gate and survives to the messages[0]
   // injection below, where a deep_explore route adds its nudge. plan route reuses this slow→plan path.
-  let intentDecision: IntentDecision | null = null;
   // Per-task re-classification (2026-07-01): the classifier + auto-plan-on-slow used to run ONLY on the first
   // fast→slow transition. But taskModeStore is sticky-slow, so once a session went slow a genuine multi-step
   // task arriving later (prod: mycox "read guide then register") skipped classification entirely and got NO
@@ -6731,43 +6765,6 @@ export async function handleChatSend(
         return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
       }
     }
-
-    // Pending-auth resume: restore the ORIGINAL message's intent decision (the router above was skipped
-  // because re-classifying the bare "ok" would produce a garbage `direct` route). Without this the
-  // deep_explore route is lost on resume and force-start can never fire. See carriedIntent.
-  //
-  // 2026-07-23: this block spent its whole life as DEAD CODE. It shipped (7a34cec) nested inside the
-  // auto-task-mode block, whose guard includes `!pending` — an `if (pending)` inside an `if (!pending …)`
-  // can never run. Nothing crashed and nothing logged, so nothing noticed: the resume flows it was written
-  // for still limped through because the inflight messages happen to carry the deep_explore nudge. What
-  // finally exposed it was a side effect three fixes away — the learning judge printing "original goal not
-  // recoverable" on every ask-tier-approved resume, and the `auth-resume: carried route` line having never
-  // once appeared in any production log. A fix whose effect is invisible-by-default needs its success line
-  // watched at least once in production before it may be called shipped.
-  if (pending) {
-    const carried = carriedIntent.get(sessionId);
-    if (carried && Date.now() - carried.ts <= INTENT_CARRY_TTL_MS) {
-      // A RESUME IS THE SAME TASK, SO IT MUST RESET THE CLOCK.
-      //
-      // The TTL exists to stop an unrelated LATER task inheriting a stale goal. A pending-auth resume is
-      // not a later task — it is the middle of this one — but only FRESH turns wrote the carry, so a long
-      // approval chain aged out while the work was still in progress. Prod 2026-07-29: the carry was last
-      // written at 12:18:44; the owner then sent only "ok" at 12:43, 12:47 and 12:49, and at 12:50:21 —
-      // 31.6 minutes, just past the cap — the judge printed `skipped (original goal not recoverable)`.
-      // Two minutes earlier, at 12:48:13, the same carried goal was still inside the window and the judge
-      // returned a real llm verdict on it. The mechanism worked; it timed out mid-task.
-      carriedIntent.set(sessionId, { ...carried, ts: Date.now() });
-      intentDecision = carried.decision;
-      signalBus.intentDecision = carried.decision;
-      signalBus.selfReferentialMeta = carried.selfReferentialMeta;
-      signalBus.carriedExploreGoal = carried.goal;
-      if (carried.decision) {
-        console.log(
-          `[intent-router] session=${sessionId} auth-resume: carried route=${carried.decision.route} conf=${carried.decision.confidence} (router skipped on resume)`,
-        );
-      }
-    }
-  }
 
   // Cleanup-turn scoping: (1) flag the turn so runToolLoop rejects external write http (clear
     // turns drifted into re-registering the service being cleared); (2) soft-pause schedules that
@@ -7626,12 +7623,9 @@ async function handleChatSendInner(
         ...(pending.priorInTurnRecords ?? []),
         ...(signalBus.inTurnRecords ?? []),
       ];
-      // Push the owner's approval message so the LLM has context for the resume.
-      // The deny path (below) pushes userMessage; the grant path did not — an asymmetry where
-      // the LLM never saw the owner's words on resume. In repeated auth-resume chains (multiple
-      // OK's in one task) the accumulated context loss produced malformed tool calls like
-      // writeFile({}) with path=undefined (prod 2026-08-09).
-      messages.push({ role: 'user', content: userMessage });
+      // Do not insert an ordinary user message between an assistant tool_use and its tool_result.
+      // The approval is already persisted in the raw timeline and represented by authApprovedCallId;
+      // inserting it here violates provider pairing invariants and caused adapter "missing=2" repairs.
       return runToolLoop(
         sessionId, messages, grants, audit,
         resumeCalls,
@@ -9619,7 +9613,23 @@ async function runToolLoop(
 
   for (const call of calls) {
     if (stopped()) return interruptedReturn();
-    const classification = tools.classify(call.name);
+    // Input is part of the authorization decision. Normalize and validate it BEFORE classification/
+    // policy checking so malformed calls can never create a reusable grant or a poisoned pending state.
+    const prepared = sanitizeToolInput(call.input);
+    const requiredCheck = prepared.input
+      ? validateRequiredToolInput(prepared.input, tools.get(call.name)?.schema)
+      : { valid: false as const, reason: prepared.reason ?? 'invalid tool input' };
+    if (!prepared.input || !requiredCheck.valid) {
+      const detail = requiredCheck.valid ? 'invalid tool input' : requiredCheck.reason;
+      const reason = `tool input format error, blocked before authorization: ${detail}`;
+      toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: reason });
+      totalToolCallsThisTurn++;
+      inTurnRecords.push({ toolName: call.name, success: false, resultText: reason });
+      console.warn(`[tool] ${call.name} → pre-auth input rejected: ${detail}`);
+      continue;
+    }
+    call.input = prepared.input;
+    const classification = tools.classify(call.name, call.input);
 
     // 2026-05-10: autonomous turn blacklist interception. Return failure as tool_result; the LLM
     // adapts to this turn's constraint without interrupting the turn (unlike auth_pending which halts the entire schedule).
@@ -9825,6 +9835,7 @@ async function runToolLoop(
       // Pause: save state, wait for user authorization
       const remainingCalls = calls.slice(calls.indexOf(call) + 1);
       pendingAuth.set(sessionId, {
+        goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
         capability, domain,
         toolName:   call.name,
         toolCallId: call.id,
@@ -9928,6 +9939,7 @@ async function runToolLoop(
 
       const remainingCalls = calls.slice(calls.indexOf(call) + 1);
       pendingQuestion.set(sessionId, {
+        goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
         toolCallId: call.id,
         question,
         options: optionsRaw,
@@ -11182,7 +11194,21 @@ async function runToolLoop(
     for (const call of response.calls) {
       // Interrupt teeth: user stopped → no longer execute subsequent tools; exit early.
       if (stopped()) return interruptedReturn();
-      const classification = tools.classify(call.name);
+      const prepared = sanitizeToolInput(call.input);
+      const requiredCheck = prepared.input
+        ? validateRequiredToolInput(prepared.input, tools.get(call.name)?.schema)
+        : { valid: false as const, reason: prepared.reason ?? 'invalid tool input' };
+      if (!prepared.input || !requiredCheck.valid) {
+        const detail = requiredCheck.valid ? 'invalid tool input' : requiredCheck.reason;
+        const reason = `tool input format error, blocked before authorization: ${detail}`;
+        nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: reason });
+        totalToolCallsThisTurn++;
+        inTurnRecords.push({ toolName: call.name, success: false, resultText: reason });
+        console.warn(`[tool] ${call.name} → pre-auth input rejected: ${detail}`);
+        continue;
+      }
+      call.input = prepared.input;
+      const classification = tools.classify(call.name, call.input);
       if (!classification) {
         nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: `Error: Unknown tool '${call.name}'` });
         totalToolCallsThisTurn++;
@@ -11552,6 +11578,7 @@ async function runToolLoop(
       if (!allowed) {
         const remainingCalls = response.calls.slice(response.calls.indexOf(call) + 1);
         pendingAuth.set(sessionId, {
+          goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
           capability, domain,
           toolName:   call.name,
           toolCallId: call.id,

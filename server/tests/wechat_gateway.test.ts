@@ -15,6 +15,7 @@ import {
   BACKOFF_DELAY_MS,
   SESSION_EXPIRED_PAUSE_MS,
   RATE_LIMIT_BASE_MS,
+  redactWeChatInboundForLog,
 } from '../src/channels/wechat/gateway.js';
 import type { WeChatCredentials } from '../src/channels/wechat/state.js';
 import { DEFAULT_POLICY } from '../src/channels/wechat/policy.js';
@@ -45,6 +46,22 @@ function makeCreds(): WeChatCredentials {
     createdAt: Date.now(),
   };
 }
+
+test('raw inbound logging redacts tokens and pseudonymizes identifiers', () => {
+  const safe = redactWeChatInboundForLog({
+    message_id: '7491988958783429000',
+    from_user_id: 'private-user@im.wechat',
+    to_user_id: 'private-bot@im.bot',
+    client_id: 'private-client',
+    context_token: 'secret-context-token',
+    item_list: [],
+  } as any);
+  assert.equal(safe.context_token, '[REDACTED]');
+  assert.equal(safe.client_id, '[REDACTED]');
+  assert.match(String(safe.from_user_id), /^sha256:/);
+  assert.doesNotMatch(JSON.stringify(safe), /private-user|secret-context-token|7491988958783429000/);
+  assert.equal('item_list' in safe, false);
+});
 
 /**
  * 受控 mock fetch:每个请求 lookup queue;支持把 stop 信号塞进序列(返回 null body)。

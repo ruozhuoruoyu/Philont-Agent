@@ -530,6 +530,15 @@ test('trigger: 同根因失败 ≥ 3 + 预算阀通过', () => {
   assert.equal(r.shouldFire, true);
 });
 
+test('trigger: stale same-root history alone does not contaminate a clean current turn', () => {
+  const r = shouldTriggerReflection({
+    turnCount: 5, toolFailures: 0, taskClosing: false, honestyFired: false,
+    interruptDrained: false, sameRootCauseFailures: 9, taskDurationMin: 5,
+  });
+  assert.equal(r.shouldFire, false);
+  assert.deepEqual(r.reasons, []);
+});
+
 test('trigger: HonestyGate 触发', () => {
   const r = shouldTriggerReflection({
     turnCount: 5,

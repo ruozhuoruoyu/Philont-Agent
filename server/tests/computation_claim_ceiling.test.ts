@@ -79,6 +79,16 @@ test('proposing a computation is not claiming one', async () => {
   );
 });
 
+test('historical and explicit could-not-verify reports bypass the model ceiling', async () => {
+  let called = false;
+  const call = async () => { called = true; return 'ASSERTS'; };
+  assert.equal(
+    await adjudicateComputationClaim('历史记录显示上一轮 z3Verify 验证通过；本轮没有机会重跑验证。', ['z3Verify'], call),
+    'does_not_assert',
+  );
+  assert.equal(called, false);
+});
+
 test('an unreachable or junk judge leaves exactly the pattern floor', async () => {
   for (const answer of ['', 'maybe?', '{"pending":true}']) {
     assert.equal(await adjudicateComputationClaim(PROD, ['pariGp'], async () => answer), 'unknown');

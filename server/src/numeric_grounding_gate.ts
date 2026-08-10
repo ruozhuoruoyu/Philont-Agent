@@ -55,7 +55,13 @@ const COMPUTE_CLAIM_RE =
 
 // Hedges / negations / intentions that mean NO accomplished-computation claim is being made — suppress.
 const ANTI_CLAIM_RE =
-  /(我?(将|要|想|打算|计划|准备|会去?)\s*(计算|验证|跑|运行)|尚未|还没|没能|未能|无法(验证|计算|跑)|不能(验证|计算)|待核实|未验证|无法确认|plan to|going to|will (?:compute|verify|run|try)|could not (?:verify|compute|run)|couldn'?t (?:verify|compute|run)|unable to (?:verify|compute|run)|was not able to|failed to (?:compute|verify|run)|did not (?:run|compute|verify))/i;
+  /(我?(将|要|想|打算|计划|准备|会去?)\s*(计算|验证|跑|运行)|尚未|还没|没能|未能|没有机会(?:重跑|运行|验证|计算)|无法(验证|计算|跑)|不能(验证|计算)|待核实|未验证|无法确认|非本轮(?:运行|执行|验证|计算|在线核查)|(?:此前|上一轮|历史记录|既有记录)[^。！？\n]{0,24}(?:显示|记载|结果|运行|验证)|plan to|going to|will (?:compute|verify|run|try)|could not (?:verify|compute|run)|couldn'?t (?:verify|compute|run)|unable to (?:verify|compute|run)|was not able to|failed to (?:compute|verify|run)|did not (?:run|compute|verify)|not run this turn|from (?:an )?(?:earlier|previous) (?:turn|session|record))/i;
+
+// Narrow whole-reply semantics for the model ceiling. Do not reuse ANTI_CLAIM_RE here: a genuine
+// fabricated report can contain a local mathematical phrase such as “未能超过阈值” while still claiming
+// that the run happened. Only explicit evidence-time or inability-to-run wording bypasses adjudication.
+const EXPLICIT_NON_CURRENT_COMPUTE_RE =
+  /(?:本轮|这(?:一)?轮)[^。！？\n]{0,18}(?:没有机会|未能|没能|无法|未|没有)(?:重跑|运行|执行|验证|计算)|非本轮(?:运行|执行|验证|计算|在线核查)|(?:此前|上一轮|历史记录|既有记录)[^。！？\n]{0,24}(?:显示|记载|结果|运行|验证)|not run this turn|from (?:an )?(?:earlier|previous) (?:turn|session|record)/i;
 
 // Numeric RESULT tokens: a number attached to a result marker / math quantity. Avoids firing on
 // incidental integers like "3 candidates" or "N=20 case" alone (those need a result context).
@@ -198,6 +204,8 @@ export async function adjudicateComputationClaim(
   tools: readonly string[],
   call?: (req: { system: string; user: string; maxTokens?: number }) => Promise<string>,
 ): Promise<ComputationClaimVerdict> {
+  // The model ceiling must obey the same polarity/evidence-time semantics as the deterministic floor.
+  if (EXPLICIT_NON_CURRENT_COMPUTE_RE.test(text)) return 'does_not_assert';
   const fn = call ?? (isAuxLLMConfigured() ? callAuxLLM : null);
   if (!fn) return 'unknown';
   try {

@@ -27,6 +27,7 @@ import {
 import { ILinkClient } from './client.js';
 import {
   ILinkGateway, superviseGatewayStart,
+  pseudonymizeWeChatId,
   type InboundEvent,
   type GatewayLogger,
 } from './gateway.js';
@@ -125,7 +126,8 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
   const SEND_HARD_TIMEOUT_MS = 25_000;
   const rawSender: RawSender = async (to, text) => {
     const startedAt = Date.now();
-    logger.info('outbound sender starting', { to, len: text.length });
+    const safeTo = pseudonymizeWeChatId(to);
+    logger.info('outbound sender starting', { to: safeTo, len: text.length });
     // The push path's missing half (reference: hermes weixin.py — every outbound must echo the peer's
     // latest context_token, from a disk cache updated on inbound). Twelve hours of production drew the
     // line precisely: replies (which echo the inbound token) worked the whole time; tokenless pushes
@@ -150,20 +152,20 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
       const cachedToken = readPeerToken(creds.accountId, to);
       let r = await attempt(cachedToken);
       if (r.ret !== 0 && cachedToken) {
-        logger.warn(`sendText with cached token ret=${r.ret} — retrying tokenless`, { to });
+        logger.warn(`sendText with cached token ret=${r.ret} — retrying tokenless`, { to: safeTo });
         r = await attempt(null);
       }
       const dur = Date.now() - startedAt;
       if (r.ret === 0) {
-        logger.info('outbound sender ok', { to, durationMs: dur, messageId: r.message_id });
+        logger.info('outbound sender ok', { to: safeTo, durationMs: dur, messageId: pseudonymizeWeChatId(r.message_id) });
         return { ok: true, messageId: r.message_id };
       }
       // -14 token expired: not handled here; the gateway's long-poll will also catch it
-      logger.warn(`sendText ret=${r.ret} errmsg=${r.errmsg ?? ''}`, { to, durationMs: dur });
+      logger.warn(`sendText ret=${r.ret} errmsg=${r.errmsg ?? ''}`, { to: safeTo, durationMs: dur });
       return { ok: false };
     } catch (e) {
       const dur = Date.now() - startedAt;
-      logger.error(`sendText threw: ${String(e)}`, { to, durationMs: dur });
+      logger.error(`sendText threw: ${String(e)}`, { to: safeTo, durationMs: dur });
       return { ok: false };
     }
   };

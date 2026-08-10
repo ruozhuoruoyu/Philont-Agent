@@ -8,6 +8,7 @@ import {
   sanitizeToolInput,
   findFirstObjectEnd,
   sanitizeAssistantMessageBlocks,
+  validateRequiredToolInput,
 } from '../src/sanitize_tool_input.js';
 
 // ── 路径 1:object 直接通过 ─────────────────────────────────────────────
@@ -22,6 +23,19 @@ test('object: 空对象也通过', () => {
   const r = sanitizeToolInput({});
   assert.equal(r.path, 'object');
   assert.deepEqual(r.input, {});
+});
+
+test('required schema validation rejects an empty call before authorization', () => {
+  const r = validateRequiredToolInput({}, { required: ['path', 'content'] });
+  assert.equal(r.valid, false);
+  if (!r.valid) assert.match(r.reason, /path, content/);
+});
+
+test('required schema validation accepts present fields', () => {
+  assert.deepEqual(
+    validateRequiredToolInput({ path: '/tmp/x', content: 'x' }, { required: ['path', 'content'] }),
+    { valid: true },
+  );
 });
 
 // ── 路径 2:string 单 JSON ──────────────────────────────────────────────

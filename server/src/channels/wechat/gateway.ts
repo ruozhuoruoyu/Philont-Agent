@@ -29,6 +29,7 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   ILinkClient,
   type GetUpdatesResponse,
@@ -54,6 +55,30 @@ import {
   releaseLock,
   getInboxDir,
 } from './state.js';
+
+const WECHAT_SECRET_LOG_KEYS = new Set(['context_token', 'client_id']);
+const WECHAT_ID_LOG_KEYS = new Set(['from_user_id', 'to_user_id', 'group_id', 'message_id']);
+
+export function pseudonymizeWeChatId(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  return `sha256:${createHash('sha256').update(String(value)).digest('hex').slice(0, 12)}`;
+}
+
+/** Log-safe copy: tokens are removed and identifiers are stable pseudonyms, never raw personal data. */
+export function redactWeChatInboundForLog(msg: InboundMessage): Record<string, unknown> {
+  const dump: Record<string, unknown> = {};
+  for (const k of Object.keys(msg)) {
+    if (k === 'item_list') continue;
+    if (WECHAT_SECRET_LOG_KEYS.has(k)) {
+      dump[k] = '[REDACTED]';
+    } else if (WECHAT_ID_LOG_KEYS.has(k)) {
+      dump[k] = pseudonymizeWeChatId((msg as unknown as Record<string, unknown>)[k]);
+    } else {
+      dump[k] = (msg as unknown as Record<string, unknown>)[k];
+    }
+  }
+  return dump;
+}
 import {
   checkInboundPolicy,
   type PolicyConfig,
@@ -406,26 +431,19 @@ export class ILinkGateway {
     }
 
     this.logger.info(`inbound ${inboundIsGroup(msg) ? 'GROUP' : 'DM'}`, {
-      from: fromUserId,
-      group: groupId || undefined,
+      from: pseudonymizeWeChatId(fromUserId),
+      group: pseudonymizeWeChatId(groupId),
       preview: text.slice(0, 40),
     });
     // Debug: dump raw msg (condensed, skipping item_list to avoid log explosion) to help
     // detect field semantic differences
-    {
-      const dump: Record<string, unknown> = {};
-      for (const k of Object.keys(msg)) {
-        if (k === 'item_list') continue;
-        dump[k] = (msg as any)[k];
-      }
-      this.logger.info('inbound raw', dump);
-    }
+    this.logger.info('inbound raw', redactWeChatInboundForLog(msg));
 
     let reply: string | void;
     try {
       reply = await this.dispatch(event);
     } catch (e) {
-      this.logger.error(`dispatch threw: ${String(e)}`, { messageId: event.messageId });
+      this.logger.error(`dispatch threw: ${String(e)}`, { messageId: pseudonymizeWeChatId(event.messageId) });
       return;
     }
 
@@ -435,7 +453,7 @@ export class ILinkGateway {
       try {
         await this.client.sendText(to, reply, { contextToken: msg.context_token });
       } catch (e) {
-        this.logger.error(`send reply failed: ${String(e)}`, { to });
+        this.logger.error(`send reply failed: ${String(e)}`, { to: pseudonymizeWeChatId(to) });
       }
     }
   }
