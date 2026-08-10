@@ -10012,8 +10012,10 @@ async function runToolLoop(
       return { outcome: { outcomeType: 'question_pending' }, auditEvents: audit.length };
     }
 
-    const inputPreview = JSON.stringify(call.input).slice(0, 300);
-    console.log(`[tool] ${call.name}(${inputPreview})`);
+    // Never dump raw tool arguments to process logs. Inputs routinely contain credentials,
+    // document contents, private queries, or shell commands with inline tokens. Detailed but
+    // purpose-built summaries belong to the trace stream below; the server log needs only the name.
+    console.log(`[tool] ${call.name} invoked`);
     // 2026-05-19 three-stream separation: tool call details → Tier 3 onTrace; semantic progress → Tier 2 onStatus
     onTrace?.({
       kind: 'tool-invocation', tier: 3,

@@ -181,7 +181,7 @@ test('evict: 非 tool_result(纯 text user/assistant)不被动', () => {
 
 // ── evictForEmergency(400 兜底路径) ──────────────────────────────────────
 
-test('emergency: 激进驱逐但保留最近 2 条(防失忆)', () => {
+test('emergency: 驱逐旧结果并保留最近 2 条的关键前缀(必要时硬截)', () => {
   const bigText = 'x'.repeat(100_000);
   const msgs: NativeMessage[] = [];
   for (let i = 0; i < 6; i++) {
@@ -190,14 +190,17 @@ test('emergency: 激进驱逐但保留最近 2 条(防失忆)', () => {
   }
   const r = evictForEmergency(msgs);
   assert.ok(r.didEvict);
-  // 最早 4 条应被占位,最后 2 条原样(6 total - keepRecent=2)
+  // 最早 4 条应被占位；最后 2 条不会被驱逐，但预算仍超限时允许 Pass 3 硬截。
   const firstTr = msgs[1].content as Array<{ content: string }>;
   assert.ok(firstTr[0].content.startsWith('[philont: tool result evicted]'));
-  // 最后两条不被动 — 这是"你想下载什么"失忆 bug 的关键修复
+  // 最近结果的开头仍保留，避免“刚取得什么”失忆；不能要求 100K 原样保留，
+  // 否则两条结果本身就会超过 96K emergency budget。
   const lastTr = msgs[11].content as Array<{ content: string }>;
-  assert.equal(lastTr[0].content.length, bigText.length);
+  assert.ok(lastTr[0].content.startsWith('x'.repeat(1_000)));
+  assert.ok(lastTr[0].content.length < bigText.length);
   const secondLastTr = msgs[9].content as Array<{ content: string }>;
-  assert.equal(secondLastTr[0].content.length, bigText.length);
+  assert.ok(secondLastTr[0].content.startsWith('x'.repeat(1_000)));
+  assert.ok(secondLastTr[0].content.length < bigText.length);
 });
 
 test('emergency: Pass3 兜底 — 连最近的巨型 tool_result 也会被硬截(防 keepRecent 保护导致窗口爆)', () => {
@@ -247,7 +250,7 @@ test('emergency: Pass2 截断早期巨型 user/assistant 文本(不依赖 tool_r
 });
 
 test('emergency: Pass2 也能处理 text block 数组', () => {
-  // 要超过 emergencyBudgetTokens=200_000,chars * 0.6 要 > 200K,故 ≥ 400K chars
+  // Far above the emergency budget, so the last-resort text-block truncation must run.
   const hugeText = 'z'.repeat(400_000);
   const msgs: NativeMessage[] = [
     {
@@ -271,5 +274,6 @@ test('defaults 合理', () => {
   assert.ok(DEFAULTS.maxSingleToolResultBytes >= 64_000);
   assert.ok(DEFAULTS.maxSingleToolResultBytes <= 100_000);
   assert.ok(DEFAULTS.contextBudgetTokens > 100_000);
+  assert.ok(DEFAULTS.emergencyBudgetTokens < DEFAULTS.contextBudgetTokens);
   assert.ok(DEFAULTS.keepRecentToolResults >= 1);
 });

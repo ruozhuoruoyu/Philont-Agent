@@ -2,7 +2,7 @@
  * Message budget: prevents messages[] from growing unboundedly and causing LLM 400 errors.
  *
  * Two layers of protection:
- *   1. truncateToolResultContent: hard cap per tool_result (~2MB),
+ *   1. truncateToolResultContent: hard cap per tool_result (64KB by default),
  *      preventing a single malformed output from blowing the window. Call before push.
  *   2. evictOldToolResults: when total messages[] tokens exceed the budget,
  *      replace "old" tool_result content with a placeholder,
@@ -27,7 +27,7 @@ export const DEFAULTS = {
   /** Number of most recent tool_results to keep on normal eviction */
   keepRecentToolResults: 4,
   /** Tighter budget for emergency (ContextTooLargeError fallback) */
-  emergencyBudgetTokens: 200_000,
+  emergencyBudgetTokens: 96_000,
   /** Emergency eviction still keeps at least the 2 most recent tool_results, ensuring
    *  key facts like URLs / file paths from the current task are not wiped — this is
    *  the root cause of the "amnesia" bug */
