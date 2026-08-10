@@ -369,6 +369,7 @@ import {
   validateRequiredToolInput,
 } from './sanitize_tool_input.js';
 import { renderDeterministicMaxIterSummary } from './max_iter_summary.js';
+import { deleteContinuation, loadContinuations, saveContinuation } from './continuation_store.js';
 import {
   computeViability,
   viabilityActuatorRelevant,
@@ -3527,13 +3528,14 @@ const timelineRetriever = new TimelineRetriever(memory.raw);
  * so that the most recent ~10-15 turns clearly dominate LLM attention. The old 80K + 40K empirically caused
  * the 3 most recent key messages to be drowned out by hundreds of irrelevant old history entries.
  */
-const TIMELINE_RECENT_BUDGET = Number(process.env.TIMELINE_RECENT_BUDGET) || 8_000;
-const TIMELINE_RECALL_BUDGET = Number(process.env.TIMELINE_RECALL_BUDGET) || 4_000;
+const TIMELINE_RECENT_BUDGET = Number(process.env.TIMELINE_RECENT_BUDGET) || 5_000;
+const TIMELINE_RECALL_BUDGET = Number(process.env.TIMELINE_RECALL_BUDGET) || 2_000;
 
 /** Paused state: waiting for the user to authorize a tool call */
 interface PendingAuth {
   /** Stable task goal captured before the authorization boundary; continuation words never replace it. */
   goal: string;
+  callLedger: Array<{ id: string; name: string; state: 'completed' | 'awaiting_auth' | 'queued' }>;
   capability: string;
   domain:     string;
   toolName:   string;
@@ -3698,6 +3700,7 @@ const DEEP_EXPLORE_GRANT_TTL_MS = 60 * 60_000;
 interface PendingQuestion {
   /** Stable task goal captured before the question boundary. */
   goal: string;
+  callLedger: Array<{ id: string; name: string; state: 'completed' | 'awaiting_user' | 'queued' }>;
   toolCallId: string;
   question: string;
   options: ReadonlyArray<{ label: string; description?: string }>;
@@ -3713,6 +3716,26 @@ interface PendingQuestion {
 const pendingQuestion = new Map<string, PendingQuestion>();
 /** Maximum wait time for the user to reply to askUserQuestion; expired requests are treated as "abandoned" */
 const QUESTION_TTL_MS = 10 * 60_000;
+
+for (const stored of loadContinuations()) {
+  if (stored.auth) pendingAuth.set(stored.sessionId, stored.auth as PendingAuth);
+  if (stored.question) pendingQuestion.set(stored.sessionId, stored.question as PendingQuestion);
+}
+
+function persistContinuation(sessionId: string): void {
+  try {
+    const auth = pendingAuth.get(sessionId);
+    const question = pendingQuestion.get(sessionId);
+    if (!auth && !question) {
+      deleteContinuation(sessionId);
+      return;
+    }
+    saveContinuation({ version: 1, sessionId, savedAt: Date.now(), auth, question });
+  } catch (e) {
+    // Durability is a recovery aid; a transient disk problem must not break the live turn.
+    console.warn('[continuation-store] persist failed; keeping in-memory continuation', e);
+  }
+}
 
 // Track active sessions for extraction at session end
 const activeSessions = new Set<string>();
@@ -4163,9 +4186,9 @@ function buildSkillUpdateMessage(): string {
  *
  * - Per session-summary injection cap: 3KB (a genuinely useful summary will not exceed this)
  * - Per userFacts / projectFacts value injection cap: 1KB
- * - Total prefix cap: 40KB (approx. 12K tokens, leaving the vast majority of the window for conversation)
+ * - Total prefix cap: configurable, 24KB by default, leaving room for current-task context
  */
-const MEMORY_PREFIX_TOTAL_CAP = 40_000;
+const MEMORY_PREFIX_TOTAL_CAP = Number(process.env.MEMORY_PREFIX_TOTAL_CAP) || 24_000;
 const SESSION_SUMMARY_INJECT_CAP = 3_000;
 const FACT_VALUE_INJECT_CAP = 1_000;
 /**
@@ -7030,11 +7053,14 @@ export async function handleChatSend(
     }
   }
 
+  const recallInput = messageIsSelfContainedGoal(userMessage)
+    ? userMessage
+    : (signalBus.carriedExploreGoal ?? userMessage);
   const messages: NativeMessage[] = pending
     ? [...pending.inflightMessages]
     : pendingQ
     ? [...pendingQ.inflightMessages]
-    : buildFreshMessages(userMessage, sessionId, signalBus);
+    : buildFreshMessages(recallInput, sessionId, signalBus);
 
   // Phase 11 (2026-05-14): per-turn messages reference for plan_review tool to check
   // "most recent assistant text" when detecting the self-review section.
@@ -7368,6 +7394,7 @@ export async function handleChatSend(
     // pendingQuestion, otherwise the next message will erroneously enter the grant/deny or question branch.
     pendingAuth.delete(sessionId);
     pendingQuestion.delete(sessionId);
+    persistContinuation(sessionId);
     const dur = Date.now() - turnStartedAt;
     // Interrupt teeth: user mid-turn stop cancelled the in-flight LLM call → clean exit as interrupted,
     // not an error. The runToolLoop boundary-check path already returns interrupted directly and does not reach here;
@@ -7556,7 +7583,6 @@ async function handleChatSendInner(
   // ── Check for pending authorization requests ──────────────────────────────────────────────────
   const pending = pendingAuth.get(sessionId);
   if (pending) {
-    pendingAuth.delete(sessionId);
 
     // Expired pending → abandon it and handle the message as a normal turn (the auth card said
     // "valid for 10 min"). Without this, a stale pending makes every later message run through
@@ -7626,7 +7652,7 @@ async function handleChatSendInner(
       // Do not insert an ordinary user message between an assistant tool_use and its tool_result.
       // The approval is already persisted in the raw timeline and represented by authApprovedCallId;
       // inserting it here violates provider pairing invariants and caused adapter "missing=2" repairs.
-      return runToolLoop(
+      const resumed = await runToolLoop(
         sessionId, messages, grants, audit,
         resumeCalls,
         pending.collectedResults,
@@ -7634,7 +7660,12 @@ async function handleChatSendInner(
         onDelta, onAuthRequest,
         signalBus, onStatus, onTrace, statusLang,
       );
+      if (pendingAuth.get(sessionId) === pending) pendingAuth.delete(sessionId);
+      persistContinuation(sessionId);
+      return resumed;
     } else if (intent === 'deny') {
+      pendingAuth.delete(sessionId);
+      persistContinuation(sessionId);
       onTrace?.({
         kind: 'auth-decision', tier: 4,
         text: `已拒绝 ${pending.toolName}`,
@@ -7686,6 +7717,8 @@ async function handleChatSendInner(
         : `Reply to ${pending.toolName} auth was not allow/deny; handling message as a normal turn`,
       meta: { toolName: pending.toolName },
     });
+    pendingAuth.delete(sessionId);
+    persistContinuation(sessionId);
     // fall through to normal turn processing below
   }
 
@@ -7761,11 +7794,12 @@ async function handleChatSendInner(
   // wraps the user reply as a tool_result and injects it, then continues runToolLoop.
   const pendingQ = pendingQuestion.get(sessionId);
   if (pendingQ) {
-    pendingQuestion.delete(sessionId);
 
     // Timeout: treat as "give up" — return a cancelled placeholder for the current tool_call + skip
     // remaining calls; let the LLM decide how to proceed based on history.
     if (Date.now() - pendingQ.createdAt > QUESTION_TTL_MS) {
+      pendingQuestion.delete(sessionId);
+      persistContinuation(sessionId);
       const cancelledResults = [
         ...pendingQ.collectedResults,
         {
@@ -7801,6 +7835,7 @@ async function handleChatSendInner(
       // Parse failed → re-send the same question and put pending back to continue waiting
       onDelta(parsed.message);
       pendingQuestion.set(sessionId, pendingQ);
+      persistContinuation(sessionId);
       return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
     }
 
@@ -7813,7 +7848,7 @@ async function handleChatSendInner(
         content: parsed.content,
       },
     ];
-    return runToolLoop(
+    const resumed = await runToolLoop(
       sessionId, messages, grants, audit,
       pendingQ.remainingCalls,
       allResults,
@@ -7821,6 +7856,9 @@ async function handleChatSendInner(
       onDelta, onAuthRequest,
       signalBus, onStatus, onTrace, statusLang,
     );
+    if (pendingQuestion.get(sessionId) === pendingQ) pendingQuestion.delete(sessionId);
+    persistContinuation(sessionId);
+    return resumed;
   }
 
   // ── Normal message: enter the tool call loop ────────────────────────────────────────────
@@ -9836,6 +9874,11 @@ async function runToolLoop(
       const remainingCalls = calls.slice(calls.indexOf(call) + 1);
       pendingAuth.set(sessionId, {
         goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
+        callLedger: [
+          ...toolResults.map((r) => ({ id: r.tool_use_id, name: 'completed', state: 'completed' as const })),
+          { id: call.id, name: call.name, state: 'awaiting_auth' as const },
+          ...remainingCalls.map((c) => ({ id: c.id, name: c.name, state: 'queued' as const })),
+        ],
         capability, domain,
         toolName:   call.name,
         toolCallId: call.id,
@@ -9849,6 +9892,7 @@ async function runToolLoop(
         priorInTurnRecords: [...(signalBus.inTurnRecords ?? [])],
         ts: Date.now(),
       });
+      persistContinuation(sessionId);
 
       onAuthRequest({ toolName: call.name, capability, domain, input: call.input });
       return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
@@ -9940,6 +9984,11 @@ async function runToolLoop(
       const remainingCalls = calls.slice(calls.indexOf(call) + 1);
       pendingQuestion.set(sessionId, {
         goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
+        callLedger: [
+          ...toolResults.map((r) => ({ id: r.tool_use_id, name: 'completed', state: 'completed' as const })),
+          { id: call.id, name: call.name, state: 'awaiting_user' as const },
+          ...remainingCalls.map((c) => ({ id: c.id, name: c.name, state: 'queued' as const })),
+        ],
         toolCallId: call.id,
         question,
         options: optionsRaw,
@@ -9950,6 +9999,7 @@ async function runToolLoop(
         inflightMessages: [...messages],
         createdAt: Date.now(),
       });
+      persistContinuation(sessionId);
 
       memory.actions.log({
         sessionId: GLOBAL_TIMELINE_SESSION_ID,
@@ -11579,6 +11629,11 @@ async function runToolLoop(
         const remainingCalls = response.calls.slice(response.calls.indexOf(call) + 1);
         pendingAuth.set(sessionId, {
           goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
+          callLedger: [
+            ...nextResults.map((r) => ({ id: r.tool_use_id, name: 'completed', state: 'completed' as const })),
+            { id: call.id, name: call.name, state: 'awaiting_auth' as const },
+            ...remainingCalls.map((c) => ({ id: c.id, name: c.name, state: 'queued' as const })),
+          ],
           capability, domain,
           toolName:   call.name,
           toolCallId: call.id,
@@ -11590,6 +11645,7 @@ async function runToolLoop(
           priorInTurnRecords: [...(signalBus.inTurnRecords ?? [])],
           ts: Date.now(),
         });
+        persistContinuation(sessionId);
 
         onAuthRequest({ toolName: call.name, capability, domain, input: call.input });
         return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };

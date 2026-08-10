@@ -932,7 +932,12 @@ export function shouldTriggerReflection(
   // failure trigger merely because an older episode used the same tool/signature.
   if (input.sameRootCauseFailures >= 3 && input.toolFailures >= 1) reasons.push('same_root_cause_failures');
   if (input.honestyFired) reasons.push('honesty_fired');
-  if (input.interruptDrained) reasons.push('interrupt_drained');
+  // Drained idle observations are background context, not evidence that this turn deserves
+  // another LLM reflection. They may strengthen a reflection triggered by a real event, but
+  // must never create one by themselves.
+  const hasConcreteTurnSignal =
+    input.taskClosing || input.toolFailures >= 1 || input.honestyFired || input.turnDegraded === true;
+  if (input.interruptDrained && hasConcreteTurnSignal) reasons.push('interrupt_drained');
   if (input.turnCount >= 15) reasons.push('long_turn_count');
   if (input.taskDurationMin >= 20) reasons.push('long_duration');
   if (input.turnDegraded === true) reasons.push('turn_degraded');

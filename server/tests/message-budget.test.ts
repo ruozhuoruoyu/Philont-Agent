@@ -267,7 +267,9 @@ test('emergency: Pass2 也能处理 text block 数组', () => {
 // ── 默认值 sanity ─────────────────────────────────────────────────────────
 
 test('defaults 合理', () => {
-  assert.ok(DEFAULTS.maxSingleToolResultBytes > 100_000);
+  // Large enough for useful source/output, bounded enough that one tool cannot dominate context.
+  assert.ok(DEFAULTS.maxSingleToolResultBytes >= 64_000);
+  assert.ok(DEFAULTS.maxSingleToolResultBytes <= 100_000);
   assert.ok(DEFAULTS.contextBudgetTokens > 100_000);
   assert.ok(DEFAULTS.keepRecentToolResults >= 1);
 });

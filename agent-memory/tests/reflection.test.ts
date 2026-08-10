@@ -609,6 +609,15 @@ test('trigger: 任何入口未命中 → 不触发', () => {
   assert.equal(r.reasons.length, 0);
 });
 
+test('trigger: idle observations alone do not trigger another reflection', () => {
+  const r = shouldTriggerReflection({
+    turnCount: 8, toolFailures: 0, taskClosing: false, honestyFired: false,
+    interruptDrained: true, sameRootCauseFailures: 0, taskDurationMin: 5,
+  });
+  assert.equal(r.shouldFire, false);
+  assert.deepEqual(r.reasons, []);
+});
+
 // ── renderReflectionPrompt ─────────────────────────────────────────────
 
 test('renderPrompt: 含 schema 字段提示与原因', () => {

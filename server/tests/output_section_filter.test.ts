@@ -50,6 +50,12 @@ Tried 3 methods; pdf2docx failed on the scanned input, camscanner skill worked.`
   assert.doesNotMatch(r.text, /Work Log/);
 });
 
+test('filter(i18n): 重复的 For User 协议标题不会出现在回复里', () => {
+  const r = extractUserSection('## For User\n## For User\nDone.\n## Work Log\ninternal');
+  assert.equal(r.usedSection, true);
+  assert.equal(r.text, 'Done.');
+});
+
 test('filter(i18n): 缺 user 段时取英文 Work Log 之前内容(策略2)', () => {
   const text = `Here is the short answer for you.
 

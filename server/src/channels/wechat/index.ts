@@ -381,13 +381,13 @@ function makeDispatcher(opts: {
     // at least 4s apart. OutboundQueue already handles chunk-level dedup + 0.3s rate-limit;
     // this adds a semantic throttle layer to prevent the LLM calling webSearch 5 times rapidly
     // and flooding the user.
-    const STATUS_MIN_INTERVAL_MS = 4_000;
+    const STATUS_MIN_INTERVAL_MS = 15_000;
     const STATUS_DEDUP_WINDOW_MS = 30_000;
     // Hard per-turn cap. WeChat limits how many bot messages ONE inbound message may earn; a long
     // turn (59 tools + gate regens) sent 10 throttled statuses and the FINAL REPLY was rejected
     // with ret=-2 (quota) — the user saw progress then silence. The final reply must always have
     // quota left, so statuses stop after the cap regardless of throttle windows.
-    const STATUS_MAX_PER_TURN = 4;
+    const STATUS_MAX_PER_TURN = 2;
     const recentStatus = new Map<string, number>(); // text → last send timestamp
     let lastStatusAt = 0;
     let statusSentCount = 0;
@@ -412,7 +412,10 @@ function makeDispatcher(opts: {
     try {
       await chatSend(sessionId, event.text, onDelta, onAuthRequest, onStatus);
     } catch (e) {
-      logger.error(`chatSend threw: ${String(e)}`, { sessionId, from: event.fromUserId });
+      logger.error(`chatSend threw: ${String(e)}`, {
+        sessionId: pseudonymizeWeChatId(sessionId),
+        from: pseudonymizeWeChatId(event.fromUserId),
+      });
       // Send a fallback to the user to avoid a completely silent failure.
       //
       // 2026-08-04: three of these in five hours, each 19 characters, each in fact caused by the HOST

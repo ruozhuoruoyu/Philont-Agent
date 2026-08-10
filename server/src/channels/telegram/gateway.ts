@@ -15,6 +15,10 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { TelegramClient, TelegramUpdate } from './client.js';
+import { createHash } from 'node:crypto';
+
+const safeTelegramId = (value: string | number): string =>
+  `tg_${createHash('sha256').update(String(value)).digest('hex').slice(0, 12)}`;
 
 /** Normalised inbound event, passed to dispatch (same shape as wechat InboundEvent, self-contained per channel). */
 export interface InboundEvent {
@@ -121,7 +125,7 @@ export class TelegramGateway {
         try {
           await this.dispatch(event);
         } catch (e) {
-          this.logger.error(`dispatch threw: ${String(e)}`, { fromUserId: event.fromUserId });
+          this.logger.error(`dispatch threw: ${String(e)}`, { fromUserId: safeTelegramId(event.fromUserId) });
         }
       }
       if (updates.length > 0) this.saveOffset();

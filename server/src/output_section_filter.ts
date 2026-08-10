@@ -82,7 +82,7 @@ export function extractUserSection(fullText: string): FilterResult {
     if (explicit.length < 80 && stripped.length > 300 && stripped.length > explicit.length * 3) {
       return { text: stripped, usedSection: false };
     }
-    return { text: explicit, usedSection: true };
+    return { text: stripRepeatedUserHeading(explicit), usedSection: true };
   }
 
   // Strategy 2: ## Work Log present but no explicit user section → take content before work log
@@ -119,6 +119,13 @@ export function extractUserSection(fullText: string): FilterResult {
     };
   }
   return { text: stripped, usedSection: false };
+}
+
+/** Models occasionally emit the protocol heading twice. It is framing, never user content. */
+function stripRepeatedUserHeading(text: string): string {
+  const lines = text.split('\n');
+  while (lines.length > 0 && USER_SECTION_HEADING.test(lines[0]!)) lines.shift();
+  return lines.join('\n').trim();
 }
 
 /**

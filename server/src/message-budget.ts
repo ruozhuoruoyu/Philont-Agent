@@ -17,12 +17,13 @@
 import type { NativeMessage } from './llm-adapter.js';
 
 export const DEFAULTS = {
-  /** Per-tool_result hard truncation threshold (chars). 500KB chars ≈ 300K tokens,
-   *  already 30% of a 1M window. Any single result exceeding this means the tool
+  /** Per-tool_result hard truncation threshold (chars). 64KB is enough for source and
+   *  diagnostics without allowing one verbose tool to dominate the next model call.
+   *  Any single result exceeding this means the tool
    *  should emit smaller output — the window should not accommodate the tool. */
-  maxSingleToolResultBytes: 500_000,
+  maxSingleToolResultBytes: 64_000,
   /** messages[] total token budget for normal pre-compression. Leaves 30% headroom for estimation error. */
-  contextBudgetTokens: 700_000,
+  contextBudgetTokens: 160_000,
   /** Number of most recent tool_results to keep on normal eviction */
   keepRecentToolResults: 4,
   /** Tighter budget for emergency (ContextTooLargeError fallback) */

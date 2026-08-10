@@ -28,6 +28,10 @@ import { registerPushChannel, unregisterPushChannel, type PushChannel } from '..
 import { extractUserSection, recordFilterCall } from '../../output_section_filter.js';
 import { runConscienceGate } from '../../conscience_gate.js';
 import { recordControllerFire } from '../../controller_registry.js';
+import { createHash } from 'node:crypto';
+
+const safeTelegramId = (value: string | number): string =>
+  `tg_${createHash('sha256').update(String(value)).digest('hex').slice(0, 12)}`;
 
 /** AuthRequest structure from chat-handler. */
 export type AuthRequestPayload = {
@@ -135,7 +139,7 @@ function makeDispatcher(opts: {
     // Policy: drop DMs / groups not in the allowlist (audit-style log)
     const decision = checkInboundPolicy({ fromUserId: event.fromUserId, groupId: event.groupId }, policy);
     if (!decision.allowed) {
-      logger.info('inbound denied by policy', { from: event.fromUserId, reason: decision.reason });
+      logger.info('inbound denied by policy', { from: safeTelegramId(event.fromUserId), reason: decision.reason });
       return;
     }
 
@@ -172,7 +176,10 @@ function makeDispatcher(opts: {
     try {
       await chatSend(sessionId, event.text, onDelta, onAuthRequest, onStatus);
     } catch (e) {
-      logger.error(`chatSend threw: ${String(e)}`, { sessionId, from: event.fromUserId });
+      logger.error(`chatSend threw: ${String(e)}`, {
+        sessionId: safeTelegramId(sessionId),
+        from: safeTelegramId(event.fromUserId),
+      });
       void outbound.sendText(
         replyTo,
         currentPhraseLang('telegram') === 'en'
