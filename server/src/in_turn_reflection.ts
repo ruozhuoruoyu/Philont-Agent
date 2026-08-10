@@ -191,6 +191,13 @@ export function isMechanicalFailure(signature: string | undefined): boolean {
   // auto-revise placeholder plan) piled onto an OEIS computation session and blocked the very
   // tool needed to iterate — five same-root failures, direction reported "systematically stuck".
   if (/^(?:pariGp|z3Verify|leanCheck):/i.test(signature)) return true;
+  // ENOENT on read tools has the SAME deadlock shape: recovery needs the same tool (re-read after
+  // the file appears / path is fixed), and blocking it locks the agent out of the file entirely.
+  // Most common case: agent spawns a long-running process, tries to read its output JSON before
+  // it's written → ENOENT × 2 → readFile disabled for the whole turn, even after the file exists.
+  // failure_signatures.ts produces `${tool}:enoent` for ENOENT, which the keyword regex below
+  // does NOT catch (it has "no such file" but not "enoent"), so we carve it out explicitly here.
+  if (/\benoent\b/i.test(signature)) return true;
   return /script error|syntax error|\btraceback\b|SyntaxError|NameError|ImportError|ModuleNotFoundError|IndentationError|TypeError|AttributeError|not a function|too few arguments|unexpected (?:token|character|symbol)|cmd-not-found|command not found|no such file/i.test(
     signature,
   );

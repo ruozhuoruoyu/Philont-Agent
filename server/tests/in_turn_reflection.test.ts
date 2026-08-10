@@ -273,3 +273,13 @@ test('isMechanicalFailure: ANY compute-tool signature is mechanical (prod 2026-0
   assert.equal(isMechanicalFailure('http:http-401'), false);
   assert.equal(isMechanicalFailure('downloadFile:other:download failed: fetch failed'), false);
 });
+
+test('isMechanicalFailure: ENOENT on read tools is mechanical — same deadlock shape (prod 2026-08-05)', async () => {
+  const { isMechanicalFailure } = await import('../src/in_turn_reflection.js');
+  // Agent spawns a long-running process, reads its output JSON before it's written → ENOENT × 2 →
+  // readFile blocked for the whole turn, even after the file exists. Blocking the only recovery tool
+  // is the same deadlock mechanical failures cause, so treat ENOENT as mechanical (skip the block).
+  assert.equal(isMechanicalFailure('readFile:enoent'), true);
+  assert.equal(isMechanicalFailure('listDir:enoent'), true);
+  assert.equal(isMechanicalFailure('fetchedStore:enoent'), true);
+});

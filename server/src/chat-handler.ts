@@ -4779,7 +4779,7 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
   // fact — and the section's growth (prod: 3356 → 10335 chars in 80 minutes, +600 per run, still
   // climbing) is what pushed the whole prefix over its cap turn after turn. The knowledge content of a
   // series is its latest member; the rest stay in the DB and remain reachable via listFacts.
-  const PROJECT_FACTS_TOP_N = 20;
+  const PROJECT_FACTS_TOP_N = 10;
   const USER_FACTS_SAFETY_CAP = 100;
   const renderFactsSection = (
     ns: 'user' | 'project',
@@ -7626,6 +7626,12 @@ async function handleChatSendInner(
         ...(pending.priorInTurnRecords ?? []),
         ...(signalBus.inTurnRecords ?? []),
       ];
+      // Push the owner's approval message so the LLM has context for the resume.
+      // The deny path (below) pushes userMessage; the grant path did not — an asymmetry where
+      // the LLM never saw the owner's words on resume. In repeated auth-resume chains (multiple
+      // OK's in one task) the accumulated context loss produced malformed tool calls like
+      // writeFile({}) with path=undefined (prod 2026-08-09).
+      messages.push({ role: 'user', content: userMessage });
       return runToolLoop(
         sessionId, messages, grants, audit,
         resumeCalls,

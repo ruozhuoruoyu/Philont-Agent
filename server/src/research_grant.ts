@@ -125,6 +125,11 @@ export const LOCAL_RESEARCH_WORKFLOW: WorkflowGrant[] = [
   { tool: 'patch', capability: 'write', domain: 'local' },
   { tool: 'moveFile', capability: 'write', domain: 'local' },
   { tool: 'shell', capability: 'execute', domain: 'local' },
+  // process (spawn/status/kill) is the same execute×local capability as shell — same commandAllowlist
+  // validation, same risk profile. Excluding it meant every `process spawn` (long-running python/z3)
+  // forced a separate auth_pending even after the user approved shell — half the auth interrupts in
+  // a research session were this one gap (prod 2026-08-05 LRC overnight).
+  { tool: 'process', capability: 'execute', domain: 'local' },
   { tool: 'pariGp', capability: 'execute', domain: 'local' },
   { tool: 'z3Verify', capability: 'execute', domain: 'local' },
   { tool: 'downloadFile', capability: 'write', domain: 'network' },
