@@ -3535,7 +3535,13 @@ const TIMELINE_RECALL_BUDGET = Number(process.env.TIMELINE_RECALL_BUDGET) || 2_0
 interface PendingAuth {
   /** Stable task goal captured before the authorization boundary; continuation words never replace it. */
   goal: string;
-  callLedger: Array<{ id: string; name: string; state: 'completed' | 'awaiting_auth' | 'queued' }>;
+  callLedger: Array<{
+    id: string;
+    name: string;
+    state: 'completed' | 'awaiting_auth' | 'queued' | 'running' | 'uncertain';
+  }>;
+  /** Durable execution phase. `running` is converted to `uncertain` after a process restart. */
+  executionState?: 'awaiting_auth' | 'running' | 'uncertain';
   capability: string;
   domain:     string;
   toolName:   string;
@@ -3718,8 +3724,27 @@ const pendingQuestion = new Map<string, PendingQuestion>();
 const QUESTION_TTL_MS = 10 * 60_000;
 
 for (const stored of loadContinuations()) {
-  if (stored.auth) pendingAuth.set(stored.sessionId, stored.auth as PendingAuth);
+  if (stored.auth) {
+    const auth = stored.auth as PendingAuth;
+    // A process cannot know whether an external side effect committed just before it died.
+    // Never replay such a call automatically: require an explicit retry/skip decision.
+    if (auth.executionState === 'running') {
+      auth.executionState = 'uncertain';
+      auth.callLedger = (auth.callLedger ?? []).map((entry) =>
+        entry.id === auth.toolCallId ? { ...entry, state: 'uncertain' as const } : entry,
+      );
+      try { saveContinuation({ ...stored, auth }); } catch { /* live state still recovers in memory */ }
+    }
+    pendingAuth.set(stored.sessionId, auth);
+  }
   if (stored.question) pendingQuestion.set(stored.sessionId, stored.question as PendingQuestion);
+}
+
+export function classifyUncertainToolReply(text: string): 'retry' | 'skip' | 'unknown' {
+  const normalized = text.trim().toLowerCase();
+  if (/^(重试|重新执行|retry|run again)$/.test(normalized)) return 'retry';
+  if (/^(跳过|不要重试|skip|do not retry)$/.test(normalized)) return 'skip';
+  return 'unknown';
 }
 
 function persistContinuation(sessionId: string): void {
@@ -7584,12 +7609,57 @@ async function handleChatSendInner(
   const pending = pendingAuth.get(sessionId);
   if (pending) {
 
+    if (pending.executionState === 'uncertain') {
+      const recovery = classifyUncertainToolReply(userMessage);
+      if (recovery === 'unknown') {
+        onDelta(
+          `服务在执行 ${pending.toolName} 期间中断，无法确认外部副作用是否已经生效。` +
+          `为避免重复操作，我没有自动执行。请明确回复“重试”或“跳过”。`,
+        );
+        return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+      }
+      if (recovery === 'skip') {
+        const uncertainResult = {
+          type: 'tool_result' as const,
+          tool_use_id: pending.toolCallId,
+          content: '⚠ TOOL RESULT UNCERTAIN — process restarted during execution; user chose not to retry. Verify external state before claiming success.',
+        };
+        const resumed = await runToolLoop(
+          sessionId, messages, grants, audit,
+          [],
+          [
+            ...pending.collectedResults,
+            uncertainResult,
+            ...pending.remainingCalls.map((call) => ({
+              type: 'tool_result' as const,
+              tool_use_id: call.id,
+              content: 'Skipped because the preceding tool result is uncertain after process restart.',
+            })),
+          ],
+          pending.iteration,
+          onDelta, onAuthRequest,
+          signalBus, onStatus, onTrace, statusLang,
+        );
+        if (pendingAuth.get(sessionId) === pending) pendingAuth.delete(sessionId);
+        persistContinuation(sessionId);
+        return resumed;
+      }
+      // Explicit retry is a new authorization decision. Continue through the normal grant path.
+      pending.executionState = 'awaiting_auth';
+      pending.ts = Date.now();
+      pending.callLedger = (pending.callLedger ?? []).map((entry) =>
+        entry.id === pending.toolCallId ? { ...entry, state: 'awaiting_auth' as const } : entry,
+      );
+      persistContinuation(sessionId);
+    }
+
     // Expired pending → abandon it and handle the message as a normal turn (the auth card said
     // "valid for 10 min"). Without this, a stale pending makes every later message run through
     // the allow/deny classifier.
     const expired = Date.now() - pending.ts > PENDING_AUTH_TTL_MS;
     const context = `Tool "${pending.toolName}" (${pending.capability}/${pending.domain})`;
-    const intent = expired ? 'unclear' : await classifyAuthIntent(userMessage, context);
+    const explicitRecoveryRetry = classifyUncertainToolReply(userMessage) === 'retry';
+    const intent = explicitRecoveryRetry ? 'grant' : expired ? 'unclear' : await classifyAuthIntent(userMessage, context);
 
     if (intent === 'grant') {
       // deep_explore runs multi-round sessions where a single round can outlast the default
@@ -7649,6 +7719,13 @@ async function handleChatSendInner(
         ...(pending.priorInTurnRecords ?? []),
         ...(signalBus.inTurnRecords ?? []),
       ];
+      // Persist BEFORE invoking the tool. If the process dies after the side effect but before
+      // recording its result, startup converts this state to `uncertain` and refuses auto-replay.
+      pending.executionState = 'running';
+      pending.callLedger = (pending.callLedger ?? []).map((entry) =>
+        entry.id === pending.toolCallId ? { ...entry, state: 'running' as const } : entry,
+      );
+      persistContinuation(sessionId);
       // Do not insert an ordinary user message between an assistant tool_use and its tool_result.
       // The approval is already persisted in the raw timeline and represented by authApprovedCallId;
       // inserting it here violates provider pairing invariants and caused adapter "missing=2" repairs.
@@ -9874,6 +9951,7 @@ async function runToolLoop(
       const remainingCalls = calls.slice(calls.indexOf(call) + 1);
       pendingAuth.set(sessionId, {
         goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
+        executionState: 'awaiting_auth',
         callLedger: [
           ...toolResults.map((r) => ({ id: r.tool_use_id, name: 'completed', state: 'completed' as const })),
           { id: call.id, name: call.name, state: 'awaiting_auth' as const },
@@ -11631,6 +11709,7 @@ async function runToolLoop(
         const remainingCalls = response.calls.slice(response.calls.indexOf(call) + 1);
         pendingAuth.set(sessionId, {
           goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
+          executionState: 'awaiting_auth',
           callLedger: [
             ...nextResults.map((r) => ({ id: r.tool_use_id, name: 'completed', state: 'completed' as const })),
             { id: call.id, name: call.name, state: 'awaiting_auth' as const },
