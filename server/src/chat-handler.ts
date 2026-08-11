@@ -2472,11 +2472,77 @@ const miniLoopLLM: MiniLoopLLMClient = {
   },
 };
 
+/**
+ * A SUB-LOOP BORROWS AUTHORIZATION. IT CANNOT MINT IT.
+ *
+ * This runner called `tools.execute()` — the bare registry, which looks a tool up and invokes it and
+ * does nothing else. Every gate this server has lives in createToolChecker, and none of them ran here:
+ * not the permission matrix, not GrantStore, not the validator chain, not pathAcl, not the
+ * dangerous-command list, not the command gate that was added this morning, not even the catastrophic
+ * hard-denies. The sub-loop's own "gate" is a name blacklist of nine self-domain tools; shell, http,
+ * writeFile, patch, process, downloadFile and deleteFile are all on the offered list.
+ *
+ * So the owner was shown `planAndExecute(task="…")` and asked to approve THAT, while what actually
+ * ran was whatever commands, paths and HTTP requests a sub-model composed at runtime. A confused
+ * deputy: the approval names the wrapper, the wrapper's contents are unknown when it is granted, and
+ * every control the wrapper's contents should have met was on the other side of the call.
+ *
+ * The rule now is the one the composition implies: a sub-task may use what the turn has ALREADY been
+ * granted, and nothing more. Reads still flow (the matrix permits them); anything the owner approved
+ * this turn keeps working, which is what most plan runs actually depend on — in the 2026-08-09 log
+ * shell was approved at 06:58 and planAndExecute ran under that grant at 07:14. What changes is that
+ * a sub-task can no longer reach for a capability nobody granted.
+ *
+ * It cannot ask for one either, because it has no owner to ask (askUserQuestion is blacklisted here
+ * by design). So a denial is returned as a structured, quotable failure and the plan reports it
+ * upward, where the parent turn CAN raise a card. That is the cheap half of bubbling up: the owner
+ * learns exactly which capability was wanted, and a retry runs with it in hand. Resuming a plan from
+ * the denied sub-step instead of re-running it needs the sub-loop's state persisted — worth doing,
+ * not done here.
+ */
+let subLoopChecker: ReturnType<typeof createToolChecker> | null = null;
+function getSubLoopChecker() {
+  // Lazy: `permissions` and `conservativeValidatorChain` are defined below this point.
+  subLoopChecker ??= createToolChecker({
+    permissions,
+    audit: internalAudit,
+    classifyTool: (name, params) => tools.classify(name, params),
+    grantStore: globalGrants,
+    validatorChain: conservativeValidatorChain,
+  });
+  return subLoopChecker;
+}
+
+/** Escape hatch if this turns out to break a flow at an inconvenient hour. Default: enforced. */
+const subLoopPolicyEnabled = (): boolean => process.env.PHILONT_SUBLOOP_POLICY !== 'off';
+
 const subTurnToolRunner = async (
   name: string,
   input: Record<string, unknown>,
 ): Promise<{ ok: boolean; output: string; error?: string }> => {
   try {
+    if (subLoopPolicyEnabled()) {
+      const denial = await getSubLoopChecker()({
+        toolName: name,
+        approval: 'never',
+        params: JSON.stringify(input ?? {}),
+      });
+      if (denial) {
+        const cls = tools.classify(name, input);
+        const capability = cls ? `${cls.capability}/${cls.domain}` : 'unknown';
+        console.warn(`[sub-loop] blocked ${name} (${capability}): ${denial.slice(0, 120)}`);
+        return {
+          ok: false,
+          output: '',
+          error:
+            `NOT AUTHORIZED for this sub-task: ${name} (${capability}). ${denial}\n` +
+            `A sub-task inherits the approvals this turn already has and cannot request new ones — ` +
+            `there is nobody here to ask. Do not try a different phrasing of the same call, and do ` +
+            `not claim the step succeeded. Stop this sub-task and report it as blocked, naming the ` +
+            `tool and capability above, so the owner can be asked once and the plan re-run with it.`,
+        };
+      }
+    }
     const r = await tools.execute(name, input);
     return {
       ok: !!r.success,
