@@ -2784,9 +2784,38 @@ function pendingCommandText(toolName: string, input: Record<string, unknown> | u
 //   - Three-level budget hard thresholds (daily/per-tick/per-initiative) + PHILONT_AUTONOMOUS=0 kill switch
 //   - 24h dedup per targetRef to prevent repeatedly running the same target
 //   - LLM output is forced into structured JSON; facts with empty sourceRefs are silently discarded (prevents hallucination)
+/**
+ * The whitelist here is real — StandardExecutor checks it before every step — but it is a list of
+ * NAMES, and this runner then went straight to the bare registry, so the checks that read the
+ * ARGUMENTS never ran. Two consequences, both on the path that executes with nobody watching:
+ *
+ *   · `readFile` is on the default read-only whitelist, and pathAcl exists precisely to stop
+ *     `readFile ~/.ssh/id_ed25519`. It was never consulted here, so the one tool most likely to be
+ *     pointed at a secret was the one running without the rule written for it.
+ *   · the whitelist widens by `isToolGranted: (tool) => globalGrants.isGranted(tool)`. That is for
+ *     the research-grant flow, but it cannot tell "granted for background research" from "the owner
+ *     approved shell in a chat two minutes ago" — and a granted `shell` here reached execute() with
+ *     no dangerous-command validator and no command gate behind it. An overnight initiative could
+ *     compose `rm -rf …`, or a `git push`, and meet nothing.
+ *
+ * Same rule as the plan sub-loop: the name list stays as the outer bound, and the checker decides
+ * the rest. Autonomous work cannot ask for anything, so a denial is simply a failed step — which is
+ * the correct shape for an unattended path.
+ */
 const autonomousToolRunner: ToolRunner = {
   async run(toolName: string, params: unknown): Promise<ToolRunResult> {
     try {
+      if (subLoopPolicyEnabled()) {
+        const denial = await getSubLoopChecker()({
+          toolName,
+          approval: 'never',
+          params: JSON.stringify((params as Record<string, unknown>) ?? {}),
+        });
+        if (denial) {
+          console.warn(`[autonomous] blocked ${toolName}: ${denial.slice(0, 120)}`);
+          return { ok: false, output: '', error: `NOT AUTHORIZED for autonomous work: ${denial}` };
+        }
+      }
       const result = await tools.execute(
         toolName,
         params as Record<string, unknown>,

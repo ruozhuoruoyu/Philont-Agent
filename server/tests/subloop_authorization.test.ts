@@ -101,3 +101,27 @@ test('the pre-fix behaviour, kept so the regression is visible', async () => {
   // There is no checker in this path at all — that is the whole finding; the assertion is the absence.
   assert.equal(typeof (registry as unknown as { check?: unknown }).check, 'undefined');
 });
+
+// ── the unattended path ─────────────────────────────────────────────────────────────────────────
+// The autonomous executor DOES enforce its whitelist before every step — but on names. The runner
+// then went to the bare registry, so nothing ever read the arguments. Two things follow, and both
+// happen while nobody is watching.
+
+test('the read tool most likely to be aimed at a secret now meets the rule written for it', async () => {
+  // readFile is on the DEFAULT autonomous whitelist; pathAcl is why ~/.ssh is not readable.
+  const check = subLoopChecker(new GrantStore());
+  assert.ok(await check(call('readFile', { path: '/root/.ssh/id_ed25519' })), 'private key');
+  assert.equal(await check(call('readFile', { path: 'docs/design.md' })), null, 'ordinary reads unaffected');
+});
+
+test('a chat approval reaching the background loop no longer brings the whole shell with it', async () => {
+  const grants = new GrantStore();
+  // isToolGranted(tool) widens the autonomous whitelist off exactly this kind of grant.
+  grants.grant('shell', 'execute', 'local', 'approved in a chat turn two minutes ago', 30 * 60_000);
+  assert.equal(grants.isGranted('shell'), true, 'so the name passes the whitelist');
+
+  const check = subLoopChecker(grants);
+  assert.equal(await check(call('shell', { command: 'python analyze.py' })), null, 'ordinary work still runs');
+  assert.ok(await check(call('shell', { command: 'rm -rf /' })), 'but not this');
+  assert.ok(await check(call('shell', { command: 'git push origin main' })), 'and not an unattended publish');
+});
