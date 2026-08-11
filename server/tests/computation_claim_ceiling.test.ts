@@ -113,3 +113,18 @@ test('the adjudicated directive names the tool and refuses the invented outcome'
   assert.match(d, /Nothing ran/);
   assert.match(d, /timeout/, 'the real ledger is shown so the rewrite works from it');
 });
+
+test('a historical-evidence clause does not buy silence for the sentence after it', async () => {
+  let called = false;
+  const call = async () => { called = true; return 'ASSERTS'; };
+  // Six characters of preamble used to disarm the ceiling for the whole reply.
+  assert.equal(
+    await adjudicateComputationClaim(
+      '历史记录显示该路线可行。本轮我跑通了 N=10^6 的枚举，比值=13.6，全部通过，0 反例。',
+      ['pariGp'],
+      call,
+    ),
+    'asserts',
+  );
+  assert.equal(called, true);
+});

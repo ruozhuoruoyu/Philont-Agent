@@ -370,6 +370,7 @@ import {
 } from './sanitize_tool_input.js';
 import { renderDeterministicMaxIterSummary } from './max_iter_summary.js';
 import { deleteContinuation, loadContinuations, saveContinuation } from './continuation_store.js';
+import { summarizeToolInputForLog } from './tool_log_summary.js';
 import {
   computeViability,
   viabilityActuatorRelevant,
@@ -3528,7 +3529,11 @@ const timelineRetriever = new TimelineRetriever(memory.raw);
  * so that the most recent ~10-15 turns clearly dominate LLM attention. The old 80K + 40K empirically caused
  * the 3 most recent key messages to be drowned out by hundreds of irrelevant old history entries.
  */
-const TIMELINE_RECENT_BUDGET = Number(process.env.TIMELINE_RECENT_BUDGET) || 5_000;
+// 2026-08-11: RECENT restored to 8K after the cut to 5K. In a WeChat session the owner's turns are
+// overwhelmingly continuation words ("继续" / "OK" — 14 of 20 messages in the 2026-08-09 log), so the
+// recent window IS the task statement; recall contributed 0–2 messages on nearly every one of those
+// turns and is the affordable half to keep small.
+const TIMELINE_RECENT_BUDGET = Number(process.env.TIMELINE_RECENT_BUDGET) || 8_000;
 const TIMELINE_RECALL_BUDGET = Number(process.env.TIMELINE_RECALL_BUDGET) || 2_000;
 
 /** Paused state: waiting for the user to authorize a tool call */
@@ -3542,6 +3547,10 @@ interface PendingAuth {
   }>;
   /** Durable execution phase. `running` is converted to `uncertain` after a process restart. */
   executionState?: 'awaiting_auth' | 'running' | 'uncertain';
+  /** When this entry became `uncertain` (restart time). Bounds the retry/skip question — see UNCERTAIN_RECOVERY_TTL_MS. */
+  uncertainSince?: number;
+  /** How many times we have asked for an explicit retry/skip and not understood the reply. */
+  uncertainPrompts?: number;
   capability: string;
   domain:     string;
   toolName:   string;
@@ -3684,12 +3693,28 @@ const WORKFLOW_GRANT_TTL_MS = 30 * 60_000;
 const skillReflexNudged = new Set<string>();
 
 /**
- * pendingAuth TTL — matches the "(valid for 10 min)" shown on the auth card. After this, a pending
- * tool is abandoned and the user's next message is handled as a normal turn (no auth re-prompt),
- * so questions like "is the session still active?" are answered instead of being bounced as
- * "please reply allow/deny". Keyed by ws sid like the rest of the auth state.
+ * pendingAuth TTL. After this, a pending tool is abandoned and the user's next message is handled as
+ * a normal turn (no auth re-prompt), so questions like "is the session still active?" are answered
+ * instead of being bounced as "please reply allow/deny". Keyed by ws sid like the rest of the auth state.
+ *
+ * 2026-08-11: raised 10 → 30 min, to the same window the approval itself buys (WORKFLOW_GRANT_TTL_MS).
+ * Ten minutes was shorter than how the owner actually answers: in the 2026-08-09 log the reply gap ran
+ * 8 min at the median with a 35–60 min tail, and each over-TTL reply silently ATE one approval — 12:43:29
+ * "OK" arrived 35.6 min late, was dropped, the card was re-sent, and the owner typed "ok" again 21
+ * seconds later. An expiry that fires more often than the owner is late is not a safety boundary, it is
+ * a treadmill; the tool still never runs on expiry, so lengthening it costs no authorization strength.
  */
-const PENDING_AUTH_TTL_MS = 10 * 60_000;
+const PENDING_AUTH_TTL_MS = Number(process.env.PENDING_AUTH_TTL_MS) || 30 * 60_000;
+
+/**
+ * How long an `uncertain` (process died mid-execution) entry may keep asking the owner for an explicit
+ * retry/skip before it gives up and records the call as unresolved. Without a bound the question is a
+ * trap: the reply words are matched deterministically (as they must be — they are OUR words), so any
+ * other message re-asks, and the owner's two most common messages are exactly the two that do not match.
+ */
+const UNCERTAIN_RECOVERY_TTL_MS = 30 * 60_000;
+/** …or after this many unrecognised replies, whichever comes first. */
+const UNCERTAIN_RECOVERY_MAX_PROMPTS = 2;
 
 /** deep_explore grant window — longer than the 12-min round deadline so one approval covers a multi-round session (see the pendingAuth grant path). */
 const DEEP_EXPLORE_GRANT_TTL_MS = 60 * 60_000;
@@ -3723,13 +3748,54 @@ const pendingQuestion = new Map<string, PendingQuestion>();
 /** Maximum wait time for the user to reply to askUserQuestion; expired requests are treated as "abandoned" */
 const QUESTION_TTL_MS = 10 * 60_000;
 
+/**
+ * A snapshot that is merely WAITING (nobody ran anything) is worthless once its window has passed —
+ * restoring it makes the next unrelated message resume an hours-old conversation. A snapshot that was
+ * RUNNING is the opposite: an external side effect may already have committed, so it must survive
+ * regardless of age and be resolved by the owner, never by a clock.
+ */
+/**
+ * Has this authorization request timed out? The single definition, used both when a turn starts and
+ * when the auth branch runs — the defect was never the check, it was that only one place had it and
+ * that place ran after the message array was already built.
+ *
+ * `running` / `uncertain` never time out: they describe a call that may already have touched the
+ * world, and only the owner can resolve that.
+ */
+export function pendingAuthIsStale(
+  pending: { ts: number; executionState?: 'awaiting_auth' | 'running' | 'uncertain' } | undefined,
+  now: number,
+): boolean {
+  if (!pending) return false;
+  if (pending.executionState === 'running' || pending.executionState === 'uncertain') return false;
+  return now - pending.ts > PENDING_AUTH_TTL_MS;
+}
+
+export function continuationSurvivesRestart(
+  stored: { savedAt?: number; auth?: unknown; question?: unknown },
+  now: number,
+): { auth: boolean; question: boolean } {
+  const auth = stored.auth as PendingAuth | undefined;
+  const question = stored.question as PendingQuestion | undefined;
+  const authSurvives = auth
+    ? !pendingAuthIsStale({ ...auth, ts: auth.ts ?? stored.savedAt ?? 0 }, now)
+    : false;
+  const questionSurvives = question
+    ? now - (question.createdAt ?? stored.savedAt ?? 0) <= QUESTION_TTL_MS
+    : false;
+  return { auth: authSurvives, question: questionSurvives };
+}
+
 for (const stored of loadContinuations()) {
-  if (stored.auth) {
+  const survives = continuationSurvivesRestart(stored, Date.now());
+  if (stored.auth && survives.auth) {
     const auth = stored.auth as PendingAuth;
     // A process cannot know whether an external side effect committed just before it died.
     // Never replay such a call automatically: require an explicit retry/skip decision.
     if (auth.executionState === 'running') {
       auth.executionState = 'uncertain';
+      auth.uncertainSince = Date.now();
+      auth.uncertainPrompts = 0;
       auth.callLedger = (auth.callLedger ?? []).map((entry) =>
         entry.id === auth.toolCallId ? { ...entry, state: 'uncertain' as const } : entry,
       );
@@ -3737,13 +3803,58 @@ for (const stored of loadContinuations()) {
     }
     pendingAuth.set(stored.sessionId, auth);
   }
-  if (stored.question) pendingQuestion.set(stored.sessionId, stored.question as PendingQuestion);
+  if (stored.question && survives.question) {
+    pendingQuestion.set(stored.sessionId, stored.question as PendingQuestion);
+  }
+  if ((stored.auth && !survives.auth) || (stored.question && !survives.question)) {
+    console.log(
+      `[continuation-store] dropped expired snapshot for ${stored.sessionId.slice(0, 24)}… ` +
+        `(auth=${stored.auth ? (survives.auth ? 'kept' : 'dropped') : 'none'}, ` +
+        `question=${stored.question ? (survives.question ? 'kept' : 'dropped') : 'none'})`,
+    );
+    // Rewrite the file so the dropped half cannot come back on the next restart.
+    try {
+      if (!survives.auth && !survives.question) deleteContinuation(stored.sessionId);
+      else
+        saveContinuation({
+          ...stored,
+          auth: survives.auth ? stored.auth : undefined,
+          question: survives.question ? stored.question : undefined,
+        });
+    } catch { /* best effort: the in-memory decision above already holds */ }
+  }
+}
+
+// The words below are OURS — the recovery prompt offers exactly "重试" / "跳过", so reading them back is
+// exact matching, not semantic classification (a general classifier has already read one of our own
+// offered words as its opposite; see classifyExploreAskReply). What must NOT be exact is the tail: a
+// person answering a two-option question types "重试吧" / "跳过这个", and rejecting those re-asks forever.
+const UNCERTAIN_RETRY_WORDS = ['重新执行', '重试', 'run again', 'retry'];
+const UNCERTAIN_SKIP_WORDS = ['不要重试', '不重试', '跳过', 'do not retry', "don't retry", 'skip'];
+/** Sentence-final particles / punctuation that carry no decision content. */
+const UNCERTAIN_REPLY_TAIL_RE = /^[\s吧呀啊了下它他这那个么吗，,。.!！?？~、]*$/;
+
+function matchesOfferedWord(normalized: string, words: readonly string[]): boolean {
+  return words.some(
+    (w) => normalized === w || (normalized.startsWith(w) && UNCERTAIN_REPLY_TAIL_RE.test(normalized.slice(w.length))),
+  );
+}
+
+/**
+ * tool_use_id → tool name for the call ledger. Completed entries were being written with the literal
+ * string `'completed'` in their `name` field, which threw away the one thing the ledger exists to
+ * answer: after a restart mid-chain, WHICH tools already ran. Ids from an earlier segment are not in
+ * this batch and honestly resolve to `unknown`.
+ */
+export function ledgerToolName(id: string, known: ReadonlyArray<{ id: string; name: string }>): string {
+  return known.find((c) => c.id === id)?.name ?? 'unknown';
 }
 
 export function classifyUncertainToolReply(text: string): 'retry' | 'skip' | 'unknown' {
   const normalized = text.trim().toLowerCase();
-  if (/^(重试|重新执行|retry|run again)$/.test(normalized)) return 'retry';
-  if (/^(跳过|不要重试|skip|do not retry)$/.test(normalized)) return 'skip';
+  // SKIP first: "不要重试" contains "重试".
+  if (matchesOfferedWord(normalized, UNCERTAIN_SKIP_WORDS)) return 'skip';
+  if (matchesOfferedWord(normalized, UNCERTAIN_RETRY_WORDS)) return 'retry';
   return 'unknown';
 }
 
@@ -6689,6 +6800,44 @@ export async function handleChatSend(
   // pending-question state (those carry tool_use that must have matching tool_result to resume),
   // otherwise recall from the global timeline.
   let intentDecision: IntentDecision | null = null;
+  // EXPIRY IS DECIDED BEFORE THE CONTEXT IS BUILT, NOT AFTER.
+  //
+  // handleChatSendInner also checks this TTL — but by the time it runs, `messages` below has already
+  // been seeded from pending.inflightMessages. On an expired pending that branch does NOT resume: it
+  // drops the pending and falls through to a normal turn, leaving the suspended assistant tool_use
+  // blocks in the message array with no tool_result behind them. The adapter then repairs the pairing
+  // to avoid a 400, and the model gets a turn whose recent history has holes in it.
+  //
+  // Production 2026-08-09 shows the correlation with nothing else in it. `[llm-adapter] tool_result
+  // pairing repair: missing=2` appears exactly twice, at 09:09:46 and 12:43:29 — the only two resumes
+  // that arrived after the TTL (58 min and 35.6 min). Every resume inside the window (8.6, 8.2, 0.5,
+  // 0.2 min …) is clean. And `missing=2` is literally the count of what was suspended: the paused call
+  // plus one queued sibling. The first of those two turns then read five files, spent 224s in the model
+  // and emitted `writeFile({})` — a call with no arguments at all, which cost the owner another nine
+  // minutes before it failed. Required-field validation now blocks that call, but this is where the
+  // damaged context it was generated from comes from.
+  //
+  // `running` / `uncertain` are exempt: those describe a call that may already have touched the world,
+  // and their inflight messages are what the retry/skip decision resumes into. Age must not decide them.
+  {
+    const stale = pendingAuth.get(sessionId);
+    if (stale && pendingAuthIsStale(stale, Date.now())) {
+      pendingAuth.delete(sessionId);
+      persistContinuation(sessionId);
+      signalBus.droppedExpiredAuth = {
+        toolName: stale.toolName,
+        ageMinutes: Math.round((Date.now() - stale.ts) / 60_000),
+      };
+      console.log(
+        `[continuation] session=${sessionId} dropped expired pending auth for ${stale.toolName} ` +
+          `(age=${signalBus.droppedExpiredAuth.ageMinutes}m > ${Math.round(PENDING_AUTH_TTL_MS / 60_000)}m) → fresh context`,
+      );
+      onTrace?.({
+        kind: 'system-event', tier: 4,
+        text: `Authorization request for ${stale.toolName} expired (${signalBus.droppedExpiredAuth.ageMinutes} min); handling this message as a new turn`,
+      });
+    }
+  }
   const pending = pendingAuth.get(sessionId);
   const pendingQ = pendingQuestion.get(sessionId);
   if (pendingQ?.goal) {
@@ -7608,15 +7757,40 @@ async function handleChatSendInner(
   // ── Check for pending authorization requests ──────────────────────────────────────────────────
   const pending = pendingAuth.get(sessionId);
   if (pending) {
+    // Captured before the block below flips it back to `awaiting_auth` on an explicit retry.
+    const wasUncertain = pending.executionState === 'uncertain';
 
     if (pending.executionState === 'uncertain') {
-      const recovery = classifyUncertainToolReply(userMessage);
+      let recovery = classifyUncertainToolReply(userMessage);
+      // THIS QUESTION MUST BE ABLE TO END WITHOUT THE OWNER SAYING THE MAGIC WORD.
+      //
+      // The reply words are matched exactly on purpose — they are the words we offered, and handing our
+      // own closed enum to a semantic classifier has already produced the opposite reading once. But an
+      // exact match with no way out is a trap, and the trap closes on precisely this owner: in the
+      // 2026-08-09 log 14 of 20 messages are "继续" or "OK", and the test for this classifier pins both
+      // of them as `unknown`. Every one of them would have re-asked the same sentence, forever, with no
+      // way to even change the subject. So: ask a bounded number of times, then decide it ourselves the
+      // safe way (skip, never replay) and let the session move on.
       if (recovery === 'unknown') {
-        onDelta(
-          `服务在执行 ${pending.toolName} 期间中断，无法确认外部副作用是否已经生效。` +
-          `为避免重复操作，我没有自动执行。请明确回复“重试”或“跳过”。`,
+        const prompts = (pending.uncertainPrompts ?? 0) + 1;
+        const ageMs = Date.now() - (pending.uncertainSince ?? pending.ts);
+        const giveUp = prompts > UNCERTAIN_RECOVERY_MAX_PROMPTS || ageMs > UNCERTAIN_RECOVERY_TTL_MS;
+        if (!giveUp) {
+          pending.uncertainPrompts = prompts;
+          persistContinuation(sessionId);
+          onDelta(
+            `服务在执行 ${pending.toolName} 期间中断，无法确认外部副作用是否已经生效。` +
+            `为避免重复操作，我没有自动执行。请明确回复“重试”或“跳过”。`,
+          );
+          return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+        }
+        console.warn(
+          `[uncertain-recovery] session=${sessionId} giving up on an explicit answer for ${pending.toolName} ` +
+            `(prompts=${prompts}, age=${Math.round(ageMs / 60_000)}m) → recording as unresolved, never replaying`,
         );
-        return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+        // Not "the user chose skip" — nobody chose. Record it as unresolved so the model must verify
+        // external state rather than assume either outcome.
+        recovery = 'skip';
       }
       if (recovery === 'skip') {
         const uncertainResult = {
@@ -7653,12 +7827,19 @@ async function handleChatSendInner(
       persistContinuation(sessionId);
     }
 
-    // Expired pending → abandon it and handle the message as a normal turn (the auth card said
-    // "valid for 10 min"). Without this, a stale pending makes every later message run through
-    // the allow/deny classifier.
-    const expired = Date.now() - pending.ts > PENDING_AUTH_TTL_MS;
+    // Expired pending → abandon it and handle the message as a normal turn. Without this, a stale
+    // pending makes every later message run through the allow/deny classifier.
+    //
+    // handleChatSend already dropped expired entries BEFORE building this turn's messages (see the
+    // continuation block there), so in practice this is now a second line of defence for entries that
+    // aged out mid-turn. It is kept because the ordering, not the check, was the defect.
+    const expired = pendingAuthIsStale(pending, Date.now());
     const context = `Tool "${pending.toolName}" (${pending.capability}/${pending.domain})`;
-    const explicitRecoveryRetry = classifyUncertainToolReply(userMessage) === 'retry';
+    // "retry" answers the interrupted-tool question and nothing else. Left unscoped it was a way to
+    // approve ANY suspended tool — including an expired one, skipping both the TTL and the intent
+    // classifier — with a word the owner was never offered for that purpose.
+    const explicitRecoveryRetry =
+      wasUncertain && classifyUncertainToolReply(userMessage) === 'retry';
     const intent = explicitRecoveryRetry ? 'grant' : expired ? 'unclear' : await classifyAuthIntent(userMessage, context);
 
     if (intent === 'grant') {
@@ -7728,7 +7909,14 @@ async function handleChatSendInner(
       persistContinuation(sessionId);
       // Do not insert an ordinary user message between an assistant tool_use and its tool_result.
       // The approval is already persisted in the raw timeline and represented by authApprovedCallId;
-      // inserting it here violates provider pairing invariants and caused adapter "missing=2" repairs.
+      // inserting it here violates the provider's pairing invariant.
+      //
+      // An earlier version of this comment blamed that insertion for the adapter's `missing=2` repairs.
+      // The log says otherwise: those repairs are dated 2026-08-09, the insertion was written on 08-10,
+      // and they occur on turns that never reach this branch. Their real source was expired pendings
+      // seeding the message array before the TTL was checked (fixed in handleChatSend). Removing the
+      // insertion is still right — the invariant is real — but it fixed a different thing than claimed,
+      // and a fix credited with someone else's symptom is a fix nobody will re-examine.
       const resumed = await runToolLoop(
         sessionId, messages, grants, audit,
         resumeCalls,
@@ -8050,6 +8238,23 @@ async function handleChatSendInner(
         `[short-answer-binding] session=${sessionId} matched previous turn's question "${detected.snippet.slice(0, 40)}…", injected binding hint`,
       );
     }
+  }
+
+  // An approval that expired must be visible to the owner. This turn is a normal turn — the suspended
+  // tool is gone and will not run — and the owner very likely just typed the approval for it.
+  if (signalBus.droppedExpiredAuth && messages[0]) {
+    const { toolName, ageMinutes } = signalBus.droppedExpiredAuth;
+    messages[0] = {
+      ...messages[0],
+      content:
+        messages[0].content +
+        `\n\n## Expired authorization (mechanism notice)\n` +
+        `The authorization request for \`${toolName}\` timed out (${ageMinutes} min old) and was discarded, so ` +
+        `**the tool did not run**. If this message was the approval, say so in one line — that the request ` +
+        `expired and you are re-requesting it — then re-issue the call. Do not silently answer something else, ` +
+        `and do not claim the tool ran.\n`,
+    };
+    console.log(`[continuation] session=${sessionId} injected expired-auth notice for ${toolName}`);
   }
 
   // Routing rule injection: extract keywords from the user message → match top-K active rules → inject into system section.
@@ -9279,6 +9484,13 @@ interface TurnSignalBus {
    */
   carriedExploreGoal?: string;
   /**
+   * Set when this turn began by throwing away an authorization request that had timed out. The owner
+   * typed something that may well have been the approval; the tool did not run and will not run. The
+   * turn must SAY so rather than silently answering something else — an approval that vanishes without
+   * a word is how the same "OK" gets typed twice (prod 2026-08-09 12:43:29 → 12:43:50).
+   */
+  droppedExpiredAuth?: { toolName: string; ageMinutes: number };
+  /**
    * Cleanup-turn scoping (2026-07-06): set when the user message is a pure cleanup command
    * (looksLikeCleanupIntent). runToolLoop then mechanism-rejects external write http for the whole
    * turn (prod: clear turns drifted into re-registering the service being cleared), and matching
@@ -9953,7 +10165,7 @@ async function runToolLoop(
         goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
         executionState: 'awaiting_auth',
         callLedger: [
-          ...toolResults.map((r) => ({ id: r.tool_use_id, name: 'completed', state: 'completed' as const })),
+          ...toolResults.map((r) => ({ id: r.tool_use_id, name: ledgerToolName(r.tool_use_id, calls), state: 'completed' as const })),
           { id: call.id, name: call.name, state: 'awaiting_auth' as const },
           ...remainingCalls.map((c) => ({ id: c.id, name: c.name, state: 'queued' as const })),
         ],
@@ -10063,7 +10275,7 @@ async function runToolLoop(
       pendingQuestion.set(sessionId, {
         goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
         callLedger: [
-          ...toolResults.map((r) => ({ id: r.tool_use_id, name: 'completed', state: 'completed' as const })),
+          ...toolResults.map((r) => ({ id: r.tool_use_id, name: ledgerToolName(r.tool_use_id, calls), state: 'completed' as const })),
           { id: call.id, name: call.name, state: 'awaiting_user' as const },
           ...remainingCalls.map((c) => ({ id: c.id, name: c.name, state: 'queued' as const })),
         ],
@@ -10090,10 +10302,12 @@ async function runToolLoop(
       return { outcome: { outcomeType: 'question_pending' }, auditEvents: audit.length };
     }
 
-    // Never dump raw tool arguments to process logs. Inputs routinely contain credentials,
-    // document contents, private queries, or shell commands with inline tokens. Detailed but
-    // purpose-built summaries belong to the trace stream below; the server log needs only the name.
-    console.log(`[tool] ${call.name} invoked`);
+    // Never dump raw tool arguments to process logs. Inputs routinely contain credentials, document
+    // contents, private queries, or shell commands with inline tokens — the 2026-08-09 log leaked the
+    // owner's Windows account name on every readFile. But a bare name is not a log either: that same
+    // log's `writeFile({})` (nine minutes of the owner's time spent approving a call that could never
+    // work) is invisible without knowing the call had no fields. Structure, not content.
+    console.log(`[tool] ${call.name} ${summarizeToolInputForLog(call.input)}`);
     // 2026-05-19 three-stream separation: tool call details → Tier 3 onTrace; semantic progress → Tier 2 onStatus
     onTrace?.({
       kind: 'tool-invocation', tier: 3,
@@ -11711,7 +11925,7 @@ async function runToolLoop(
           goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
           executionState: 'awaiting_auth',
           callLedger: [
-            ...nextResults.map((r) => ({ id: r.tool_use_id, name: 'completed', state: 'completed' as const })),
+            ...nextResults.map((r) => ({ id: r.tool_use_id, name: ledgerToolName(r.tool_use_id, response.calls), state: 'completed' as const })),
             { id: call.id, name: call.name, state: 'awaiting_auth' as const },
             ...remainingCalls.map((c) => ({ id: c.id, name: c.name, state: 'queued' as const })),
           ],

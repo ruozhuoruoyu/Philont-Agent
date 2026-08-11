@@ -353,3 +353,21 @@ async function waitUntil(check: () => boolean, timeoutMs: number = 1_000): Promi
     await new Promise((r) => setTimeout(r, 5));
   }
 }
+
+test('group identifiers are pseudonymized too, not just the DM fields', () => {
+  const safe = redactWeChatInboundForLog({
+    message_id: '7491988958783429000',
+    from_user_id: 'private-user@im.wechat',
+    room_id: 'R-1234567890@chatroom',
+    chat_room_id: 'R-1234567890@chatroom',
+    group_id: '',
+    session_id: 'S-abc',
+    context_token: 'secret-context-token',
+    item_list: [],
+  } as any);
+  assert.match(String(safe.room_id), /^sha256:/);
+  assert.match(String(safe.chat_room_id), /^sha256:/);
+  assert.doesNotMatch(JSON.stringify(safe), /R-1234567890|S-abc/);
+  // Every field inboundGroupId() can read must be covered — that split is the whole defect.
+  assert.equal(safe.group_id, undefined);
+});

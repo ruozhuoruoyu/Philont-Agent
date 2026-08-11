@@ -57,11 +57,59 @@ const COMPUTE_CLAIM_RE =
 const ANTI_CLAIM_RE =
   /(我?(将|要|想|打算|计划|准备|会去?)\s*(计算|验证|跑|运行)|尚未|还没|没能|未能|没有机会(?:重跑|运行|验证|计算)|无法(验证|计算|跑)|不能(验证|计算)|待核实|未验证|无法确认|非本轮(?:运行|执行|验证|计算|在线核查)|(?:此前|上一轮|历史记录|既有记录)[^。！？\n]{0,24}(?:显示|记载|结果|运行|验证)|plan to|going to|will (?:compute|verify|run|try)|could not (?:verify|compute|run)|couldn'?t (?:verify|compute|run)|unable to (?:verify|compute|run)|was not able to|failed to (?:compute|verify|run)|did not (?:run|compute|verify)|not run this turn|from (?:an )?(?:earlier|previous) (?:turn|session|record))/i;
 
-// Narrow whole-reply semantics for the model ceiling. Do not reuse ANTI_CLAIM_RE here: a genuine
-// fabricated report can contain a local mathematical phrase such as “未能超过阈值” while still claiming
-// that the run happened. Only explicit evidence-time or inability-to-run wording bypasses adjudication.
+// Evidence-time wording: this result is from an earlier run / could not be produced this turn.
+// Do not reuse ANTI_CLAIM_RE at the ceiling: a genuine fabricated report can contain a local
+// mathematical phrase such as “未能超过阈值” while still claiming that the run happened.
 const EXPLICIT_NON_CURRENT_COMPUTE_RE =
   /(?:本轮|这(?:一)?轮)[^。！？\n]{0,18}(?:没有机会|未能|没能|无法|未|没有)(?:重跑|运行|执行|验证|计算)|非本轮(?:运行|执行|验证|计算|在线核查)|(?:此前|上一轮|历史记录|既有记录)[^。！？\n]{0,24}(?:显示|记载|结果|运行|验证)|not run this turn|from (?:an )?(?:earlier|previous) (?:turn|session|record)/i;
+
+/**
+ * HEDGES SUPPRESS THE SENTENCE THEY ARE IN, NOT THE WHOLE REPLY.
+ *
+ * Both the pattern floor and the model ceiling used to test their hedge patterns against the entire
+ * text, so ONE qualifying clause anywhere disarmed the gate for everything else in the message. The
+ * cost of that is exact: prefixing a fabricated report with six characters —
+ *
+ *   “历史记录显示该路线可行。本轮我跑通了 N=10^6 的枚举，比值=13.6，全部通过，0 反例。”
+ *
+ * — made the floor return null AND made the ceiling answer `does_not_assert` without even calling the
+ * judge, on a reply asserting a computation that never ran. Splitting first means the hedge covers
+ * “历史记录显示该路线可行” and the sentence after it still has to answer for itself.
+ */
+export function splitClaimSentences(text: string): string[] {
+  return text
+    // Semicolons split too: "历史记录显示 X；本轮又验证了 Y" is two claims, and treating it as one
+    // would let the first clause's evidence-time marker cover the second.
+    .split(/(?<=[。！？!?；;\n])|(?<=\.)\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/** Sentences that assert a computation happened THIS turn (unhedged, not marked as prior evidence). */
+function currentTurnComputeClaims(text: string): string[] {
+  return splitClaimSentences(text).filter(
+    (s) => COMPUTE_CLAIM_RE.test(s) && !EXPLICIT_NON_CURRENT_COMPUTE_RE.test(s) && !ANTI_CLAIM_RE.test(s),
+  );
+}
+
+/**
+ * Ceiling-side test: is the WHOLE reply accounted for by evidence-time wording?
+ *
+ * The ceiling deliberately does not use COMPUTE_CLAIM_RE — its whole reason to exist is the reply the
+ * pattern floor cannot see (prod: “本轮实际执行：… PARI/GP 验证假设 A。结果：… 最小距离 = 1/7”, which names
+ * no listed verb). So it cannot ask "which sentences are claims?". It asks the answerable question
+ * instead: does anything here look like a reported result that the evidence-time markers do NOT cover?
+ * If yes, the judge still gets the reply.
+ */
+function everyResultIsMarkedAsPriorEvidence(text: string): boolean {
+  const sentences = splitClaimSentences(text);
+  if (!sentences.some((s) => EXPLICIT_NON_CURRENT_COMPUTE_RE.test(s))) return false;
+  return sentences.every(
+    (s) =>
+      EXPLICIT_NON_CURRENT_COMPUTE_RE.test(s) ||
+      (!COMPUTE_CLAIM_RE.test(s) && !RESULT_NUMBER_RE.test(s)),
+  );
+}
 
 // Numeric RESULT tokens: a number attached to a result marker / math quantity. Avoids firing on
 // incidental integers like "3 candidates" or "N=20 case" alone (those need a result context).
@@ -78,8 +126,8 @@ export function detectUngroundedComputation(
   toolResults: GroundingToolResult[],
 ): { claim: string; okCompute: number } | null {
   if (!text) return null;
-  if (ANTI_CLAIM_RE.test(text)) return null;
-  if (!COMPUTE_CLAIM_RE.test(text)) return null;
+  const claimSentences = currentTurnComputeClaims(text);
+  if (claimSentences.length === 0) return null;
   if (!RESULT_NUMBER_RE.test(text)) return null;
 
   // Is there ANY successful compute/exec tool result this turn?
@@ -88,7 +136,7 @@ export function detectUngroundedComputation(
   ).length;
   if (okCompute > 0) return null; // genuinely backed — leave it (per-number check is future work)
 
-  const m = COMPUTE_CLAIM_RE.exec(text);
+  const m = COMPUTE_CLAIM_RE.exec(claimSentences[0]!);
   const claim = (m?.[0] ?? 'computed result').slice(0, 60);
   return { claim, okCompute };
 }
@@ -204,8 +252,10 @@ export async function adjudicateComputationClaim(
   tools: readonly string[],
   call?: (req: { system: string; user: string; maxTokens?: number }) => Promise<string>,
 ): Promise<ComputationClaimVerdict> {
-  // The model ceiling must obey the same polarity/evidence-time semantics as the deterministic floor.
-  if (EXPLICIT_NON_CURRENT_COMPUTE_RE.test(text)) return 'does_not_assert';
+  // The model ceiling must obey the same polarity/evidence-time semantics as the deterministic floor —
+  // per sentence. Bypass adjudication only when NO sentence claims a computation ran this turn; a
+  // single "上一轮的记录显示…" must not buy silence for the paragraph that follows it.
+  if (everyResultIsMarkedAsPriorEvidence(text)) return 'does_not_assert';
   const fn = call ?? (isAuxLLMConfigured() ? callAuxLLM : null);
   if (!fn) return 'unknown';
   try {

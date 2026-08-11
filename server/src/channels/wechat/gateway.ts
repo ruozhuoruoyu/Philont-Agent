@@ -57,7 +57,14 @@ import {
 } from './state.js';
 
 const WECHAT_SECRET_LOG_KEYS = new Set(['context_token', 'client_id']);
-const WECHAT_ID_LOG_KEYS = new Set(['from_user_id', 'to_user_id', 'group_id', 'message_id']);
+// `group_id` is what the wire payload carries (and what the first version of this list was written
+// against, from a DM-only log where it was always ''). The fields that actually identify a GROUP are
+// `room_id` / `chat_room_id` — they are what inboundGroupId() reads — and they were passing through
+// this dump in the clear. Producer and consumer naming apart by one word, no error either side: the
+// same shape as the push-channel key split. Whatever inboundGroupId reads belongs in this set.
+const WECHAT_ID_LOG_KEYS = new Set([
+  'from_user_id', 'to_user_id', 'group_id', 'room_id', 'chat_room_id', 'message_id', 'session_id',
+]);
 
 export function pseudonymizeWeChatId(value: unknown): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
