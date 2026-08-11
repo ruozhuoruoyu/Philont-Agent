@@ -36,17 +36,17 @@ test('confidence: provisional + 1 succ → tentative', () => {
   assert.equal(r, 'tentative');
 });
 
-test('confidence: tentative + 1 succ (streak < 2) → 仍 tentative', () => {
+test('confidence: tentative + 1 succ → validated (prod 2026-08-05: lowered from 2 to 1)', () => {
   const r = nextConfidence({
     current: 'tentative',
     consecutiveSuccesses: 1,
     consecutiveFailures: 0,
     lastOutcome: 'success',
   });
-  assert.equal(r, 'tentative');
+  assert.equal(r, 'validated');
 });
 
-test('confidence: tentative + 2 succ streak → validated', () => {
+test('confidence: tentative + 2 succ streak → validated (higher streak still validated)', () => {
   const r = nextConfidence({
     current: 'tentative',
     consecutiveSuccesses: 2,

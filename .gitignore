@@ -57,3 +57,36 @@ dist-app/
 
 # Active compass (owner-edited + Phase-2-learned); the tracked template is compass.example.md
 /compass.md
+
+# ── Runtime state and working data (2026-08-11) ───────────────────────────────
+# `git add -A` in a live install put 902 files on the public remote in one commit
+# (335e65e): a GitHub token, the agent's private journals, page captures, the owner's
+# documents, and a whole run's output tree. None of it was ignored because none of it
+# had ever been named here. What follows is the boundary that was only implicit.
+.philont/
+.clawhub/
+.playwright-mcp/
+.mycox_config
+server/output/
+
+# Credentials in any of the shapes they actually get saved as
+*token*.txt
+*token*.json
+*credentials*
+*.pem
+*.key
+!**/*.key.example
+
+# Model/OCR data files and captured artifacts that belong to a run, not to the source
+*.traineddata
+*.g6
+*.pptx
+*.docx
+*.xlsx
+*.pdf
+*.png
+*.jpg
+*.jpeg
+!docs/**/*.png
+!web-ui/**/*.png
+!web-ui/**/*.svg

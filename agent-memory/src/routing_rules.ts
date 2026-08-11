@@ -101,7 +101,7 @@ export interface ConfidenceComputeInput {
  *
  * Rules (see plan):
  *   provisional + 1 succ                       → tentative
- *   tentative   + 2 succ streak                → validated
+ *   tentative   + 1 succ streak                → validated
  *   disputed    + 2 succ streak                → validated (recovery)
  *   validated   + 1 fail                       → disputed
  *   tentative   + 1 fail                       → provisional (catch-all demote one tier)
@@ -120,7 +120,7 @@ export function nextConfidence(input: ConfidenceComputeInput): RoutingConfidence
 
   if (lastOutcome === 'success') {
     if (current === 'provisional') return 'tentative';
-    if (current === 'tentative' && consecutiveSuccesses >= 2) return 'validated';
+    if (current === 'tentative' && consecutiveSuccesses >= 1) return 'validated';
     if (current === 'disputed' && consecutiveSuccesses >= 2) return 'validated';
     return current;
   }

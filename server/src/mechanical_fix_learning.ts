@@ -173,13 +173,22 @@ export function buildMechanicalFixVerifyPrompt(
       'You are checking a proposed authoring-cheatsheet line before it is written into an agent\'s ' +
       'permanent prompt for this error signature. Your job is to KNOCK IT DOWN.\n' +
       'Answer REJECT if ANY of these hold:\n' +
-      '  - it states something FALSE about the tool or language (invented restrictions are the main risk);\n' +
+      '  - it states something FALSE about the tool or language. Invented restrictions ARE the main risk, ' +
+      'BUT reject on this ground only when you can POSITIVELY identify the falsehood — e.g. "PARI/GP ' +
+      'forbids X at top level" when X is in fact allowed. A rule stating that multi-line constructs need ' +
+      'a syntax wrapper (brace block, semicolon terminator, etc.) is a REAL feature of most script tools: ' +
+      'PARI/GP reads one line at a time so multi-line for(/sum(/if( dies without a { } block; Lean needs ' +
+      'terminators; z3 SMT-LIB is paren-delimited. Do NOT reject such a rule as "invented" unless you ' +
+      'can cite the specific counter-example from your own knowledge.\n' +
       '  - it is not what THIS error was about;\n' +
-      '  - it is generic advice ("check your syntax", "be careful") that names no concrete construct;\n' +
+      '  - it is generic advice that names no concrete construct. A line that names a specific syntax ' +
+      'construct (e.g. "brace block { ... }", "for(", "sum(", "if(") is NOT generic even if the rule ' +
+      'sounds broadly applicable;\n' +
       '  - it repeats something already in the existing lines.\n' +
       'Answer ACCEPT only if the line is true, specific, and would have prevented this exact error.\n' +
-      'If you are unsure, answer REJECT. A rejected line costs nothing; a false one is injected into ' +
-      'every future turn that hits this signature.\n' +
+      'If you are unsure, answer REJECT — but only when genuinely unsure about a factual claim, not ' +
+      'just cautious about whether the rule sounds broadly useful. A rejected line costs nothing; a ' +
+      'false one is injected into every future turn.\n' +
       'Answer with exactly one word: ACCEPT or REJECT.',
     user:
       `Tool: ${r.toolName}\nSignature: ${r.signature}\n\n` +

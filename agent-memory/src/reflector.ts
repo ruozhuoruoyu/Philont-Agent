@@ -297,8 +297,31 @@ export class SessionReflector {
     // make room, and once the declined pool is empty the only thing left to evict is another hypothesis
     // nobody has tried either. Refusing to mint is strictly better than trading one untried draft for
     // another. Updates and merges into EXISTING skills are unaffected — those add evidence, not volume.
-    const untested = this.skills.untestedDraftCount();
-    const mintingBlocked = untested >= MAX_DRAFT_SKILLS;
+    let untested = this.skills.untestedDraftCount();
+    let mintingBlocked = untested >= MAX_DRAFT_SKILLS;
+    if (mintingBlocked && specs.length > 0) {
+      // Try to break the deadlock: prune declined drafts first (the idle tick may not have run since
+      // the last reflection, so pruneDraftsToCap at line ~393 may be stale).
+      const pruned = this.skills.pruneDraftsToCap(MAX_DRAFT_SKILLS);
+      if (pruned > 0) {
+        untested = this.skills.untestedDraftCount();
+        mintingBlocked = untested >= MAX_DRAFT_SKILLS;
+      }
+      // If declined pool was empty (nothing met the isDeclinedDraft bar), force-evict the most-offered
+      // untested draft — it has the strongest negative evidence short of the declined threshold. Better
+      // than freezing minting for days while drafts slowly accumulate the 12 fallback offers the
+      // declined bar requires.
+      if (mintingBlocked) {
+        const forced = this.skills.forceEvictOldestDraft();
+        if (forced) {
+          console.log(
+            `[reflector] force-evicted draft '${forced}' to unblock minting (most offered, never chosen)`,
+          );
+          untested = this.skills.untestedDraftCount();
+          mintingBlocked = untested >= MAX_DRAFT_SKILLS;
+        }
+      }
+    }
     if (mintingBlocked && specs.length > 0) {
       console.log(
         `[reflector] not minting ${specs.length} new draft(s): ${untested} untested draft(s) already at cap ${MAX_DRAFT_SKILLS} — ` +

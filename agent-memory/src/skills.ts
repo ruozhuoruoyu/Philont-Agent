@@ -731,6 +731,36 @@ export class SkillStore extends EventEmitter {
   }
 
   /**
+   * Last-resort eviction when pruneDraftsToCap cannot evict (declined pool empty) but the creation-side
+   * cap is blocking minting. Force-evicts the untested draft with the HIGHEST offered_count — it has been
+   * shown the most times and never chosen, which is the strongest negative evidence short of the
+   * isDeclinedDraft bar. A never-offered draft is never force-evicted: it has zero evidence against it.
+   *
+   * Rationale (prod 2026-08-05): with DECLINED_MIN_FALLBACK_OFFERS at 12 and one exploration slot per turn,
+   * 40 drafts each need 12 fallback showings (≈480 turns ≈ 3.7 days) before pruneDraftsToCap can touch
+   * them — during which minting is frozen and reflect.new_skill stays 0. Force-evicting the most-offered
+   * draft breaks the deadlock without lowering the declined bar (which risks false-positive deletion of
+   * useful skills on irrelevant-turn offers, as seen at DECLINED_MIN_FALLBACK_OFFERS=3 on 2026-08-04).
+   *
+   * Returns the evicted skill name, or null if there is nothing to force-evict (every draft has
+   * offered_count 0 — genuinely never tested, the original design's "refuse to mint" applies).
+   */
+  forceEvictOldestDraft(): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT name FROM memory_skills
+         WHERE maturity = 'draft' AND COALESCE(use_count, 0) = 0 AND COALESCE(from_disk, 0) = 0
+           AND COALESCE(offered_count, 0) > 0
+         ORDER BY COALESCE(offered_count, 0) DESC, created_at ASC
+         LIMIT 1`,
+      )
+      .get() as { name: string } | undefined;
+    if (!row) return null;
+    if (this.deleteSkill(row.name)) return row.name;
+    return null;
+  }
+
+  /**
    * Drafts that have never been offered to the model — hypotheses nobody has had the chance to test.
    *
    * This is the number the CREATION side must respect. The store's own design metric is "creation rate <=

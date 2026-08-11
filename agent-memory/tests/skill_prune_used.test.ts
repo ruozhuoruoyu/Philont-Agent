@@ -157,3 +157,47 @@ test('the prune log says how many showings were real matches', () => {
   assert.equal(f.offeredCount, 3);
   assert.equal(f.matchedCount, 0, 'a fallback rotation is a showing but not a match');
 });
+
+// ── force-evict: breaking the minting deadlock (2026-08-05) ──────────────────────────────────────
+//
+// pruneDraftsToCap only evicts drafts that meet the isDeclinedDraft bar (3 matched or 12 fallback
+// offers). When the declined pool is empty but the cap is full, minting freezes for days until
+// drafts slowly accumulate enough offers. forceEvictOldestDraft breaks the deadlock by evicting the
+// most-offered untested draft — the strongest negative evidence short of the declined bar.
+
+test('forceEvictOldestDraft: evicts the most-offered untested draft', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill(draft('offered-5x'));
+  offer(skills, 'offered-5x', 5);
+  skills.createSkill(draft('offered-2x'));
+  offer(skills, 'offered-2x', 2);
+  skills.createSkill(draft('never-offered'));
+
+  const evicted = skills.forceEvictOldestDraft();
+  assert.equal(evicted, 'offered-5x');
+  assert.equal(skills.getByName('offered-5x'), null);
+  assert.ok(skills.getByName('offered-2x'));
+  assert.ok(skills.getByName('never-offered'));
+});
+
+test('forceEvictOldestDraft: never-offered drafts are safe — returns null', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill(draft('never-offered-a'));
+  skills.createSkill(draft('never-offered-b'));
+
+  // Zero evidence against either — the original design's "refuse to mint" applies.
+  assert.equal(skills.forceEvictOldestDraft(), null);
+  assert.ok(skills.getByName('never-offered-a'));
+  assert.ok(skills.getByName('never-offered-b'));
+});
+
+test('forceEvictOldestDraft: used drafts are safe (useCount > 0)', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill(draft('used-and-offered'));
+  offer(skills, 'used-and-offered', 10);
+  skills.recordUsage('used-and-offered');
+
+  // useCount > 0 means it left the untested pool — force-evict skips it.
+  assert.equal(skills.forceEvictOldestDraft(), null);
+  assert.ok(skills.getByName('used-and-offered'));
+});
