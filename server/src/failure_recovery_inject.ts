@@ -12,7 +12,6 @@
  *   - Short time window (default 30 minutes): old failures stop interfering once the user
  *     restarts the session or switches topics
  *
- * Design doc: (internal design note)
  */
 
 import type { AuditLog } from '@agent/policy';

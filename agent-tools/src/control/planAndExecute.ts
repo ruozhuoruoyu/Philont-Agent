@@ -15,7 +15,6 @@
  *   - cross server-restart persistence
  *   - keyword-detection auto-trigger
  *
- * Design doc: (internal design note)
  */
 
 import type { Tool, ToolDefinition } from '@agent/policy';

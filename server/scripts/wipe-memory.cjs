@@ -2,9 +2,9 @@
 /**
  * 整体擦掉 philont memory + secrets,从干净状态重启 server(2026-05-09)
  *
- * 用途:开发期 mycox 等测试积累了大量 reflection-emitted skill / playbook /
- * routing rule / 跨 session timeline 历史,污染面已涉及 5 张表。继续点修
- * (mycox-cleanup.cjs)是 whack-a-mole — 改用整体核弹清干净重来。
+ * 用途:开发和测试可能积累大量 reflection-emitted skill / playbook /
+ * routing rule / 跨 session timeline 历史。需要重新验证完整初始化流程时，
+ * 使用统一重置代替针对某个服务逐项清理。
  *
  * 默认行为(--db-only):
  *   - 备份 ~/.philont/memory/memory.sqlite 到 memory.sqlite.wipe.<ISO>.bak

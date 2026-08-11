@@ -9,7 +9,7 @@
  * removed 2026-05-06. Curiosity is re-implemented in the K8 initiative layer (autonomous/drivers/curiosity_driver.ts)
  * — that layer actually runs tools at idle-time, not just advising the LLM turn-time.
  *
- * Architectural position (see plan (internal design note) Phase K2):
+ * Architectural position:
  *   - These drives should ideally live in the Rust compile-time kernel, exposed to TS via agent-node FFI
  *   - Currently implemented in TS, but the **logic** is language-agnostic — core algorithms are 1:1 portable to Rust
  *   - Callers remain TsDriveRuntime.beforeTurn, interface is TsDriveEngine
@@ -314,4 +314,3 @@ export class TsTaskCommitmentDrive implements TsDriveEngine {
 
 // Internal helper functions for testing (exported but not core API)
 export { isPolicyRefusal, isDeliveredResult, isPureOpenQuestion };
-
