@@ -9239,6 +9239,8 @@ function summarizeTurnTools(records: InTurnToolRecord[]): string {
         firstError = r.resultText.slice(0, 60).replace(/\s+/g, ' ');
       }
     }
+    // Name-only on purpose: this is the turn-summary tally and inTurnRecords keep no params, so an
+    // http POST counts as read here. A log line, not a decision — the gate is in createToolChecker.
     const c = tools.classify(r.toolName);
     if (c?.capability === 'read') read++;
     else if (c?.capability === 'write') write++;
@@ -10059,11 +10061,24 @@ async function runToolLoop(
   statusLang: PhraseLang = 'en',
 ): Promise<{ outcome: { outcomeType: string; text?: string; reason?: string }; auditEvents: number }> {
 
-  // Create pre-intercept checker (reuses createToolChecker for unified logic)
+  // THE INPUT IS PART OF THE AUTHORIZATION DECISION, SO THE DECIDER HAS TO SEE IT.
+  //
+  // This lambda dropped its second argument. createToolChecker passes the parsed params in — that is
+  // the whole reason ToolRegistry.classify takes them — and every tool with a dynamic classify() was
+  // therefore judged by its STATIC declaration instead.
+  //
+  // For `http` and `securedHttp` the static declaration is read × network, which the default matrix
+  // permits outright. Their classify() exists precisely to say that POST/PUT/PATCH/DELETE are
+  // write × network, which the matrix denies. So every external write this agent has ever made over
+  // http — registering an account, posting content, calling someone's webhook — was authorized as if
+  // it were a page fetch, and no approval card was ever raised for it. The dynamic classifier was
+  // written, tested, and never consulted at the one call site that decides anything.
+  //
+  // runToolLoop was already fixed to classify with input; this is the half that gates.
   const checker = createToolChecker({
     permissions,
     audit,
-    classifyTool: (name) => tools.classify(name),
+    classifyTool: (name, params) => tools.classify(name, params),
     grantStore: grants,
     validatorChain: conservativeValidatorChain,
   });
