@@ -30,6 +30,8 @@ import {
   installSkillFromRegistryTool,
   removeLock,
   createPlanAndExecuteTool,
+  SUBLOOP_AUTH_DENIED,
+  type PlanExecCheckpoint,
   createCredentialTools,
   hostEnvPromptLine,
   matchBarriers,
@@ -2535,7 +2537,7 @@ const subTurnToolRunner = async (
           ok: false,
           output: '',
           error:
-            `NOT AUTHORIZED for this sub-task: ${name} (${capability}). ${denial}\n` +
+            `${SUBLOOP_AUTH_DENIED} for this sub-task: ${name} (${capability}). ${denial}\n` +
             `A sub-task inherits the approvals this turn already has and cannot request new ones — ` +
             `there is nobody here to ask. Do not try a different phrasing of the same call, and do ` +
             `not claim the step succeeded. Stop this sub-task and report it as blocked, naming the ` +
@@ -2554,9 +2556,41 @@ const subTurnToolRunner = async (
   }
 };
 
+/**
+ * Interrupted plans, waiting for the approval they stopped for.
+ *
+ * Keyed by task text: the parent model re-issues the same planAndExecute call after the owner says
+ * yes, which is the only handle both sides reliably share. Bounded and short-lived — a checkpoint is
+ * a convenience, and a stale one that resurrected an old plan would be worse than re-planning.
+ */
+const PLAN_CHECKPOINT_TTL_MS = 30 * 60_000;
+const planCheckpoints = new Map<string, PlanExecCheckpoint>();
+
+const planCheckpointStore = {
+  load: (task: string): PlanExecCheckpoint | null => {
+    const cp = planCheckpoints.get(task.trim());
+    if (!cp) return null;
+    if (Date.now() - cp.createdAt > PLAN_CHECKPOINT_TTL_MS) {
+      planCheckpoints.delete(task.trim());
+      return null;
+    }
+    return cp;
+  },
+  save: (cp: PlanExecCheckpoint): void => {
+    if (planCheckpoints.size > 20) planCheckpoints.clear();
+    planCheckpoints.set(cp.task.trim(), cp);
+    console.warn(
+      `[plan-execute] checkpointed at ${cp.blockedSubTaskId}: ${cp.completed.filter((c) => c.status === 'success').length} ` +
+        `done, waiting on an approval — a retry of the same task resumes instead of re-planning`,
+    );
+  },
+  clear: (task: string): void => { planCheckpoints.delete(task.trim()); },
+};
+
 const planAndExecuteTool = createPlanAndExecuteTool({
   llm: miniLoopLLM,
   toolRunner: subTurnToolRunner,
+  checkpoints: planCheckpointStore,
   toolDefs: tools.list()
     .filter((t) => !PLAN_EXEC_BLACKLIST.has(t.name))
     .map((t) => ({
@@ -2813,7 +2847,7 @@ const autonomousToolRunner: ToolRunner = {
         });
         if (denial) {
           console.warn(`[autonomous] blocked ${toolName}: ${denial.slice(0, 120)}`);
-          return { ok: false, output: '', error: `NOT AUTHORIZED for autonomous work: ${denial}` };
+          return { ok: false, output: '', error: `${SUBLOOP_AUTH_DENIED} for autonomous work: ${denial}` };
         }
       }
       const result = await tools.execute(

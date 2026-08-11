@@ -92,6 +92,7 @@ export type {
 export {
   createPlanAndExecuteTool,
   PlanBudgetTracker,
+  SUBLOOP_AUTH_DENIED,
 } from './control/planAndExecute.js';
 export type {
   SubTask,
@@ -99,6 +100,7 @@ export type {
   SubTaskResult,
   PlanAndExecuteDeps,
   PlanAndExecuteStructuredResult,
+  PlanExecCheckpoint,
 } from './control/planAndExecute.js';
 
 // ── All built-in tools ────────────────────────────────

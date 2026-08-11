@@ -47,6 +47,30 @@ interface PlanErr {
 
 export type SubTaskStatus = 'success' | 'failed' | 'skipped';
 
+/**
+ * The one string the server's tool runner and this loop both read to recognise "the policy layer
+ * refused this". Two copies of a marker is how a producer and a consumer end up disagreeing, so it
+ * lives here and the runner imports it.
+ */
+export const SUBLOOP_AUTH_DENIED = 'NOT AUTHORIZED';
+
+/**
+ * Where a plan stopped when authorization ran out, and everything already finished.
+ *
+ * A sub-loop has nobody to ask, so a denial ends the plan rather than the sub-task: continuing would
+ * spend budget on downstream steps that depend on the one that could not run. Re-running the whole
+ * plan after the owner approves is correct but wasteful — the successful steps did real work, some of
+ * it expensive (a Lean compile, a long enumeration). This carries that work across the approval.
+ */
+export interface PlanExecCheckpoint {
+  task: string;
+  ordered: SubTask[];
+  completed: SubTaskResult[];
+  blockedSubTaskId: string;
+  blockedReason: string;
+  createdAt: number;
+}
+
 export interface SubTaskResult {
   id: string;
   description: string;
@@ -379,6 +403,15 @@ export interface PlanAndExecuteDeps {
    * systemPrompt is byte-identical to before this callback existed (zero behavior change).
    */
   recall?: (query: string) => string;
+  /**
+   * Where to look for, and where to hand back, an interrupted plan. Resuming is opt-in: without a
+   * store this behaves exactly as before, re-planning from scratch every call.
+   */
+  checkpoints?: {
+    load: (task: string) => PlanExecCheckpoint | null;
+    save: (checkpoint: PlanExecCheckpoint) => void;
+    clear: (task: string) => void;
+  };
 }
 
 const DEFAULT_BLACKLIST = new Set([
@@ -399,6 +432,7 @@ export function createPlanAndExecuteTool(deps: PlanAndExecuteDeps): Tool {
     logger,
     onProgress,
     recall,
+    checkpoints,
   } = deps;
 
   return {
@@ -471,6 +505,58 @@ export function createPlanAndExecuteTool(deps: PlanAndExecuteDeps): Tool {
       // every later run.
       const budgetTracker = deps.budgetTracker ?? new PlanBudgetTracker();
 
+      // RESUME: the same task, stopped last time for want of an approval the owner has since given.
+      //
+      // Re-planning would be correct and wasteful — the finished steps did real work, sometimes the
+      // expensive kind (a Lean compile, a long enumeration), and a fresh decomposition would not even
+      // produce the same steps to skip. So the plan is reused verbatim and execution restarts at the
+      // step that was refused. If the approval still is not there, it stops in the same place again
+      // and the checkpoint survives; nothing is lost by trying.
+      const resumeFrom = checkpoints?.load(task) ?? null;
+      let blockedCheckpoint: PlanExecCheckpoint | null = null;
+
+      if (resumeFrom) {
+        onProgress?.(
+          `▸ resuming: ${resumeFrom.completed.length}/${resumeFrom.ordered.length} sub-tasks already done, ` +
+            `restarting at ${resumeFrom.blockedSubTaskId}`,
+        );
+        logger?.log(
+          `[plan-execute] resume task="${task.slice(0, 40)}" done=${resumeFrom.completed.length} ` +
+            `restart=${resumeFrom.blockedSubTaskId}`,
+        );
+        const remaining = resumeFrom.ordered.filter(
+          (st) => !resumeFrom.completed.some((c) => c.id === st.id && c.status === 'success'),
+        );
+        const resumed = await runExecutePhase({
+          ordered: remaining,
+          parentTask: task,
+          llm,
+          toolDefs,
+          toolRunner,
+          toolWhitelist: userWhitelist,
+          toolBlacklist,
+          maxIters: maxItersPerSubTask,
+          budgetTracker,
+          onProgress,
+          logger,
+          recall,
+          onBlocked: (cp) => {
+            blockedCheckpoint = cp;
+            checkpoints?.save({ ...cp, ordered: resumeFrom.ordered,
+              completed: [...resumeFrom.completed, ...cp.completed] });
+          },
+        });
+        const all = [...resumeFrom.completed, ...resumed];
+        if (!blockedCheckpoint) checkpoints?.clear(task);
+        onProgress?.(`▸ aggregate (${aggregateMode})`);
+        const aggregatedResume = await runAggregatePhase(task, all, aggregateMode);
+        return {
+          success: true,
+          output: aggregatedResume,
+          data: { resumedFrom: resumeFrom.blockedSubTaskId, results: all } as Record<string, unknown>,
+        };
+      }
+
       onProgress?.(`▸ plan phase: decompose (max ${maxSubTasks} sub-tasks)`);
 
       const planResult = await runPlanPhase(
@@ -523,10 +609,16 @@ export function createPlanAndExecuteTool(deps: PlanAndExecuteDeps): Tool {
         onProgress,
         logger,
         recall,
+        onBlocked: (cp) => {
+          blockedCheckpoint = cp;
+          checkpoints?.save(cp);
+        },
       });
 
       onProgress?.(`▸ aggregate (${aggregateMode})`);
       const aggregated = await runAggregatePhase(task, results, aggregateMode);
+
+      if (!blockedCheckpoint) checkpoints?.clear(task);
 
       const totals = budgetTracker.totals();
       const structured: PlanAndExecuteStructuredResult = {
@@ -620,6 +712,8 @@ interface ExecutePhaseOptions {
   logger?: { log: (msg: string) => void; warn: (msg: string) => void };
   /** See PlanAndExecuteDeps.recall — cross-layer skill-recall callback for the sub-task prompt. */
   recall?: (query: string) => string;
+  /** Called once if the plan stops because the policy layer refused a call. */
+  onBlocked?: (checkpoint: PlanExecCheckpoint) => void;
 }
 
 async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult[]> {
@@ -636,6 +730,7 @@ async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult
     onProgress,
     logger,
     recall,
+    onBlocked,
   } = opts;
 
   const results = new Map<string, SubTaskResult>();
@@ -722,12 +817,22 @@ async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult
       `▸ ${i + 1}/${ordered.length}: ${st.description.slice(0, 60)} → running`,
     );
 
+    // The denial has to be observed HERE, not inferred from what the sub-model does with it. The
+    // sub-model is told to stop and report, and it usually will — but a mechanism that only works
+    // when the model cooperates is a suggestion, not a mechanism.
+    let authDenial: string | null = null;
+    const watchedRunner = async (name: string, input: Record<string, unknown>) => {
+      const r = await toolRunner(name, input);
+      if (!r.ok && r.error?.includes(SUBLOOP_AUTH_DENIED)) authDenial ??= r.error;
+      return r;
+    };
+
     const subResult = await runMiniAgentLoop({
       systemPrompt,
       userMessage: st.description,
       llm,
       toolDefs,
-      toolRunner,
+      toolRunner: watchedRunner,
       toolWhitelist,
       toolBlacklist,
       maxIters,
@@ -771,6 +876,50 @@ async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult
     logger?.log(
       `[plan-execute] ${st.id} ${status} iter=${subResult.itersUsed} tools=${subResult.toolCallHistory.length}`,
     );
+
+    // Out of authorization: stop the plan rather than burning budget on every downstream step that
+    // depends on the one that could not run. What already succeeded is kept and handed back.
+    //
+    // A denial makes the sub-task NOT a success, whatever the sub-model then wrote. It will often
+    // write something reasonable — "could not publish, moving on" — and that sentence used to be
+    // enough to mark the step done, which would bury the refusal under a plausible summary and let
+    // the plan continue on top of work that never happened. What decides here is the ledger of what
+    // the policy layer refused, not the model's account of it.
+    if (authDenial) {
+      if (status === 'success') {
+        status = 'failed';
+        r.status = 'failed';
+      }
+      r.error = `${r.error ?? ''}\n${authDenial}`.trim();
+      onBlocked?.({
+        task: parentTask,
+        ordered,
+        completed: ordered
+          .slice(0, i)
+          .map((prev) => results.get(prev.id))
+          .filter((x): x is SubTaskResult => x !== undefined),
+        blockedSubTaskId: st.id,
+        blockedReason: authDenial,
+        createdAt: Date.now(),
+      });
+      onProgress?.(
+        `▸ stopped at ${i + 1}/${ordered.length}: needs an approval this turn does not have — ` +
+          `${i} step(s) already done are kept for the retry`,
+      );
+      for (const rest of ordered.slice(i + 1)) {
+        results.set(rest.id, {
+          id: rest.id,
+          description: rest.description,
+          status: 'skipped',
+          finalText: '',
+          toolCallCount: 0,
+          iters: 0,
+          hitCap: false,
+          skippedBecauseOf: st.id,
+        });
+      }
+      break;
+    }
   }
 
   return ordered.map((st) => results.get(st.id)!);

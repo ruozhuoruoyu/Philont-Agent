@@ -1265,3 +1265,23 @@ test('findReasoningSessionClaim: 未来意图与否定不算声称', () => {
   assert.equal(findReasoningSessionClaim('目前没有进行中的深度探索会话'), null);
   assert.equal(findReasoningSessionClaim('No deep_explore session is running right now.'), null);
 });
+
+test('fabricated_reasoning_state: a hedge suppresses its own clause, not the claim after it', async () => {
+  const { findReasoningTerminalClaim } = await import('../src/honesty_gate.js');
+
+  // The denial check ran against the FIRST match of each pattern and skipped the pattern entirely
+  // when that match was hedged — so hedge-then-claim, which is close to the default shape of a model
+  // told to be careful, was read by its hedge alone.
+  assert.equal(
+    findReasoningTerminalClaim('这个定理尚未编译，我不声称已证。经过五轮推理，根命题已证。'),
+    '根命题已证',
+  );
+  // Same pattern, hedge second: order must not matter either.
+  assert.equal(
+    findReasoningTerminalClaim('根命题已证。不过另一个定理尚未编译，我不声称已证。'),
+    '根命题已证',
+  );
+  // And the honest report it was written for is still silent.
+  assert.equal(findReasoningTerminalClaim('这个定理尚未编译，我不声称已证。'), null);
+  assert.equal(findReasoningTerminalClaim('猜想尚未证明，我不声称已证。'), null);
+});

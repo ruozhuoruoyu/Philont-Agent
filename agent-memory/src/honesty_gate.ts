@@ -490,8 +490,24 @@ const REASONING_ROUND_RESULT_PATTERNS: ReadonlyArray<RegExp> = [
 
 export function findReasoningTerminalClaim(text: string): string | null {
   for (const re of REASONING_TERMINAL_PATTERNS) {
-    const m = re.exec(text);
-    if (m) {
+    // EVERY match, not the first one.
+    //
+    // The denial check was written against `re.exec(text)` — one match per pattern — and skipped to
+    // the NEXT pattern when that match turned out to be hedged. So a reply that hedges once and then
+    // claims outright was read by its hedge and the claim never examined:
+    //
+    //   “这个定理尚未编译，我不声称已证。经过五轮推理，根命题已证。”   → null
+    //
+    // Hedge-then-claim is not an exotic shape; it is close to the default shape of a model that has
+    // been told to be careful. The suppression has to apply to the clause it lives in and no further,
+    // which means scanning the pattern across the whole text instead of stopping at its first hit.
+    const scan = re.global ? re : new RegExp(re.source, `${re.flags}g`);
+    scan.lastIndex = 0;
+    for (let m = scan.exec(text); m !== null; m = scan.exec(text)) {
+      if (m[0].length === 0) {
+        scan.lastIndex++; // defensive: a zero-width match would spin here
+        continue;
+      }
       const matched = m[0];
       // Positive terminal words inside an explicit denial are not terminal claims. Production example:
       // “定理、未编译，我不声称已证” previously fired fabricated_reasoning_state on the word 已证.
@@ -499,7 +515,7 @@ export function findReasoningTerminalClaim(text: string): string | null {
         /(?:未|没有|尚未|并非|不(?:会|能)?声称|不能说|无法确认)[^。！？\n]{0,20}(?:已证|成立|proved|proven|solved)/i.test(matched) ||
         /(?:not|never|cannot|can'?t|do not claim)[^.!?\n]{0,20}(?:proved|proven|solved)/i.test(matched);
       const isExplicitImpossibilityConclusion = /(?:不能|无法|不可能).*(?:证明|证明路径)/.test(matched);
-      if (deniesPositiveClaim && !isExplicitImpossibilityConclusion) continue;
+      if (deniesPositiveClaim && !isExplicitImpossibilityConclusion) continue; // this match only
       return matched.slice(0, 60);
     }
   }
