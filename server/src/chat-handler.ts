@@ -371,6 +371,7 @@ import {
 import { renderDeterministicMaxIterSummary } from './max_iter_summary.js';
 import { deleteContinuation, loadContinuations, saveContinuation } from './continuation_store.js';
 import { summarizeToolInputForLog } from './tool_log_summary.js';
+import { safeSessionId } from './safe_session_id.js';
 import {
   computeViability,
   viabilityActuatorRelevant,
@@ -3697,12 +3698,18 @@ const skillReflexNudged = new Set<string>();
  * a normal turn (no auth re-prompt), so questions like "is the session still active?" are answered
  * instead of being bounced as "please reply allow/deny". Keyed by ws sid like the rest of the auth state.
  *
- * 2026-08-11: raised 10 → 30 min, to the same window the approval itself buys (WORKFLOW_GRANT_TTL_MS).
+ * 2026-08-11: raised 10 → 30 min, the same window the approval itself buys (WORKFLOW_GRANT_TTL_MS).
  * Ten minutes was shorter than how the owner actually answers: in the 2026-08-09 log the reply gap ran
  * 8 min at the median with a 35–60 min tail, and each over-TTL reply silently ATE one approval — 12:43:29
  * "OK" arrived 35.6 min late, was dropped, the card was re-sent, and the owner typed "ok" again 21
- * seconds later. An expiry that fires more often than the owner is late is not a safety boundary, it is
- * a treadmill; the tool still never runs on expiry, so lengthening it costs no authorization strength.
+ * seconds later.
+ *
+ * This is a TRADE, not a free win, and it should be read as one: an "OK" arriving 25 minutes after the
+ * card now executes the tool where it previously would not, so the window in which the owner's intent
+ * may have moved on is three times wider. What is bought is fewer re-authorizations of work already
+ * approved. The 35.6-min case in that log still expires under the new value — it is now visible and
+ * re-requested rather than silently eaten. Which number is right is a judgement about how this owner
+ * wants to be asked, not a fact about the code; PENDING_AUTH_TTL_MS overrides it.
  */
 const PENDING_AUTH_TTL_MS = Number(process.env.PENDING_AUTH_TTL_MS) || 30 * 60_000;
 
@@ -3771,6 +3778,26 @@ export function pendingAuthIsStale(
   return now - pending.ts > PENDING_AUTH_TTL_MS;
 }
 
+/**
+ * Which message array this turn starts from. A suspended state's inflight messages carry assistant
+ * tool_use blocks that only its own resume path answers, so they may be used ONLY while that state is
+ * still live. This function, not the order of statements in handleChatSend, is what makes that true.
+ */
+export type TurnContextSource = 'auth-inflight' | 'question-inflight' | 'fresh';
+
+export function selectTurnContextSource(
+  auth: { ts: number; executionState?: 'awaiting_auth' | 'running' | 'uncertain' } | undefined,
+  question: { createdAt: number } | undefined,
+  now: number,
+): { source: TurnContextSource; dropAuth: boolean } {
+  if (auth && pendingAuthIsStale(auth, now)) {
+    return { source: question ? 'question-inflight' : 'fresh', dropAuth: true };
+  }
+  if (auth) return { source: 'auth-inflight', dropAuth: false };
+  if (question) return { source: 'question-inflight', dropAuth: false };
+  return { source: 'fresh', dropAuth: false };
+}
+
 export function continuationSurvivesRestart(
   stored: { savedAt?: number; auth?: unknown; question?: unknown },
   now: number,
@@ -3808,7 +3835,7 @@ for (const stored of loadContinuations()) {
   }
   if ((stored.auth && !survives.auth) || (stored.question && !survives.question)) {
     console.log(
-      `[continuation-store] dropped expired snapshot for ${stored.sessionId.slice(0, 24)}… ` +
+      `[continuation-store] dropped expired snapshot for ${safeSessionId(stored.sessionId)} ` +
         `(auth=${stored.auth ? (survives.auth ? 'kept' : 'dropped') : 'none'}, ` +
         `question=${stored.question ? (survives.question ? 'kept' : 'dropped') : 'none'})`,
     );
@@ -3838,6 +3865,48 @@ function matchesOfferedWord(normalized: string, words: readonly string[]): boole
   return words.some(
     (w) => normalized === w || (normalized.startsWith(w) && UNCERTAIN_REPLY_TAIL_RE.test(normalized.slice(w.length))),
   );
+}
+
+/**
+ * Close a suspended tool chain: one tool_result for the interrupted call and one for every call still
+ * queued behind it, so nothing in the message array is left unanswered.
+ *
+ * The two reasons are kept apart because they are different facts about the world. `declined` is the
+ * owner saying no. `unresolved` is nobody saying anything — the recovery question ran out its bound.
+ * Writing "the user chose not to retry" in the second case is a fabrication, and it is one the model
+ * would then repeat to the owner, the audit trail would store, and the learning judge would score.
+ * Neither one is ever replayed; only one of them is a decision.
+ */
+export function closeSuspendedToolChain(
+  pending: {
+    toolCallId: string;
+    remainingCalls: ReadonlyArray<{ id: string }>;
+    collectedResults: ReadonlyArray<{ type: 'tool_result'; tool_use_id: string; content: string }>;
+  },
+  reason: 'declined' | 'unresolved',
+): Array<{ type: 'tool_result'; tool_use_id: string; content: string }> {
+  const head =
+    reason === 'declined'
+      ? '⚠ TOOL RESULT UNCERTAIN — the process restarted while this tool was executing and the user ' +
+        'explicitly chose not to retry it. Whether the external side effect committed is unknown; ' +
+        'verify external state before claiming success.'
+      : '⚠ TOOL RESULT UNRESOLVED — the process restarted while this tool was executing, and NO explicit ' +
+        'retry/skip decision was ever received. Whether the external side effect committed is unknown. ' +
+        'It will not be replayed. Do not say that it ran, and do not say that the user declined it — ' +
+        'nobody decided. If it matters to the current request, check the external state read-only first.';
+  const tail =
+    reason === 'declined'
+      ? 'Skipped because the preceding tool result is uncertain after a process restart.'
+      : 'Skipped because the preceding tool result is unresolved after a process restart.';
+  return [
+    ...pending.collectedResults,
+    { type: 'tool_result' as const, tool_use_id: pending.toolCallId, content: head },
+    ...pending.remainingCalls.map((call) => ({
+      type: 'tool_result' as const,
+      tool_use_id: call.id,
+      content: tail,
+    })),
+  ];
 }
 
 /**
@@ -5606,7 +5675,7 @@ async function maybeCompact(
     );
     if (result.didCompact) {
       console.log(
-        `[memory] compress session=${sessionId} mode=${mode}: ${result.tokensBefore} → ${result.tokensAfter} tokens (note=${result.summaryNoteId})`,
+        `[memory] compress session=${safeSessionId(sessionId)} mode=${mode}: ${result.tokensBefore} → ${result.tokensAfter} tokens (note=${result.summaryNoteId})`,
       );
       messages.length = 0;
       messages.push(...(result.compactedMessages as unknown as NativeMessage[]));
@@ -5614,7 +5683,7 @@ async function maybeCompact(
       if (gained < result.tokensBefore * COMPACT_MIN_GAIN_RATIO) {
         incompressibleTurns.add(sessionId);
         console.warn(
-          `[memory] compress session=${sessionId} freed only ${gained} tokens ` +
+          `[memory] compress session=${safeSessionId(sessionId)} freed only ${gained} tokens ` +
             `(<${Math.round(COMPACT_MIN_GAIN_RATIO * 100)}%) — the tail is incompressible (oversized tool_results). ` +
             `Suppressing further compaction this turn; relying on tool_result eviction.`,
         );
@@ -5632,7 +5701,7 @@ async function maybeCompact(
   const eviction = evictOldToolResults(messages, { budgetTokens: COMPACT_HARD_THRESHOLD_TOKENS });
   if (eviction.didEvict) {
     console.log(
-      `[memory] evict old tool_result session=${sessionId}: ${eviction.tokensBefore} → ${eviction.tokensAfter} tokens (${eviction.evictedCount} items)`,
+      `[memory] evict old tool_result session=${safeSessionId(sessionId)}: ${eviction.tokensBefore} → ${eviction.tokensAfter} tokens (${eviction.evictedCount} items)`,
     );
   }
 }
@@ -5886,7 +5955,7 @@ async function sendLlmWithRescue(
       if (took >= LLM_SLOW_CALL_LOG_MS) {
         const left = turnRemainingMs(sessionId);
         console.warn(
-          `[llm] slow call session=${sessionId} took ${Math.round(took / 1000)}s ` +
+          `[llm] slow call session=${safeSessionId(sessionId)} took ${Math.round(took / 1000)}s ` +
             `(budget ${Math.round(ms / 1000)}s, turn left ${Number.isFinite(left) ? Math.round(left / 1000) + 's' : 'n/a'})`,
         );
       }
@@ -5907,12 +5976,12 @@ async function sendLlmWithRescue(
       // which will spend it writing the user a reply instead of on a second wait.
       if (!hasRoomForTimeoutRetry(turnRemainingMs(sessionId))) {
         console.warn(
-          `[llm] timeout session=${sessionId} after ${LLM_CALL_TIMEOUT_MS}ms — NOT retrying, ` +
+          `[llm] timeout session=${safeSessionId(sessionId)} after ${LLM_CALL_TIMEOUT_MS}ms — NOT retrying, ` +
             `${Math.round(turnRemainingMs(sessionId) / 1000)}s left of the turn (wrap-up needs it)`,
         );
         throw e;
       }
-      console.warn(`[llm] timeout session=${sessionId} after ${LLM_CALL_TIMEOUT_MS}ms — retrying once`);
+      console.warn(`[llm] timeout session=${safeSessionId(sessionId)} after ${LLM_CALL_TIMEOUT_MS}ms — retrying once`);
       onTrace?.({
         kind: 'system-event',
         tier: 4,
@@ -5920,11 +5989,11 @@ async function sendLlmWithRescue(
       });
       try {
         const r = await call();
-        console.log(`[llm] timeout retry session=${sessionId} succeeded`);
+        console.log(`[llm] timeout retry session=${safeSessionId(sessionId)} succeeded`);
         return r;
       } catch (e2) {
         if (e2 instanceof LlmTimeoutError) {
-          console.warn(`[llm] timeout retry session=${sessionId} also failed after ${LLM_CALL_TIMEOUT_MS}ms — giving up`);
+          console.warn(`[llm] timeout retry session=${safeSessionId(sessionId)} also failed after ${LLM_CALL_TIMEOUT_MS}ms — giving up`);
           internalAudit.append('task_failure_mode', {
             sessionId,
             kind: 'llm_timeout',
@@ -5947,7 +6016,7 @@ async function sendLlmWithRescue(
     }
     const before = estimateTotalTokens(messages);
     console.warn(
-      `[llm] ContextTooLargeError session=${sessionId} tokens≈${before}: ${e.message.slice(0, 200)} — emergency evict retry`,
+      `[llm] ContextTooLargeError session=${safeSessionId(sessionId)} tokens≈${before}: ${e.message.slice(0, 200)} — emergency evict retry`,
     );
     onTrace?.({
       kind: 'system-event',
@@ -5956,7 +6025,7 @@ async function sendLlmWithRescue(
     });
     const r = evictForEmergency(messages);
     console.log(
-      `[llm] emergency evict session=${sessionId}: ${r.tokensBefore} → ${r.tokensAfter} tokens (${r.evictedCount} items, keep recent ${BUDGET.emergencyKeepRecent})`,
+      `[llm] emergency evict session=${safeSessionId(sessionId)}: ${r.tokensBefore} → ${r.tokensAfter} tokens (${r.evictedCount} items, keep recent ${BUDGET.emergencyKeepRecent})`,
     );
     try {
       return await call();
@@ -5997,19 +6066,19 @@ async function runFinalize(sessionId: string): Promise<void> {
   try {
     const result = await extractor.extractFromSession(sessionId);
     console.log(
-      `[memory] session=${sessionId} fact extraction: ${result.factsStored} facts, ${result.notesStored} notes`,
+      `[memory] session=${safeSessionId(sessionId)} fact extraction: ${result.factsStored} facts, ${result.notesStored} notes`,
     );
   } catch (e) {
-    console.error(`[memory] fact extraction failed session=${sessionId}:`, e);
+    console.error(`[memory] fact extraction failed session=${safeSessionId(sessionId)}:`, e);
   }
 
   try {
     const result = await reflector.reflectFromSession(sessionId);
     console.log(
-      `[memory] session=${sessionId} skill reflection: ${result.skillsCreated} created, ${result.skillsUpdated} updated`,
+      `[memory] session=${safeSessionId(sessionId)} skill reflection: ${result.skillsCreated} created, ${result.skillsUpdated} updated`,
     );
   } catch (e) {
-    console.error(`[memory] skill reflection failed session=${sessionId}:`, e);
+    console.error(`[memory] skill reflection failed session=${safeSessionId(sessionId)}:`, e);
   }
 
   // v7: pursuit proposal (shadow state) — independent LLM pass; failure does not affect other steps
@@ -6017,11 +6086,11 @@ async function runFinalize(sessionId: string): Promise<void> {
     const result = await pursuitExtractor.extractFromSession(sessionId);
     if (result.pursuitsProposed > 0) {
       console.log(
-        `[pursuit] session=${sessionId} created shadow pursuit: ${result.pursuitsProposed}`,
+        `[pursuit] session=${safeSessionId(sessionId)} created shadow pursuit: ${result.pursuitsProposed}`,
       );
     }
   } catch (e) {
-    console.error(`[pursuit] proposal failed session=${sessionId}:`, e);
+    console.error(`[pursuit] proposal failed session=${safeSessionId(sessionId)}:`, e);
   }
 
   // v7: drive reflection — scans unscored outcomes to backfill utility + adjusts drive_config parameters.
@@ -6043,17 +6112,17 @@ async function runFinalize(sessionId: string): Promise<void> {
     const result = await selfReflector.reflect();
     if (result.updated) {
       console.log(
-        `[self-reflect] session=${sessionId} summary updated (sourceIntegrity=${result.sourceIntegrity.toFixed(2)}, strengths=${result.strengths.length}, edges=${result.growthEdges.length})`,
+        `[self-reflect] session=${safeSessionId(sessionId)} summary updated (sourceIntegrity=${result.sourceIntegrity.toFixed(2)}, strengths=${result.strengths.length}, edges=${result.growthEdges.length})`,
       );
     }
   } catch (e) {
-    console.error(`[self-reflect] self-reflection failed session=${sessionId}:`, e);
+    console.error(`[self-reflect] self-reflection failed session=${safeSessionId(sessionId)}:`, e);
   }
 
   try {
     await backfillSessionSummary(sessionId);
   } catch (e) {
-    console.error(`[memory] session summary backfill failed session=${sessionId}:`, e);
+    console.error(`[memory] session summary backfill failed session=${safeSessionId(sessionId)}:`, e);
   }
 }
 
@@ -6439,7 +6508,7 @@ function shadowLearningJudge(
     if (!resolved) {
       // Nothing recoverable: emit no verdict rather than a meaningless one. A skipped sample is honest;
       // a could_not_verify about the word "ok" is noise that looks like data.
-      console.log(`[learning-judge] shadow session=${sessionId} skipped (auth resume, original goal not recoverable)`);
+      console.log(`[learning-judge] shadow session=${safeSessionId(sessionId)} skipped (auth resume, original goal not recoverable)`);
       return;
     }
     const goal = resolved;
@@ -6457,7 +6526,7 @@ function shadowLearningJudge(
     })
       .then((v) => {
         console.log(
-          `[learning-judge] shadow session=${sessionId} verdict=${v.outcome} basis=${v.basis} "${v.evidence}"`,
+          `[learning-judge] shadow session=${safeSessionId(sessionId)} verdict=${v.outcome} basis=${v.basis} "${v.evidence}"`,
         );
         // ...and count it, so "0 verified out of 12" is a number something can read rather than one a
         // human has to tally off a pasted log. Twice, deliberately: in-memory for the rolling /autonomy
@@ -6578,7 +6647,7 @@ export async function handleChatSend(
         } catch (e) {
           console.warn('[push] unsubscribe failed', e);
         }
-        console.log(`[push] owner asked to STOP pushes (session=${sessionId}) → unsubscribed=${ok}`);
+        console.log(`[push] owner asked to STOP pushes (session=${safeSessionId(sessionId)}) → unsubscribed=${ok}`);
         reply = ok
           ? lang === 'en'
             ? 'Done — proactive messages are off. I will not message you unprompted again. Reply "resume pushing" if you ever want them back.'
@@ -6592,7 +6661,7 @@ export async function handleChatSend(
         } catch (e) {
           console.warn('[push] resubscribe failed', e);
         }
-        console.log(`[push] owner asked to RESUME pushes (session=${sessionId})`);
+        console.log(`[push] owner asked to RESUME pushes (session=${safeSessionId(sessionId)})`);
         reply =
           lang === 'en'
             ? 'Proactive messages are back on. Reply "stop pushing" to turn them off again.'
@@ -6780,12 +6849,12 @@ export async function handleChatSend(
           signalBus.exploreAskApproved = true;
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
-          console.log(`[intent-router] session=${sessionId} ask-tier APPROVED → deep_explore on restored goal`);
+          console.log(`[intent-router] session=${safeSessionId(sessionId)} ask-tier APPROVED → deep_explore on restored goal`);
         } else if (askIntent === 'deny') {
           signalBus.exploreAskDeclined = true;
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
-          console.log(`[intent-router] session=${sessionId} ask-tier declined → flat run on restored goal`);
+          console.log(`[intent-router] session=${safeSessionId(sessionId)} ask-tier declined → flat run on restored goal`);
         }
         // unclear → fall through: the reply is a new message; the offer is dropped.
       }
@@ -6819,9 +6888,18 @@ export async function handleChatSend(
   //
   // `running` / `uncertain` are exempt: those describe a call that may already have touched the world,
   // and their inflight messages are what the retry/skip decision resumes into. Age must not decide them.
+  //
+  // The choice of message source is made by selectTurnContextSource, which re-derives staleness
+  // itself, so the guarantee does not rest on this block running before the build below. If the two
+  // are ever separated again, the selector still refuses a stale pending's inflight.
+  const turnContext = selectTurnContextSource(
+    pendingAuth.get(sessionId),
+    pendingQuestion.get(sessionId),
+    Date.now(),
+  );
   {
     const stale = pendingAuth.get(sessionId);
-    if (stale && pendingAuthIsStale(stale, Date.now())) {
+    if (stale && turnContext.dropAuth) {
       pendingAuth.delete(sessionId);
       persistContinuation(sessionId);
       signalBus.droppedExpiredAuth = {
@@ -6829,7 +6907,7 @@ export async function handleChatSend(
         ageMinutes: Math.round((Date.now() - stale.ts) / 60_000),
       };
       console.log(
-        `[continuation] session=${sessionId} dropped expired pending auth for ${stale.toolName} ` +
+        `[continuation] session=${safeSessionId(sessionId)} dropped expired pending auth for ${stale.toolName} ` +
           `(age=${signalBus.droppedExpiredAuth.ageMinutes}m > ${Math.round(PENDING_AUTH_TTL_MS / 60_000)}m) → fresh context`,
       );
       onTrace?.({
@@ -6865,7 +6943,7 @@ export async function handleChatSend(
     signalBus.selfReferentialMeta = carried?.selfReferentialMeta ?? false;
     if (carried?.decision) {
       console.log(
-        `[intent-router] session=${sessionId} auth-resume: carried route=${carried.decision.route} conf=${carried.decision.confidence} (router skipped on resume)`,
+        `[intent-router] session=${safeSessionId(sessionId)} auth-resume: carried route=${carried.decision.route} conf=${carried.decision.confidence} (router skipped on resume)`,
       );
     }
   }
@@ -6943,7 +7021,7 @@ export async function handleChatSend(
       ts: Date.now(),
     });
     if (intentDecision) {
-      console.log(`[intent-router] session=${sessionId} route=${intentDecision.route}${intentDecision.domain ? `:${intentDecision.domain}` : ''} conf=${intentDecision.confidence}`);
+      console.log(`[intent-router] session=${safeSessionId(sessionId)} route=${intentDecision.route}${intentDecision.domain ? `:${intentDecision.domain}` : ''} conf=${intentDecision.confidence}`);
       // Three-tier deep_explore routing, ASK tier: mid-confidence reasoning task → one question,
       // zero LLM turn cost; the next reply decides (grant → force engine, deny → flat). Only for
       // interactive sessions with a self-contained goal and no recently-active session.
@@ -6958,7 +7036,7 @@ export async function handleChatSend(
       if (askTier) {
         pendingExploreAsk.set(sessionId, { goal: userMessage, decision: intentDecision, ts: Date.now() });
         onDelta(buildDeepExploreAskText(intentDecision));
-        console.log(`[intent-router] session=${sessionId} ask-tier question sent (conf=${intentDecision.confidence})`);
+        console.log(`[intent-router] session=${safeSessionId(sessionId)} ask-tier question sent (conf=${intentDecision.confidence})`);
         return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
       }
     }
@@ -7003,13 +7081,13 @@ export async function handleChatSend(
           }
           if (aborted.length > 0) {
             console.log(
-              `[cleanup-scope] session=${sessionId} aborted ${aborted.length} in-flight scheduled run(s) ` +
+              `[cleanup-scope] session=${safeSessionId(sessionId)} aborted ${aborted.length} in-flight scheduled run(s) ` +
                 `before deleting: ${aborted.join(', ')}`,
             );
           }
           if (paused.length > 0) {
             console.log(
-              `[cleanup-scope] session=${sessionId} paused ${paused.length} schedule(s) matching [${targets.join(',')}] ` +
+              `[cleanup-scope] session=${safeSessionId(sessionId)} paused ${paused.length} schedule(s) matching [${targets.join(',')}] ` +
                 `for ${Math.round(CLEANUP_SCHEDULE_PAUSE_MS / 60000)}min: ${paused.join(', ')}`,
             );
             internalAudit.append('self_domain_write', {
@@ -7056,7 +7134,7 @@ export async function handleChatSend(
         ? cls.reasons.join(',')
         : `intent:plan:${intentDecision?.confidence ?? '?'}`;
       console.log(
-        `[auto-task-mode] session=${sessionId} ${modeAtEntry}→slow reasons=[${reasonLabel}]` +
+        `[auto-task-mode] session=${safeSessionId(sessionId)} ${modeAtEntry}→slow reasons=[${reasonLabel}]` +
         (modeAtEntry === 'slow' ? ' (re-plan for new task at boundary)' : ''),
       );
 
@@ -7184,7 +7262,7 @@ export async function handleChatSend(
               projectHint: projectHint ?? null,
             });
             console.log(
-              `[auto-plan-on-slow] session=${sessionId} created placeholder plan ${placeholder.id} (${placeholder.steps.length} steps, guideUrl=${guideUrl ?? 'none'}, project=${projectHint ?? 'none'})`,
+              `[auto-plan-on-slow] session=${safeSessionId(sessionId)} created placeholder plan ${placeholder.id} (${placeholder.steps.length} steps, guideUrl=${guideUrl ?? 'none'}, project=${projectHint ?? 'none'})`,
             );
             // Phase 13.5: projectHint matched → mechanism layer loadOrCreate plan.md;
             // the LLM no longer needs to pass persist:true; plan_revise/update/close hooks
@@ -7222,7 +7300,7 @@ export async function handleChatSend(
         reasons: cls.reasons,
       });
       console.log(
-        `[auto-task-mode] session=${sessionId} slow→fast (new task classified fast at task boundary)`,
+        `[auto-task-mode] session=${safeSessionId(sessionId)} slow→fast (new task classified fast at task boundary)`,
       );
     }
   }
@@ -7230,11 +7308,14 @@ export async function handleChatSend(
   const recallInput = messageIsSelfContainedGoal(userMessage)
     ? userMessage
     : (signalBus.carriedExploreGoal ?? userMessage);
-  const messages: NativeMessage[] = pending
-    ? [...pending.inflightMessages]
-    : pendingQ
-    ? [...pendingQ.inflightMessages]
-    : buildFreshMessages(recallInput, sessionId, signalBus);
+  // Driven by turnContext, not by re-reading the maps: an expired pending can never reach this line
+  // as a message source, whatever else moves around it.
+  const messages: NativeMessage[] =
+    turnContext.source === 'auth-inflight' && pending
+      ? [...pending.inflightMessages]
+      : turnContext.source === 'question-inflight' && pendingQ
+      ? [...pendingQ.inflightMessages]
+      : buildFreshMessages(recallInput, sessionId, signalBus);
 
   // Phase 11 (2026-05-14): per-turn messages reference for plan_review tool to check
   // "most recent assistant text" when detecting the self-review section.
@@ -7278,7 +7359,7 @@ export async function handleChatSend(
   signalBus.userMessage = userMessage;
   const userPreview = userMessage.length > 80 ? userMessage.slice(0, 80) + '…' : userMessage;
   console.log(
-    `[turn] session=${sessionId} start ${pending ? '(resume pending auth)' : '(fresh)'} user="${userPreview.replace(/\n/g, ' ')}"`,
+    `[turn] session=${safeSessionId(sessionId)} start ${pending ? '(resume pending auth)' : '(fresh)'} user="${userPreview.replace(/\n/g, ' ')}"`,
   );
 
   try {
@@ -7298,7 +7379,7 @@ export async function handleChatSend(
     // this gives ops an at-a-glance view of "what was called in this turn overall").
     const toolSummary = summarizeTurnTools(signalBus.inTurnRecords ?? []);
     console.log(
-      `[turn] session=${sessionId} done outcome=${result.outcome.outcomeType} durationMs=${dur} auditEvents=${result.auditEvents} ${toolSummary} ${textPreview}`,
+      `[turn] session=${safeSessionId(sessionId)} done outcome=${result.outcome.outcomeType} durationMs=${dur} auditEvents=${result.auditEvents} ${toolSummary} ${textPreview}`,
     );
 
     // Phase 12 cont (2026-05-17): scheduled sessions automatically capture the current turn outcome to
@@ -7368,7 +7449,7 @@ export async function handleChatSend(
           (summary.outcome === 'ok' || summary.outcome === 'partial') &&
           summary.httpOkCount >= 1;
         console.log(
-          `[schedule-outcomes] session=${sessionId} scheduleId=${scheduleId} ` +
+          `[schedule-outcomes] session=${safeSessionId(sessionId)} scheduleId=${scheduleId} ` +
             `outcome=${summary.outcome} httpOk=${summary.httpOkCount} ` +
             `httpFail=${summary.httpFailCount} sigs=[${failureSignatures.join(',')}]`,
         );
@@ -7381,7 +7462,7 @@ export async function handleChatSend(
         scheduledTurnProgress.set(sessionId, { madeProgress, at: Date.now() });
         if (!madeProgress) {
           console.warn(
-            `[schedule-progress] session=${sessionId} NO real external progress ` +
+            `[schedule-progress] session=${safeSessionId(sessionId)} NO real external progress ` +
               `(writes attempted, all failed) → counts as a failure for auto-pause`,
           );
         }
@@ -7426,7 +7507,7 @@ export async function handleChatSend(
         if (os && os.status === 'active' && os.noProgressRounds >= 3 && sameRootCauseFailures >= 2) {
           viabilityRecommendStop.set(sessionId, Date.now());
           console.log(
-            `[viability] session=${sessionId} reflection recommend_stop armed (noProgressRounds=${os.noProgressRounds}, sameRootCause=${sameRootCauseFailures})`,
+            `[viability] session=${safeSessionId(sessionId)} reflection recommend_stop armed (noProgressRounds=${os.noProgressRounds}, sameRootCause=${sameRootCauseFailures})`,
           );
         }
       } catch {
@@ -7509,7 +7590,7 @@ export async function handleChatSend(
           emptyConclusionFired: signalBus.emptyConclusionFired === true,
         });
         console.log(
-          `[routing-outcome] session=${sessionId} ruleIds=[${signalBus.activeRuleIds.join(',')}] outcome=${outcome ? 'success' : 'ambiguous (not attributed)'}`,
+          `[routing-outcome] session=${safeSessionId(sessionId)} ruleIds=[${signalBus.activeRuleIds.join(',')}] outcome=${outcome ? 'success' : 'ambiguous (not attributed)'}`,
         );
       }
 
@@ -7574,14 +7655,14 @@ export async function handleChatSend(
     // not an error. The runToolLoop boundary-check path already returns interrupted directly and does not reach here;
     // this path specifically handles "abort hitting in-flight LLM HTTP and throwing AbortError".
     if (isAbortError(e)) {
-      console.log(`[turn] session=${sessionId} stopped by user durationMs=${dur}`);
+      console.log(`[turn] session=${safeSessionId(sessionId)} stopped by user durationMs=${dur}`);
       return {
         outcome: { outcomeType: 'interrupted', reason: 'user_stop', text: 'Stopped' },
         auditEvents: audit.length,
       };
     }
     if (e instanceof TurnDeadlineError) {
-      console.warn(`[turn] session=${sessionId} hit ${TURN_HARD_DEADLINE_MS}ms deadline durationMs=${dur}`);
+      console.warn(`[turn] session=${safeSessionId(sessionId)} hit ${TURN_HARD_DEADLINE_MS}ms deadline durationMs=${dur}`);
       internalAudit.append('task_failure_mode', {
         sessionId,
         kind: 'turn_deadline',
@@ -7589,7 +7670,7 @@ export async function handleChatSend(
         detail: `turn 跑了 ${dur}ms 撞 ${TURN_HARD_DEADLINE_MS}ms 硬上限`,
       });
     } else {
-      console.error(`[turn] session=${sessionId} failed durationMs=${dur}:`, (e as any)?.message ?? e);
+      console.error(`[turn] session=${safeSessionId(sessionId)} failed durationMs=${dur}:`, (e as any)?.message ?? e);
       // Generic exception fallback audit (cases already emitted inside sendLlmWithRescue as llm_timeout / llm_api_error
       // will not reach here again; but K7-bridge failures / question flow exceptions etc. will fall here)
       internalAudit.append('task_failure_mode', {
@@ -7711,7 +7792,7 @@ async function handleChatSendInner(
             allNotAttempted,
           );
           console.warn(
-            `[cross-turn-reflection] session=${sessionId} plan=${lastPlan!.id} → close failure (sameRoot=${sameRoot}, sig=${topSig})`,
+            `[cross-turn-reflection] session=${safeSessionId(sessionId)} plan=${lastPlan!.id} → close failure (sameRoot=${sameRoot}, sig=${topSig})`,
           );
           audit.append('self_domain_write', {
             source: 'cross_turn_reflection',
@@ -7724,7 +7805,7 @@ async function handleChatSendInner(
           });
         } else {
           console.warn(
-            `[cross-turn-reflection] session=${sessionId} sameRoot=${sameRoot} (sig=${topSig}) but no active plan, only injecting reminder`,
+            `[cross-turn-reflection] session=${safeSessionId(sessionId)} sameRoot=${sameRoot} (sig=${topSig}) but no active plan, only injecting reminder`,
           );
         }
         // 2. Inject reminder
@@ -7756,12 +7837,12 @@ async function handleChatSendInner(
 
   // ── Check for pending authorization requests ──────────────────────────────────────────────────
   const pending = pendingAuth.get(sessionId);
-  if (pending) {
+  pendingAuthBlock: if (pending) {
     // Captured before the block below flips it back to `awaiting_auth` on an explicit retry.
     const wasUncertain = pending.executionState === 'uncertain';
 
     if (pending.executionState === 'uncertain') {
-      let recovery = classifyUncertainToolReply(userMessage);
+      const recovery = classifyUncertainToolReply(userMessage);
       // THIS QUESTION MUST BE ABLE TO END WITHOUT THE OWNER SAYING THE MAGIC WORD.
       //
       // The reply words are matched exactly on purpose — they are the words we offered, and handing our
@@ -7769,8 +7850,13 @@ async function handleChatSendInner(
       // exact match with no way out is a trap, and the trap closes on precisely this owner: in the
       // 2026-08-09 log 14 of 20 messages are "继续" or "OK", and the test for this classifier pins both
       // of them as `unknown`. Every one of them would have re-asked the same sentence, forever, with no
-      // way to even change the subject. So: ask a bounded number of times, then decide it ourselves the
-      // safe way (skip, never replay) and let the session move on.
+      // way to even change the subject.
+      //
+      // So the question is bounded. What the bound must NOT do is invent an answer: after two unheard
+      // replies the owner has not "chosen to skip", and telling the model they did is a lie the audit
+      // trail and the learning judge would both inherit. The call is recorded as UNRESOLVED — never
+      // replayed, not decided — and the message that ran out the bound is then handled as what it
+      // actually was: a new request. Closing the dead chain is not a reason to drop what the owner said.
       if (recovery === 'unknown') {
         const prompts = (pending.uncertainPrompts ?? 0) + 1;
         const ageMs = Date.now() - (pending.uncertainSince ?? pending.ts);
@@ -7785,31 +7871,23 @@ async function handleChatSendInner(
           return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
         }
         console.warn(
-          `[uncertain-recovery] session=${sessionId} giving up on an explicit answer for ${pending.toolName} ` +
-            `(prompts=${prompts}, age=${Math.round(ageMs / 60_000)}m) → recording as unresolved, never replaying`,
+          `[uncertain-recovery] session=${safeSessionId(sessionId)} no explicit answer for ${pending.toolName} ` +
+            `(prompts=${prompts}, age=${Math.round(ageMs / 60_000)}m) → recorded UNRESOLVED (not skipped), ` +
+            `never replayed; this turn continues as a normal request`,
         );
-        // Not "the user chose skip" — nobody chose. Record it as unresolved so the model must verify
-        // external state rather than assume either outcome.
-        recovery = 'skip';
+        // Close the suspended chain so every tool_use has a tool_result, then leave the auth branch.
+        // The normal path below pushes this turn's real user message after these results.
+        messages.push({ role: 'user', content: closeSuspendedToolChain(pending, 'unresolved') });
+        pendingAuth.delete(sessionId);
+        persistContinuation(sessionId);
+        signalBus.unresolvedToolCall = { toolName: pending.toolName, reason: 'no_explicit_decision' };
+        break pendingAuthBlock;
       }
       if (recovery === 'skip') {
-        const uncertainResult = {
-          type: 'tool_result' as const,
-          tool_use_id: pending.toolCallId,
-          content: '⚠ TOOL RESULT UNCERTAIN — process restarted during execution; user chose not to retry. Verify external state before claiming success.',
-        };
         const resumed = await runToolLoop(
           sessionId, messages, grants, audit,
           [],
-          [
-            ...pending.collectedResults,
-            uncertainResult,
-            ...pending.remainingCalls.map((call) => ({
-              type: 'tool_result' as const,
-              tool_use_id: call.id,
-              content: 'Skipped because the preceding tool result is uncertain after process restart.',
-            })),
-          ],
+          closeSuspendedToolChain(pending, 'declined'),
           pending.iteration,
           onDelta, onAuthRequest,
           signalBus, onStatus, onTrace, statusLang,
@@ -7881,7 +7959,7 @@ async function handleChatSendInner(
       }
       if (wfGrants.length > 0) {
         console.log(
-          `[workflow-grant] session=${sessionId} ${pending.capability}/${pending.domain} approval also grants [${wfGrants.map((g) => g.tool).join(',')}] for ${Math.round(WORKFLOW_GRANT_TTL_MS / 60_000)}min`,
+          `[workflow-grant] session=${safeSessionId(sessionId)} ${pending.capability}/${pending.domain} approval also grants [${wfGrants.map((g) => g.tool).join(',')}] for ${Math.round(WORKFLOW_GRANT_TTL_MS / 60_000)}min`,
         );
       }
       // Reconstruct the suspended tool as a call and place it back at the front of the queue, then re-enter runToolLoop with the remaining calls.
@@ -8150,7 +8228,7 @@ async function handleChatSendInner(
       snippet: retroHit.snippet,
       userMessageLength: userMessage.length,
     });
-    console.log(`[recall-trigger] session=${sessionId} matched "${retroHit.snippet}", injected proactive recall hint`);
+    console.log(`[recall-trigger] session=${safeSessionId(sessionId)} matched "${retroHit.snippet}", injected proactive recall hint`);
   }
 
   // Phase 18 WS2: if the ViabilityGate recommended stop_and_report last turn and the user now EXPLICITLY accepts
@@ -8172,7 +8250,7 @@ async function handleChatSendInner(
             reasoningSessionId: stopRec.reasoningSessionId,
           });
           console.log(
-            `[viability] session=${sessionId} user accepted stop → reasoning session ${stopRec.reasoningSessionId} abandoned`,
+            `[viability] session=${safeSessionId(sessionId)} user accepted stop → reasoning session ${stopRec.reasoningSessionId} abandoned`,
           );
         } catch (e) {
           console.warn('[viability] abandon-on-accept failed (ignored):', e);
@@ -8216,7 +8294,7 @@ async function handleChatSendInner(
     const detected = detectUnclosedQuestion(priorAssistant);
     if (detected.hasQuestion && !bindingFresh) {
       console.log(
-        `[short-answer-binding] session=${sessionId} SKIPPED — the prior question is ` +
+        `[short-answer-binding] session=${safeSessionId(sessionId)} SKIPPED — the prior question is ` +
           `${Math.round(bindingAgeMs / 60000)} min old (limit ${Math.round(SHORT_ANSWER_BINDING_TTL_MS / 60000)}); ` +
           `treating this as a new message, not an answer`,
       );
@@ -8235,7 +8313,7 @@ async function handleChatSendInner(
         userReplyLen: userMessage.length,
       });
       console.log(
-        `[short-answer-binding] session=${sessionId} matched previous turn's question "${detected.snippet.slice(0, 40)}…", injected binding hint`,
+        `[short-answer-binding] session=${safeSessionId(sessionId)} matched previous turn's question "${detected.snippet.slice(0, 40)}…", injected binding hint`,
       );
     }
   }
@@ -8254,7 +8332,7 @@ async function handleChatSendInner(
         `expired and you are re-requesting it — then re-issue the call. Do not silently answer something else, ` +
         `and do not claim the tool ran.\n`,
     };
-    console.log(`[continuation] session=${sessionId} injected expired-auth notice for ${toolName}`);
+    console.log(`[continuation] session=${safeSessionId(sessionId)} injected expired-auth notice for ${toolName}`);
   }
 
   // Routing rule injection: extract keywords from the user message → match top-K active rules → inject into system section.
@@ -8281,7 +8359,7 @@ async function handleChatSendInner(
         matched: inj.matched,
       });
       console.log(
-        `[routing-inject] session=${sessionId} injected ${inj.matched} routing rules (ids=${inj.ruleIds.join(',')})`,
+        `[routing-inject] session=${safeSessionId(sessionId)} injected ${inj.matched} routing rules (ids=${inj.ruleIds.join(',')})`,
       );
     }
   }
@@ -8388,7 +8466,7 @@ async function handleChatSendInner(
       signalBus.recommendStop = false;
       episodeAnchorTs.set(sessionId, Date.now());
       console.log(
-        `[viability] session=${sessionId} doom-reset on user override ("${userMessage.slice(0, 20)}") — fresh episode, accumulated stop signals cleared`,
+        `[viability] session=${safeSessionId(sessionId)} doom-reset on user override ("${userMessage.slice(0, 20)}") — fresh episode, accumulated stop signals cleared`,
       );
     }
   } catch (e) {
@@ -8425,7 +8503,7 @@ async function handleChatSendInner(
         kinds: recovery.recentFailures.map((f) => f.kind),
       });
       console.log(
-        `[failure-recovery] session=${sessionId} injected ${recovery.recentFailures.length} failure hints (kinds=${recovery.recentFailures.map((f) => f.kind).join(',')})`,
+        `[failure-recovery] session=${safeSessionId(sessionId)} injected ${recovery.recentFailures.length} failure hints (kinds=${recovery.recentFailures.map((f) => f.kind).join(',')})`,
       );
     }
   }
@@ -8434,7 +8512,7 @@ async function handleChatSendInner(
   // it picks a forbidden one. See autonomousCapabilityNote.
   if (messages[0] && sessionId.startsWith('system:scheduled:')) {
     messages[0] = { ...messages[0], content: messages[0].content + autonomousCapabilityNote() };
-    console.log(`[unattended-turn] session=${sessionId} injected capability note (appendJournal / store_note)`);
+    console.log(`[unattended-turn] session=${safeSessionId(sessionId)} injected capability note (appendJournal / store_note)`);
   }
 
   // Commit-to-execution + stay-on-target (2026-06-17). Two prompt anchors for the prod failures where the
@@ -8447,7 +8525,7 @@ async function handleChatSendInner(
     if (turnAnchors.anchor) addition += buildAntiSubstitutionDirective(userMessage);
     messages[0] = { ...messages[0], content: messages[0].content + addition };
     console.log(
-      `[commit-exec] session=${sessionId} injected${turnAnchors.commit ? ' commit-to-execution' : ''}${turnAnchors.anchor ? ' stay-on-target' : ''}`,
+      `[commit-exec] session=${safeSessionId(sessionId)} injected${turnAnchors.commit ? ' commit-to-execution' : ''}${turnAnchors.anchor ? ' stay-on-target' : ''}`,
     );
   }
 
@@ -8473,7 +8551,7 @@ async function handleChatSendInner(
       const nudge = buildDeepExploreNudge(intentDecision, !!signalBus.exploreAskApproved);
       if (nudge) {
         messages[0] = { ...messages[0], content: messages[0].content + nudge };
-        console.log(`[intent-router] session=${sessionId} injected deep_explore nudge (mode=${intentDecision.domain ?? 'deliberate'})`);
+        console.log(`[intent-router] session=${safeSessionId(sessionId)} injected deep_explore nudge (mode=${intentDecision.domain ?? 'deliberate'})`);
       }
     }
   }
@@ -8493,7 +8571,7 @@ async function handleChatSendInner(
   });
   if (fired.length === 0) {
     console.log(
-      `[drive] session=${sessionId} 0 fired (evaluated ${driveRuntime.listEngines().length} engines)`,
+      `[drive] session=${safeSessionId(sessionId)} 0 fired (evaluated ${driveRuntime.listEngines().length} engines)`,
     );
   } else {
     for (const f of fired) {
@@ -8505,7 +8583,7 @@ async function handleChatSendInner(
         snap = '<unserializable>';
       }
       console.log(
-        `[drive] session=${sessionId} FIRE ${f.driveId} utility=${f.utility.toFixed(2)} snapshot=${snap}`,
+        `[drive] session=${safeSessionId(sessionId)} FIRE ${f.driveId} utility=${f.utility.toFixed(2)} snapshot=${snap}`,
       );
     }
   }
@@ -8547,7 +8625,7 @@ async function handleChatSendInner(
     if (!isScheduledTurn && planLoopEnabled() && signalBus.intentDecision?.route === 'plan') {
       const loopGuideUrl = userMessage.match(/https?:\/\/[^\s,;:'"<>()`，。；：、]+/)?.[0]?.replace(/[.,;:!?]+$/, '');
       if (loopGuideUrl) {
-        console.log(`[plan-loop] session=${sessionId} entering mechanism loop (guide=${loopGuideUrl})`);
+        console.log(`[plan-loop] session=${safeSessionId(sessionId)} entering mechanism loop (guide=${loopGuideUrl})`);
         const loopResult = await runPlanExecuteLoop(userMessage, [loopGuideUrl], {
           llm: miniLoopLLM,
           toolRunner: subTurnToolRunner,
@@ -8766,7 +8844,7 @@ async function handleChatSendInner(
           });
           recordControllerFire('honesty');
           console.warn(
-            `[honesty] session=${sessionId} fired severity=${honesty.severity} reason=${honesty.reason} ` +
+            `[honesty] session=${safeSessionId(sessionId)} fired severity=${honesty.severity} reason=${honesty.reason} ` +
             `failCount=${honesty.failCount} okCount=${honesty.okCount} claim="${honesty.matchedClaim}" (zero-tool first response)`,
           );
           messages.push({ role: 'assistant', content: firstTextContent });
@@ -8817,7 +8895,7 @@ async function handleChatSendInner(
           }
           firstTextContent = regen.content;
         } else if (!honesty) {
-          console.log(`[honesty] session=${sessionId} passed (zero-tool first response)`);
+          console.log(`[honesty] session=${safeSessionId(sessionId)} passed (zero-tool first response)`);
         }
 
         // Claim grounding — the same chain the tool loop runs, and the reason this branch no longer
@@ -9009,7 +9087,7 @@ async function handleChatSendInner(
               if (recoveryTool) {
                 taskModeStore.set(sessionId, 'fast', `auto:recovery-plan-abandoned:${recoveryTool}`);
                 console.log(
-                  `[plan-auto-close] session=${sessionId} recovery plan for ${recoveryTool} abandoned → mode restored to fast (the recovery attempt is over; do not keep the session locked for it)`,
+                  `[plan-auto-close] session=${safeSessionId(sessionId)} recovery plan for ${recoveryTool} abandoned → mode restored to fast (the recovery attempt is over; do not keep the session locked for it)`,
                 );
               }
               internalAudit.append('self_domain_write', {
@@ -9022,7 +9100,7 @@ async function handleChatSendInner(
                 strongSignal,
               });
               console.log(
-                `[plan-auto-close] session=${sessionId} plan ${lastPlan.id} (was ${lastPlan.status}) → failed; trigger=${strongSignal}`,
+                `[plan-auto-close] session=${safeSessionId(sessionId)} plan ${lastPlan.id} (was ${lastPlan.status}) → failed; trigger=${strongSignal}`,
               );
             }
           }
@@ -9387,7 +9465,7 @@ async function decideForcedDeepExploreCall(
   ) {
     signalBus.forcedDeepExploreContinue = true;
     console.warn(
-      `[force-continue] session=${sessionId} model narrated deep_explore round results with 0 calls — forcing a real deep_explore(action=continue)`,
+      `[force-continue] session=${safeSessionId(sessionId)} model narrated deep_explore round results with 0 calls — forcing a real deep_explore(action=continue)`,
     );
     return { id: `forced-de-continue-${idSeed}`, name: 'deep_explore', input: { action: 'continue' } };
   }
@@ -9433,7 +9511,7 @@ async function decideForcedDeepExploreCall(
     signalBus.forcedDeepExploreStart = true;
     const forcedInput = buildForceStartInput(signalBus.intentDecision ?? null, forceGoal ?? forceMessage);
     console.warn(
-      `[force-start] session=${sessionId} deep_explore route + depth wanted but the turn answered flat — forcing deep_explore(action=start, mode=${forcedInput.mode ?? 'auto'})`,
+      `[force-start] session=${safeSessionId(sessionId)} deep_explore route + depth wanted but the turn answered flat — forcing deep_explore(action=start, mode=${forcedInput.mode ?? 'auto'})`,
     );
     return { id: `forced-de-start-${idSeed}`, name: 'deep_explore', input: forcedInput };
   }
@@ -9490,6 +9568,12 @@ interface TurnSignalBus {
    * a word is how the same "OK" gets typed twice (prod 2026-08-09 12:43:29 → 12:43:50).
    */
   droppedExpiredAuth?: { toolName: string; ageMinutes: number };
+  /**
+   * A tool that was mid-execution when the process died and never got an explicit retry/skip decision.
+   * Recorded as unresolved — NOT as a user refusal. Anything downstream that reasons about what the
+   * owner decided must be able to tell those apart.
+   */
+  unresolvedToolCall?: { toolName: string; reason: 'no_explicit_decision' };
   /**
    * Cleanup-turn scoping (2026-07-06): set when the user message is a pure cleanup command
    * (looksLikeCleanupIntent). runToolLoop then mechanism-rejects external write http for the whole
@@ -9755,7 +9839,7 @@ async function applyClaimGrounding(opts: {
   if (!finding) return false;
   // A log-only observation (the announced-tool window that found no verdict) is reported and dropped:
   // the window exists so a miss is readable rather than silent.
-  console.warn(`[${finding.rule}] session=${sessionId} ${finding.log}`);
+  console.warn(`[${finding.rule}] session=${safeSessionId(sessionId)} ${finding.log}`);
   if (!isGroundingFire(finding)) return false;
 
   audit.append('self_domain_write', {
@@ -9964,7 +10048,7 @@ async function runToolLoop(
       const reason = autonomousBlacklistReason(call.name);
       (signalBus.blockedTools ??= new Set()).add(call.name);
       console.warn(
-        `[autonomous-blacklist] session=${sessionId} rejected ${call.name}`,
+        `[autonomous-blacklist] session=${safeSessionId(sessionId)} rejected ${call.name}`,
       );
       toolResults.push({
         type: 'tool_result',
@@ -9997,7 +10081,7 @@ async function runToolLoop(
     {
       const redirect = forceTierClassifyRedirect(call, signalBus);
       if (redirect) {
-        console.warn(`[intent-router] session=${sessionId} rejected task_mode_classify(slow) on force-tier deep_explore turn`);
+        console.warn(`[intent-router] session=${safeSessionId(sessionId)} rejected task_mode_classify(slow) on force-tier deep_explore turn`);
         toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: redirect });
         totalToolCallsThisTurn++;
         inTurnRecords.push({ toolName: call.name, success: false, resultText: redirect });
@@ -10043,7 +10127,7 @@ async function runToolLoop(
       if (terminalClosedThisTurn) {
         taskModeStore.set(sessionId, 'fast', `auto:terminal-plan:${lastPlan!.status}`);
         console.log(
-          `[plan_protocol_gate] session=${sessionId} terminal plan ${lastPlan!.id} (${lastPlan!.status}) closed this turn → auto fast, ${call.name} allowed[first-iter]`,
+          `[plan_protocol_gate] session=${safeSessionId(sessionId)} terminal plan ${lastPlan!.id} (${lastPlan!.status}) closed this turn → auto fast, ${call.name} allowed[first-iter]`,
         );
       }
       const planAllowsExec = lastPlan?.status === 'executing';
@@ -10056,7 +10140,7 @@ async function runToolLoop(
       const recoveryScoped = needsPlanReview && !exempt && autoRecoveryPlanScopeAllows(lastPlan, call.name);
       if (recoveryScoped) {
         console.log(
-          `[plan_protocol_gate] session=${sessionId} auto-recovery plan (${lastPlan!.guideRef}) is scoped to its failing tool — ${call.name} allowed[first-iter]`,
+          `[plan_protocol_gate] session=${safeSessionId(sessionId)} auto-recovery plan (${lastPlan!.guideRef}) is scoped to its failing tool — ${call.name} allowed[first-iter]`,
         );
       }
       if (needsPlanReview && !exempt && !recoveryScoped) {
@@ -10106,7 +10190,7 @@ async function runToolLoop(
           `   - 调 plan_revise 改 plan(若现 plan 路径错了)\n\n` +
           `**不要直接重试 ${call.name} 不变** — 会再次被拦。`;
         console.warn(
-          `[plan_protocol_gate] session=${sessionId} rejected ${call.name} (slow + planStatus=${lastPlan?.status ?? 'none'})[first-iter]`,
+          `[plan_protocol_gate] session=${safeSessionId(sessionId)} rejected ${call.name} (slow + planStatus=${lastPlan?.status ?? 'none'})[first-iter]`,
         );
         toolResults.push({
           type: 'tool_result',
@@ -10154,7 +10238,7 @@ async function runToolLoop(
     const allowed = denial === null || autoGrant || isAuthExemptManagementCall(call);
     if (autoGrant && denial !== null) {
       console.warn(
-        `[auto-grant] session=${sessionId} allowed ${call.name} (${capability}×${domain})— PHILONT_AUTO_GRANT=1, sandbox unattended`,
+        `[auto-grant] session=${safeSessionId(sessionId)} allowed ${call.name} (${capability}×${domain})— PHILONT_AUTO_GRANT=1, sandbox unattended`,
       );
     }
 
@@ -10200,7 +10284,7 @@ async function runToolLoop(
           const lastUserMsg = findLastUserText(messages, messages.length - 1) ?? '';
           const rejection = renderAskGuardRejection(detected.snippet, lastUserMsg);
           console.log(
-            `[ask-guard] session=${sessionId} rejected askUserQuestion (prior question: "${detected.snippet.slice(0, 40)}…")`,
+            `[ask-guard] session=${safeSessionId(sessionId)} rejected askUserQuestion (prior question: "${detected.snippet.slice(0, 40)}…")`,
           );
           onTrace?.({
             kind: 'internal-gate', tier: 4,
@@ -10350,7 +10434,7 @@ async function runToolLoop(
         // Re-issuing the same command runs it as-is (the session is now marked nudged), so this never loops.
         skillReflexNudged.add(sessionId);
         console.warn(
-          `[skill-reflex] session=${sessionId} intercepted hand-rolled "${parserLabel}" → nudging search_skills first`,
+          `[skill-reflex] session=${safeSessionId(sessionId)} intercepted hand-rolled "${parserLabel}" → nudging search_skills first`,
         );
         result = { success: false, output: '', error: buildSkillReflexNudge(parserLabel), duration: 0 };
       } else if (isDeepExploreAdvance(call) && deepExploreAdvancesThisTurn >= 1) {
@@ -10523,7 +10607,7 @@ async function runToolLoop(
     if (turnAgeMs > TURN_HARD_DEADLINE_MS - TURN_WRAPUP_HEADROOM_MS) {
       outOfTime = true;
       console.warn(
-        `[turn-wrapup] session=${sessionId} ${Math.round(turnAgeMs / 1000)}s elapsed of the ` +
+        `[turn-wrapup] session=${safeSessionId(sessionId)} ${Math.round(turnAgeMs / 1000)}s elapsed of the ` +
           `${Math.round(TURN_HARD_DEADLINE_MS / 1000)}s turn budget — no more tool calls; writing the ` +
           `reply with the ${Math.round(TURN_WRAPUP_HEADROOM_MS / 1000)}s that are left`,
       );
@@ -10560,7 +10644,7 @@ async function runToolLoop(
             );
           }
           console.warn(
-            `[plan-circuit-breaker] session=${sessionId} plan_* failed ${planFailures}x, downgrade ${wasMode}→fast + inject wrap-up hint`,
+            `[plan-circuit-breaker] session=${safeSessionId(sessionId)} plan_* failed ${planFailures}x, downgrade ${wasMode}→fast + inject wrap-up hint`,
           );
           audit.append('self_domain_write', {
             source: 'plan_circuit_breaker',
@@ -10631,7 +10715,7 @@ async function runToolLoop(
             blockedToolAfterReflection = reflection.signature.slice(0, colonIdx);
             signalBus.inTurnToolBlockFired = true;
             console.warn(
-              `[in-turn-tool-block] session=${sessionId} remaining calls to ${blockedToolAfterReflection} this turn are mechanism-layer disabled`,
+              `[in-turn-tool-block] session=${safeSessionId(sessionId)} remaining calls to ${blockedToolAfterReflection} this turn are mechanism-layer disabled`,
             );
 
             // Phase 11 (2026-05-14): simultaneously check if ResearchBeforeRetry is needed.
@@ -10647,7 +10731,7 @@ async function runToolLoop(
                 signature: reflection.signature,
               };
               console.warn(
-                `[research-before-retry] session=${sessionId} triggered: no research call this turn, business tools blocked after ${reflection.signature}`,
+                `[research-before-retry] session=${safeSessionId(sessionId)} triggered: no research call this turn, business tools blocked after ${reflection.signature}`,
               );
               audit.append('self_domain_write', {
                 source: 'research_before_retry',
@@ -10661,7 +10745,7 @@ async function runToolLoop(
           }
         }
         console.warn(
-          `[in-turn-reflection] session=${sessionId} signature=${reflection.signature} count=${reflection.count}`,
+          `[in-turn-reflection] session=${safeSessionId(sessionId)} signature=${reflection.signature} count=${reflection.count}`,
         );
         audit.append('self_domain_write', {
           source: 'in_turn_reflection',
@@ -10710,7 +10794,7 @@ async function runToolLoop(
               ? 'mechanical error (fix-and-retry, not a strategic wall)'
               : 'benign miss';
           console.log(
-            `[auto-revise-on-fail] session=${sessionId} skipped (${skipReason}, no escalation): ${reflection.signature}`,
+            `[auto-revise-on-fail] session=${safeSessionId(sessionId)} skipped (${skipReason}, no escalation): ${reflection.signature}`,
           );
         }
         if (
@@ -10740,7 +10824,7 @@ async function runToolLoop(
               signature: reflection.signature,
             });
             console.log(
-              `[auto-revise-on-fail] session=${sessionId} fast→slow due to ${reflection.signature}`,
+              `[auto-revise-on-fail] session=${safeSessionId(sessionId)} fast→slow due to ${reflection.signature}`,
             );
           }
 
@@ -10787,7 +10871,7 @@ async function runToolLoop(
                 signature: reflection.signature,
               });
               console.log(
-                `[auto-revise-on-fail] session=${sessionId} created placeholder plan ${placeholder.id} sig=${reflection.signature}`,
+                `[auto-revise-on-fail] session=${safeSessionId(sessionId)} created placeholder plan ${placeholder.id} sig=${reflection.signature}`,
               );
             } else if (lastPlan.status === 'executing') {
               // Path B: active plan in executing → inject user-role hint (M3 removed 'reviewed')
@@ -10810,7 +10894,7 @@ async function runToolLoop(
             // naturally forces LLM to call plan_update_step (to enter executing) or plan_revise (to change the approach)
           } catch (e) {
             console.warn(
-              `[auto-revise-on-fail] session=${sessionId} failed (ignored):`,
+              `[auto-revise-on-fail] session=${safeSessionId(sessionId)} failed (ignored):`,
               e,
             );
           }
@@ -10845,7 +10929,7 @@ async function runToolLoop(
       if (e instanceof LlmTimeoutError && !hasRoomForTimeoutRetry(turnRemainingMs(sessionId))) {
         outOfTime = true;
         console.warn(
-          `[turn-wrapup] session=${sessionId} the LLM call timed out with no budget for a retry — ` +
+          `[turn-wrapup] session=${safeSessionId(sessionId)} the LLM call timed out with no budget for a retry — ` +
             `wrapping up instead of failing the turn`,
         );
         break;
@@ -10927,7 +11011,7 @@ async function runToolLoop(
           const okN = recentToolResults.filter((r) => r.content.startsWith('✓')).length;
           const failN = recentToolResults.filter((r) => r.content.startsWith('⚠')).length;
           console.log(
-            `[honesty] session=${sessionId} passed (${okN} ok / ${failN} fail / ${recentToolResults.length} total)`,
+            `[honesty] session=${safeSessionId(sessionId)} passed (${okN} ok / ${failN} fail / ${recentToolResults.length} total)`,
           );
         }
         if (honestyVerdict) {
@@ -10945,7 +11029,7 @@ async function runToolLoop(
           });
           recordControllerFire('honesty');
           console.warn(
-            `[honesty] session=${sessionId} fired severity=${honestyVerdict.severity} reason=${honestyVerdict.reason} failCount=${honestyVerdict.failCount} okCount=${honestyVerdict.okCount} claim="${honestyVerdict.matchedClaim}"`,
+            `[honesty] session=${safeSessionId(sessionId)} fired severity=${honestyVerdict.severity} reason=${honestyVerdict.reason} failCount=${honestyVerdict.failCount} okCount=${honestyVerdict.okCount} claim="${honestyVerdict.matchedClaim}"`,
           );
           // K7→K8 bridge: write fire to signalBus so the finally block produces a K8 initiative.
           // Take **the most recent** fire (honestyAttempts cap is 1 per turn; at most one overwrite).
@@ -11102,7 +11186,7 @@ async function runToolLoop(
           });
           recordControllerFire('empty_conclusion');
           console.warn(
-            `[empty-conclusion] session=${sessionId} fired reason=${empty.reason} toolCalls=${totalToolCallsThisTurn} finalLen=${empty.detail?.finalTextLength}`,
+            `[empty-conclusion] session=${safeSessionId(sessionId)} fired reason=${empty.reason} toolCalls=${totalToolCallsThisTurn} finalLen=${empty.detail?.finalTextLength}`,
           );
           messages.push({ role: 'assistant', content: response.content });
           pushGateDirective(
@@ -11166,7 +11250,7 @@ async function runToolLoop(
             });
             recordControllerFire('half_finished');
             console.warn(
-              `[half-finished] session=${sessionId} fired reason=${hf.reason} phrase="${hf.matchedPhrase}" planUpdateOk=${planUpdateStepOk}`,
+              `[half-finished] session=${safeSessionId(sessionId)} fired reason=${hf.reason} phrase="${hf.matchedPhrase}" planUpdateOk=${planUpdateStepOk}`,
             );
             messages.push({ role: 'assistant', content: response.content });
             pushGateDirective(
@@ -11237,7 +11321,7 @@ async function runToolLoop(
               matchedClaim: claim,
             });
             console.warn(
-              `[plan-failure-false-claim] session=${sessionId} fired reason=${reason} claim="${claim}"`,
+              `[plan-failure-false-claim] session=${safeSessionId(sessionId)} fired reason=${reason} claim="${claim}"`,
             );
             messages.push({ role: 'assistant', content: response.content });
             pushGateDirective(
@@ -11303,7 +11387,7 @@ async function runToolLoop(
           });
           recordControllerFire('output_format');
           console.warn(
-            `[output-format] session=${sessionId} fired reason=${fmt.reason} finalLen=${fmt.detail?.finalTextLength}`,
+            `[output-format] session=${safeSessionId(sessionId)} fired reason=${fmt.reason} finalLen=${fmt.detail?.finalTextLength}`,
           );
           messages.push({ role: 'assistant', content: response.content });
           pushGateDirective(
@@ -11414,7 +11498,7 @@ async function runToolLoop(
           });
           if (v.verdict !== 'continue' && !vRelevantToThisTurn) {
             console.log(
-              `[viability] session=${sessionId} verdict=${v.verdict} score=${v.score} SKIPPED — active session ` +
+              `[viability] session=${safeSessionId(sessionId)} verdict=${v.verdict} score=${v.score} SKIPPED — active session ` +
               `but this turn neither ran deep_explore nor pitched continuation (unrelated task); not hijacking. ` +
               `reasons=${v.reasons.join(',')}`,
             );
@@ -11441,7 +11525,7 @@ async function runToolLoop(
             });
             recordControllerFire('viability');
             console.warn(
-              `[viability] session=${sessionId} fired verdict=${v.verdict} score=${v.score} reasons=${v.reasons.join(',')} hasSession=${!!ownerSession}`,
+              `[viability] session=${safeSessionId(sessionId)} fired verdict=${v.verdict} score=${v.score} reasons=${v.reasons.join(',')} hasSession=${!!ownerSession}`,
             );
             messages.push({ role: 'assistant', content: response.content });
             pushGateDirective(
@@ -11466,7 +11550,7 @@ async function runToolLoop(
             viabilityStopReasoningId = ownerSession?.id ?? null;
             if (CONTINUATION_PITCH_RE.test(response.content)) {
               console.warn(
-                `[viability] session=${sessionId} continuation pitch persisted after regen → deterministic stop_and_report downgrade`,
+                `[viability] session=${safeSessionId(sessionId)} continuation pitch persisted after regen → deterministic stop_and_report downgrade`,
               );
             }
           }
@@ -11562,7 +11646,7 @@ async function runToolLoop(
       {
         const redirect = forceTierClassifyRedirect(call, signalBus);
         if (redirect) {
-          console.warn(`[intent-router] session=${sessionId} rejected task_mode_classify(slow) on force-tier deep_explore turn`);
+          console.warn(`[intent-router] session=${safeSessionId(sessionId)} rejected task_mode_classify(slow) on force-tier deep_explore turn`);
           nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: redirect });
           totalToolCallsThisTurn++;
           inTurnRecords.push({ toolName: call.name, success: false, resultText: redirect });
@@ -11576,7 +11660,7 @@ async function runToolLoop(
         const reason = autonomousBlacklistReason(call.name);
         (signalBus.blockedTools ??= new Set()).add(call.name);
         console.warn(
-          `[autonomous-blacklist] session=${sessionId} rejected ${call.name} (in main loop)`,
+          `[autonomous-blacklist] session=${safeSessionId(sessionId)} rejected ${call.name} (in main loop)`,
         );
         nextResults.push({
           type: 'tool_result',
@@ -11622,7 +11706,7 @@ async function runToolLoop(
           call.name,
         );
         console.warn(
-          `[research-before-retry] session=${sessionId} rejected ${call.name} (must research first, signature ${researchTriggerContext.signature})`,
+          `[research-before-retry] session=${safeSessionId(sessionId)} rejected ${call.name} (must research first, signature ${researchTriggerContext.signature})`,
         );
         nextResults.push({
           type: 'tool_result',
@@ -11657,7 +11741,7 @@ async function runToolLoop(
         // LLM chose to do research → unlock. Reset flag; next business tool call will be allowed.
         researchRequiredBeforeBusinessTool = false;
         console.log(
-          `[research-before-retry] session=${sessionId} unlocked: ${call.name} is a research tool, business tools allowed`,
+          `[research-before-retry] session=${safeSessionId(sessionId)} unlocked: ${call.name} is a research tool, business tools allowed`,
         );
       }
 
@@ -11672,7 +11756,7 @@ async function runToolLoop(
           `  (b) Use other tools (list_facts / get_fact / listCredentialNames / search_skills) to gather diagnostic information\n` +
           `  (c) Use the ## For User section to tell the user the blocker and what you need, then close out this turn`;
         console.warn(
-          `[in-turn-tool-block] session=${sessionId} rejected ${call.name} (mechanism-layer disabled after in-turn-reflection)`,
+          `[in-turn-tool-block] session=${safeSessionId(sessionId)} rejected ${call.name} (mechanism-layer disabled after in-turn-reflection)`,
         );
         nextResults.push({
           type: 'tool_result',
@@ -11708,7 +11792,7 @@ async function runToolLoop(
       if (signalBus.cleanupIntent) {
         const rejected = cleanupHttpWriteReject(call.name, call.input);
         if (rejected) {
-          console.warn(`[cleanup-scope] session=${sessionId} rejected external write ${call.name} (cleanup turn)`);
+          console.warn(`[cleanup-scope] session=${safeSessionId(sessionId)} rejected external write ${call.name} (cleanup turn)`);
           nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: rejected.error });
           totalToolCallsThisTurn++;
           inTurnRecords.push({ toolName: call.name, success: false, resultText: rejected.error });
@@ -11759,7 +11843,7 @@ async function runToolLoop(
             if (driftRej) rej = { ...driftRej, reason: 'rejected_by_spec_host_guard' };
           }
           if (rej) {
-            console.warn(`[spec-contract-guard] session=${sessionId} blocked ${method} ${specHost} (${rej.reason})`);
+            console.warn(`[spec-contract-guard] session=${safeSessionId(sessionId)} blocked ${method} ${specHost} (${rej.reason})`);
             nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: rej.error });
             totalToolCallsThisTurn++;
             inTurnRecords.push({ toolName: call.name, success: false, resultText: rej.error });
@@ -11813,7 +11897,7 @@ async function runToolLoop(
         if (terminalClosedThisTurn) {
           taskModeStore.set(sessionId, 'fast', `auto:terminal-plan:${lastPlan!.status}`);
           console.log(
-            `[plan_protocol_gate] session=${sessionId} terminal plan ${lastPlan!.id} (${lastPlan!.status}) closed this turn → auto fast, ${call.name} allowed`,
+            `[plan_protocol_gate] session=${safeSessionId(sessionId)} terminal plan ${lastPlan!.id} (${lastPlan!.status}) closed this turn → auto fast, ${call.name} allowed`,
           );
         }
         const planAllowsExec = lastPlan?.status === 'executing';
@@ -11826,7 +11910,7 @@ async function runToolLoop(
         const recoveryScoped = needsPlanReview && !exempt && autoRecoveryPlanScopeAllows(lastPlan, call.name);
         if (recoveryScoped) {
           console.log(
-            `[plan_protocol_gate] session=${sessionId} auto-recovery plan (${lastPlan!.guideRef}) is scoped to its failing tool — ${call.name} allowed`,
+            `[plan_protocol_gate] session=${safeSessionId(sessionId)} auto-recovery plan (${lastPlan!.guideRef}) is scoped to its failing tool — ${call.name} allowed`,
           );
         }
         if (needsPlanReview && !exempt && !recoveryScoped) {
@@ -11873,7 +11957,7 @@ async function runToolLoop(
             `   - plan_revise to revise the plan (if the current path is wrong)\n\n` +
             `**Do not retry ${call.name} unchanged** — it will be blocked again.`;
           console.warn(
-            `[plan_protocol_gate] session=${sessionId} rejected ${call.name} (slow + planStatus=${lastPlan?.status ?? 'none'})`,
+            `[plan_protocol_gate] session=${safeSessionId(sessionId)} rejected ${call.name} (slow + planStatus=${lastPlan?.status ?? 'none'})`,
           );
           nextResults.push({
             type: 'tool_result',
@@ -11915,7 +11999,7 @@ async function runToolLoop(
       const allowed = denial2 === null || autoGrant2 || isAuthExemptManagementCall(call);
       if (autoGrant2 && denial2 !== null) {
         console.warn(
-          `[auto-grant] session=${sessionId} allowed ${call.name} (${capability}×${domain})[secondary-iter]— PHILONT_AUTO_GRANT=1`,
+          `[auto-grant] session=${safeSessionId(sessionId)} allowed ${call.name} (${capability}×${domain})[secondary-iter]— PHILONT_AUTO_GRANT=1`,
         );
       }
 

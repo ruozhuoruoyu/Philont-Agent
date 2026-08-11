@@ -99,3 +99,77 @@ test('pendingAuthIsStale: an in-flight or unresolved call is never aged out', as
   assert.equal(pendingAuthIsStale({ ts: NOW - 600 * MIN, executionState: 'uncertain' }, NOW), false);
   assert.equal(pendingAuthIsStale(undefined, NOW), false);
 });
+
+// ── the ORDERING, not just the predicate ────────────────────────────────────────────────────────
+// The earlier version of this file proved pendingAuthIsStale() computed the right answer and stopped
+// there — which would stay green if someone moved the drop back below the message build, i.e. if the
+// actual defect were reintroduced. selectTurnContextSource is what the message array is built from,
+// and it re-derives staleness itself, so this pins the property rather than the arithmetic.
+
+test('an expired pending is never the source of a turn context, whatever else moves', async () => {
+  const { selectTurnContextSource } = await import('../src/chat-handler.js');
+  const expired = { ts: NOW - 58 * MIN, executionState: 'awaiting_auth' as const };
+  assert.deepEqual(selectTurnContextSource(expired, undefined, NOW), { source: 'fresh', dropAuth: true });
+});
+
+test('a live pending still resumes into its own inflight messages', async () => {
+  const { selectTurnContextSource } = await import('../src/chat-handler.js');
+  const live = { ts: NOW - 5 * MIN, executionState: 'awaiting_auth' as const };
+  assert.deepEqual(selectTurnContextSource(live, undefined, NOW), { source: 'auth-inflight', dropAuth: false });
+});
+
+test('an interrupted call keeps its context at any age — that is what retry/skip resumes into', async () => {
+  const { selectTurnContextSource } = await import('../src/chat-handler.js');
+  const stuck = { ts: NOW - 600 * MIN, executionState: 'uncertain' as const };
+  assert.deepEqual(selectTurnContextSource(stuck, undefined, NOW), { source: 'auth-inflight', dropAuth: false });
+});
+
+test('dropping an expired auth does not steal a live question its context', async () => {
+  const { selectTurnContextSource } = await import('../src/chat-handler.js');
+  const expired = { ts: NOW - 58 * MIN, executionState: 'awaiting_auth' as const };
+  assert.deepEqual(
+    selectTurnContextSource(expired, { createdAt: NOW - MIN }, NOW),
+    { source: 'question-inflight', dropAuth: true },
+  );
+});
+
+test('no suspended state at all → fresh', async () => {
+  const { selectTurnContextSource } = await import('../src/chat-handler.js');
+  assert.deepEqual(selectTurnContextSource(undefined, undefined, NOW), { source: 'fresh', dropAuth: false });
+});
+
+// ── an unresolved call is not a decision ────────────────────────────────────────────────────────
+
+test('closing a chain answers every suspended tool_use exactly once', async () => {
+  const { closeSuspendedToolChain } = await import('../src/chat-handler.js');
+  const pending = {
+    toolCallId: 'call-a',
+    remainingCalls: [{ id: 'call-b' }, { id: 'call-c' }],
+    collectedResults: [{ type: 'tool_result' as const, tool_use_id: 'call-earlier', content: '✓' }],
+  };
+  for (const reason of ['declined', 'unresolved'] as const) {
+    const results = closeSuspendedToolChain(pending, reason);
+    const ids = results.map((r) => r.tool_use_id);
+    assert.deepEqual(ids, ['call-earlier', 'call-a', 'call-b', 'call-c'], reason);
+    assert.equal(new Set(ids).size, ids.length, `${reason}: no duplicate tool_result`);
+  }
+});
+
+test('running out the recovery bound must not be reported as the user declining', async () => {
+  const { closeSuspendedToolChain } = await import('../src/chat-handler.js');
+  const pending = { toolCallId: 'call-a', remainingCalls: [], collectedResults: [] };
+
+  const unresolved = closeSuspendedToolChain(pending, 'unresolved')[0]!.content;
+  // The whole point: three "继续"s are not a refusal, and the model must not be told they were.
+  // (The text may TELL the model not to say it — what it must never do is assert it.)
+  assert.doesNotMatch(unresolved, /user (?:explicitly )?(?:chose|declined|decided)\b(?! it)/i);
+  assert.match(unresolved, /do not say that the user declined it/i);
+  assert.match(unresolved, /NO explicit .*decision was ever received/i);
+  assert.match(unresolved, /nobody decided/i);
+  assert.match(unresolved, /will not be replayed/i);
+
+  const declined = closeSuspendedToolChain(pending, 'declined')[0]!.content;
+  assert.match(declined, /user\s+explicitly chose not to retry/i);
+
+  assert.notEqual(unresolved, declined);
+});

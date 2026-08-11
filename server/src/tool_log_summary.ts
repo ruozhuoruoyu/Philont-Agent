@@ -12,11 +12,23 @@
  * paths with the home directory folded to `~`. `fields=[]` is what makes an empty call obvious.
  */
 
-/** Keys whose VALUE is safe to print verbatim: closed enums and small structural scalars. */
+import { createHash } from 'node:crypto';
+
+/**
+ * Keys whose VALUE is safe to print verbatim. Deliberately only closed enums and structural numbers:
+ * a key called `id` is NOT on this list, because "it's just an id" is how a customer name or a
+ * document title ends up in a log — identifiers are hashed instead, which keeps them correlatable
+ * without being readable.
+ */
 const SAFE_SCALAR_KEYS = new Set([
-  'action', 'method', 'mode', 'kind', 'algorithm', 'channel', 'namespace', 'status', 'op',
-  'limit', 'maxFiles', 'maxMatches', 'maxResults', 'timeout', 'depth', 'iteration', 'nodeId',
-  'parentNodeId', 'step_id', 'plan_id', 'id', 'recursive', 'force', 'dryRun',
+  'action', 'method', 'mode', 'kind', 'algorithm', 'channel', 'status', 'op',
+  'limit', 'maxFiles', 'maxMatches', 'maxResults', 'timeout', 'depth', 'iteration',
+  'recursive', 'force', 'dryRun',
+]);
+
+/** Identifier-shaped keys: hashed, so two log lines about the same object still line up. */
+const ID_KEYS = new Set([
+  'id', 'nodeId', 'parentNodeId', 'step_id', 'plan_id', 'pursuitId', 'sessionId', 'namespace', 'key', 'name',
 ]);
 
 /** Keys that carry a body: report size, never content. */
@@ -28,11 +40,26 @@ const BULK_KEYS = new Set([
 /** Keys that are secrets outright — the name is logged, nothing else, never a length. */
 const SECRET_KEYS = /(^|_)(token|secret|password|passwd|apikey|api_key|authorization|cookie|credential)($|_)/i;
 
-/** Fold a filesystem path so it keeps its shape without naming the account. */
+/**
+ * A path's SHAPE, never its directories.
+ *
+ * Folding `C:\Users\<name>` to `~` only covers the one leak that happened to be in the log that
+ * prompted this. `/root/acme-migration/...`, a UNC share, a non-standard home, a directory named
+ * after a client — all still readable. What debugging actually needs from a path is which file, and
+ * roughly where: `k13_minlaw_arith.lean (abs, d6)` answers a wrong-file or wrong-directory bug just
+ * as well as the full string, and answers nothing else.
+ */
 export function safePathForLog(value: string): string {
-  return value
-    .replace(/^([A-Za-z]:)?[\\/]?(Users|home)[\\/][^\\/]+/i, '~')
-    .replace(/\\/g, '/');
+  const normalized = value.replace(/\\/g, '/');
+  const isAbsolute = /^([A-Za-z]:)?\//.test(normalized) || normalized.startsWith('//');
+  const segments = normalized.split('/').filter((s) => s.length > 0 && s !== '.');
+  const basename = segments.length > 0 ? segments[segments.length - 1]! : '(root)';
+  const depth = Math.max(0, segments.length - 1);
+  return `${basename} (${isAbsolute ? 'abs' : 'rel'}, d${depth})`;
+}
+
+function digestForLog(value: string): string {
+  return `#${createHash('sha256').update(value).digest('hex').slice(0, 8)}`;
 }
 
 function safeHost(value: string): string | null {
@@ -68,6 +95,7 @@ function summarizeValue(key: string, value: unknown): string | null {
     }
     if (BULK_KEYS.has(key)) return `${key}Bytes=${value.length}`;
     if (SAFE_SCALAR_KEYS.has(key) && value.length <= 32) return `${key}=${value}`;
+    if (ID_KEYS.has(key)) return `${key}=${digestForLog(value)}`;
     return `${key}=<${value.length}c>`;
   }
   if (Array.isArray(value)) return `${key}=<${value.length} items>`;

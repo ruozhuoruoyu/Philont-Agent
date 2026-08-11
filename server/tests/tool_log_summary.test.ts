@@ -7,14 +7,40 @@ test('an argument-less call is visible as such (the writeFile({}) case)', () => 
   assert.equal(line, 'fields=[]');
 });
 
-test('paths keep their shape but not the account name', () => {
-  assert.equal(safePathForLog('C:\\Users\\ye.xiaozhou\\.philont\\workspace\\fetched\\a.lean'), '~/.philont/workspace/fetched/a.lean');
-  assert.equal(safePathForLog('/home/ye/dev/x.ts'), '~/dev/x.ts');
+test('paths keep only their shape: which file, roughly where', () => {
+  assert.equal(safePathForLog('C:\\Users\\ye.xiaozhou\\.philont\\workspace\\fetched\\a.lean'), 'a.lean (abs, d6)');
+  assert.equal(safePathForLog('/home/ye/dev/x.ts'), 'x.ts (abs, d3)');
+  assert.equal(safePathForLog('out/k13.lean'), 'k13.lean (rel, d1)');
   const line = summarizeToolInputForLog({ path: 'C:\\Users\\ye.xiaozhou\\out\\k13.lean', content: 'x'.repeat(4271) });
   assert.match(line, /fields=\[path,content\]/);
-  assert.match(line, /path=~\/out\/k13\.lean/);
+  assert.match(line, /path=k13\.lean \(abs, d4\)/);
   assert.match(line, /contentBytes=4271/);
   assert.doesNotMatch(line, /ye\.xiaozhou/);
+});
+
+test('directories nobody parameterised leak nothing either', () => {
+  // The home-folding version covered exactly one shape; these are the ones it did not.
+  for (const p of [
+    '/root/acme-migration/customer-list.xlsx',
+    '//fileserver/legal/2026-Q3/contract.docx',
+    '/srv/clients/northwind/report.pdf',
+  ]) {
+    const out = safePathForLog(p);
+    assert.doesNotMatch(out, /acme|fileserver|legal|clients|northwind|srv|root/i, p);
+  }
+  assert.equal(safePathForLog('/root/acme-migration/customer-list.xlsx'), 'customer-list.xlsx (abs, d2)');
+});
+
+test('identifier-shaped values are hashed, not printed — and stay correlatable', () => {
+  const a = summarizeToolInputForLog({ namespace: 'project', key: 'lrc.k13.minlaw_mid_lower_lean_2026' });
+  const b = summarizeToolInputForLog({ namespace: 'project', key: 'lrc.k13.minlaw_mid_lower_lean_2026' });
+  assert.equal(a, b, 'the same object must produce the same line');
+  assert.doesNotMatch(a, /minlaw_mid_lower/);
+  assert.match(a, /key=#[0-9a-f]{8}/);
+  assert.notEqual(
+    summarizeToolInputForLog({ key: 'a' }),
+    summarizeToolInputForLog({ key: 'b' }),
+  );
 });
 
 test('bodies are reported by size, never by content', () => {

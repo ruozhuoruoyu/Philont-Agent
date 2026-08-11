@@ -27,6 +27,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { AuthRequest } from './chat-handler.js';
+import { safeSessionId } from './safe_session_id.js';
 
 // ── argv parsing ─────────────────────────────────────────────────────────────
 
@@ -224,7 +225,7 @@ async function run(): Promise<RunResult> {
     // human, and forcing them to re-add their UTC offset to every line is a tax with no upside.
     log.push(`[${stampTime(new Date())}] ${tag} ${text}`);
   };
-  logLine('task', `session=${sessionId} workspace=${workspace}`);
+  logLine('task', `session=${safeSessionId(sessionId)} workspace=${workspace}`);
 
   let finalText = '';
   let authRequested = false;
