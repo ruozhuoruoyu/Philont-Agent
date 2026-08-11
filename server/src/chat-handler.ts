@@ -16,6 +16,7 @@ import {
   createPathAclValidator,
   createDangerousCommandValidator,
   DEFAULT_DANGEROUS_PATTERNS,
+  findDangerousPattern,
   type ToolCheckInput,
 } from '@agent/policy';
 import type { ToolDefinition, ToolResult } from '@agent/policy';
@@ -2117,8 +2118,6 @@ const tools = createToolset({
 // Parent turn calls once → internally plans + runs sub-tasks via a mini-agent-loop → aggregates and returns.
 // From the parent turn's perspective, 1 iteration completes without hitting the MAX_TOOL_LOOP_ITERATIONS cap.
 //
-// Design doc: (internal design note) (planAndExecute plan)
-//
 // Sub-loop blacklist:
 //   - planAndExecute (prevent nested recursion with unbounded budget)
 //   - askUserQuestion (sub-loop is non-interactive)
@@ -2639,10 +2638,22 @@ const permissions = createReadOnlyMatrix();
 // `createToolChecker` was called WITHOUT a validatorChain, so pathAcl / dangerousCommands / etc.
 // existed but ran only in demos — never in production. This is the conservative "safe-deny" config
 // agreed with the maintainer (see SECURITY-DESIGN.md §5):
-//   - dangerousCommands: ONLY the hard-deny catastrophic patterns (rm -rf /, mkfs, dd on /dev,
-//     fork bomb, base64|sh, eval $(curl), writes to /etc · /boot · ~/.ssh, secret-file exfil).
-//     The grant-action patterns (git --force, sudo, …) are filtered OUT so nothing here ever needs an
-//     approval flow — this checker has no onApprovalNeeded, so a require-grant would just dead-end.
+//   - dangerousCommands: the hard-deny catastrophic patterns (rm -rf /, mkfs, dd on /dev, fork bomb,
+//     base64|sh, eval $(curl), writes to /etc · /boot · ~/.ssh, secret-file exfil) AND, since
+//     2026-08-11, the grant-action patterns.
+//
+//     Those were filtered out on the reasoning that "a require-grant would just dead-end", and half
+//     of that was right: the card does appear (this handler's own auth flow raises it off the denial
+//     string, not policy's onApprovalNeeded), but approving it issued a TOOL-scope grant, which
+//     isGranted(…, 'command') deliberately refuses — so the next attempt was denied again, forever.
+//     The missing half is below in the grant path: an approval for a command-gated call now also
+//     issues a command-scope grant for exactly that command, so the loop converges on one yes.
+//
+//     What this turns on is the distinction the list was written for and never got to make. Local git
+//     is free — staging, committing, rebasing are reversible and stay on the machine — while `git
+//     push`, `git remote set-url` and credential configuration each need their own approval. On
+//     2026-08-10 a plain `git push`, running under a shell grant given half an hour earlier for
+//     something else, put 902 files including a live GitHub token onto a public repository.
 //   - pathAcl: sensitive-path denylist (~/.ssh, .env, /etc/shadow, .aws/credentials, …). Closes the
 //     real gap that `readFile ~/.ssh/id_rsa` succeeded today. workspaceOnly stays OFF (would over-block).
 //     KNOWN TRADEOFF: this also blocks legitimate `.env` reads via the file tools.
@@ -2650,10 +2661,47 @@ const permissions = createReadOnlyMatrix();
 // workspaceOnly. See SECURITY-DESIGN.md for the staged plan.
 const conservativeValidatorChain = createDefaultChain({
   pathAcl: createPathAclValidator({}),
-  dangerousCommands: createDangerousCommandValidator({
-    patterns: DEFAULT_DANGEROUS_PATTERNS.filter((p) => p.defaultAction === 'deny'),
-  }),
+  dangerousCommands: createDangerousCommandValidator({ patterns: commandGatePatterns() }),
 });
+
+/**
+ * Which command gates are live. `full` (default) honours every pattern the list was written with;
+ * `publish` keeps only the ones whose damage leaves this machine — publishing, where a push would go,
+ * stored credentials, and piping the network into a shell — and lets the local-destructive ones
+ * (git reset --hard, git clean -fdx, chmod 777, systemctl stop …) through as before.
+ *
+ * The knob exists because the failure mode of a gate is not only "too loose". An owner who is asked
+ * twelve times in a morning stops reading the question, and this codebase has that morning on record.
+ * If the local-destructive tail turns out to be noise here, `publish` is the retreat that keeps the
+ * part that matters; `off` restores the pre-2026-08-11 behaviour of deny-patterns only.
+ */
+function commandGatePatterns(): typeof DEFAULT_DANGEROUS_PATTERNS {
+  const mode = (process.env.PHILONT_COMMAND_GATE ?? 'full').toLowerCase();
+  if (mode === 'off') return DEFAULT_DANGEROUS_PATTERNS.filter((p) => p.defaultAction === 'deny');
+  if (mode === 'publish') {
+    const leavesTheMachine = new Set([
+      'git_push', 'git_force_push', 'git_remote_write', 'git_credential_config',
+      'curl_pipe_shell', 'wget_pipe_shell',
+    ]);
+    return DEFAULT_DANGEROUS_PATTERNS.filter(
+      (p) => p.defaultAction === 'deny' || leavesTheMachine.has(p.id),
+    );
+  }
+  return DEFAULT_DANGEROUS_PATTERNS;
+}
+
+/**
+ * How long an approval for a command-gated call covers THAT command. Short on purpose: the point of
+ * the narrow scope is that the yes is about one invocation, not about a capability.
+ */
+const SENSITIVE_COMMAND_GRANT_TTL_MS = 5 * 60_000;
+
+/** The command a shell/process call would run, for the command-gate checks. */
+function pendingCommandText(toolName: string, input: Record<string, unknown> | undefined): string {
+  if (toolName !== 'shell' && toolName !== 'process') return '';
+  const command = input?.command;
+  return typeof command === 'string' ? command : '';
+}
 
 // ── K8 proactivity layer: autonomous loop ────────────────────────────────────────────
 // Runs independent ticks during idle time (default 5 min); GapDriver / CuriosityDriver scan memory
@@ -7937,13 +7985,48 @@ async function handleChatSendInner(
       // approved 10:34:04 → card 10:44:13 → approved 10:49:26 → card 11:04:39 → approved 11:04:41 → card
       // 11:22:06. Ten-minute clockwork; the owner typed OK twelve times in one morning for a workflow he
       // had already authorised.
+      // A COMMAND-GATED CALL IS APPROVED AS A COMMAND, NOT AS A CAPABILITY.
+      //
+      // `git push` reaches the auth card through the validator chain, which requires a COMMAND-scope
+      // grant — a tool-scope one deliberately does not satisfy it. So a normal approval here would
+      // grant `shell` for thirty minutes, the validator would refuse it again, and the card would come
+      // straight back: approve, denied, approve, denied. The yes has to be shaped like the question.
+      //
+      // Which is also the safer shape. What went wrong on 2026-08-10 was not that publishing was
+      // allowed; it was that publishing rode in on a shell approval given earlier for something else.
+      // This grant covers that one command for five minutes and nothing else — and the workflow batch
+      // below is suppressed, because "yes, push this" is not "yes, and also help yourself to the local
+      // write/execute loop for half an hour".
+      const gatedCommand = pendingCommandText(pending.toolName, pending.input);
+      const gatedPattern = gatedCommand ? findDangerousPattern(gatedCommand) : null;
+      const commandGated = gatedPattern?.defaultAction === 'grant';
+
       const grantTtlMs =
         pending.toolName === 'deep_explore' ? DEEP_EXPLORE_GRANT_TTL_MS : WORKFLOW_GRANT_TTL_MS;
       grants.grant(pending.toolName, pending.capability as any, pending.domain as any, userMessage, grantTtlMs);
+      if (commandGated) {
+        grants.grant({
+          toolName: pending.toolName,
+          scope: 'command',
+          // Exact command. `*` / `?` inside it would read as glob wildcards — a widening confined to
+          // this one command shape and this one short window, which beats not converging at all.
+          pattern: gatedCommand,
+          capability: pending.capability as any,
+          domain: pending.domain as any,
+          reason: `command-gated approval (${gatedPattern!.id}): ${userMessage.slice(0, 40)}`,
+          ttlMs: SENSITIVE_COMMAND_GRANT_TTL_MS,
+        });
+        console.log(
+          `[command-gate] session=${safeSessionId(sessionId)} approved ${gatedPattern!.id} for ONE command ` +
+            `(${Math.round(SENSITIVE_COMMAND_GRANT_TTL_MS / 60_000)}min, no workflow batch): ${gatedCommand.slice(0, 60)}`,
+        );
+      }
       const grantMinutes = Math.round(grantTtlMs / 60_000);
       onTrace?.({
         kind: 'auth-decision', tier: 4,
-        text: `Granted ${pending.toolName} (valid for ${grantMinutes} min)`,
+        text: commandGated
+          ? `Granted this one ${pending.toolName} command — ${gatedPattern!.description} (${Math.round(SENSITIVE_COMMAND_GRANT_TTL_MS / 60_000)} min, this command only)`
+          : `Granted ${pending.toolName} (valid for ${grantMinutes} min)`,
         meta: { toolName: pending.toolName },
       });
       // Phase 18 (2026-06-15) WS5 + 2026-06-17 fix: research-workflow grant. Approving ANY local write/execute
@@ -7954,7 +8037,9 @@ async function handleChatSendInner(
       // user paid one "ok" per tool/capability — the "继续→授权→ok" treadmill (prod 2026-06-17: ~6 "ok"s for one
       // push). One approval now covers the loop. Network downloads (downloadFile, domain=network), destructive
       // deleteFile, and external/untrusted execution stay per-call.
-      const wfGrants = localWorkflowGrants(pending.capability, pending.domain, pending.toolName);
+      const wfGrants = commandGated
+        ? []
+        : localWorkflowGrants(pending.capability, pending.domain, pending.toolName);
       for (const g of wfGrants) {
         grants.grant(g.tool, g.capability as any, g.domain as any, `research workflow grant via ${pending.toolName} approval`, WORKFLOW_GRANT_TTL_MS);
       }

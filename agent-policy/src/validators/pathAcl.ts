@@ -52,6 +52,14 @@ export const DEFAULT_SENSITIVE_PATHS: string[] = [
   '**/id_ed25519',
   '**/id_ecdsa',
   '**/*.pem',
+  // 2026-08-11: the shapes a credential is actually saved as, learned from a public-repo leak whose
+  // payload was a file literally named `git token.txt` sitting next to the source.
+  '**/.git-credentials',
+  '**/.philont-credentials',
+  '**/.netrc',
+  '**/*credentials*',
+  '**/*token*.txt',
+  '**/*.key',
 ];
 
 /** Default set of tools that require path checks */

@@ -77,6 +77,7 @@ export {
   createSsrfValidator,
   createDangerousCommandValidator,
   DEFAULT_DANGEROUS_PATTERNS,
+  findDangerousPattern,
   createLeakDetector,
   redactOutput,
   scanText,

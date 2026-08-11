@@ -200,6 +200,45 @@ export const DEFAULT_DANGEROUS_PATTERNS: DangerousCommandPattern[] = [
     description: 'git force push',
     defaultAction: 'grant',
   },
+  // PUBLISHING IS ITS OWN DECISION, AND ORDINARY `git push` IS THE ONE THAT PUBLISHES.
+  //
+  // Only force-push was listed here, as if the risk were losing history. On 2026-08-10 a plain
+  // `git push` put 902 files on a public repository in one commit: a GitHub token, the agent's
+  // private journals, page captures, the owner's documents and a run's whole output tree. Nothing
+  // was overwritten and nothing was forced. The act that could not be taken back was the ordinary
+  // one — and it ran under a shell approval given for something else half an hour earlier.
+  //
+  // Local git stays free: staging, committing, branching, rebasing are all reversible and none of
+  // them leave the machine. What needs its own yes is the step that does. A compound
+  // `git add -A && git commit && git push` matches here too, since the pattern is tested against
+  // the whole command line.
+  {
+    id: 'git_push',
+    regex: /\bgit\s+(?:-[^\s]+\s+)*push\b/,
+    description: 'git push — publishes commits to a remote',
+    defaultAction: 'grant',
+  },
+  // pathAcl already refuses these paths to the FILE tools; `cat` is not a file tool. Only the piped
+  // form (cat .env | curl) was covered, as though the danger were the pipe. Reading a credential into
+  // the context window is the same disclosure with a slower second step.
+  {
+    id: 'credential_file_read',
+    regex: /\b(?:cat|less|more|head|tail|base64|xxd|strings)\s+[^|&;]*(?:\btokens?\b|\bcredentials?\b|\.netrc\b|id_(?:rsa|ed25519|ecdsa)\b|\.pem\b)/i,
+    description: 'reading a credential file into context',
+    defaultAction: 'grant',
+  },
+  {
+    id: 'git_remote_write',
+    regex: /\bgit\s+(?:-[^\s]+\s+)*remote\s+(?:add|set-url)\b/,
+    description: 'git remote add/set-url — changes where a push would go',
+    defaultAction: 'grant',
+  },
+  {
+    id: 'git_credential_config',
+    regex: /\bgit\s+config\b[^\n]*credential/i,
+    description: 'git credential configuration — stores or redirects push credentials',
+    defaultAction: 'grant',
+  },
   {
     id: 'git_reset_hard',
     regex: /\bgit\s+reset\s+(-[^\s]*\s+)*--hard\b/,
@@ -216,6 +255,24 @@ export const DEFAULT_DANGEROUS_PATTERNS: DangerousCommandPattern[] = [
 
 const DEFAULT_COMMAND_TOOLS = new Set(['shell', 'process']);
 const DEFAULT_COMMAND_FIELDS = ['command'];
+
+/**
+ * The same match the validator makes, available to whoever has to ACT on it.
+ *
+ * A require-grant answer is only half a mechanism: something must then issue a grant of the right
+ * shape, and a tool-scope grant deliberately does not satisfy a command-scope requirement. Exporting
+ * the predicate keeps the authorization path and the validator reading one list instead of two.
+ */
+export function findDangerousPattern(
+  command: string,
+  patterns: DangerousCommandPattern[] = DEFAULT_DANGEROUS_PATTERNS,
+): DangerousCommandPattern | null {
+  if (!command) return null;
+  for (const p of patterns) {
+    if (p.regex.test(command)) return p;
+  }
+  return null;
+}
 
 export interface DangerousCommandConfig {
   patterns?: DangerousCommandPattern[];

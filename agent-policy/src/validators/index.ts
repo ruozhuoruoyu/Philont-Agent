@@ -26,6 +26,7 @@ export type { SsrfConfig } from './ssrf.js';
 
 export {
   createDangerousCommandValidator,
+  findDangerousPattern,
   DEFAULT_DANGEROUS_PATTERNS,
 } from './dangerousCommands.js';
 export type {
