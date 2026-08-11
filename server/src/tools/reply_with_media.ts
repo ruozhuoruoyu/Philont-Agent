@@ -21,6 +21,7 @@
 import type { Tool } from '@agent/policy';
 import { findMediaChannel, type MediaKind } from '../channels/registry.js';
 import { currentSessionId } from '../channels/turn_context.js';
+import { safeSessionId } from '../safe_session_id.js';
 
 const VALID_KINDS: MediaKind[] = ['image', 'file', 'voice', 'video'];
 
@@ -82,7 +83,7 @@ export const replyWithMediaTool: Tool = {
         success: false,
         output: '',
         error:
-          `The current session (${sid}) is not on a media-capable channel (web-ui, typically). ` +
+          `The current session (${safeSessionId(sid)}) is not on a media-capable channel (web-ui, typically). ` +
           `To get the file to the user, write it with writeFile and tell them the path in your reply.`,
       };
     }

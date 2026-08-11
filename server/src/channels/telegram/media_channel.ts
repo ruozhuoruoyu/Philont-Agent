@@ -17,6 +17,7 @@ import {
   type SendMediaResult,
 } from '../registry.js';
 import type { TelegramClient } from './client.js';
+import { safeSessionId } from '../../safe_session_id.js';
 
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
 
@@ -52,7 +53,7 @@ export function createTelegramMediaChannel(opts: {
     async send(sessionId, args: SendMediaArgs): Promise<SendMediaResult> {
       const chatId = parseTelegramChatId(sessionId, botId);
       if (!chatId) {
-        throw new Error(`telegram send: cannot extract chatId from sessionId ${sessionId}`);
+        throw new Error(`telegram send: cannot extract chatId from sessionId ${safeSessionId(sessionId)}`);
       }
       const stat = statFile(args.path);
       if (stat.size > maxBytes) {

@@ -32,6 +32,7 @@ import {
 } from '@agent/memory';
 import type { AuditEventType } from '@agent/policy';
 import { callAuxLLM } from '@agent/tools';
+import { safeSessionId } from './safe_session_id.js';
 
 /** Regex for "task complete / done / finished" user expressions, used to detect task closing */
 const TASK_CLOSING_RE =
@@ -257,7 +258,7 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
     const prevFire = lastReflectionFire.get(opts.sessionId);
     if (prevFire && prevFire.reasonsKey === reasonsKey && Date.now() - prevFire.ts < REFLECTION_COOLDOWN_MS) {
       console.log(
-        `[reflection] session=${opts.sessionId} skipped (same reasons "${reasonsKey}" fired ` +
+        `[reflection] session=${safeSessionId(opts.sessionId)} skipped (same reasons "${reasonsKey}" fired ` +
           `${Math.round((Date.now() - prevFire.ts) / 60_000)}min ago, within ${REFLECTION_COOLDOWN_MS / 60_000}min cooldown)`,
       );
       opts.metrics?.increment('reflect.skip_cooldown'); // instrumentation: how often reflection is suppressed
@@ -266,7 +267,7 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
     lastReflectionFire.set(opts.sessionId, { ts: Date.now(), reasonsKey });
 
     console.log(
-      `[reflection] session=${opts.sessionId} triggered reasons=${decision.reasons.join(',')} ` +
+      `[reflection] session=${safeSessionId(opts.sessionId)} triggered reasons=${decision.reasons.join(',')} ` +
         `turnCount=${state.turnCount} toolFailures=${state.toolFailures} taskClosing=${state.taskClosing}`,
     );
 
@@ -326,7 +327,7 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
     const parsed = parseReflectionOutput(llmResponse);
     if (!parsed.ok) {
       console.warn(
-        `[reflection] session=${opts.sessionId} parse failed: ${parsed.errors.slice(0, 3).join('; ').slice(0, 300)}`,
+        `[reflection] session=${safeSessionId(opts.sessionId)} parse failed: ${parsed.errors.slice(0, 3).join('; ').slice(0, 300)}`,
       );
       opts.appendAudit?.('self_domain_write', {
         source: 'reflection',
@@ -341,7 +342,7 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
 
     const reflection = parsed.reflection!;
     if (!reflection.hadLesson) {
-      console.log(`[reflection] session=${opts.sessionId} LLM self-assessed had_lesson=false; skipping apply`);
+      console.log(`[reflection] session=${safeSessionId(opts.sessionId)} LLM self-assessed had_lesson=false; skipping apply`);
       opts.appendAudit?.('self_domain_write', {
         source: 'reflection',
         origin: 'Internal',
@@ -434,7 +435,7 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
     opts.metrics?.increment('reflect.skill_refine', result.stats.skillsRefined);
 
     console.log(
-      `[reflection] session=${opts.sessionId} reflectionId=${reflectionId} ` +
+      `[reflection] session=${safeSessionId(opts.sessionId)} reflectionId=${reflectionId} ` +
         `applied=${result.applied.length} routing=${result.stats.routingRulesCreated} ` +
         `playbooks=${result.stats.playbooksCreated} new_skills=${result.stats.newSkillsCreated} ` +
         `refined=${result.stats.skillsRefined} errors=${result.errors.length}`,

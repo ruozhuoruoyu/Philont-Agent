@@ -28,6 +28,7 @@ import {
   MEDIA_FILE,
   MEDIA_VOICE,
 } from './client.js';
+import { safeSessionId } from '../../safe_session_id.js';
 
 /** Hard file size cap (prevents the LLM from accidentally sending a 100MB video). Can be relaxed, but conservative for now. */
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
@@ -94,7 +95,7 @@ export function createWeChatMediaChannel(opts: {
     async send(sessionId, args: SendMediaArgs): Promise<SendMediaResult> {
       const peer = parseWeChatPeer(sessionId, accountId);
       if (!peer) {
-        throw new Error(`wechat send: cannot extract peer from sessionId ${sessionId}`);
+        throw new Error(`wechat send: cannot extract peer from sessionId ${safeSessionId(sessionId)}`);
       }
       // Check size before reading to avoid loading large files into RAM
       const stat = statFile(args.path);

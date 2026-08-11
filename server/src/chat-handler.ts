@@ -3698,20 +3698,21 @@ const skillReflexNudged = new Set<string>();
  * a normal turn (no auth re-prompt), so questions like "is the session still active?" are answered
  * instead of being bounced as "please reply allow/deny". Keyed by ws sid like the rest of the auth state.
  *
- * 2026-08-11: raised 10 → 30 min, the same window the approval itself buys (WORKFLOW_GRANT_TTL_MS).
- * Ten minutes was shorter than how the owner actually answers: in the 2026-08-09 log the reply gap ran
- * 8 min at the median with a 35–60 min tail, and each over-TTL reply silently ATE one approval — 12:43:29
- * "OK" arrived 35.6 min late, was dropped, the card was re-sent, and the owner typed "ok" again 21
- * seconds later.
+ * Stays at 10 minutes. It was briefly raised to 30 to stop late replies being eaten — in the
+ * 2026-08-09 log the owner's reply gap ran 8 min at the median with a 35–60 min tail, and 12:43:29's
+ * "OK" arrived 35.6 min late, was dropped in silence, and cost a second "ok" 21 seconds later.
  *
- * This is a TRADE, not a free win, and it should be read as one: an "OK" arriving 25 minutes after the
- * card now executes the tool where it previously would not, so the window in which the owner's intent
- * may have moved on is three times wider. What is bought is fewer re-authorizations of work already
- * approved. The 35.6-min case in that log still expires under the new value — it is now visible and
- * re-requested rather than silently eaten. Which number is right is a judgement about how this owner
- * wants to be asked, not a fact about the code; PENDING_AUTH_TTL_MS overrides it.
+ * That reasoning conflated two different windows. WORKFLOW_GRANT_TTL_MS is 30 minutes because the
+ * owner SAID YES and that yes should cover the loop it authorised. This window is the opposite state:
+ * nothing has been approved, and widening it only widens the gap in which an "OK" can land on a
+ * request the owner has stopped meaning. And the specific harm that motivated the raise — the eaten
+ * approval — was the silence, not the ten minutes: an expired card is now dropped before it can
+ * poison the context, the turn says the request expired and re-issues it, and the owner's message is
+ * answered instead of consumed. With that fixed, the case for a longer unapproved window is gone.
+ *
+ * PENDING_AUTH_TTL_MS overrides it for anyone who wants the trade anyway.
  */
-const PENDING_AUTH_TTL_MS = Number(process.env.PENDING_AUTH_TTL_MS) || 30 * 60_000;
+const PENDING_AUTH_TTL_MS = Number(process.env.PENDING_AUTH_TTL_MS) || 10 * 60_000;
 
 /**
  * How long an `uncertain` (process died mid-execution) entry may keep asking the owner for an explicit
@@ -4072,7 +4073,7 @@ const scheduler = startScheduler(
           try {
             const result = await reflector.reflectFromSession(targetSessionId);
             console.log(
-              `${label} reflect on ${targetSessionId}: ${result.skillsCreated} created`
+              `${label} reflect on ${safeSessionId(targetSessionId)}: ${result.skillsCreated} created`
             );
           } catch (e) {
             console.warn(`${label} reflect failed:`, e);
@@ -6365,7 +6366,7 @@ function buildFreshMessages(
   }
   console.log(
     `[timeline] retrieved ${recalled.recencyCount} recent + ${recalled.recallCount} recall msgs (~${recalled.totalTokens} tokens${
-      isAutonomous ? `, scoped to ${sessionId}` : `, recent scoped to ${sessionId}`
+      isAutonomous ? `, scoped to ${safeSessionId(sessionId)}` : `, recent scoped to ${safeSessionId(sessionId)}`
     })`,
   );
 

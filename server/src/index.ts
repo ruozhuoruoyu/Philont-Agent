@@ -102,6 +102,7 @@ import {
   isAuxLLMConfigured,
 } from '@agent/tools';
 import { listRegisteredPushChannels, findPushChannel, describePushChannelMiss } from './push/channel.js';
+import { safeSessionId } from './safe_session_id.js';
 
 // Port: default 20266 (large enough to avoid common dev server ports 3000/8080; below the
 // Linux ephemeral range 32768+, so it won't be stolen by ephemeral client ports).
@@ -730,7 +731,7 @@ wss.on('connection', (ws) => {
     try {
       ws.send(JSON.stringify(payload));
     } catch (e) {
-      console.error(`[ws ${sessionId}] send failed:`, e);
+      console.error(`[ws ${safeSessionId(sessionId)}] send failed:`, e);
     }
   };
 
@@ -755,7 +756,7 @@ wss.on('connection', (ws) => {
     try {
       msg = JSON.parse(data.toString());
     } catch (parseErr) {
-      console.error(`[ws ${sessionId}] invalid JSON:`, parseErr);
+      console.error(`[ws ${safeSessionId(sessionId)}] invalid JSON:`, parseErr);
       safeSend({ type: 'error', message: `invalid JSON: ${String(parseErr)}` });
       return;
     }
@@ -802,7 +803,7 @@ wss.on('connection', (ws) => {
         );
       } catch (error) {
         const e: any = error;
-        console.error(`[ws ${sessionId}] chat.send error:`, e);
+        console.error(`[ws ${safeSessionId(sessionId)}] chat.send error:`, e);
         errMessage = String(e?.message ?? e);
       } finally {
         if (result) {
@@ -848,7 +849,7 @@ wss.on('connection', (ws) => {
         await finalizeSession(sessionId);
         safeSend({ type: 'session_finalized' });
       } catch (error) {
-        console.error(`[ws ${sessionId}] chat.end error:`, error);
+        console.error(`[ws ${safeSessionId(sessionId)}] chat.end error:`, error);
         safeSend({ type: 'error', message: String(error) });
       }
       return;

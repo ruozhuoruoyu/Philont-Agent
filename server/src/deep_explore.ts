@@ -98,6 +98,7 @@ import {
 import { currentSessionId } from './channels/turn_context.js';
 import { decidePhaseTransition, goalNeedsDecision, classifyGoal, looksDeductive } from './phase_gate.js';
 import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
+import { safeSessionId } from './safe_session_id.js';
 
 const VALID_KINDS: ReadonlySet<string> = new Set([
   'subgoal',
@@ -2629,7 +2630,7 @@ export function makeReasoningToolRunner(
               appendApproach: `not ${profile.settledVerb}: unchecked ${obj.kind} — ${obj.excerpt}`,
             });
             console.warn(
-              `[deep-explore] settle refused once: ${obj.kind} was never machine-checked (node ${nodeId}, session ${sessionId})`,
+              `[deep-explore] settle refused once: ${obj.kind} was never machine-checked (node ${nodeId}, session ${safeSessionId(sessionId)})`,
             );
             return {
               ok: true,
