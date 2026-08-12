@@ -11,6 +11,8 @@ Give Philont a direction in `compass.md`. It keeps persistent pursuits across co
 
 The bet is simple: **reliability should live in the runtime, not only in model scale.** Plans, checkpoints, tool policy, execution evidence, memory, and skill lifecycle are explicit mechanisms around the model. That makes lower-cost compatible models a practical first-class target while keeping Claude, DeepSeek, GLM, Kimi, MiniMax, Gemini, and other compatible endpoints interchangeable.
 
+**Built for developers who run agents every day, care about model cost, and want long-running work to survive beyond one chat.**
+
 <p align="center">
   <img src="docs/media/philont-demo.gif" alt="Philont carries a persistent pursuit through background research, scoped authorization, checkpoint resume, and an evidence-backed result" width="960">
 </p>
@@ -72,6 +74,17 @@ OpenClaw, Hermes, and Philont overlap substantially and evolve quickly. The usef
 | **Philont** | Persistent pursuits and a runtime that makes authorization, execution evidence, recovery, and learning governance explicit |
 
 Philont borrows ideas and compatible conventions from both projects; see [Acknowledgements](#acknowledgements).
+
+### Who it is for
+
+Philont is a good fit when your work is **multi-step, interruptible, recurring, and verifiable**:
+
+- you maintain long-lived software, research, or automation projects;
+- you want to use lower-cost or local-compatible models without reducing the agent to one-shot chat;
+- you want pursuits, memory, checkpoints, and reusable skills to survive across sessions;
+- you are willing to self-host, inspect traces, and help shape a developer-preview runtime.
+
+It is not currently aimed at zero-setup consumer use, fastest-possible one-shot answers, multi-tenant enterprise deployment, or unattended high-risk production changes. → [Who is Philont for?](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Who-Is-Philont-For)
 
 ---
 
