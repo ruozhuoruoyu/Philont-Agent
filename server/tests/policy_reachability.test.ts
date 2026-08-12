@@ -187,7 +187,7 @@ test('research grants are issued with an audience on every path that issues them
 test('the address is resolved once, before any module reads its own map', () => {
   const entry = chatHandler.indexOf('const outstandingDecisions = pendingDecisions.list(sessionId);');
   const askRead = chatHandler.indexOf('const exploreAsk = pendingExploreAsk.get(sessionId);');
-  const researchRead = chatHandler.indexOf('pendingResearchGrants.get(signalBus.resolvedDecisionId)');
+  const researchRead = chatHandler.indexOf('const rg = researchPayloadFor(signalBus);');
   assert.ok(entry > 0, 'entry resolution not found');
   assert.ok(entry < askRead, 'the deep-explore ask must not read its map before the address is known');
   assert.ok(entry < researchRead, 'nor may research authorization');
@@ -227,7 +227,7 @@ test('an unaddressed message no longer destroys the deep-explore ask', () => {
 });
 
 test('the semantic classifier reads the verdict, never picks the target', () => {
-  const block = chatHandler.slice(chatHandler.indexOf('pendingResearchGrants.get(signalBus.resolvedDecisionId)'));
+  const block = chatHandler.slice(chatHandler.indexOf('const rg = researchPayloadFor(signalBus);'));
   assert.match(
     block.slice(0, 2000),
     /classifyGrantReply\(verdictText\)/,
@@ -237,13 +237,13 @@ test('the semantic classifier reads the verdict, never picks the target', () => 
 });
 
 test('every card carries an id before it is shown', () => {
-  assert.match(chatHandler, /const decisionId = registerResearchDecision\(sid\);/, 'wechat/telegram push');
+  assert.match(chatHandler, /const decisionId = registerResearchDecision\(sid, \{/, 'wechat/telegram push');
   assert.match(chatHandler, /payload: \{ decisionId/, 'the web-ui card carries it too, for a button');
   assert.match(chatHandler, /decisionId: askDecisionId/, 'the deep-explore ask');
 });
 
 test('resolving a card takes it out of the book on every terminal path', () => {
-  const block = chatHandler.slice(chatHandler.indexOf('pendingResearchGrants.get(signalBus.resolvedDecisionId)'));
+  const block = chatHandler.slice(chatHandler.indexOf('const rg = researchPayloadFor(signalBus);'));
   const resolves = block.split('pendingDecisions.resolve(sessionId, rg.decisionId!)').length - 1;
   assert.ok(resolves >= 3, `grant, deny and expiry must all clear the card, found ${resolves}`);
 });
@@ -325,4 +325,25 @@ test('the tail I claimed was wired actually is', () => {
     /filter\(\(d\) => d\.id !== signalBus\.resolvedDecisionId\)/,
     'the one just answered is not still waiting',
   );
+});
+
+test('a card and the payload behind it are created in one place', () => {
+  // They were written in two, and drifted: the book held [A, B] while the payload map held only B,
+  // so an approval for A matched nothing and did nothing — silently, and indistinguishably from a
+  // card that works. Nothing else may write into the payload map.
+  const writes = chatHandler.match(/pendingResearchGrants\.set\(/g) ?? [];
+  assert.equal(writes.length, 1, `only registerResearchDecision may create a payload, found ${writes.length}`);
+  const fn = chatHandler.slice(
+    chatHandler.indexOf('export function registerResearchDecision('),
+    chatHandler.indexOf('export function researchPayloadFor('),
+  );
+  assert.match(fn, /pendingDecisions\.add\(sid, \{/, 'the addressable card');
+  assert.match(fn, /pendingResearchGrants\.set\(id, \{/, 'and its payload, under the same id');
+});
+
+test('the payload is fetched by the resolved id and by nothing else', () => {
+  const fn = chatHandler.slice(chatHandler.indexOf('export function researchPayloadFor('));
+  const body = fn.slice(0, fn.indexOf('\n}'));
+  assert.match(body, /pendingResearchGrants\.get\(signalBus\.resolvedDecisionId\)/);
+  assert.doesNotMatch(body, /\.get\(sessionId\)|values\(\)/, 'never "the latest one in this conversation"');
 });

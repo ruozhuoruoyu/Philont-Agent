@@ -3125,7 +3125,7 @@ const pushDispatcher = new PushDispatcher({
  * pendingQuestion carry provider tool_use pairing and continuations, and get their own pass rather
  * than being bent into a common shape for the sake of a uniform surface.
  */
-const pendingDecisions = new PendingDecisionBook();
+export const pendingDecisions = new PendingDecisionBook();
 
 /**
  * Research tools whose effects leave this machine or touch credentials. A bare "同意" may not decide
@@ -3238,6 +3238,57 @@ function auditDecisionApplied(
  */
 const pendingResearchGrants = new Map<string, PendingResearchGrant & { sessionId: string }>();
 
+/**
+ * One research-authorization card, created whole.
+ *
+ * The addressable decision and the payload behind it are written here together, under one id,
+ * because they were once written in two places and drifted: the book held [A, B] while the payload
+ * map — keyed by conversation — held only B. An approval for A then matched no payload and did
+ * nothing, silently. A card you can address with nothing behind it is the worst shape available:
+ * from outside it is indistinguishable from a card that works.
+ */
+export function registerResearchDecision(
+  sid: string,
+  req: { pursuitId: string; questionId: string; tool: string; why: string; title: string },
+): string {
+  const id = `r${Math.random().toString(36).slice(2, 6)}`;
+  pendingDecisions.add(sid, {
+    id,
+    kind: 'research_authorization',
+    title: `后台研究「${req.title}」请求使用 ${req.tool}`,
+    detail: req.why ? `用途：${req.why}` : undefined,
+    offered: ['同意', '批准', '授权', '允许', '可以', '好', 'approve', 'allow', 'yes', 'ok',
+              '拒绝', '不同意', '不批准', '不允许', '不要', 'reject', 'deny', 'no'],
+    resolutionPolicy: RESEARCH_TOOLS_NEEDING_EXPLICIT_ADDRESS.has(req.tool)
+      ? 'explicit_address_required'
+      : 'unique_bare_reply_allowed',
+    createdAt: Date.now(),
+    expiresAt: Date.now() + RESEARCH_GRANT_PENDING_TTL_MS,
+  });
+  pendingResearchGrants.set(id, {
+    pursuitId: req.pursuitId,
+    questionId: req.questionId,
+    tool: req.tool,
+    why: req.why,
+    ts: Date.now(),
+    decisionId: id,
+    sessionId: sid,
+  });
+  return id;
+}
+
+/**
+ * The payload for the decision this message resolved — by that id, never by "the most recent one in
+ * this conversation". Exported so a test drives the same lookup production does, rather than a
+ * reconstruction of it that can agree with a broken original.
+ */
+export function researchPayloadFor(
+  signalBus: TurnSignalBus,
+): (PendingResearchGrant & { sessionId: string }) | undefined {
+  if (!signalBus.resolvedDecisionId) return undefined;
+  return pendingResearchGrants.get(signalBus.resolvedDecisionId);
+}
+
 /** Every outstanding research request of one conversation (for expiry sweeps and the pending list). */
 function researchGrantsOf(sessionId: string): Array<PendingResearchGrant & { sessionId: string }> {
   return [...pendingResearchGrants.values()].filter((r) => r.sessionId === sessionId);
@@ -3349,52 +3400,28 @@ function enqueueResearchGrantPush(
    * A research tool that reaches outside this machine is not something a stray "同意" should decide:
    * it may well arrive an hour later, about a subject the owner has half put down.
    */
-  const registerResearchDecision = (sid: string): string => {
-    const id = `r${Math.random().toString(36).slice(2, 6)}`;
-    pendingDecisions.add(sid, {
-      id,
-      kind: 'research_authorization',
-      title: `后台研究「${title}」请求使用 ${tool}`,
-      detail: why ? `用途：${why}` : undefined,
-      offered: ['同意', '批准', '授权', '允许', '可以', '好', 'approve', 'allow', 'yes', 'ok',
-                '拒绝', '不同意', '不批准', '不允许', '不要', 'reject', 'deny', 'no'],
-      resolutionPolicy: RESEARCH_TOOLS_NEEDING_EXPLICIT_ADDRESS.has(tool)
-        ? 'explicit_address_required'
-        : 'unique_bare_reply_allowed',
-      createdAt: Date.now(),
-      expiresAt: Date.now() + RESEARCH_GRANT_PENDING_TTL_MS,
-    });
-    return id;
-  };
-
   // Register pending for subscribed WeChat DM users (reconstruct stable sessionId). Group subscriptions / non-WeChat channels are skipped.
   for (const sub of memory.pushSubscriptions.listActive()) {
     const sid = reconstructDmSessionId(sub.channel, sub.peer);
     if (!sid) continue;
-    const decisionId = registerResearchDecision(sid);
-    pendingResearchGrants.set(decisionId, {
+    const decisionId = registerResearchDecision(sid, {
       pursuitId: parsed.pursuitId,
       questionId: parsed.questionId,
       tool,
       why,
-      ts: Date.now(),
-      decisionId,
-      sessionId: sid,
+      title,
     });
   }
 
   // Web-ui: register pending under each connected web-ui session + show the request card.
   // (Mirrors the WeChat/Telegram path; the front-end renders the structured payload bilingually.)
   for (const [sid, send] of webuiClients) {
-    const decisionId = registerResearchDecision(sid);
-    pendingResearchGrants.set(decisionId, {
+    const decisionId = registerResearchDecision(sid, {
       pursuitId: parsed.pursuitId,
       questionId: parsed.questionId,
       tool,
       why,
-      ts: Date.now(),
-      decisionId,
-      sessionId: sid,
+      title,
     });
     send({
       type: 'research_grant_request',
@@ -8655,9 +8682,7 @@ async function handleChatSendInner(
   // unclear / expired → pass through to normal turn (pending-approval prompt section + grant_research_tool fallback).
   // By the id the entry router resolved — never "the most recent one in this conversation", which is
   // what let an answer meant for A be applied to B.
-  const rg = signalBus.resolvedDecisionId
-    ? pendingResearchGrants.get(signalBus.resolvedDecisionId)
-    : undefined;
+  const rg = researchPayloadFor(signalBus);
   // Only when the address resolved at message entry names THIS card. The reply reaching here used to
   // mean nothing more than "no earlier module claimed it", which is not the same as "it was meant for
   // this" — and one message must resolve at most one decision, so a reply already spent upstream is
