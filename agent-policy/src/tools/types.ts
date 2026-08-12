@@ -10,6 +10,15 @@ export interface ToolResult {
   output: string;
   error?: string;
   duration?: number; // milliseconds
+  /**
+   * Machine-readable detail alongside the human-readable `output`, for the cases where a caller has
+   * to branch on WHAT happened rather than parse a sentence about it.
+   *
+   * Added when planAndExecute needed to say "this plan stopped for want of an approval, here is the
+   * step it stopped at, and it can be resumed" — a distinction the parent turn must act on and which
+   * has no honest encoding in prose. Prose is what the model reads; this is what the mechanism reads.
+   */
+  data?: Record<string, unknown>;
 }
 
 /** Tool definition */
