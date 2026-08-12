@@ -332,3 +332,20 @@ test('grant_research_tool ratifies a pending request — it cannot mint authoriz
   assert.equal(real.success, true, 'the flow it exists for still works');
   assert.equal(minted.length, 1);
 });
+
+test('reachability: a self-domain tool must not be able to mint authorization unchecked', async () => {
+  // grant_research_tool is write × self, which the read-only matrix permits — so it raises no
+  // approval card of its own, and the ONLY thing between a model and an arbitrary capability is the
+  // validation inside it. That validation is therefore a security control, not a niceness, and this
+  // asserts it is still in the source rather than only in a behaviour test that could be rewritten
+  // around. (The behaviour itself is pinned by the test above.)
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  // Package root: the suite runs from dist/tests when compiled and from tests/ under tsx, so an
+  // import.meta-relative path resolves differently in the two. npm runs both from here.
+  const src = readFileSync(join(process.cwd(), 'src', 'research_tools.ts'), 'utf8');
+  assert.match(src, /pursuits\.get\(p\.pursuitId\)/, 'the pursuit must be looked up');
+  assert.match(src, /pendingTool\?\.tool === p\.tool/, 'the pending request must match the tool asked for');
+  const grantCall = src.indexOf('grantStore.grant({');
+  assert.ok(grantCall > src.indexOf('pendingTool?.tool === p.tool'), 'validation must precede the grant');
+});
