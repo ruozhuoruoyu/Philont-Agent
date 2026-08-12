@@ -2133,6 +2133,10 @@ const PLAN_EXEC_BLACKLIST: ReadonlySet<string> = new Set([
   'forget_skill',
   // WS3: constitution decisions require the owner in the loop — never inside a sub-loop.
   'decide_constitution_proposal',
+  // Authorization is not something a sub-loop may write, even a validated kind. grant_research_tool
+  // ratifies a request the background research already made — a legitimate act, and one that belongs
+  // to a turn the owner is present for. A sub-task reaching for it would be asking itself.
+  'grant_research_tool',
   // Credential recording is only allowed in user-driven turns; sub-loop inside planAndExecute / autonomous turns
   // cannot modify secrets.
   'saveCredential',
@@ -2521,7 +2525,7 @@ const subLoopPolicyEnabled = (): boolean => process.env.PHILONT_SUBLOOP_POLICY !
 const subTurnToolRunner = async (
   name: string,
   input: Record<string, unknown>,
-): Promise<{ ok: boolean; output: string; error?: string }> => {
+): Promise<{ ok: boolean; output: string; error?: string; policyDenied?: boolean }> => {
   try {
     if (subLoopPolicyEnabled()) {
       const denial = await getSubLoopChecker()({
@@ -2536,6 +2540,9 @@ const subTurnToolRunner = async (
         return {
           ok: false,
           output: '',
+          // Structured, so a business error that happens to say "not authorized" — an HTTP 401 body,
+          // say — is never mistaken for OUR refusal and turned into a resumable checkpoint.
+          policyDenied: true,
           error:
             `${SUBLOOP_AUTH_DENIED} for this sub-task: ${name} (${capability}). ${denial}\n` +
             `A sub-task inherits the approvals this turn already has and cannot request new ones — ` +
@@ -2566,25 +2573,40 @@ const subTurnToolRunner = async (
 const PLAN_CHECKPOINT_TTL_MS = 30 * 60_000;
 const planCheckpoints = new Map<string, PlanExecCheckpoint>();
 
+/**
+ * A CHECKPOINT BELONGS TO ONE CONVERSATION.
+ *
+ * Keyed on the task text alone, this was a process-wide map: two conversations that phrased a task
+ * identically — "build and publish", "check the logs" — would share one entry, and the second would
+ * resume the first one's plan, inherit its completed results, and fold their text into its own
+ * summary. Cross-session continuation, and a way for one conversation's file paths and outputs to
+ * surface in another's report. Task text is a description; it was never an identity.
+ */
+function planCheckpointKey(task: string): string {
+  return `${currentSessionId() ?? 'unknown'}::${task.trim()}`;
+}
+
 const planCheckpointStore = {
   load: (task: string): PlanExecCheckpoint | null => {
-    const cp = planCheckpoints.get(task.trim());
+    const key = planCheckpointKey(task);
+    const cp = planCheckpoints.get(key);
     if (!cp) return null;
     if (Date.now() - cp.createdAt > PLAN_CHECKPOINT_TTL_MS) {
-      planCheckpoints.delete(task.trim());
+      planCheckpoints.delete(key);
       return null;
     }
     return cp;
   },
   save: (cp: PlanExecCheckpoint): void => {
     if (planCheckpoints.size > 20) planCheckpoints.clear();
-    planCheckpoints.set(cp.task.trim(), cp);
+    planCheckpoints.set(planCheckpointKey(cp.task), cp);
     console.warn(
-      `[plan-execute] checkpointed at ${cp.blockedSubTaskId}: ${cp.completed.filter((c) => c.status === 'success').length} ` +
-        `done, waiting on an approval — a retry of the same task resumes instead of re-planning`,
+      `[plan-execute] session=${safeSessionId(currentSessionId() ?? '')} checkpointed at ${cp.blockedSubTaskId}: ` +
+        `${cp.completed.filter((c) => c.status === 'success').length} done, waiting on an approval — ` +
+        `a retry of the same task in THIS conversation resumes instead of re-planning`,
     );
   },
-  clear: (task: string): void => { planCheckpoints.delete(task.trim()); },
+  clear: (task: string): void => { planCheckpoints.delete(planCheckpointKey(task)); },
 };
 
 const planAndExecuteTool = createPlanAndExecuteTool({
@@ -2847,7 +2869,7 @@ const autonomousToolRunner: ToolRunner = {
         });
         if (denial) {
           console.warn(`[autonomous] blocked ${toolName}: ${denial.slice(0, 120)}`);
-          return { ok: false, output: '', error: `${SUBLOOP_AUTH_DENIED} for autonomous work: ${denial}` };
+          return { ok: false, output: '', policyDenied: true, error: `${SUBLOOP_AUTH_DENIED} for autonomous work: ${denial}` };
         }
       }
       const result = await tools.execute(

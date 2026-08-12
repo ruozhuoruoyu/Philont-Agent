@@ -546,15 +546,20 @@ export function createPlanAndExecuteTool(deps: PlanAndExecuteDeps): Tool {
               completed: [...resumeFrom.completed, ...cp.completed] });
           },
         });
-        const all = [...resumeFrom.completed, ...resumed];
+        // Merge by id, not by concatenation. `completed` carries every result before the block —
+        // including ordinary failures, which ARE re-run on resume — so appending would list the same
+        // sub-task twice and double-count it in every tally downstream.
+        const byId = new Map<string, SubTaskResult>();
+        for (const r of resumeFrom.completed) byId.set(r.id, r);
+        for (const r of resumed) byId.set(r.id, r); // the fresh attempt wins
+        const all = resumeFrom.ordered.map((st) => byId.get(st.id)).filter((r): r is SubTaskResult => !!r);
         if (!blockedCheckpoint) checkpoints?.clear(task);
         onProgress?.(`▸ aggregate (${aggregateMode})`);
         const aggregatedResume = await runAggregatePhase(task, all, aggregateMode);
-        return {
-          success: true,
-          output: aggregatedResume,
-          data: { resumedFrom: resumeFrom.blockedSubTaskId, results: all } as Record<string, unknown>,
-        };
+        return blockedResult(blockedCheckpoint, aggregatedResume, {
+          resumedFrom: resumeFrom.blockedSubTaskId,
+          results: all,
+        });
       }
 
       onProgress?.(`▸ plan phase: decompose (max ${maxSubTasks} sub-tasks)`);
@@ -635,13 +640,45 @@ export function createPlanAndExecuteTool(deps: PlanAndExecuteDeps): Tool {
         },
       };
 
-      return {
-        success: true,
-        output:
-          aggregated +
-          '\n\n--- detailed results ---\n' +
-          JSON.stringify(structured, null, 2),
-      };
+      return blockedResult(
+        blockedCheckpoint,
+        aggregated + '\n\n--- detailed results ---\n' + JSON.stringify(structured, null, 2),
+        { results },
+      );
+    },
+  };
+}
+
+/**
+ * A PLAN THAT STOPPED FOR WANT OF AN APPROVAL DID NOT SUCCEED.
+ *
+ * The sub-task is marked failed, which stops the SUB-model from writing over the refusal — and then
+ * the orchestrator returned `success: true` anyway, because it had successfully produced a report.
+ * One level up, that is the same whitewash: the parent's execution ledger records
+ * `planAndExecute → success`, and everything that reads the ledger to decide whether work happened —
+ * the honesty gate, the learning judge, the turn tally — is reading a success for a task that was
+ * refused. Marking the step honestly and the wrapper dishonestly leaves the lie exactly where it does
+ * the most damage, since the wrapper is what the rest of the system actually looks at.
+ */
+function blockedResult(
+  checkpoint: PlanExecCheckpoint | null,
+  output: string,
+  data: Record<string, unknown>,
+): { success: boolean; output: string; error?: string; data?: Record<string, unknown> } {
+  if (!checkpoint) return { success: true, output, data };
+  return {
+    success: false,
+    output,
+    error:
+      `AUTHORIZATION_REQUIRED — the plan stopped at "${checkpoint.blockedSubTaskId}": ` +
+      `${checkpoint.blockedReason.split('\n')[0]}. Work already finished is kept; approve the ` +
+      `capability and re-issue the same task to resume from that step.`,
+    data: {
+      ...data,
+      outcome: 'blocked',
+      authorizationRequired: true,
+      resumable: true,
+      blockedSubTaskId: checkpoint.blockedSubTaskId,
     },
   };
 }
@@ -823,7 +860,7 @@ async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult
     let authDenial: string | null = null;
     const watchedRunner = async (name: string, input: Record<string, unknown>) => {
       const r = await toolRunner(name, input);
-      if (!r.ok && r.error?.includes(SUBLOOP_AUTH_DENIED)) authDenial ??= r.error;
+      if (!r.ok && r.policyDenied === true) authDenial ??= r.error ?? SUBLOOP_AUTH_DENIED;
       return r;
     };
 

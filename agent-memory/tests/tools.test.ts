@@ -301,3 +301,34 @@ test('store_fact rejects secrets wrapped in object values (regression)', async (
   });
   assert.equal(ok.success, true, ok.error);
 });
+
+test('grant_research_tool ratifies a pending request — it cannot mint authorization', async () => {
+  const { openMemoryDb, createResearchTools } = await import('../src/index.js');
+  const db = openMemoryDb(':memory:') as unknown as { pursuits: any };
+  const minted: unknown[] = [];
+  const tools = createResearchTools(db.pursuits, { grant: (g: unknown) => minted.push(g) } as never);
+  const grant = tools.find((t) => t.name === 'grant_research_tool')! as unknown as {
+    execute: (p: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>;
+  };
+
+  // It is write × self, which the read-only matrix permits — so it raises no card of its own, and
+  // the only thing standing between a model and an arbitrary capability is this validation.
+  const invented = await grant.execute({ pursuitId: 'no-such-pursuit', tool: 'shell' });
+  assert.equal(invented.success, false, 'a fabricated pursuit id must not mint a grant');
+  assert.equal(minted.length, 0);
+
+  const pid = db.pursuits.createRoot({ title: 'a research', intent: 'find out', origin: 'user' }).id;
+  const qid = db.pursuits.addOpenQuestion(pid, 'needs a numeric check', 1);
+
+  const nothingPending = await grant.execute({ pursuitId: pid, tool: 'shell' });
+  assert.equal(nothingPending.success, false, 'a real pursuit with nothing pending is not an approval');
+
+  db.pursuits.setQuestionPendingTool(pid, qid, { tool: 'pariGp', why: 'needs to compute' });
+  const wrongTool = await grant.execute({ pursuitId: pid, tool: 'shell' });
+  assert.equal(wrongTool.success, false, 'approving a DIFFERENT tool than the one requested');
+  assert.equal(minted.length, 0, 'nothing was granted along the way');
+
+  const real = await grant.execute({ pursuitId: pid, tool: 'pariGp' });
+  assert.equal(real.success, true, 'the flow it exists for still works');
+  assert.equal(minted.length, 1);
+});

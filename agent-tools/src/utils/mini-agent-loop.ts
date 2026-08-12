@@ -94,6 +94,15 @@ export interface MiniLoopToolRunResult {
   ok: boolean;
   output: string;
   error?: string;
+  /**
+   * Set only by the policy layer refusing this call — never by a tool reporting its own failure.
+   *
+   * The first version recognised a refusal by looking for a marker string inside `error`, which
+   * cannot tell our refusal from someone else's: an HTTP 401 body reading "Not Authorized" is an
+   * ordinary business failure, and this codebase spent a morning walking into 401s. Matching text
+   * would have turned each of them into a resumable authorization checkpoint.
+   */
+  policyDenied?: boolean;
 }
 
 export interface MiniAgentLoopOptions {

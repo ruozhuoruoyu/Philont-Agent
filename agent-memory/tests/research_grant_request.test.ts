@@ -267,13 +267,26 @@ test('grant_research_tool: 写 grant(execute/system/reason=research:<pid>)', asy
   const grantTool = ts.find((t) => t.name === 'grant_research_tool')!;
   assert.ok(grantTool, '提供 grantStore 时应产出 grant_research_tool');
 
-  const r = await grantTool.execute({ pursuitId: 'r1', tool: 'runLean' });
+  // 2026-08-12: this used to pass with a pursuitId that did not exist, which was the hole — the tool
+  // minted an execute × system grant for any tool name it was handed, and being write × self it
+  // raised no card of its own. It ratifies a request the research already made; there has to be one.
+  const p = mem.pursuits.createRoot({ title: 'r', intent: 'find out', origin: 'user' });
+  const qid = mem.pursuits.addOpenQuestion(p.id, '需要验证', 1);
+  mem.pursuits.setQuestionPendingTool(p.id, qid, { tool: 'runLean', why: '验证' });
+
+  assert.equal(
+    (await grantTool.execute({ pursuitId: 'no-such-pursuit', tool: 'runLean' })).success,
+    false,
+    '编造的 pursuitId 不能换来授权',
+  );
+
+  const r = await grantTool.execute({ pursuitId: p.id, tool: 'runLean' });
   assert.equal(r.success, true);
   assert.equal(sink.calls.length, 1);
   assert.equal(sink.calls[0].toolName, 'runLean');
   assert.equal(sink.calls[0].capability, 'execute');
   assert.equal(sink.calls[0].domain, 'system');
-  assert.equal(sink.calls[0].reason, 'research:r1');
+  assert.equal(sink.calls[0].reason, `research:${p.id}`);
   assert.ok(sink.calls[0].ttlMs > 0);
   mem.close();
 });

@@ -67,6 +67,8 @@ export interface ToolRunResult {
   ok: boolean;
   output: string;
   error?: string;
+  /** Set only by the policy layer refusing the call — not by a tool reporting its own failure. */
+  policyDenied?: boolean;
 }
 
 export interface InitiativeExecutorOptions {

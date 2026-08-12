@@ -69,14 +69,16 @@ test('a plan blocked on authorization keeps what it already finished', async () 
     const step = ran.length;
     ran.push(`call-${step}`);
     if (step >= 1 && !authorized) {
-      return { ok: false, output: '', error: `${SUBLOOP_AUTH_DENIED} for this sub-task: shell (execute/local)` };
+      return { ok: false, output: '', policyDenied: true, error: `${SUBLOOP_AUTH_DENIED} for this sub-task: shell (execute/local)` };
     }
     return { ok: true, output: 'ok' };
   };
 
   const tool = makeTool(runner, store);
   const first = await tool.execute({ task: 'compile then publish then note' });
-  assert.equal(first.success, true, 'the plan reports rather than throwing');
+  // Not success: the plan was refused. The report is still produced, but the tool result the parent
+  // ledger records must say so — see the blocked-result test below.
+  assert.equal(first.success, false);
 
   const cp = store.get('compile then publish then note');
   assert.ok(cp, 'a checkpoint was taken');
@@ -97,7 +99,7 @@ test('after the approval, the same call resumes instead of redoing st-1', async 
   const runner = async () => {
     const step = executed.length;
     if (!authorized && step >= 1) {
-      return { ok: false, output: '', error: `${SUBLOOP_AUTH_DENIED} for this sub-task: shell (execute/local)` };
+      return { ok: false, output: '', policyDenied: true, error: `${SUBLOOP_AUTH_DENIED} for this sub-task: shell (execute/local)` };
     }
     executed.push(`run-${step}`);
     return { ok: true, output: 'ok' };
@@ -135,7 +137,7 @@ test('a sub-model writing a tidy summary over a refusal does not make the step d
   const store = new Map<string, PlanExecCheckpoint>();
   // Denies everything, so the sub-model's own wrap-up text is the only thing suggesting success.
   const tool = makeTool(
-    async () => ({ ok: false, output: '', error: `${SUBLOOP_AUTH_DENIED} for this sub-task: shell (execute/local)` }),
+    async () => ({ ok: false, output: '', policyDenied: true, error: `${SUBLOOP_AUTH_DENIED} for this sub-task: shell (execute/local)` }),
     store,
   );
   await tool.execute({ task: 'compile then publish then note' });
@@ -144,4 +146,54 @@ test('a sub-model writing a tidy summary over a refusal does not make the step d
   assert.ok(cp, 'the refusal is what decides, not the summary written over it');
   assert.equal(cp!.blockedSubTaskId, 'st-1');
   assert.equal(cp!.completed.filter((c) => c.status === 'success').length, 0);
+});
+
+// ── the boundaries the first version did not model ──────────────────────────────────────────────
+
+test('a blocked plan does not report success to the parent', async () => {
+  const store = new Map<string, PlanExecCheckpoint>();
+  const tool = makeTool(
+    async () => ({ ok: false, output: '', policyDenied: true, error: `${SUBLOOP_AUTH_DENIED}: shell` }),
+    store,
+  );
+  const r = await tool.execute({ task: 'compile then publish then note' });
+
+  // The sub-task being marked failed is not enough: the parent's ledger reads THIS.
+  assert.equal(r.success, false, 'a refused plan is not a successful tool call');
+  assert.match(r.error ?? '', /AUTHORIZATION_REQUIRED/);
+  assert.equal((r.data as Record<string, unknown>)?.outcome, 'blocked');
+  assert.equal((r.data as Record<string, unknown>)?.resumable, true);
+});
+
+test('an ordinary failure that says "not authorized" is not our refusal', async () => {
+  const store = new Map<string, PlanExecCheckpoint>();
+  // An HTTP 401 body. Text-matching would have made this a resumable authorization checkpoint.
+  const tool = makeTool(
+    async () => ({ ok: false, output: '', error: 'HTTP 401: {"message":"NOT AUTHORIZED — bad api key"}' }),
+    store,
+  );
+  const r = await tool.execute({ task: 'compile then publish then note' });
+  assert.equal(store.size, 0, 'no checkpoint: this is the API refusing, not the policy layer');
+  assert.notEqual((r.data as Record<string, unknown>)?.outcome, 'blocked');
+});
+
+test('a plain failure before the block is not double-counted on resume', async () => {
+  const store = new Map<string, PlanExecCheckpoint>();
+  let authorized = false;
+  let calls = 0;
+  // st-1 fails outright (not a policy denial); st-2 is refused; st-3 never runs.
+  const tool = makeTool(async () => {
+    const n = calls++;
+    if (n === 0) return { ok: false, output: '', error: 'compiler said no' };
+    if (!authorized) return { ok: false, output: '', policyDenied: true, error: `${SUBLOOP_AUTH_DENIED}: shell` };
+    return { ok: true, output: 'ok' };
+  }, store);
+
+  await tool.execute({ task: 'compile then publish then note' });
+  authorized = true;
+  const second = await tool.execute({ task: 'compile then publish then note' });
+
+  const results = (second.data as { results?: Array<{ id: string }> })?.results ?? [];
+  const ids = results.map((r) => r.id);
+  assert.deepEqual([...new Set(ids)], ids, `each sub-task appears once, got ${ids.join(',')}`);
 });

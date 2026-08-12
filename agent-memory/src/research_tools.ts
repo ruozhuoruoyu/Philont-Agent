@@ -184,6 +184,46 @@ export function createResearchTools(
         if (typeof p.pursuitId !== 'string' || !p.pursuitId.trim()) {
           return { success: false, output: '', error: 'requires pursuitId (the research the pending request belongs to)' };
         }
+        // THIS TOOL RATIFIES A REQUEST THE SYSTEM MADE. IT DOES NOT INVENT ONE.
+        //
+        // It validated only that two strings were non-empty, then minted an execute × system grant
+        // for any tool name it was handed. And it is itself write × self, which the read-only matrix
+        // permits — so it raised no approval card of its own. Measured: with a pursuitId that does
+        // not exist, `{ pursuitId: '编造的', tool: 'shell' }` returned success and put a two-hour
+        // grant for `shell` into the store. Since GrantStore matches by tool NAME (capability and
+        // domain are not compared on lookup), that grant then satisfied the matrix for shell.
+        //
+        // Which made every gate above it optional: a model that wanted a capability could mint the
+        // grant first and ask for nothing. The deep checks still held — dangerous commands, pathAcl
+        // and the command gate all sit behind the grant — but the approval layer did not.
+        //
+        // The description always said "the tool name shown in the pending section". Now the code
+        // says it too: there must BE a pending request, recorded by the executor that hit the wall,
+        // for this exact pursuit and this exact tool.
+        const pursuit = pursuits.get(p.pursuitId);
+        if (!pursuit) {
+          return {
+            success: false,
+            output: '',
+            error:
+              `no research pursuit "${p.pursuitId}" — this tool approves a request the background ` +
+              `research already made; it cannot create authorization on its own.`,
+          };
+        }
+        const pending = pursuit.openQuestions.find((q) => q.pendingTool?.tool === p.tool);
+        if (!pending) {
+          const offered = pursuit.openQuestions
+            .map((q) => q.pendingTool?.tool)
+            .filter((t): t is string => !!t);
+          return {
+            success: false,
+            output: '',
+            error:
+              `research "${p.pursuitId}" has no pending request for "${p.tool}"` +
+              (offered.length ? ` (pending: ${offered.join(', ')})` : ' (nothing is pending)') +
+              `. Authorization is granted for a request the research made, not for a tool chosen here.`,
+          };
+        }
         const ttlMs =
           typeof p.ttlMs === 'number' && Number.isFinite(p.ttlMs) && p.ttlMs > 0
             ? p.ttlMs
