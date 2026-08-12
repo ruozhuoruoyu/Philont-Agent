@@ -1015,9 +1015,10 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
       .enqueue({ severity: 'digest', kind: 'health_selfcheck', targetRef: 'health:daily', text })
       .catch((e) => {
         console.warn('[health] push dispatch threw', e);
-        return { delivered: 0 } as { delivered: number };
+        return { delivered: 0, deferred: 0 } as { delivered: number; deferred: number };
       });
-    const newStamp = nextHealthSendStamp(stamp, today, (dispatch?.delivered ?? 0) > 0);
+    const wasDeferred = (dispatch?.deferred ?? 0) > 0;
+    const newStamp = nextHealthSendStamp(stamp, today, (dispatch?.delivered ?? 0) > 0, wasDeferred);
     memory.facts.storeFact({
       namespace: 'system',
       key: 'health_selfcheck_last_ymd',
@@ -1029,7 +1030,7 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
     // failure waits for the next restart or the 24h tick. Twenty minutes is comfortably past warmup; the
     // attempt cap in shouldSkipHealthSend bounds the total, and the dispatcher's digest limiter is not an
     // obstacle because markDigestSent advances only on SUCCESS.
-    if (!newStamp.delivered && newStamp.attempts < HEALTH_SEND_MAX_ATTEMPTS_PER_DAY) {
+    if (!newStamp.delivered && !newStamp.deferred && newStamp.attempts < HEALTH_SEND_MAX_ATTEMPTS_PER_DAY) {
       if (healthRetryTimer) clearTimeout(healthRetryTimer);
       healthRetryTimer = setTimeout(() => {
         healthRetryTimer = null;
@@ -3095,6 +3096,7 @@ const pushDispatcher = new PushDispatcher({
     } catch { /* counting must never affect delivery */ }
   },
   subscriptions: memory.pushSubscriptions,
+  deferredPushes: memory.deferredPushes,
   logger: {
     log: (m) => console.log(`[push] ${m}`),
     warn: (m) => console.warn(`[push] ${m}`),

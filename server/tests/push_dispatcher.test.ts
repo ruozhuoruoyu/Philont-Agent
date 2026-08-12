@@ -52,6 +52,7 @@ function setup(opts: { globalEnabled?: boolean; now?: () => number } = {}) {
   const h = openMemoryDb(':memory:');
   const dispatcher = new PushDispatcher({
     subscriptions: h.pushSubscriptions,
+    deferredPushes: h.deferredPushes,
     isGloballyEnabled: () => opts.globalEnabled ?? true,
     now: opts.now ?? (() => Date.now()),
     logger: { log: () => {}, warn: () => {}, error: () => {} },
@@ -361,6 +362,27 @@ test('dispatcher: 失败不写 dedup ring,下次同请求可重试', async () =>
   f.setReturn({ ok: true, messageIds: ['m1'] });
   const r = await dispatcher.enqueue(URGENT_REQ);
   assert.equal(r.delivered, 1, '失败后 dedup 不应记录 fingerprint');
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
+
+test('dispatcher: WeChat ret=-2 becomes one durable next-inbound item, not a blind failure', async () => {
+  const now = 10_000;
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  f.setReturn({ ok: false, retry: 'next_inbound', code: -2, error: 'prepare failed' });
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1', urgentMinIntervalMs: 0 });
+
+  const first = await dispatcher.enqueue(URGENT_REQ);
+  const second = await dispatcher.enqueue(URGENT_REQ);
+  assert.equal(first.failed, 0);
+  assert.equal(first.deferred, 1);
+  assert.equal(second.deferred, 1);
+  assert.equal(h.deferredPushes.count(), 1, 'semantic upsert prevents duplicate cards');
+  const pending = h.deferredPushes.peek(f.channel.name, 'p1', now)!;
+  assert.equal(pending.text, URGENT_REQ.text);
+  assert.equal(h.pushSubscriptions.get(f.channel.name, 'p1')!.lastUrgentAt, null);
   unregisterPushChannel(f.channel.name);
   h.close();
 });

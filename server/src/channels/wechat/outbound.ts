@@ -26,7 +26,12 @@ export const CHUNK_DELAY_MS = 300;
 export const DEDUP_WINDOW_MS = 5 * 60_000;
 
 /** Low-level callback that sends a short text to iLink; outbound layer is agnostic of the implementation */
-export type RawSender = (to: string, text: string) => Promise<{ ok: boolean; messageId?: string }>;
+export type RawSender = (to: string, text: string) => Promise<{
+  ok: boolean;
+  messageId?: string;
+  retry?: 'next_inbound';
+  code?: number;
+}>;
 
 /**
  * Sanitize text into a form safe for sending to WeChat.
@@ -85,6 +90,8 @@ export interface SendTextResult {
    * message, which carries fresh quota. null when everything was delivered.
    */
   remainder: string | null;
+  retry?: 'next_inbound';
+  code?: number;
 }
 
 /**
@@ -293,6 +300,8 @@ export class OutboundQueue {
         // fails too, and with a transient error, skipping a middle chunk would garble order.
         result.chunksFailed = chunks.length - i;
         result.remainder = chunks.slice(i).join('');
+        result.retry = r.retry;
+        result.code = r.code;
         break;
       }
     }

@@ -113,6 +113,12 @@ test('a delivered report is final for the day; a failed one may retry', () => {
   assert.equal(shouldSkipHealthSend(ok, '20260723'), true);
 });
 
+test('a durably deferred report waits for next inbound instead of blind retrying', () => {
+  const stamp = nextHealthSendStamp(null, '20260723', false, true);
+  assert.deepEqual(stamp, { ymd: '20260723', delivered: false, deferred: true, attempts: 1 });
+  assert.equal(shouldSkipHealthSend(stamp, '20260723'), true);
+});
+
 test('retries are capped — a channel that failed three times today is down, not unlucky', () => {
   let stamp = null;
   for (let i = 0; i < HEALTH_SEND_MAX_ATTEMPTS_PER_DAY; i++) stamp = nextHealthSendStamp(stamp, '20260723', false);

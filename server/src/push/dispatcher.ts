@@ -22,7 +22,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { PushSubscription, PushSubscriptionStore } from '@agent/memory';
+import type { DeferredPushStore, PushSubscription, PushSubscriptionStore } from '@agent/memory';
 import type { PushChannel } from './channel.js';
 import { findPushChannel, describePushChannelMiss } from './channel.js';
 
@@ -50,6 +50,8 @@ export interface DispatchResult {
   skipped: SkipReason[];
   /** Number of channel.pushText failures */
   failed: number;
+  /** Accepted into a durable next-inbound mailbox (not yet delivered). */
+  deferred: number;
 }
 
 export interface SkipReason {
@@ -68,6 +70,7 @@ export interface SkipReason {
 
 export interface PushDispatcherOptions {
   subscriptions: PushSubscriptionStore;
+  deferredPushes?: DeferredPushStore;
   /** Max entries in the 24h dedup ring (to bound memory). Default 1000 */
   dedupRingCap?: number;
   /** Global kill check callback (default: reads env PHILONT_PUSH_ENABLED) */
@@ -92,16 +95,18 @@ interface DedupEntry {
 const DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class PushDispatcher {
-  private readonly opts: Required<Omit<PushDispatcherOptions, 'logger' | 'now' | 'isGloballyEnabled' | 'onSendOutcome'>> & {
+  private readonly opts: Required<Omit<PushDispatcherOptions, 'logger' | 'now' | 'isGloballyEnabled' | 'onSendOutcome' | 'deferredPushes'>> & {
     logger: NonNullable<PushDispatcherOptions['logger']>;
     now: () => number;
     isGloballyEnabled: () => boolean;
   };
   private dedupRing: DedupEntry[] = [];
   private readonly onSendOutcome?: (channel: string, ok: boolean) => void;
+  private readonly deferredPushes?: DeferredPushStore;
 
   constructor(options: PushDispatcherOptions) {
     this.onSendOutcome = options.onSendOutcome;
+    this.deferredPushes = options.deferredPushes;
     this.opts = {
       subscriptions: options.subscriptions,
       dedupRingCap: options.dedupRingCap ?? 1000,
@@ -118,7 +123,7 @@ export class PushDispatcher {
 
   /** Main entry point. Caller fire-and-forget; dispatcher does not throw internally. */
   async enqueue(req: PushRequest): Promise<DispatchResult> {
-    const result: DispatchResult = { delivered: 0, skipped: [], failed: 0 };
+    const result: DispatchResult = { delivered: 0, skipped: [], failed: 0, deferred: 0 };
     const now = this.opts.now();
 
     // 1. Global kill switch
@@ -184,9 +189,21 @@ export class PushDispatcher {
             this.opts.subscriptions.markDigestSent(t.channel, t.peer, now);
           }
         } else {
-          result.failed += 1;
+          if (sendResult.retry === 'next_inbound' && this.deferredPushes) {
+            this.deferredPushes.enqueue({
+              channel: t.channel, peer: t.peer, severity: req.severity,
+              kind: req.kind, targetRef: req.targetRef,
+              text: sendResult.deferredText ?? req.text,
+              expiresAt: now + 24 * 60 * 60_000,
+            }, now);
+            result.deferred += 1;
+          } else {
+            result.failed += 1;
+          }
           this.opts.logger.warn(
-            `[push] ${t.channel}:${t.peer} pushText returned failure: ${sendResult.error ?? 'unknown'}`,
+            `[push] ${t.channel}:${t.peer} pushText returned failure` +
+              (sendResult.retry === 'next_inbound' && this.deferredPushes ? ' — deferred to next inbound' : '') +
+              `: ${sendResult.error ?? 'unknown'}`,
           );
         }
       } catch (e) {
@@ -214,7 +231,7 @@ export class PushDispatcher {
    * would be tuning a funnel we still could not watch.
    */
   private finish(req: PushRequest, result: DispatchResult): DispatchResult {
-    if (result.delivered > 0 && result.skipped.length === 0 && result.failed === 0) {
+    if (result.delivered > 0 && result.skipped.length === 0 && result.failed === 0 && result.deferred === 0) {
       this.opts.logger.log(`[push] ${req.kind} delivered to ${result.delivered} target(s)`);
       return result;
     }
@@ -222,7 +239,7 @@ export class PushDispatcher {
       .map((s) => `${s.channel}:${s.peer}=${s.reason}${s.detail ? ` (${s.detail})` : ''}`)
       .join(', ');
     this.opts.logger.log(
-      `[push-funnel] ${req.kind} (${req.severity}) → delivered=${result.delivered} failed=${result.failed}` +
+      `[push-funnel] ${req.kind} (${req.severity}) → delivered=${result.delivered} deferred=${result.deferred} failed=${result.failed}` +
         (why ? ` skipped=[${why}]` : ''),
     );
     return result;

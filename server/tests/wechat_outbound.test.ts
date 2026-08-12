@@ -334,3 +334,13 @@ test('OutboundQueue: 失败的 chunk 不进去重窗口,稍后重发不会被 de
   assert.equal(r2.chunksSent, 1);
   assert.equal(sent[0], 'important tail');
 });
+
+test('OutboundQueue: ret=-2 metadata reaches the push dispatcher as next-inbound deferral', async () => {
+  const sender: RawSender = async () => ({ ok: false, retry: 'next_inbound', code: -2 });
+  const q = new OutboundQueue(sender);
+  const r = await q.sendText('owner', 'daily health report');
+  assert.equal(r.retry, 'next_inbound');
+  assert.equal(r.code, -2);
+  assert.equal(r.remainder, 'daily health report');
+  assert.equal(r.chunksSent, 0);
+});

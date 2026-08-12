@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 41;
+export const SCHEMA_VERSION = 42;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -1265,6 +1265,27 @@ function migrateV40ToV41(db: Database.Database): void {
   addColumnIfMissing(db, 'memory_skills', 'matched_count', 'INTEGER NOT NULL DEFAULT 0');
 }
 
+/** v42: proactive sends rejected by a conversational channel survive until its next inbound turn. */
+function migrateV41ToV42(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS deferred_pushes (
+      id         TEXT PRIMARY KEY,
+      channel    TEXT NOT NULL,
+      peer       TEXT NOT NULL,
+      severity   TEXT NOT NULL CHECK(severity IN ('urgent','digest')),
+      kind       TEXT NOT NULL,
+      target_ref TEXT NOT NULL,
+      text       TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      UNIQUE(channel, peer, kind, target_ref)
+    );
+    CREATE INDEX IF NOT EXISTS idx_deferred_push_peer
+      ON deferred_pushes(channel, peer, expires_at);
+  `);
+}
+
 function migrateV39ToV40(db: Database.Database): void {
   addColumnIfMissing(db, 'memory_raw_messages', 'origin_session_id', 'TEXT');
 }
@@ -1537,6 +1558,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 41) {
     migrateV40ToV41(db);
+  }
+  if (current < 42) {
+    migrateV41ToV42(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

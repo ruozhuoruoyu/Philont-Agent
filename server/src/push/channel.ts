@@ -46,6 +46,11 @@ export interface PushTextResult {
   /** A single push may be split into multiple chunks; record a messageId per chunk */
   messageIds?: string[];
   error?: string;
+  /** Conversational channels can ask the dispatcher to hold this until the peer next writes. */
+  retry?: 'next_inbound';
+  code?: number;
+  /** Unsent portion when a chunked channel partially delivered before deferring. */
+  deferredText?: string;
 }
 
 const channels = new Map<string, PushChannel>();

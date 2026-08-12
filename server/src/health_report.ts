@@ -356,6 +356,8 @@ export interface HealthSendStamp {
   ymd: string;
   delivered: boolean;
   attempts: number;
+  /** Accepted into a durable next-inbound mailbox; do not blind-retry it. */
+  deferred?: boolean;
 }
 
 export const HEALTH_SEND_MAX_ATTEMPTS_PER_DAY = 3;
@@ -364,6 +366,7 @@ export const HEALTH_SEND_MAX_ATTEMPTS_PER_DAY = 3;
 export function shouldSkipHealthSend(stamp: HealthSendStamp | null | undefined, today: string): boolean {
   if (!stamp || stamp.ymd !== today) return false;
   if (stamp.delivered) return true;
+  if (stamp.deferred) return true;
   return stamp.attempts >= HEALTH_SEND_MAX_ATTEMPTS_PER_DAY;
 }
 
@@ -372,9 +375,16 @@ export function nextHealthSendStamp(
   prev: HealthSendStamp | null | undefined,
   today: string,
   delivered: boolean,
+  deferred = false,
 ): HealthSendStamp {
   const attempts = prev && prev.ymd === today ? prev.attempts + 1 : 1;
-  return { ymd: today, delivered: delivered || (prev?.ymd === today && prev.delivered === true), attempts };
+  const isDeferred = !delivered && (deferred || (prev?.ymd === today && prev.deferred === true));
+  return {
+    ymd: today,
+    delivered: delivered || (prev?.ymd === today && prev.delivered === true),
+    attempts,
+    ...(isDeferred ? { deferred: true } : {}),
+  };
 }
 
 /**

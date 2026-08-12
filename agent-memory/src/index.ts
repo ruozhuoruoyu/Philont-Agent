@@ -36,6 +36,7 @@ import { DriveOutcomeStore } from './drive_outcome.js';
 import { RoutingRuleStore } from './routing_rules.js';
 import { ConfigRuleStore } from './config_rules.js';
 import { PushSubscriptionStore } from './push_subscriptions.js';
+import { DeferredPushStore } from './deferred_pushes.js';
 import { ReasoningStore } from './reasoning.js';
 import { ScheduleOutcomeStore } from './schedule_outcomes.js';
 import { PlanFileStore } from './plan_files.js';
@@ -43,6 +44,8 @@ import { MetricsStore } from './metrics.js';
 import { BackupRunner, type BackupConfig } from './backup.js';
 
 export { MemoryStore } from './store.js';
+export { DeferredPushStore } from './deferred_pushes.js';
+export type { DeferredPush, DeferredPushSeverity } from './deferred_pushes.js';
 export { NotesStore } from './notes.js';
 export { RawStore } from './raw.js';
 export { ActionLog } from './actions.js';
@@ -633,6 +636,8 @@ export interface MemoryHandle {
   configRules: ConfigRuleStore;
   /** v14: proactive push subscriptions (opt-in state) */
   pushSubscriptions: PushSubscriptionStore;
+  /** v42: proactive messages waiting for the channel's next inbound reply allowance */
+  deferredPushes: DeferredPushStore;
   /** v21: run trace for repeated schedule firings (2026-05-17) */
   scheduleOutcomes: ScheduleOutcomeStore;
   /** v22 Phase 13 (2026-05-17): per-project plan.md work notes (LLM-perspective accumulation layer) */
@@ -884,6 +889,7 @@ export function openMemoryDb(
     routingRules: new RoutingRuleStore(db),
     configRules: new ConfigRuleStore(db),
     pushSubscriptions: new PushSubscriptionStore(db),
+    deferredPushes: new DeferredPushStore(db),
     scheduleOutcomes: new ScheduleOutcomeStore(db),
     planFiles: new PlanFileStore(),
     reasoning: new ReasoningStore(db),

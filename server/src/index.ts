@@ -924,6 +924,7 @@ if (process.env.WECHAT_ENABLED === '1') {
     .then(({ startWeChatGateway }) =>
       startWeChatGateway({
         chatSend: handleChatSend,
+        deferredPushes: memory.deferredPushes,
       }),
     )
     .then((gw) => {

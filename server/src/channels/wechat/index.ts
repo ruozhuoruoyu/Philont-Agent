@@ -89,6 +89,10 @@ export interface MountOptions {
   /** Explicit policy; if not provided, policyFromEnv is used */
   policy?: PolicyConfig;
   logger?: GatewayLogger;
+  deferredPushes?: {
+    peek(channel: string, peer: string, now?: number): { id: string; kind: string; text: string } | null;
+    markDelivered(id: string): boolean;
+  };
 }
 
 /**
@@ -162,7 +166,7 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
       }
       // -14 token expired: not handled here; the gateway's long-poll will also catch it
       logger.warn(`sendText ret=${r.ret} errmsg=${r.errmsg ?? ''}`, { to: safeTo, durationMs: dur });
-      return { ok: false };
+      return { ok: false, ...(r.ret === -2 ? { retry: 'next_inbound' as const } : {}), code: r.ret };
     } catch (e) {
       const dur = Date.now() - startedAt;
       logger.error(`sendText threw: ${String(e)}`, { to: safeTo, durationMs: dur });
@@ -176,6 +180,7 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
     chatSend: opts.chatSend,
     outbound,
     logger,
+    deferredPushes: opts.deferredPushes,
   });
 
   const gw = new ILinkGateway({
@@ -221,9 +226,12 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
       try {
         const r = await outbound.sendText(peer, text);
         return {
-          ok: r.chunksSent > 0,
+          ok: r.chunksSent > 0 && r.chunksFailed === 0 && r.remainder === null,
           messageIds: r.messageIds,
-          ...(r.chunksSent === 0 ? { error: 'all chunks deduped or failed' } : {}),
+          retry: r.retry,
+          code: r.code,
+          deferredText: r.remainder ?? undefined,
+          ...(r.chunksFailed > 0 || r.chunksSent === 0 ? { error: 'one or more chunks failed' } : {}),
         };
       } catch (e) {
         return { ok: false, error: String(e) };
@@ -292,13 +300,14 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
 const REMAINDER_TTL_MS = 6 * 60 * 60_000;
 
 /** Build InboundDispatcher: inbound → handleChatSend → buffer → outbound */
-function makeDispatcher(opts: {
+export function makeDispatcher(opts: {
   accountId: string;
   chatSend: ChatSendFn;
   outbound: OutboundQueue;
   logger: GatewayLogger;
+  deferredPushes?: MountOptions['deferredPushes'];
 }): (e: InboundEvent) => Promise<void> {
-  const { accountId, chatSend, outbound, logger } = opts;
+  const { accountId, chatSend, outbound, logger, deferredPushes } = opts;
 
   // Quota-suspended reply tails, keyed by replyTo. WeChat caps bot messages per inbound message
   // (sendText ret=-2); when a reply's tail is rejected, it is parked here and delivered at the
@@ -352,6 +361,13 @@ function makeDispatcher(opts: {
     // chat-handler's pendingAuth (yes/no follow-up) can work across inbound events.
     const sessionId = makeSessionId(accountId, event);
     const replyTo = event.groupId || event.fromUserId;
+    // A failed proactive push is not sent separately here: that would spend the inbound allowance
+    // before the current answer. It is appended to the final answer and acknowledged only when the
+    // entire combined send succeeds.
+    const deferred = event.groupId ? null : (
+      deferredPushes?.peek(`wechat:${accountId}`, replyTo) ??
+      deferredPushes?.peek('wechat', replyTo) ?? null
+    );
 
     // Deliver any quota-suspended tail from the previous turn BEFORE producing the new reply.
     await flushRemainder(replyTo);
@@ -468,7 +484,14 @@ function makeDispatcher(opts: {
       }
 
       // WeChat markdown conversion: table → bullet, strip **bold** / ### h, inline `code` → 「code」
-      const rendered = renderForWeChat(sectioned).trim();
+      let rendered = renderForWeChat(sectioned).trim();
+      if (deferred) {
+        const heading = currentPhraseLang('wechat') === 'en'
+          ? 'Pending notice that could not be delivered earlier:'
+          : '此前未能送达的待办通知：';
+        rendered = [rendered, `${heading}\n${renderForWeChat(deferred.text).slice(0, 1500)}`]
+          .filter(Boolean).join('\n\n——\n\n');
+      }
 
       if (rendered.length > 0) {
         try {
@@ -481,12 +504,29 @@ function makeDispatcher(opts: {
             sectionHit: filtered.usedSection,
           });
           if (r.remainder) stashRemainder(replyTo, r.remainder, sessionId);
+          if (deferred && r.chunksFailed === 0 && r.remainder === null) {
+            deferredPushes?.markDelivered(deferred.id);
+            logger.info('deferred proactive notice delivered with inbound reply', {
+              replyTo, kind: deferred.kind, deferredId: deferred.id,
+            });
+          }
         } catch (e) {
           logger.error(`outbound.sendText failed: ${String(e)}`, { replyTo });
         }
       }
     } else {
       logger.info('chatSend produced no text', { sessionId, hasAuthPrompt: !!pendingAuthPrompt });
+      if (deferred) {
+        try {
+          const heading = currentPhraseLang('wechat') === 'en'
+            ? 'Pending notice that could not be delivered earlier:'
+            : '此前未能送达的待办通知：';
+          const r = await outbound.sendText(replyTo, `${heading}\n${renderForWeChat(deferred.text).slice(0, 1500)}`);
+          if (r.chunksFailed === 0 && r.remainder === null) deferredPushes?.markDelivered(deferred.id);
+        } catch (e) {
+          logger.error(`deferred notice send failed: ${String(e)}`, { replyTo });
+        }
+      }
     }
 
     // Last: send auth request (always the final message — prominent and not buried by later messages)
