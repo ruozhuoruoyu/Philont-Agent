@@ -165,7 +165,11 @@ export class AgentApp extends LitElement {
           </div>
         </nav>
         <main>
-          ${this.view === 'chat' ? html`<agent-chat></agent-chat>`
+          <!-- Keep chat mounted across tab changes. agent-chat owns the WebSocket; conditionally
+               removing it closes the socket, finalizes the server session, and creates a new
+               session when the user returns to Chat. Navigation is not a conversation boundary. -->
+          <agent-chat ?hidden=${this.view !== 'chat'}></agent-chat>
+          ${this.view === 'chat' ? null
             : this.view === 'memory' ? html`<memory-dashboard></memory-dashboard>`
             : this.view === 'marketplace' ? html`<skills-marketplace></skills-marketplace>`
             : this.view === 'autonomous' ? html`<autonomous-dashboard></autonomous-dashboard>`
@@ -220,5 +224,6 @@ export class AgentApp extends LitElement {
     /* min-height:0 lets the flex child shrink below its content height;
        overflow:auto keeps non-chat views (memory/settings) scrollable. */
     main { flex: 1; min-height: 0; overflow: auto; }
+    agent-chat[hidden] { display: none; }
   `;
 }
