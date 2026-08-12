@@ -132,14 +132,6 @@ No compass = neutral defaults: unbounded auto-tuning and no declared focus. Full
 
 ---
 
-## A note on deep exploring — from the author
-
-Philont has two deep-work protocols, and the rule of thumb is: *if the work succeeds, what changed?* **What you know** (a proof, a decision, a diagnosis) → `deep_explore`. **The world** (something deployed, sent, delivered) → a plan. They compose: think it through first, then execute the consequences.
-
-> **A note from the author — a layman, not a mathematician.** I spent about a week pointing `deep_explore` at the **Goldbach conjecture**. It built and pruned a real reasoning tree and closed off many dead ends, but it did **not** produce a breakthrough — and I'm not equipped to judge how close any of it came. (That experience is exactly why `deep_explore` now carries the `magnitude`, `lemmaLookup`, and `barrierCheck` verification teeth — so it does the quantitative bookkeeping an LLM slips on, and flags a known no-go before grinding it.) If you're a mathematician — or a researcher in any field — I'd genuinely love for you to try Philont on real problems and tell me where it helps and where it falls short.
-
----
-
 ## Configuration
 
 Everything is configured via environment variables (`.env`, or the launcher's setup wizard). **[.env.example](.env.example)** is the fully annotated list; selected:
