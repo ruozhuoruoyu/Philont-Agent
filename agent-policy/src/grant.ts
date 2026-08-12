@@ -24,6 +24,16 @@ export interface Grant {
   domain:     Domain;
   expiresAt:  number;
   reason:     string;
+  /**
+   * WHO this grant was issued for. Absent means "whoever calls" — the ordinary case, an approval the
+   * owner gave in a conversation about the work in front of them.
+   *
+   * Set, it means the approval was about a narrower context and does not travel outside it. Grants
+   * are looked up by tool NAME, so without this a yes given to background research for `shell` was
+   * equally a yes for the main loop, for a plan sub-task, and for any other pursuit — the reason
+   * string recorded which research had asked, and nothing read it.
+   */
+  audience?:  string;
 }
 
 const DEFAULT_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -80,6 +90,7 @@ export class GrantStore {
     domain: Domain;
     reason: string;
     ttlMs?: number;
+    audience?: string;
   }): void;
   grant(
     arg: string | {
@@ -90,6 +101,7 @@ export class GrantStore {
       domain: Domain;
       reason: string;
       ttlMs?: number;
+      audience?: string;
     },
     capability?: Capability,
     domain?: Domain,
@@ -115,6 +127,7 @@ export class GrantStore {
         domain: arg.domain,
         expiresAt: Date.now() + (arg.ttlMs ?? DEFAULT_TTL_MS),
         reason: arg.reason,
+        audience: arg.audience,
       };
     }
 
@@ -137,6 +150,7 @@ export class GrantStore {
     toolName: string,
     params?: Record<string, unknown>,
     scopeMin: GrantScope = 'tool',
+    audience?: string,
   ): boolean {
     const list = this.grants.get(toolName);
     if (!list || list.length === 0) return false;
@@ -154,6 +168,9 @@ export class GrantStore {
     for (const g of active) {
       // Validator level does not accept tool-scope (tool-scope can only bypass the matrix)
       if (scopeMin !== 'tool' && g.scope === 'tool') continue;
+      // An audience-scoped grant answers only to that audience. An unscoped one answers to everyone,
+      // which keeps every existing grant behaving exactly as before.
+      if (g.audience !== undefined && g.audience !== audience) continue;
       if (this.matches(g, params)) return true;
     }
     return false;

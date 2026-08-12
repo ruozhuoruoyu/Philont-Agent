@@ -140,3 +140,41 @@ test('the dangerous-command chain is not filtered down to deny-only', () => {
     'the chain should read its patterns from commandGatePatterns(), which honours PHILONT_COMMAND_GATE',
   );
 });
+
+/**
+ * An escape hatch whose blast radius is larger than its name is how an escape hatch becomes the
+ * incident. PHILONT_SUBLOOP_POLICY=off says "stop asking me"; it must not also say "let a background
+ * plan write to ~/.ssh or pipe a credential out".
+ */
+test('turning the sub-loop policy off does not turn off the things nobody can grant', () => {
+  const runners = chatHandler.slice(chatHandler.indexOf('const subTurnToolRunner'));
+  assert.match(
+    runners,
+    /subLoopPolicyEnabled\(\)\s*\?\s*getSubLoopChecker\(\)\s*:\s*getSubLoopFloorChecker\(\)/,
+    'with the flag off a runner must fall back to the floor checker, not to no check at all',
+  );
+  // And the floor must be the deep chain: catastrophic commands, sensitive paths, exfiltration.
+  const floor = chatHandler.slice(
+    chatHandler.indexOf('function getSubLoopFloorChecker'),
+    chatHandler.indexOf('const subTurnToolRunner'),
+  );
+  assert.match(floor, /validatorChain:\s*conservativeValidatorChain/, 'the floor keeps the validator chain');
+  assert.doesNotMatch(floor, /grantStore/, 'the floor decides what is never done, not who may do it');
+});
+
+/**
+ * A research approval is for the research loop. Grants are matched by tool name, so without an
+ * audience the same yes covered the main loop and any plan sub-task for the whole window.
+ */
+test('research grants are issued with an audience on every path that issues them', () => {
+  const issuances = chatHandler.split('grants.grant({').slice(1);
+  const researchIssuances = issuances.filter((block) => block.slice(0, 400).includes('research:'));
+  assert.ok(researchIssuances.length > 0, 'the scan must not silently match nothing');
+  for (const block of researchIssuances) {
+    assert.match(
+      block.slice(0, 400),
+      /audience:\s*RESEARCH_GRANT_AUDIENCE/,
+      'a research grant issued without an audience travels outside the research loop',
+    );
+  }
+});

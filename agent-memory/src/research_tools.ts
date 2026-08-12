@@ -27,9 +27,15 @@ export interface ResearchGrantSink {
     domain: 'local' | 'network' | 'system' | 'self';
     reason: string;
     ttlMs?: number;
+    /** Who the grant answers to; research grants are not approvals for the main loop. */
+    audience?: string;
   }): void;
 }
 
+/** The audience a research grant answers to; it is not an approval for anything else. */
+export const RESEARCH_GRANT_AUDIENCE = 'research';
+/** Ceiling on a research authorization, whatever was asked for. */
+export const MAX_RESEARCH_GRANT_TTL_MS = 8 * 60 * 60_000;
 /** grant_research_tool default authorization duration: 2 hours (enough for a few background idle ticks, auto-expires). */
 export const DEFAULT_RESEARCH_GRANT_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -224,10 +230,14 @@ export function createResearchTools(
               `. Authorization is granted for a request the research made, not for a tool chosen here.`,
           };
         }
-        const ttlMs =
+        // "Default two hours" was not "at most two hours": any positive finite number was accepted,
+        // so a single real pending request could be turned into an authorization lasting years.
+        const ttlMs = Math.min(
           typeof p.ttlMs === 'number' && Number.isFinite(p.ttlMs) && p.ttlMs > 0
             ? p.ttlMs
-            : DEFAULT_RESEARCH_GRANT_TTL_MS;
+            : DEFAULT_RESEARCH_GRANT_TTL_MS,
+          MAX_RESEARCH_GRANT_TTL_MS,
+        );
         try {
           // gated research tools authorized with execute/system; reason records which research authorized this (auditable).
           // Only write authorization, don't touch initiative/question — driver sees isGranted on next tick and replays.
@@ -236,8 +246,19 @@ export function createResearchTools(
             capability: 'execute',
             domain: 'system',
             reason: `research:${p.pursuitId}`,
+            // Background research only. Without this the yes travelled: grants are matched by tool
+            // NAME, so an approval for the research to run `shell` was equally an approval for the
+            // main loop and for any plan sub-task to run it, for the whole two hours.
+            audience: RESEARCH_GRANT_AUDIENCE,
             ttlMs,
           });
+          // Consume the request. It is answered now; leaving it standing let the same approval be
+          // replayed for a fresh two hours whenever the model felt like asking again.
+          try {
+            pursuits.setQuestionPendingTool(p.pursuitId, pending.id, null);
+          } catch {
+            /* the grant is already written; a bookkeeping failure must not undo it */
+          }
           const mins = Math.round(ttlMs / 60000);
           return {
             success: true,

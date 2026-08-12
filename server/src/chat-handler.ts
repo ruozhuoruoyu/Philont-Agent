@@ -8,7 +8,7 @@
 
 import {
   AuditLog,
-  createReadOnlyMatrix, checkPermission,
+  createReadOnlyMatrix, createSandboxMatrix, checkPermission,
   createToolChecker,
   GrantStore,
   SecretStore,
@@ -56,6 +56,7 @@ import {
   createMemoryTools,
   createPushTools,
   createResearchTools,
+  RESEARCH_GRANT_AUDIENCE,
   createTaskModeTools,
   createPlanTools,
   InMemoryTaskModeStore,
@@ -2544,8 +2545,28 @@ export function subLoopBlockedAuthorization(
   };
 }
 
-/** Escape hatch if this turns out to break a flow at an inconvenient hour. Default: enforced. */
+/**
+ * Escape hatch if this turns out to break a flow at an inconvenient hour. Default: enforced.
+ *
+ * `off` drops the GRANT layer for sub-loops — the matrix and the approvals — and nothing else. An
+ * operator switching this at 2am is saying "stop asking me", not "let a background plan write to
+ * ~/.ssh or pipe a credential out"; a switch whose blast radius is larger than its name is how an
+ * escape hatch becomes the incident. The deep checks below run either way.
+ */
 const subLoopPolicyEnabled = (): boolean => process.env.PHILONT_SUBLOOP_POLICY !== 'off';
+
+/** The refusals no flag reaches: catastrophic commands, sensitive paths, credential exfiltration. */
+let subLoopFloorChecker: ReturnType<typeof createToolChecker> | null = null;
+function getSubLoopFloorChecker() {
+  subLoopFloorChecker ??= createToolChecker({
+    // No permissions matrix and no grant store: this layer does not decide who may do what, only
+    // that some things are not done at all.
+    permissions: createSandboxMatrix(),
+    audit: internalAudit,
+    validatorChain: conservativeValidatorChain,
+  });
+  return subLoopFloorChecker;
+}
 
 const subTurnToolRunner = async (
   name: string,
@@ -2560,8 +2581,9 @@ const subTurnToolRunner = async (
   deniedDomain?: string;
 }> => {
   try {
-    if (subLoopPolicyEnabled()) {
-      const denial = await getSubLoopChecker()({
+    {
+      const check = subLoopPolicyEnabled() ? getSubLoopChecker() : getSubLoopFloorChecker();
+      const denial = await check({
         toolName: name,
         approval: 'never',
         params: JSON.stringify(input ?? {}),
@@ -2897,8 +2919,9 @@ function pendingCommandText(toolName: string, input: Record<string, unknown> | u
 const autonomousToolRunner: ToolRunner = {
   async run(toolName: string, params: unknown): Promise<ToolRunResult> {
     try {
-      if (subLoopPolicyEnabled()) {
-        const denial = await getSubLoopChecker()({
+      {
+        const check = subLoopPolicyEnabled() ? getSubLoopChecker() : getSubLoopFloorChecker();
+        const denial = await check({
           toolName,
           approval: 'never',
           params: JSON.stringify((params as Record<string, unknown>) ?? {}),
@@ -3526,7 +3549,10 @@ const autonomousExecutor = new StandardExecutor({
   // agent-memory: two copies of a resolution is how a writer and a reader end up disagreeing.
   responseLanguage: () => resolveResponseLanguage({ userLocale: readUserLanguage() }),
   // Proactive research "request permission": let executor include user-authorized gated tools in the effective whitelist.
-  isToolGranted: (tool) => globalGrants.isGranted(tool),
+  // Asks as the research audience, so a research approval reaches the loop it was given for — and
+  // an ordinary chat approval for `shell`, which carries no audience, still widens the whitelist the
+  // way it always did. What no longer happens is the reverse: research grants leaking outward.
+  isToolGranted: (tool) => globalGrants.isGranted(tool, undefined, 'tool', RESEARCH_GRANT_AUDIENCE),
   // H3: a skill_repair initiative's evidence is local ledger state, not something to fetch with a tool.
   // Re-checks isRepairCandidate at execution time: the recipe may have been repaired, deleted, or
   // promoted between propose() and now — returning null makes the executor fail loudly instead of
@@ -8367,6 +8393,9 @@ async function handleChatSendInner(
         capability: 'execute',
         domain: 'system',
         reason: `research:${rg.pursuitId}`,
+        // Same audience as the tool path: an approval for the background research is not an
+        // approval for this conversation's next shell command.
+        audience: RESEARCH_GRANT_AUDIENCE,
         ttlMs: DEFAULT_RESEARCH_GRANT_TTL_MS,
       });
       onTrace?.({

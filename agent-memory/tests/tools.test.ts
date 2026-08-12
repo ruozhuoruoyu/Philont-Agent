@@ -349,3 +349,43 @@ test('reachability: a self-domain tool must not be able to mint authorization un
   const grantCall = src.indexOf('grantStore.grant({');
   assert.ok(grantCall > src.indexOf('pendingTool?.tool === p.tool'), 'validation must precede the grant');
 });
+
+test('a research approval is stamped for the research loop, and the request is consumed', async () => {
+  const { openMemoryDb, createResearchTools, RESEARCH_GRANT_AUDIENCE } = await import('../src/index.js');
+  const db = openMemoryDb(':memory:') as unknown as { pursuits: any };
+  const issued: Array<{ audience?: string }> = [];
+  const tools = createResearchTools(db.pursuits, { grant: (g: { audience?: string }) => issued.push(g) } as never);
+  const grant = tools.find((t) => t.name === 'grant_research_tool')! as unknown as {
+    execute: (p: Record<string, unknown>) => Promise<{ success: boolean }>;
+  };
+
+  const pid = db.pursuits.createRoot({ title: 'r', intent: 'find out', origin: 'user' }).id;
+  const qid = db.pursuits.addOpenQuestion(pid, 'needs shell', 1);
+  db.pursuits.setQuestionPendingTool(pid, qid, { tool: 'shell', why: 'to run it' });
+
+  assert.equal((await grant.execute({ pursuitId: pid, tool: 'shell' })).success, true);
+  // Grants are matched by tool NAME; without this stamp the same yes covered the main loop and any
+  // plan sub-task for the whole window. (GrantStore's side of it is tested in agent-policy.)
+  assert.equal(issued[0]!.audience, RESEARCH_GRANT_AUDIENCE);
+
+  // The request is answered, so it cannot be re-cashed for a fresh window.
+  assert.equal((await grant.execute({ pursuitId: pid, tool: 'shell' })).success, false);
+  assert.equal(issued.length, 1);
+});
+
+test('a research authorization has a ceiling, not just a default', async () => {
+  const { openMemoryDb, createResearchTools, MAX_RESEARCH_GRANT_TTL_MS } = await import('../src/index.js');
+  const db = openMemoryDb(':memory:') as unknown as { pursuits: any };
+  const issued: Array<{ ttlMs?: number }> = [];
+  const tools = createResearchTools(db.pursuits, { grant: (g: { ttlMs?: number }) => issued.push(g) } as never);
+  const grant = tools.find((t) => t.name === 'grant_research_tool')! as unknown as {
+    execute: (p: Record<string, unknown>) => Promise<{ success: boolean }>;
+  };
+  const pid = db.pursuits.createRoot({ title: 'r', intent: 'find out', origin: 'user' }).id;
+  const qid = db.pursuits.addOpenQuestion(pid, 'needs shell', 1);
+  db.pursuits.setQuestionPendingTool(pid, qid, { tool: 'shell', why: 'to run it' });
+
+  // A year, asked for politely. "Default two hours" was never "at most two hours".
+  await grant.execute({ pursuitId: pid, tool: 'shell', ttlMs: 365 * 24 * 60 * 60_000 });
+  assert.equal(issued[0]!.ttlMs, MAX_RESEARCH_GRANT_TTL_MS);
+});
