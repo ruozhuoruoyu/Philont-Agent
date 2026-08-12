@@ -14,6 +14,8 @@ import assert from 'node:assert/strict';
 import {
   routeReply,
   renderAmbiguityPrompt,
+  renderNeedsAddressPrompt,
+  renderPendingTail,
   PendingDecisionBook,
   type PendingDecision,
 } from '../src/pending_decisions.js';
@@ -27,6 +29,7 @@ function decision(over: Partial<PendingDecision> = {}): PendingDecision {
     kind: 'research_authorization',
     title: '后台研究「LRC k=13」请求使用 shell 跑数值验证',
     offered: ['同意', '拒绝'],
+    resolutionPolicy: 'unique_bare_reply_allowed',
     createdAt: NOW,
     expiresAt: NOW + HOUR,
     ...over,
@@ -37,8 +40,10 @@ const research = decision({ id: 'r7k2' });
 const publish = decision({
   id: 'p4m8',
   kind: 'tool_authorization',
-  title: '发布计划请求执行 git push origin main',
+  title: '发布计划请求执行 git push',
+  detail: 'git push origin main',
   offered: ['同意', '拒绝'],
+  resolutionPolicy: 'explicit_address_required',
 });
 
 test('one thing outstanding: a bare yes answers it', () => {
@@ -64,18 +69,27 @@ test('quoting the card is exact, and costs the owner nothing', () => {
   assert.deepEqual(r, { kind: 'addressed', id: 'r7k2', how: 'quoted' });
 });
 
+const shown = { displayedAt: NOW, ordinals: ['r7k2', 'p4m8'] };
+
 test('a number picks one out of the list that was shown', () => {
-  assert.deepEqual(routeReply('2 同意', [research, publish], { now: NOW }), {
+  assert.deepEqual(routeReply('2 同意', [research, publish], { now: NOW, snapshot: shown }), {
     kind: 'addressed', id: 'p4m8', how: 'indexed',
   });
-  assert.deepEqual(routeReply('第1个', [research, publish], { now: NOW }), {
+  assert.deepEqual(routeReply('第1个', [research, publish], { now: NOW, snapshot: shown }), {
     kind: 'addressed', id: 'r7k2', how: 'indexed',
   });
   // Out of range is not an index, and a bare number answers nothing on its own: unaddressed beats
   // confidently wrong, and every card stays up.
-  assert.equal(routeReply('9', [research, publish], { now: NOW }).kind, 'unaddressed');
+  assert.equal(routeReply('9', [research, publish], { now: NOW, snapshot: shown }).kind, 'unaddressed');
   // A number that opens an ordinary sentence is not a selection either.
-  assert.equal(routeReply('2 个问题都先放着', [research, publish], { now: NOW }).kind, 'unaddressed');
+  assert.equal(
+    routeReply('2 个问题都先放着', [research, publish], { now: NOW, snapshot: shown }).kind,
+    'unaddressed',
+  );
+  // And with no list ever shown, a number addresses nothing — the reply falls through as an
+  // ordinary message and every card stays up, rather than being counted against a list the owner
+  // was never given.
+  assert.equal(routeReply('1 同意', [research, publish], { now: NOW }).kind, 'unaddressed');
 });
 
 test('an id said outright works, for a reply that arrives somewhere else entirely', () => {
@@ -152,4 +166,76 @@ test('expiry is swept on read', () => {
   const book = new PendingDecisionBook();
   book.add('s1', decision({ id: 'a', expiresAt: NOW - 1 }));
   assert.deepEqual(book.list('s1', NOW), []);
+});
+
+// ── the snapshot, and the risk tier ─────────────────────────────────────────────────────────────
+
+test('an ordinal means the list the owner SAW, not the list as it is now', () => {
+  const shownList = { displayedAt: NOW, ordinals: ['r7k2', 'p4m8'] };
+  // A request registered after the list was rendered. Re-deriving positions from the live set would
+  // put it first and silently move the owner's "1" onto something they were never shown there.
+  const arrivedLater = decision({ id: 'z9', title: '另一个研究请求 http' });
+  const live = [arrivedLater, research, publish];
+
+  assert.deepEqual(routeReply('1 同意', live, { now: NOW, snapshot: shownList }), {
+    kind: 'addressed', id: 'r7k2', how: 'indexed',
+  });
+});
+
+test('a stale snapshot stops addressing by number', () => {
+  const old = { displayedAt: NOW - 31 * 60_000, ordinals: ['r7k2', 'p4m8'] };
+  assert.equal(routeReply('1 同意', [research, publish], { now: NOW, snapshot: old }).kind, 'unaddressed');
+});
+
+test('a slot already resolved is not reused by its number', () => {
+  const shownList = { displayedAt: NOW, ordinals: ['r7k2', 'p4m8'] };
+  // r7k2 has since been answered, so only publish is live. "1" must not slide onto it.
+  assert.equal(routeReply('1 同意', [publish], { now: NOW, snapshot: shownList }).kind, 'unaddressed');
+});
+
+test('a high-risk authorization is not decided by a bare yes, even alone', () => {
+  const r = routeReply('同意', [publish], { now: NOW });
+  assert.equal(r.kind, 'needs-address');
+  if (r.kind === 'needs-address') assert.equal(r.decision.id, 'p4m8');
+
+  // Pointing at it works, by any of the exact means.
+  assert.equal(routeReply('p4m8 同意', [publish], { now: NOW }).how, 'named');
+  assert.equal(
+    routeReply('同意', [publish], { now: NOW, quotedText: '发布计划请求执行 git push' }).how,
+    'quoted',
+  );
+});
+
+test('policy narrows only after ambiguity is judged, never instead of it', () => {
+  // Both could be what "同意" meant. Filtering by policy first would quietly approve the research
+  // one and leave the git push standing — mis-addressing wearing a safer-looking mask.
+  const r = routeReply('同意', [research, publish], { now: NOW });
+  assert.equal(r.kind, 'ambiguous');
+  if (r.kind === 'ambiguous') assert.equal(r.candidates.length, 2);
+});
+
+test('the prompts say plainly that nothing ran, and show the exact operation', () => {
+  const amb = renderAmbiguityPrompt([research, publish]);
+  assert.match(amb, /一个都没有执行/);
+  assert.match(amb, /git push origin main/, 'a high-risk item shows the full command');
+  assert.doesNotMatch(amb, /没听懂|不明白/, 'the system knows where the ambiguity is');
+
+  const needs = renderNeedsAddressPrompt(publish);
+  assert.match(needs, /没有执行/);
+  assert.match(needs, /git push origin main/);
+});
+
+test('an ordinary reply gets a nudge, not a re-ask', () => {
+  const tail = renderPendingTail([research, publish]);
+  assert.match(tail, /2 件事/);
+  assert.doesNotMatch(tail, /同意|拒绝/, 'a tail must not re-offer the words and become a second card');
+  assert.equal(renderPendingTail([]), '');
+});
+
+test('the book records the list it rendered', () => {
+  const book = new PendingDecisionBook();
+  book.add('s1', research);
+  book.add('s1', publish);
+  book.snapshot('s1', book.list('s1', NOW), NOW);
+  assert.deepEqual(book.lastSnapshot('s1')?.ordinals, ['r7k2', 'p4m8']);
 });
