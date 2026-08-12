@@ -56,7 +56,7 @@ import {
   createMemoryTools,
   createPushTools,
   createResearchTools,
-  RESEARCH_GRANT_AUDIENCE,
+  researchGrantAudience,
   createTaskModeTools,
   createPlanTools,
   InMemoryTaskModeStore,
@@ -2559,8 +2559,10 @@ const subLoopPolicyEnabled = (): boolean => process.env.PHILONT_SUBLOOP_POLICY !
 let subLoopFloorChecker: ReturnType<typeof createToolChecker> | null = null;
 function getSubLoopFloorChecker() {
   subLoopFloorChecker ??= createToolChecker({
-    // No permissions matrix and no grant store: this layer does not decide who may do what, only
-    // that some things are not done at all.
+    // No grant store, and deliberately no classifyTool: without a classifier the matrix branch in
+    // createToolChecker does not run at all, so this sandbox matrix is inert and only the validator
+    // chain below decides. That is the intent — this layer does not rule on who may do what, only on
+    // what is not done regardless. Passing a classifier here would deny everything.
     permissions: createSandboxMatrix(),
     audit: internalAudit,
     validatorChain: conservativeValidatorChain,
@@ -3552,7 +3554,16 @@ const autonomousExecutor = new StandardExecutor({
   // Asks as the research audience, so a research approval reaches the loop it was given for — and
   // an ordinary chat approval for `shell`, which carries no audience, still widens the whitelist the
   // way it always did. What no longer happens is the reverse: research grants leaking outward.
-  isToolGranted: (tool) => globalGrants.isGranted(tool, undefined, 'tool', RESEARCH_GRANT_AUDIENCE),
+  isToolGranted: (tool, targetRef) => {
+    // targetRef is `pursuit:<id>:q:<qid>`, so an approval given to one research does not answer for
+    // another. Unscoped grants (an ordinary chat approval) still widen the whitelist as before.
+    const pursuitId = targetRef?.startsWith('pursuit:') ? targetRef.split(':')[1] : undefined;
+    return (
+      globalGrants.isGranted(tool) ||
+      (pursuitId !== undefined &&
+        globalGrants.isGranted(tool, undefined, 'tool', researchGrantAudience(pursuitId)))
+    );
+  },
   // H3: a skill_repair initiative's evidence is local ledger state, not something to fetch with a tool.
   // Re-checks isRepairCandidate at execution time: the recipe may have been repaired, deleted, or
   // promoted between propose() and now — returning null makes the executor fail loudly instead of
@@ -8395,7 +8406,7 @@ async function handleChatSendInner(
         reason: `research:${rg.pursuitId}`,
         // Same audience as the tool path: an approval for the background research is not an
         // approval for this conversation's next shell command.
-        audience: RESEARCH_GRANT_AUDIENCE,
+        audience: researchGrantAudience(rg.pursuitId),
         ttlMs: DEFAULT_RESEARCH_GRANT_TTL_MS,
       });
       onTrace?.({

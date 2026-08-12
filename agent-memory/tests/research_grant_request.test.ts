@@ -308,3 +308,32 @@ test('createResearchTools 不传 grantStore → 不产出 grant_research_tool', 
   assert.ok(ts.find((t) => t.name === 'research_focus'));
   mem.close();
 });
+
+// ── approval has to let the research CONTINUE ───────────────────────────────────────────────────
+
+test('after approval the driver replays the authorized tool — clearing the request strands it', () => {
+  // The regression this pins: a grant that clears question.pendingTool succeeds and stops the
+  // research dead. PursuitDriver recognises the post-approval replay by `pendingTool && isGranted`,
+  // and clearing is what DENY means. Every earlier test asserted the grant was written; none
+  // asserted the research could then continue, so the two were indistinguishable.
+  const authorized = new PursuitDriver(DEFAULT_PURSUIT_CONFIG, (t) => t === 'runLean');
+  const withRequest = pursuitFixture({
+    openQuestions: [openQ({ pendingTool: { tool: 'runLean', why: '验证', approvedAt: Date.now() } })],
+  });
+  const proposals = authorized.propose(snap({
+    activePursuits: [withRequest],
+    // The needs-grant round already marked this target done, so only a recognised replay gets past dedup.
+    recentDoneTargetRefs: new Set([`pursuit:${withRequest.id}:q:q1`]),
+  }));
+  assert.equal(proposals.length, 1, 'the approval must produce a replay');
+  const plan = proposals[0].plan!;
+  assert.equal(plan[plan.length - 1].tool, 'runLean');
+
+  // And the shape a cleared request leaves behind: nothing to replay, dedup holds it for 24h.
+  const cleared = pursuitFixture({ openQuestions: [openQ({ pendingTool: null })] });
+  const none = authorized.propose(snap({
+    activePursuits: [cleared],
+    recentDoneTargetRefs: new Set([`pursuit:${cleared.id}:q:q1`]),
+  }));
+  assert.equal(none.length, 0, 'a cleared request is a withdrawn one — that is what deny does');
+});

@@ -173,8 +173,8 @@ test('research grants are issued with an audience on every path that issues them
   for (const block of researchIssuances) {
     assert.match(
       block.slice(0, 400),
-      /audience:\s*RESEARCH_GRANT_AUDIENCE/,
-      'a research grant issued without an audience travels outside the research loop',
+      /audience:\s*researchGrantAudience\(/,
+      'a research grant issued without a per-pursuit audience answers for research that never asked',
     );
   }
 });

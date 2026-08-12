@@ -667,7 +667,17 @@ export interface OpenQuestion {
    * closeOpenQuestion will clear it when the question is answered. null/absent = no pending request.
    * Stored in the open_questions_json blob; no schema column.
    */
-  pendingTool?: { tool: string; why: string } | null;
+  pendingTool?: {
+    tool: string;
+    why: string;
+    /**
+     * When the owner authorized it. The request STAYS after approval — PursuitDriver recognises the
+     * post-approval replay by `pendingTool && isGranted(pendingTool.tool)`, so clearing it here is
+     * how you grant a tool and silently stop the research that asked for it. Clearing is what DENY
+     * means. This marks it answered so the same request cannot be cashed twice for a fresh window.
+     */
+    approvedAt?: number;
+  } | null;
 }
 
 /** Progress trace (used by PursuitStaleDrive and effectiveness scoring) */

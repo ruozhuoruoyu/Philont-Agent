@@ -350,8 +350,8 @@ test('reachability: a self-domain tool must not be able to mint authorization un
   assert.ok(grantCall > src.indexOf('pendingTool?.tool === p.tool'), 'validation must precede the grant');
 });
 
-test('a research approval is stamped for the research loop, and the request is consumed', async () => {
-  const { openMemoryDb, createResearchTools, RESEARCH_GRANT_AUDIENCE } = await import('../src/index.js');
+test('a research approval is stamped for the research that asked, and cannot be cashed twice', async () => {
+  const { openMemoryDb, createResearchTools, researchGrantAudience } = await import('../src/index.js');
   const db = openMemoryDb(':memory:') as unknown as { pursuits: any };
   const issued: Array<{ audience?: string }> = [];
   const tools = createResearchTools(db.pursuits, { grant: (g: { audience?: string }) => issued.push(g) } as never);
@@ -364,13 +364,39 @@ test('a research approval is stamped for the research loop, and the request is c
   db.pursuits.setQuestionPendingTool(pid, qid, { tool: 'shell', why: 'to run it' });
 
   assert.equal((await grant.execute({ pursuitId: pid, tool: 'shell' })).success, true);
-  // Grants are matched by tool NAME; without this stamp the same yes covered the main loop and any
-  // plan sub-task for the whole window. (GrantStore's side of it is tested in agent-policy.)
-  assert.equal(issued[0]!.audience, RESEARCH_GRANT_AUDIENCE);
+  // Grants are matched by tool NAME; the audience is the only thing that says who the yes was for,
+  // and "all background research" was still wider than the research that asked.
+  assert.equal(issued[0]!.audience, researchGrantAudience(pid));
 
-  // The request is answered, so it cannot be re-cashed for a fresh window.
+  // THE REQUEST SURVIVES THE APPROVAL. PursuitDriver recognises the post-approval replay by
+  // `pendingTool && isGranted(tool)` — clearing it here writes the grant and strands the research,
+  // which is what clearing means on the DENY path.
+  const after = db.pursuits.get(pid).openQuestions.find((q: any) => q.id === qid);
+  assert.equal(after.pendingTool?.tool, 'shell', 'the request must still be visible to the driver');
+  assert.ok(after.pendingTool?.approvedAt, 'and marked answered');
+
+  // Answered once. A second call would just buy a fresh window off the same yes.
   assert.equal((await grant.execute({ pursuitId: pid, tool: 'shell' })).success, false);
   assert.equal(issued.length, 1);
+});
+
+test('one research being authorized does not authorize another', async () => {
+  const { openMemoryDb, createResearchTools, researchGrantAudience } = await import('../src/index.js');
+  const db = openMemoryDb(':memory:') as unknown as { pursuits: any };
+  const issued: Array<{ audience?: string }> = [];
+  const tools = createResearchTools(db.pursuits, { grant: (g: { audience?: string }) => issued.push(g) } as never);
+  const grant = tools.find((t) => t.name === 'grant_research_tool')! as unknown as {
+    execute: (p: Record<string, unknown>) => Promise<{ success: boolean }>;
+  };
+
+  const a = db.pursuits.createRoot({ title: 'A', intent: 'a', origin: 'user' }).id;
+  const b = db.pursuits.createRoot({ title: 'B', intent: 'b', origin: 'user' }).id;
+  const qa = db.pursuits.addOpenQuestion(a, 'needs shell', 1);
+  db.pursuits.setQuestionPendingTool(a, qa, { tool: 'shell', why: 'to run it' });
+  await grant.execute({ pursuitId: a, tool: 'shell' });
+
+  assert.equal(issued[0]!.audience, researchGrantAudience(a));
+  assert.notEqual(issued[0]!.audience, researchGrantAudience(b), "B's loop must not be able to spend A's approval");
 });
 
 test('a research authorization has a ceiling, not just a default', async () => {

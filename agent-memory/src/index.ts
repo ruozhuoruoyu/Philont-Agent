@@ -553,7 +553,7 @@ export type { PushTool } from './push_tools.js';
 export {
   researchFocusTool,
   createResearchTools,
-  RESEARCH_GRANT_AUDIENCE,
+  researchGrantAudience,
   MAX_RESEARCH_GRANT_TTL_MS,
   DEFAULT_RESEARCH_GRANT_TTL_MS,
 } from './research_tools.js';

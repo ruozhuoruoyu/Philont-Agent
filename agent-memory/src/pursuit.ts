@@ -418,7 +418,7 @@ export class PursuitStore {
   setQuestionPendingTool(
     pursuitId: string,
     questionId: string,
-    pendingTool: { tool: string; why: string } | null
+    pendingTool: NonNullable<OpenQuestion['pendingTool']> | null
   ): void {
     const pursuit = this.get(pursuitId);
     if (!pursuit) throw new PursuitNotFoundError(pursuitId);

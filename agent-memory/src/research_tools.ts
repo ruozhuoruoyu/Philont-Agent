@@ -32,8 +32,16 @@ export interface ResearchGrantSink {
   }): void;
 }
 
-/** The audience a research grant answers to; it is not an approval for anything else. */
-export const RESEARCH_GRANT_AUDIENCE = 'research';
+/**
+ * The audience a research grant answers to.
+ *
+ * A single shared `'research'` was still too wide: it kept the yes out of the main loop and out of
+ * plan sub-tasks, and then let every OTHER background research use it too. An approval is for the
+ * research that asked — the one whose question hit the wall, whose reason the owner was shown.
+ */
+export function researchGrantAudience(pursuitId: string): string {
+  return `research:${pursuitId}`;
+}
 /** Ceiling on a research authorization, whatever was asked for. */
 export const MAX_RESEARCH_GRANT_TTL_MS = 8 * 60 * 60_000;
 /** grant_research_tool default authorization duration: 2 hours (enough for a few background idle ticks, auto-expires). */
@@ -217,6 +225,15 @@ export function createResearchTools(
           };
         }
         const pending = pursuit.openQuestions.find((q) => q.pendingTool?.tool === p.tool);
+        if (pending?.pendingTool?.approvedAt) {
+          return {
+            success: false,
+            output: '',
+            error:
+              `"${p.tool}" was already authorized for research "${p.pursuitId}". One request, one ` +
+              `authorization — re-approving it would just buy a fresh window off the same yes.`,
+          };
+        }
         if (!pending) {
           const offered = pursuit.openQuestions
             .map((q) => q.pendingTool?.tool)
@@ -249,13 +266,19 @@ export function createResearchTools(
             // Background research only. Without this the yes travelled: grants are matched by tool
             // NAME, so an approval for the research to run `shell` was equally an approval for the
             // main loop and for any plan sub-task to run it, for the whole two hours.
-            audience: RESEARCH_GRANT_AUDIENCE,
+            audience: researchGrantAudience(p.pursuitId),
             ttlMs,
           });
-          // Consume the request. It is answered now; leaving it standing let the same approval be
-          // replayed for a fresh two hours whenever the model felt like asking again.
+          // Mark it answered — do NOT clear it. PursuitDriver detects the post-approval replay by
+          // `pendingTool && isGranted(tool)`, and clearing is what DENY means (chat-handler's deny
+          // path does exactly that, with a comment saying the driver then stops replaying). Erasing
+          // it here would write the grant and silently strand the research that asked for it.
           try {
-            pursuits.setQuestionPendingTool(p.pursuitId, pending.id, null);
+            pursuits.setQuestionPendingTool(p.pursuitId, pending.id, {
+              tool: pending.pendingTool!.tool,
+              why: pending.pendingTool!.why,
+              approvedAt: Date.now(),
+            });
           } catch {
             /* the grant is already written; a bookkeeping failure must not undo it */
           }

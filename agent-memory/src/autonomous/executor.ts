@@ -85,7 +85,7 @@ export interface InitiativeExecutorOptions {
    * (a single shared executor runs across multiple ticks). Default = always unauthorized (pure read-only).
    * Avoids agent-memory depending on agent-policy — only declares the callback shape.
    */
-  isToolGranted?: (tool: string) => boolean;
+  isToolGranted?: (tool: string, targetRef?: string) => boolean;
   /**
    * H3 (skill_self_repair.md): resolves the diagnosis evidence for a `skill_repair` initiative —
    * the broken recipe's body + its recent failed executions. Returns null when the skill is gone
@@ -119,7 +119,7 @@ export class StandardExecutor implements InitiativeExecutor {
   private readonly llm: ExtractorLlmClient;
   private readonly tools: ToolRunner;
   private readonly whitelist: ReadonlySet<string>;
-  private readonly isToolGranted: (tool: string) => boolean;
+  private readonly isToolGranted: (tool: string, targetRef?: string) => boolean;
   private readonly skillRepairContext: (skillName: string) => SkillRepairContext | null;
   private readonly factNs: string;
   /** Resolves the language for `summary` — the one field of this output the owner reads. See options. */
@@ -148,8 +148,10 @@ export class StandardExecutor implements InitiativeExecutor {
   }
 
   /** Effective whitelist = base read-only whitelist ∪ currently authorized gated tools. */
-  private isAllowed(tool: string): boolean {
-    return this.whitelist.has(tool) || this.isToolGranted(tool);
+  private isAllowed(tool: string, targetRef?: string): boolean {
+    // targetRef identifies WHICH research is asking (pursuit:<id>:q:<qid>), so an approval given to
+    // one pursuit does not answer for another.
+    return this.whitelist.has(tool) || this.isToolGranted(tool, targetRef);
   }
 
   async run(initiative: Initiative): Promise<InitiativeRunResult> {
@@ -176,7 +178,7 @@ export class StandardExecutor implements InitiativeExecutor {
     // 1) Run tools in the plan
     const plan = initiative.plan ?? [];
     for (const step of plan) {
-      if (!this.isAllowed(step.tool)) {
+      if (!this.isAllowed(step.tool, initiative.targetRef)) {
         return {
           status: 'failed',
           error: `tool "${step.tool}" is not in the autonomous whitelist (read-only toolset + authorized tools)`,
