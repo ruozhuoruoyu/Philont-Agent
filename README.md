@@ -1,15 +1,19 @@
-# Philont-Agent
+# Philont
 
-<p align="center"><b>A self-hosted AI agent that acts on its own initiative, remembers and learns from its own failures, and is structurally unable to fake success — on a model ~100× cheaper than the frontier.</b></p>
+<p align="center"><b>A self-hosted agent runtime designed to make smaller models dependable on long-running work.</b></p>
 
 [![CI](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Status: developer preview](https://img.shields.io/badge/status-developer%20preview-orange.svg)](#status)
 [![Wiki](https://img.shields.io/badge/docs-Wiki-2563eb.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/wiki)
 
-**Philont: Selfhood Engineering.** Most open-source agents are **task runners** — powerful at carrying out what you ask, but tools all the same. Philont is built to be a **being** instead: intrinsic drives that research while you're away — pointed by a **compass you write** — memory and judgment that grow across every session and channel, and autonomy that stays **bounded**: every action passes an auditable permission layer, its drives self-tune only inside the leash you set, and its core values sit behind red lines it cannot rewrite itself. Anchored to an execution ledger of what actually happened, it's structurally unable to **pretend success**. Because its intelligence lives in the **loop, not the model**, it runs on a model ~100× cheaper than the frontier (DeepSeek Flash class); bring your own: Claude, DeepSeek, GLM, Kimi, MiniMax, Gemini, or any compatible endpoint. Self-hosted on your own machine, it reaches you on **WeChat, Telegram, a Web UI, or a headless CLI**.
+Give Philont a direction in `compass.md`. It keeps persistent pursuits across conversations, researches them while you are away, asks before crossing permission boundaries, and checks completion claims against what its tools actually executed.
 
-> 📖 **Deep dive: the [Philont Wiki](https://github.com/ruozhuoruoyu/Philont-Agent/wiki)** (English / 中文) — [Architecture](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Architecture) · [Selfhood Engineering](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Selfhood-Engineering) · [Compass](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Compass) · [Honesty Gates](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Honesty-Gates) · [Plan Protocol](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Plan-Protocol) · [Deep Reasoning](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Deep-Reasoning) · [Why a Cheap Model Is Enough](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough)
+The bet is simple: **reliability should live in the runtime, not only in model scale.** Plans, checkpoints, tool policy, execution evidence, memory, and skill lifecycle are explicit mechanisms around the model. That makes lower-cost compatible models a practical first-class target while keeping Claude, DeepSeek, GLM, Kimi, MiniMax, Gemini, and other compatible endpoints interchangeable.
+
+> **Developer preview.** Philont is dogfooded on lower-cost models, but reproducible cost-per-success benchmarks are not published yet. Its policy layer is defense in depth, not an OS sandbox. See [Current maturity](#current-maturity) and [Permission & Security](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security).
+
+**Start here:** [Quick start](#quick-start) · [How it works](#why-philont) · [Wiki](https://github.com/ruozhuoruoyu/Philont-Agent/wiki) · [Security model](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security) · [Why smaller models](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough)
 
 ---
 
@@ -44,30 +48,24 @@ Then **open `compass.md`** in the repo root (created for you on first start from
 
 ## Why Philont
 
-One idea, applied everywhere: **an agent's reliability comes from the loop it runs, not the prompt it reads.** A prompt instruction is a suggestion the model can ignore; a loop is code it cannot. Six consequences:
+One idea, applied everywhere: **an agent's reliability comes from the loop it runs, not only from the prompt it reads.** Four parts make that concrete:
 
-- **It can't fake success.** Every turn is anchored to an **execution ledger** — the real record of what tools ran — and a family of honesty gates compares every claim ("done", "sent", "proved", "remembered") against it, forcing an honest regeneration when they diverge. → [Honesty Gates](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Honesty-Gates)
-- **A cheap model is enough.** The gap between a frontier model and a cheap one on long tasks is a small, predictable set of failure modes (winging it, premature "done", fabricated numbers, blind retries) — and each one is caught by a runtime mechanism instead of paid for in frontier tokens. → [Why a Cheap Model Is Enough](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough)
-- **It's a being, not a task runner — and you say where it points.** Intrinsic drives (curiosity / pursuit / commitment) generate its own goals at idle time, aimed by a **compass file you write**; it keeps an evidence-backed self-model of how it actually behaves; and its constitution evolves only through amendment proposals **you ratify** — red lines can never be amended. All of it visible: send `/autonomy` in chat or open the dashboard. → [Compass](#compass--you-say-where-it-points) · [Selfhood Engineering](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Selfhood-Engineering) · [design doc](docs/design/selfhood_closure.md)
-- **Two cheap models beat one — because the mechanism holds the memory.** A multi-step build that ships with a written guide is drafted by the main model and reviewed by a **second, independent model** plus a deterministic coverage check. Neither weak model remembers anything across rounds, so the *loop* does: the revision sees its own previous plan and what the reviewers already accepted (ground can be added, never lost), the round that scored best is the one executed, a complaint raised twice is escalated, and a disagreement between the two reviewers is put back to the author as a question. Judgement from the models, memory from the mechanism — which is what makes two passes worth more than two attempts (production: deliverables 5→9→12, gaps 8→4→1, where redrafting alone had oscillated). → [Plan Protocol](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Plan-Protocol)
-- **It learns only from what it can verify.** Knowledge is promoted a layer at a time and only after it is checked at the layer below — *verify-then-condense*. A **learning judge** scores each turn and may call it a success only when a real **grounding tool** (shell / http / a prover) actually did the thing; a fabricated claim with a bystander `readFile` next to it cannot mint a skill. Recipes are re-verified every time they're reused, and one that breaks is **diagnosed from its own failed runs in the execution ledger and rewritten**, with the prior version kept so the fix must re-earn trust. A missed lesson is cheap; a fabricated success poisons the memory — so the loop is deliberately biased toward learning nothing. (Honest status: the judge runs in **shadow** — it scores and logs; letting it mint skills is gated on its verdicts proving trustworthy in real logs first.) → [Autonomy & Self-Learning](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Autonomy-and-Self-Learning) · [design doc](docs/design/self_learning_redesign.md)
-- **It remembers — episodically and procedurally.** A 5-layer memory (timeline, actions, FTS notes, facts, skills) persists across every session and channel; a service integration that provably worked is kept as its **verified calls** and replayed, rather than re-read and mis-remembered on every run. → [Memory System](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Memory-System)
+- **Persistent pursuits.** Curiosity, pursuit, and commitment drives can advance work between conversations. A `compass.md` you own declares the focus areas and clamps how those drives may tune themselves. → [Compass](#compass--you-say-where-it-points)
+- **Evidence-aware execution.** Tool calls produce an execution ledger. Completion claims such as “done”, “sent”, or “proved” are checked against that ledger, and unsupported claims can be intercepted and regenerated. These checks reduce known false-completion patterns; they do not prove arbitrary external truth. → [Honesty Gates](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Honesty-Gates)
+- **Runtime support for smaller models.** Complex work can be decomposed, reviewed, executed, checkpointed, and revised by explicit state machines instead of asking one model call to hold the whole job together. → [Plan Protocol](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Plan-Protocol) · [Why smaller models](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough)
+- **Governed adaptation.** Memory persists across channels, while learned rules and skill recipes have maturity, reuse checks, demotion, revision history, and repair paths. The learning judge is still in shadow: the lifecycle exists, but long-term improvement is not yet a proven result. → [Autonomy & Self-Learning](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Autonomy-and-Self-Learning)
 
-| | OpenClaw | Hermes | **Philont** |
-|---|:---:|:---:|:---:|
-| Core model | extrinsic task runner | task runner + learning loop | **autonomous being with intrinsic drives** |
-| Acts on its own initiative | ⚠️ scheduled | ⚠️ scheduled cron | ✅ curiosity · pursuit · commitment drives |
-| **You declare where it points** | ❌ | ⚠️ `SOUL.md` — a persona for the agent | ✅ `compass.md` — *your* direction: a **leash** its drives cannot self-tune past, and focus areas that seed what it pursues at night |
-| Self-learning from its own **failures** | ❌ | ⚠️ learns from successful runs, not failures | ✅ failure-driven skill demotion · anti-patterns learned from tool failures |
-| **Repairs its own skills after they fail** | ❌ | ⚠️ | ✅ diagnose from failed runs → rewrite → re-verify (old version kept) |
-| A second model reviews the plan | ❌ | ❌ | ✅ author + independent reviewer + deterministic check, **ratcheted by the loop** |
-| Step-by-step deep exploring | ❌ | ❌ | ✅ `deep_explore` — dual-mode tree (formal proof · evidence-based deliberation) |
-| Built-in permission / audit layer | command allowlist | command approval | ✅ 3×4 capability matrix · validator chain · SHA-256 audit log |
-| Runs complex tasks on a **cheap** model | ⚠️ leans on a strong model | ⚠️ leans on a strong model | ✅ **DeepSeek V4 Flash — ~100× cheaper** |
-| Persistent cross-session memory | ✅ | ✅ | ✅ 5-layer (timeline · actions · FTS notes · facts · skills) |
-| Lives across channels (WeChat / Telegram / …) | ✅ | ✅ | ✅ |
+### Different design centers
 
-OpenClaw and Hermes are excellent at *doing what you ask* — and we [gratefully build on both](#acknowledgements). Philont is built to *want things, reason about them, and stay honest* — on hardware-store-cheap inference.
+OpenClaw, Hermes, and Philont overlap substantially and evolve quickly. The useful comparison is emphasis, not a checklist of features one project supposedly lacks.
+
+| Project | Primary design center |
+|---|---|
+| **OpenClaw** | Broad integrations and a practical personal-agent ecosystem |
+| **Hermes Agent** | Polished task execution, channels, reusable skills, and experience-driven improvement |
+| **Philont** | Persistent pursuits and a runtime that makes authorization, execution evidence, recovery, and learning governance explicit |
+
+Philont borrows ideas and compatible conventions from both projects; see [Acknowledgements](#acknowledgements).
 
 ---
 

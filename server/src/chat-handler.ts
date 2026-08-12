@@ -3125,7 +3125,11 @@ const pushDispatcher = new PushDispatcher({
  * pendingQuestion carry provider tool_use pairing and continuations, and get their own pass rather
  * than being bent into a common shape for the sake of a uniform surface.
  */
-export const pendingDecisions = new PendingDecisionBook();
+export const pendingDecisions = new PendingDecisionBook((sessionId, decision) => {
+  // A card nobody answered in time. Whatever was waiting behind it has to be told, because the
+  // address is gone and no message the owner writes can reach it any more.
+  onDecisionExpired(sessionId, decision);
+});
 
 /**
  * Research tools whose effects leave this machine or touch credentials. A bare "同意" may not decide
@@ -3278,6 +3282,103 @@ export function registerResearchDecision(
 }
 
 /**
+ * What happens to the thing behind a card when its address expires.
+ *
+ * Expired is not denied. The research still wants the tool and the owner never said no — they were
+ * busy. So the payload for the dead address is dropped and the request itself (`question.pendingTool`)
+ * is deliberately LEFT standing: the driver's next tick re-asks and gets a fresh card with a fresh id
+ * and a fresh window. Withdrawing it here would silently convert "no answer yet" into "refused",
+ * which is a decision the owner did not make.
+ */
+function onDecisionExpired(sessionId: string, decision: PendingDecision): void {
+  if (decision.kind !== 'research_authorization') return;
+  const payload = pendingResearchGrants.get(decision.id);
+  pendingResearchGrants.delete(decision.id);
+  auditDecisionApplied(
+    sessionId,
+    decision.id,
+    'expired',
+    payload ? `${payload.tool} for research ${payload.pursuitId}; request left standing` : 'no payload',
+  );
+  console.log(
+    `[pending] session=${safeSessionId(sessionId)} decision=${decision.id} expired unanswered; ` +
+      `payload dropped, research request left standing for a fresh card`,
+  );
+}
+
+/**
+ * Production's effects, in one place so the handler passes the same object every time and a test can
+ * pass a failing one. Both writes are the real thing — this is not a seam that lets the test agree
+ * with a broken original.
+ */
+const researchEffects = {
+  grant: (g: {
+    toolName: string;
+    capability: 'execute';
+    domain: 'system';
+    reason: string;
+    audience: string;
+    ttlMs: number;
+  }) => globalGrants.grant(g),
+  withdrawRequest: (pursuitId: string, questionId: string) =>
+    memory.pursuits.setQuestionPendingTool(pursuitId, questionId, null),
+};
+
+/**
+ * The state change itself, separated from the bookkeeping around it, and reporting whether it
+ * happened.
+ *
+ * The order used to be: delete the payload, resolve the card, write `applied`, and only then attempt
+ * the grant. Every record said the decision had been carried out before anything had been carried
+ * out — so a throw inside `grants.grant()` left a conversation where the card was gone, the payload
+ * was gone, the ledger said granted, and no grant existed. On the deny side a failed withdrawal was
+ * logged as a warning while the ledger still claimed denied and the background research kept its
+ * request. This project keeps writing gates against exactly that failure; the gate's own bookkeeping
+ * must not be an instance of it.
+ *
+ * Effects are injected so this can be tested against real state transitions without an LLM turn.
+ */
+export function applyResearchDecision(input: {
+  payload: PendingResearchGrant & { sessionId: string };
+  verdict: 'grant' | 'deny';
+  effects: {
+    grant: (g: {
+      toolName: string;
+      capability: 'execute';
+      domain: 'system';
+      reason: string;
+      audience: string;
+      ttlMs: number;
+    }) => void;
+    withdrawRequest: (pursuitId: string, questionId: string) => void;
+  };
+}): { applied: true; detail: string } | { applied: false; reason: string } {
+  const { payload, verdict, effects } = input;
+  try {
+    if (verdict === 'grant') {
+      effects.grant({
+        toolName: payload.tool,
+        capability: 'execute',
+        domain: 'system',
+        reason: `research:${payload.pursuitId}`,
+        // An approval for the background research is not an approval for this conversation's next
+        // shell command.
+        audience: researchGrantAudience(payload.pursuitId),
+        ttlMs: DEFAULT_RESEARCH_GRANT_TTL_MS,
+      });
+      return { applied: true, detail: `${payload.tool} for research ${payload.pursuitId}` };
+    }
+    // Deny means the request goes away: clear question.pendingTool so the driver stops replaying it
+    // and the pending-approval section stops being shown. If that write fails the denial has NOT
+    // taken effect — the research would keep asking — and saying otherwise would be the lie above.
+    effects.withdrawRequest(payload.pursuitId, payload.questionId);
+    return { applied: true, detail: `${payload.tool} for research ${payload.pursuitId}` };
+  } catch (e) {
+    return { applied: false, reason: `${verdict} failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
  * The payload for the decision this message resolved — by that id, never by "the most recent one in
  * this conversation". Exported so a test drives the same lookup production does, rather than a
  * reconstruction of it that can agree with a broken original.
@@ -3289,10 +3390,6 @@ export function researchPayloadFor(
   return pendingResearchGrants.get(signalBus.resolvedDecisionId);
 }
 
-/** Every outstanding research request of one conversation (for expiry sweeps and the pending list). */
-function researchGrantsOf(sessionId: string): Array<PendingResearchGrant & { sessionId: string }> {
-  return [...pendingResearchGrants.values()].filter((r) => r.sessionId === sessionId);
-}
 /** Do not consume if pending is too old (a user replying "approve" after a long time is likely out of context). Reuses the research authorization TTL. */
 const RESEARCH_GRANT_PENDING_TTL_MS = DEFAULT_RESEARCH_GRANT_TTL_MS;
 
@@ -7382,33 +7479,49 @@ export async function handleChatSend(
       exploreAsk?.decisionId !== undefined &&
       resolvedDecision?.decision.id === exploreAsk.decisionId;
     if (exploreAsk && addressedToAsk) {
-      pendingExploreAsk.delete(sessionId);
-      pendingDecisions.resolve(sessionId, exploreAsk.decisionId!);
-      if (Date.now() - exploreAsk.ts <= EXPLORE_ASK_TTL_MS) {
+      if (Date.now() - exploreAsk.ts > EXPLORE_ASK_TTL_MS) {
+        pendingExploreAsk.delete(sessionId);
+        pendingDecisions.resolve(sessionId, exploreAsk.decisionId!);
+        auditDecisionApplied(sessionId, exploreAsk.decisionId!, 'expired', 'ask-tier offer timed out');
+      } else {
+        const askVerdictText = signalBus.resolvedVerdictText ?? userMessage;
         // Match the vocabulary the ask itself offered ("进" / "直接") BEFORE consulting the generic
         // authorisation classifier — that classifier only knows "did the user authorise?", so it read
         // our own DENY word 直接 as assent and logged ask-tier APPROVED on an explicit refusal
         // (prod 2026-07-13). See classifyExploreAskReply.
         const askIntent =
-          classifyExploreAskReply(userMessage) ??
+          classifyExploreAskReply(askVerdictText) ??
           (await classifyAuthIntent(
-            userMessage,
+            askVerdictText,
             'Enter the deep reasoning engine (deep_explore) for the research goal just proposed',
           ));
         if (askIntent === 'grant') {
+          pendingExploreAsk.delete(sessionId);
+          pendingDecisions.resolve(sessionId, exploreAsk.decisionId!);
           signalBus.exploreAskApproved = true;
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
           auditDecisionApplied(sessionId, exploreAsk.decisionId!, 'granted', 'deep_explore entry');
           console.log(`[intent-router] session=${safeSessionId(sessionId)} ask-tier APPROVED → deep_explore on restored goal`);
         } else if (askIntent === 'deny') {
+          pendingExploreAsk.delete(sessionId);
+          pendingDecisions.resolve(sessionId, exploreAsk.decisionId!);
           signalBus.exploreAskDeclined = true;
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
           auditDecisionApplied(sessionId, exploreAsk.decisionId!, 'denied', 'flat run instead');
           console.log(`[intent-router] session=${safeSessionId(sessionId)} ask-tier declined → flat run on restored goal`);
+        } else {
+          // ONLY A VERDICT CONSUMES. Naming the card is not answering it: "d3 这是什么意思？" is
+          // addressed, has a non-empty verdict text, and means nothing terminal — and it used to
+          // destroy the offer, because the delete ran at the top of this branch before anything had
+          // been read. That narrowed the original bug (any message destroyed the ask) instead of
+          // ending it. The offer stands, the message runs as an ordinary turn that can answer the
+          // question, and the tail reminds them it is still waiting.
+          console.log(
+            `[intent-router] session=${safeSessionId(sessionId)} ask-tier addressed without a verdict → offer stands`,
+          );
         }
-        // unclear → fall through: the reply is a new message; the offer is dropped.
       }
     }
   }
@@ -8712,19 +8825,23 @@ async function handleChatSendInner(
     const action = decideResearchGrantAction(rg, intent, Date.now(), RESEARCH_GRANT_PENDING_TTL_MS);
 
     if (action === 'grant') {
+      // STATE FIRST, THEN THE RECORD. If the grant does not get written, nothing below runs: the card
+      // stays addressable, the payload stays behind it, and the owner is told plainly rather than
+      // reassured by a ledger entry describing something that did not happen.
+      const outcome = applyResearchDecision({ payload: rg, verdict: 'grant', effects: researchEffects });
+      if (!outcome.applied) {
+        auditDecisionApplied(sessionId, rg.decisionId!, 'failed', outcome.reason);
+        console.error(`[research-grant] session=${safeSessionId(sessionId)} grant failed: ${outcome.reason}`);
+        const failed = statusLang === 'zh'
+          ? `没能完成授权（${outcome.reason}）。这张卡还在，可以再回复一次。`
+          : `Could not complete the authorization (${outcome.reason}). The request is still open — reply again to retry.`;
+        messages.push({ role: 'assistant', content: failed });
+        onDelta(failed);
+        return { outcome: { outcomeType: 'response' }, auditEvents: audit.length };
+      }
       pendingResearchGrants.delete(rg.decisionId!);
       pendingDecisions.resolve(sessionId, rg.decisionId!);
-      auditDecisionApplied(sessionId, rg.decisionId!, 'granted', `${rg.tool} for research ${rg.pursuitId}`);
-      grants.grant({
-        toolName: rg.tool,
-        capability: 'execute',
-        domain: 'system',
-        reason: `research:${rg.pursuitId}`,
-        // Same audience as the tool path: an approval for the background research is not an
-        // approval for this conversation's next shell command.
-        audience: researchGrantAudience(rg.pursuitId),
-        ttlMs: DEFAULT_RESEARCH_GRANT_TTL_MS,
-      });
+      auditDecisionApplied(sessionId, rg.decisionId!, 'granted', outcome.detail);
       onTrace?.({
         kind: 'auth-decision', tier: 4,
         text: `Granted background research use of ${rg.tool} (research ${rg.pursuitId})`,
@@ -8737,15 +8854,22 @@ async function handleChatSendInner(
       onDelta(reply);
       return { outcome: { outcomeType: 'response' }, auditEvents: audit.length };
     } else if (action === 'deny') {
+      // A denial that fails to withdraw the request is not a denial — the driver keeps replaying it.
+      // It used to be a console warning under a ledger entry that said `denied`.
+      const outcome = applyResearchDecision({ payload: rg, verdict: 'deny', effects: researchEffects });
+      if (!outcome.applied) {
+        auditDecisionApplied(sessionId, rg.decisionId!, 'failed', outcome.reason);
+        console.error(`[research-grant] session=${safeSessionId(sessionId)} deny failed: ${outcome.reason}`);
+        const failed = statusLang === 'zh'
+          ? `没能撤回这个请求（${outcome.reason}）。后台研究可能还会再问，这张卡我先留着。`
+          : `Could not withdraw the request (${outcome.reason}). Background research may ask again; the card stays open.`;
+        messages.push({ role: 'assistant', content: failed });
+        onDelta(failed);
+        return { outcome: { outcomeType: 'response' }, auditEvents: audit.length };
+      }
       pendingResearchGrants.delete(rg.decisionId!);
       pendingDecisions.resolve(sessionId, rg.decisionId!);
-      auditDecisionApplied(sessionId, rg.decisionId!, 'denied', `${rg.tool} for research ${rg.pursuitId}`);
-      // Revoke the request: clear question.pendingTool → driver no longer replays, pending-approval section no longer shown.
-      try {
-        memory.pursuits.setQuestionPendingTool(rg.pursuitId, rg.questionId, null);
-      } catch (e) {
-        console.warn('[research-grant] withdraw request failed', e);
-      }
+      auditDecisionApplied(sessionId, rg.decisionId!, 'denied', outcome.detail);
       onTrace?.({
         kind: 'auth-decision', tier: 4,
         text: `Denied background research use of ${rg.tool} (research ${rg.pursuitId})`,
@@ -10550,7 +10674,10 @@ function emitFinalText(opts: {
   // An ordinary reply while cards are outstanding gets a nudge — one line, no re-offer of the words
   // that would make it a second card competing for the next message. This is the "user sent a normal
   // message" trigger of the digest; nothing is consumed and nothing is re-asked.
-  const stillWaiting = pendingDecisions.list(sessionId).filter((d) => d.id !== signalBus.resolvedDecisionId);
+  // The book no longer holds anything that was resolved this turn, so it IS the outstanding set.
+  // Filtering out `resolvedDecisionId` on top of that used to be harmless and now hides a real card:
+  // a message can address a decision without answering it, and that decision is still waiting.
+  const stillWaiting = pendingDecisions.list(sessionId);
   const withTail =
     stillWaiting.length > 0
       ? safeText +

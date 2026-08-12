@@ -167,7 +167,9 @@ test('turning the sub-loop policy off does not turn off the things nobody can gr
  * audience the same yes covered the main loop and any plan sub-task for the whole window.
  */
 test('research grants are issued with an audience on every path that issues them', () => {
-  const issuances = chatHandler.split('grants.grant({').slice(1);
+  // Matches grants.grant({ …, globalGrants.grant({ … and effects.grant({ … — the issuance has moved
+  // once already, and a scan anchored to one caller name goes quietly blind when it moves again.
+  const issuances = chatHandler.split(/\.grant\(\{/).slice(1);
   const researchIssuances = issuances.filter((block) => block.slice(0, 400).includes('research:'));
   assert.ok(researchIssuances.length > 0, 'the scan must not silently match nothing');
   for (const block of researchIssuances) {
@@ -315,15 +317,19 @@ test('claimedByAnotherDecision: a module acts only on its own decision', async (
   assert.equal(claimedByAnotherDecision({ resolvedDecisionId: 'r1' } as never, 'r1'), false);
 });
 
-test('the tail I claimed was wired actually is', () => {
+test('the tail reports what is still waiting, including a card that was named but not answered', () => {
   // It was imported and never called, while the summary said ordinary replies carried a reminder.
   // A claim about behaviour with no call site is the same defect as a gate with no call site.
   assert.match(chatHandler, /renderPendingTail\(\s*\n?\s*stillWaiting,/);
-  assert.match(chatHandler, /const stillWaiting = pendingDecisions\.list\(sessionId\)/);
-  assert.match(
-    chatHandler,
-    /filter\(\(d\) => d\.id !== signalBus\.resolvedDecisionId\)/,
-    'the one just answered is not still waiting',
+  assert.match(chatHandler, /const stillWaiting = pendingDecisions\.list\(sessionId\);/);
+  // And it must NOT subtract the decision this message addressed. Addressing is not answering: a
+  // reply that names a card to ask what it means leaves the card open, and the book — which no
+  // longer holds anything resolved this turn — is already the exact outstanding set.
+  const line = chatHandler.slice(chatHandler.indexOf('const stillWaiting = pendingDecisions.list('));
+  assert.doesNotMatch(
+    line.slice(0, 200),
+    /resolvedDecisionId/,
+    'subtracting the addressed decision hides a card that is still waiting',
   );
 });
 
@@ -346,4 +352,66 @@ test('the payload is fetched by the resolved id and by nothing else', () => {
   const body = fn.slice(0, fn.indexOf('\n}'));
   assert.match(body, /pendingResearchGrants\.get\(signalBus\.resolvedDecisionId\)/);
   assert.doesNotMatch(body, /\.get\(sessionId\)|values\(\)/, 'never "the latest one in this conversation"');
+});
+
+test('a card is consumed only by a terminal verdict', () => {
+  // The ask-tier offer was deleted at the top of its branch, before the reply had been classified.
+  // That made "d3 这是什么意思？" — addressed, non-empty, and not an answer — destroy it. The delete
+  // and the resolve must live inside grant, deny and expiry, and nowhere else.
+  const start = chatHandler.indexOf('if (exploreAsk && addressedToAsk) {');
+  const branch = chatHandler.slice(start, chatHandler.indexOf('// Interrupt teeth:', start));
+  assert.ok(branch.length > 200, 'ask-tier branch not found');
+  const deletes = branch.split('pendingExploreAsk.delete(sessionId);').length - 1;
+  assert.equal(deletes, 3, `grant, deny and expiry only — found ${deletes}`);
+  for (const terminal of ["if (askIntent === 'grant') {", "} else if (askIntent === 'deny') {"]) {
+    const body = branch.slice(branch.indexOf(terminal), branch.indexOf(terminal) + 400);
+    assert.match(body, /pendingExploreAsk\.delete\(sessionId\);/, `${terminal} must consume`);
+    assert.match(body, /pendingDecisions\.resolve\(sessionId, exploreAsk\.decisionId!\);/, `${terminal} must clear`);
+  }
+  // The unclear arm exists and takes nothing.
+  assert.match(branch, /ask-tier addressed without a verdict → offer stands/);
+});
+
+test('the state change happens before the record of it', () => {
+  const branch = chatHandler.slice(chatHandler.indexOf('const rg = researchPayloadFor(signalBus);'));
+  for (const [verdict, label] of [['grant', 'granted'], ['deny', 'denied']]) {
+    const call = branch.indexOf(`applyResearchDecision({ payload: rg, verdict: '${verdict}'`);
+    assert.ok(call > 0, `${verdict} must go through the applier`);
+    // Measured from the branch, not from the applier call — slicing forward from the call cannot see
+    // a record written BEFORE it, which is the whole failure. (Found by reintroducing exactly that.)
+    const record = branch.indexOf(`auditDecisionApplied(sessionId, rg.decisionId!, '${label}'`);
+    assert.ok(record > 0, `${verdict} must record its outcome`);
+    assert.ok(record > call, `${label} must not be recorded before the change that earns it`);
+
+    const after = branch.slice(call, record);
+    assert.match(after, /if \(!outcome\.applied\) \{/, `${verdict} must check the outcome first`);
+    assert.match(after, /auditDecisionApplied\(sessionId, rg\.decisionId!, 'failed', outcome\.reason\)/);
+    assert.ok(
+      after.indexOf('return { outcome: { outcomeType:') < after.lastIndexOf('}'),
+      `a failed ${verdict} must not fall through into the success path`,
+    );
+  }
+});
+
+test('decision_failed has a call site, not just a signature', () => {
+  // The three-state audit shipped as an interface with one state unreachable.
+  const failures = chatHandler.match(/auditDecisionApplied\([^)]*'failed'/g) ?? [];
+  assert.ok(failures.length >= 2, `grant and deny must both be able to fail, found ${failures.length}`);
+});
+
+test('an expiring card takes its payload with it', () => {
+  // list() dropped stale cards silently: the address vanished, the payload map kept its entry
+  // forever, and the handler's own expired branch became unreachable — it can only run for a
+  // decision the router resolved, and the router cannot resolve what list() has already hidden.
+  assert.match(chatHandler, /new PendingDecisionBook\(\(sessionId, decision\) => \{/, 'the hook is installed');
+  assert.match(chatHandler, /onDecisionExpired\(sessionId, decision\)/);
+  const fn = chatHandler.slice(chatHandler.indexOf('function onDecisionExpired('));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+  assert.match(body, /pendingResearchGrants\.delete\(decision\.id\)/, 'the payload goes');
+  assert.match(body, /'expired'/, 'and it is recorded');
+  assert.doesNotMatch(
+    body,
+    /setQuestionPendingTool/,
+    'expired is not denied — withdrawing the request would decide something the owner did not',
+  );
 });

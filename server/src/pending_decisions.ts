@@ -275,6 +275,22 @@ export class PendingDecisionBook {
   private readonly lastShown = new Map<string, DecisionListSnapshot>();
 
   /**
+   * Expiry is an EVENT, not a quiet filter.
+   *
+   * `list()` used to drop stale cards on its own and tell nobody. The address for the request
+   * disappeared while everything behind it stayed: the payload map kept its entry forever, the
+   * research question kept showing "awaiting approval", and the handler's own `expired` branch became
+   * unreachable — it can only run for a decision the router resolved, and the router cannot resolve
+   * what list() has already hidden. So the owner saw a request that could no longer be answered by
+   * any message they could write.
+   *
+   * The hook is taken here rather than at a sweep call site because every read already goes through
+   * list(); a sweeper is one more thing that has to be remembered, and this file's history is a list
+   * of things that were not.
+   */
+  constructor(private readonly onExpire?: (sessionId: string, decision: PendingDecision) => void) {}
+
+  /**
    * Register a new one. Unlike the single-slot maps this replaces, an arriving request never
    * displaces an unanswered one — that was how a card became an orphan the owner had already seen.
    */
@@ -285,9 +301,21 @@ export class PendingDecisionBook {
   }
 
   list(sessionId: string, now = Date.now()): PendingDecision[] {
-    const live = (this.bySession.get(sessionId) ?? []).filter((d) => d.expiresAt > now);
+    const all = this.bySession.get(sessionId) ?? [];
+    const live = all.filter((d) => d.expiresAt > now);
     if (live.length === 0) this.bySession.delete(sessionId);
     else this.bySession.set(sessionId, live);
+    if (live.length !== all.length && this.onExpire) {
+      // Removed from the book BEFORE the hook runs, so a handler that reads the book sees the truth,
+      // and a throwing hook cannot resurrect a dead card or take the routing path down with it.
+      for (const dead of all.filter((d) => d.expiresAt <= now)) {
+        try {
+          this.onExpire(sessionId, dead);
+        } catch (e) {
+          console.warn('[pending] expiry hook failed', dead.id, e);
+        }
+      }
+    }
     return live;
   }
 
