@@ -19,6 +19,8 @@ export interface PendingResearchGrant {
   questionId: string;
   tool: string;
   why: string;
+  /** The addressable identity of the card shown for this request. See pending_decisions.ts. */
+  decisionId?: string;
   /** Registration timestamp (epoch ms), used for TTL expiry */
   ts: number;
 }

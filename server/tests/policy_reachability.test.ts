@@ -178,3 +178,81 @@ test('research grants are issued with an audience on every path that issues them
     );
   }
 });
+
+// ── the reply has one address, and one claimant ─────────────────────────────────────────────────
+// Wiring invariants for research authorization and the deep-explore ask. The behaviour lives in
+// pending_decisions.test.ts; these assert that the handler is CONNECTED to it — the failure mode
+// this whole week has been about.
+
+test('the address is resolved once, before any module reads its own map', () => {
+  const entry = chatHandler.indexOf('const outstandingDecisions = pendingDecisions.list(sessionId);');
+  const askRead = chatHandler.indexOf('const exploreAsk = pendingExploreAsk.get(sessionId);');
+  const researchRead = chatHandler.indexOf('const rg = pendingResearchGrants.get(sessionId);');
+  assert.ok(entry > 0, 'entry resolution not found');
+  assert.ok(entry < askRead, 'the deep-explore ask must not read its map before the address is known');
+  assert.ok(entry < researchRead, 'nor may research authorization');
+});
+
+test('both wired modules act only when the address names them', () => {
+  // The guard has to be ON THE BRANCH, not merely computed above it. Asserting that the expression
+  // appears somewhere in the file passes while `if (exploreAsk && addressedToAsk)` decays back to
+  // `if (exploreAsk)` — measuring that the guard was written rather than that it decides anything,
+  // which is the failure this file exists to catch.
+  assert.match(
+    chatHandler,
+    /if \(exploreAsk && addressedToAsk\) \{/,
+    'the deep-explore ask must be entered only for a reply addressed to it',
+  );
+  assert.match(
+    chatHandler,
+    /if \(rg && addressedToResearch\) \{/,
+    'research authorization must be entered only for a reply addressed to it',
+  );
+  // And the guards must be derived from the entry resolution, not from something local.
+  assert.match(chatHandler, /resolvedDecision\?\.decision\.id === exploreAsk\.decisionId/);
+  assert.match(chatHandler, /signalBus\.resolvedDecisionId === rg\.decisionId/);
+});
+
+test('an unaddressed message no longer destroys the deep-explore ask', () => {
+  // It was deleted before its reply was even examined, so "帮我看下日志" discarded a question the
+  // owner had been asked. The delete now sits behind the address check.
+  const block = chatHandler.slice(
+    chatHandler.indexOf('const exploreAsk = pendingExploreAsk.get(sessionId);'),
+    chatHandler.indexOf('const exploreAsk = pendingExploreAsk.get(sessionId);') + 600,
+  );
+  const deleteAt = block.indexOf('pendingExploreAsk.delete(sessionId);');
+  const guardAt = block.indexOf('if (exploreAsk && addressedToAsk) {');
+  assert.ok(guardAt >= 0, 'the delete must sit behind the address check, not beside a computed flag');
+  assert.ok(guardAt < deleteAt, 'and the check must come first');
+});
+
+test('the semantic classifier reads the verdict, never picks the target', () => {
+  const block = chatHandler.slice(chatHandler.indexOf('const rg = pendingResearchGrants.get(sessionId);'));
+  assert.match(
+    block.slice(0, 2000),
+    /classifyGrantReply\(verdictText\)/,
+    'the closed-enum reader must see the verdict text, not the whole message',
+  );
+  assert.match(block.slice(0, 2500), /classifyAuthIntent\(\s*verdictText/, 'and so must the semantic one');
+});
+
+test('every card carries an id before it is shown', () => {
+  assert.match(chatHandler, /decisionId: registerResearchDecision\(sid\)/, 'wechat/telegram push');
+  assert.match(chatHandler, /payload: \{ decisionId/, 'the web-ui card carries it too, for a button');
+  assert.match(chatHandler, /decisionId: askDecisionId/, 'the deep-explore ask');
+});
+
+test('resolving a card takes it out of the book on every terminal path', () => {
+  const block = chatHandler.slice(chatHandler.indexOf('const rg = pendingResearchGrants.get(sessionId);'));
+  const resolves = block.split('pendingDecisions.resolve(sessionId, rg.decisionId)').length - 1;
+  assert.ok(resolves >= 2, `grant and deny must both clear the card, found ${resolves}`);
+});
+
+test('a resolution is audited as it happens, not reconstructed later', () => {
+  assert.match(chatHandler, /function auditDecisionResolution/);
+  assert.match(chatHandler, /auditDecisionResolution\(sessionId, decision, routed\.how, routed\.verdictText\)/);
+  const fn = chatHandler.slice(chatHandler.indexOf('function auditDecisionResolution'));
+  for (const field of ['decisionId', 'decisionKind', 'addressedBy', 'verdict', 'principal']) {
+    assert.match(fn.slice(0, 900), new RegExp(field), `the record must carry ${field}`);
+  }
+});

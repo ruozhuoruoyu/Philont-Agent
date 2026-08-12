@@ -338,7 +338,7 @@ const autoSubscribeCheckedSessions = new Set<string>();
 
 /** Ask-tier deep_explore routing (2026-07-09): the pending question per session — the goal we
  *  offered to deep-explore, awaiting the owner's 进/直接 reply. TTL'd; one entry per session. */
-const pendingExploreAsk = new Map<string, { goal: string; decision: IntentDecision; ts: number }>();
+const pendingExploreAsk = new Map<string, { goal: string; decision: IntentDecision; ts: number; decisionId?: string }>();
 const EXPLORE_ASK_TTL_MS = 10 * 60_000;
 
 /**
@@ -375,6 +375,16 @@ import {
 import { renderDeterministicMaxIterSummary } from './max_iter_summary.js';
 import { deleteContinuation, loadContinuations, saveContinuation } from './continuation_store.js';
 import { summarizeToolInputForLog } from './tool_log_summary.js';
+import {
+  PendingDecisionBook,
+  routeReply,
+  needsVerdict,
+  renderAmbiguityPrompt,
+  renderNeedsAddressPrompt,
+  renderVerdictPrompt,
+  renderPendingTail,
+  type PendingDecision,
+} from './pending_decisions.js';
 import { safeSessionId } from './safe_session_id.js';
 import {
   computeViability,
@@ -3103,6 +3113,64 @@ const pushDispatcher = new PushDispatcher({
 //       (prompt pending section + grant_research_tool fallback).
 // User replies "approve/reject" on WeChat → handleChatSendInner entry deterministic routing (see below).
 // Pure logic (rendering / sessionId reconstruction / verdict) extracted to research_grant.ts for independent testing.
+/**
+ * WHO IS THIS REPLY FOR.
+ *
+ * Four kinds of card used to compete to interpret one unaddressed sentence, in a fixed code order
+ * that has nothing to do with which card the owner was looking at, each keeping a single slot that a
+ * later request silently overwrote. The book is the address layer; each kind still owns its payload
+ * and its resume path. See pending_decisions.ts for the routing rules and what they refuse to guess.
+ *
+ * Only research authorization and the deep-explore ask are registered here so far. pendingAuth and
+ * pendingQuestion carry provider tool_use pairing and continuations, and get their own pass rather
+ * than being bent into a common shape for the sake of a uniform surface.
+ */
+const pendingDecisions = new PendingDecisionBook();
+
+/**
+ * Research tools whose effects leave this machine or touch credentials. A bare "同意" may not decide
+ * these even when they are the only thing outstanding — the owner has to point at the card.
+ */
+const RESEARCH_TOOLS_NEEDING_EXPLICIT_ADDRESS: ReadonlySet<string> = new Set([
+  'shell', 'process', 'http', 'securedHttp', 'downloadFile', 'writeFile', 'patch', 'deleteFile', 'moveFile',
+]);
+
+/** `shadow` compares old and new routing without letting the router decide; `enforce` is live. */
+const pendingRouterMode = (): 'shadow' | 'enforce' =>
+  process.env.PHILONT_PENDING_ROUTER === 'shadow' ? 'shadow' : 'enforce';
+
+/** WeChat folds a quoted message into the text as `[引用: …]`; that quote is the exact address. */
+function splitQuotedReply(message: string): { quoted?: string; reply: string } {
+  const m = message.match(/^\[引用[:：]\s*([\s\S]*?)\]\s*\n?([\s\S]*)$/);
+  if (!m) return { reply: message };
+  return { quoted: m[1], reply: m[2] ?? '' };
+}
+
+/** One line per resolution, so who decided what — and how they addressed it — is on the record. */
+function auditDecisionResolution(
+  sessionId: string,
+  decision: PendingDecision,
+  how: string,
+  verdict: string,
+): void {
+  internalAudit.append('self_domain_write', {
+    source: 'pending_decision',
+    origin: 'External',
+    toolName: 'decision_resolved',
+    sessionId,
+    decisionId: decision.id,
+    decisionKind: decision.kind,
+    addressedBy: how,
+    verdict: verdict.slice(0, 40),
+    principal: safeSessionId(sessionId),
+    at: Date.now(),
+  });
+  console.log(
+    `[pending] session=${safeSessionId(sessionId)} resolved ${decision.id} (${decision.kind}) ` +
+      `addressed-by=${how} verdict="${verdict.slice(0, 24)}"`,
+  );
+}
+
 const pendingResearchGrants = new Map<string, PendingResearchGrant>();
 /** Do not consume if pending is too old (a user replying "approve" after a long time is likely out of context). Reuses the research authorization TTL. */
 const RESEARCH_GRANT_PENDING_TTL_MS = DEFAULT_RESEARCH_GRANT_TTL_MS;
@@ -3203,6 +3271,32 @@ function enqueueResearchGrantPush(
   const title = pursuit?.title ?? 'research';
   const { tool, why } = requested;
 
+  /**
+   * The card gets an id now, before any of it is addressable. Everything that later has to say
+   * "this one" — a quote, a number, a reply arriving in another conversation — needs something
+   * stable to point at, and retrofitting identity onto a card already shown is not possible.
+   *
+   * A research tool that reaches outside this machine is not something a stray "同意" should decide:
+   * it may well arrive an hour later, about a subject the owner has half put down.
+   */
+  const registerResearchDecision = (sid: string): string => {
+    const id = `r${Math.random().toString(36).slice(2, 6)}`;
+    pendingDecisions.add(sid, {
+      id,
+      kind: 'research_authorization',
+      title: `后台研究「${title}」请求使用 ${tool}`,
+      detail: why ? `用途：${why}` : undefined,
+      offered: ['同意', '批准', '授权', '允许', '可以', '好', 'approve', 'allow', 'yes', 'ok',
+                '拒绝', '不同意', '不批准', '不允许', '不要', 'reject', 'deny', 'no'],
+      resolutionPolicy: RESEARCH_TOOLS_NEEDING_EXPLICIT_ADDRESS.has(tool)
+        ? 'explicit_address_required'
+        : 'unique_bare_reply_allowed',
+      createdAt: Date.now(),
+      expiresAt: Date.now() + RESEARCH_GRANT_PENDING_TTL_MS,
+    });
+    return id;
+  };
+
   // Register pending for subscribed WeChat DM users (reconstruct stable sessionId). Group subscriptions / non-WeChat channels are skipped.
   for (const sub of memory.pushSubscriptions.listActive()) {
     const sid = reconstructDmSessionId(sub.channel, sub.peer);
@@ -3213,22 +3307,27 @@ function enqueueResearchGrantPush(
       tool,
       why,
       ts: Date.now(),
+      decisionId: registerResearchDecision(sid),
     });
   }
 
   // Web-ui: register pending under each connected web-ui session + show the request card.
   // (Mirrors the WeChat/Telegram path; the front-end renders the structured payload bilingually.)
   for (const [sid, send] of webuiClients) {
+    const decisionId = registerResearchDecision(sid);
     pendingResearchGrants.set(sid, {
       pursuitId: parsed.pursuitId,
       questionId: parsed.questionId,
       tool,
       why,
       ts: Date.now(),
+      decisionId,
     });
     send({
       type: 'research_grant_request',
-      payload: { title, tool, why, ttlMinutes: Math.round(RESEARCH_GRANT_PENDING_TTL_MS / 60000) },
+      // The id travels with the card so a button can carry it back verbatim, instead of the
+      // front-end sending a word for something else to guess at.
+      payload: { decisionId, title, tool, why, ttlMinutes: Math.round(RESEARCH_GRANT_PENDING_TTL_MS / 60000) },
     });
   }
 
@@ -7100,13 +7199,97 @@ export async function handleChatSend(
   // tool_results have since been evicted / the turn's messages are rebuilt). Re-arm each turn.
   incompressibleTurns.delete(sessionId);
 
-  // Ask-tier deep_explore routing: a pending "要进深度推理吗?" question is resolved by THIS message.
+  // ── WHO IS THIS REPLY FOR ────────────────────────────────────────────────────────────────────
+  //
+  // Resolved once, here, before any module reads its own map. Four kinds of card used to be consulted
+  // in a fixed code order — deep-explore ask, tool authorization, research, question — so a reply went
+  // to whichever came first in this file rather than to the card the owner was looking at. A "同意"
+  // typed at a research card could approve a `git push` asked later.
+  //
+  // At most one decision comes out of one message. When the address is not determined nothing is
+  // consumed at all: the cards stay up and the owner is asked which they meant. Guessing here does
+  // not mislabel — it spends the answer on the wrong authorization and strands the other request.
+  const outstandingDecisions = pendingDecisions.list(sessionId);
+  // "待办" — the owner asking to see what is waiting. Rendering the list also snapshots it, which is
+  // what makes the numbers in the next reply mean these items and not whatever arrives meanwhile.
+  if (/^\s*(待办|待办事项|pending|todo)\s*$/i.test(userMessage)) {
+    const lang: 'zh' | 'en' =
+      resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en' ? 'en' : 'zh';
+    if (outstandingDecisions.length === 0) {
+      onDelta(lang === 'en' ? 'Nothing is waiting on you.' : '没有等你决定的事。');
+    } else {
+      pendingDecisions.snapshot(sessionId, outstandingDecisions);
+      const lines = outstandingDecisions
+        .map((d, i) => `${i + 1}. ${d.title}${d.detail ? `\n   ${d.detail}` : ''}`)
+        .join('\n');
+      onDelta(
+        lang === 'en'
+          ? `Waiting on you:\n${lines}\n\nReply "1 yes" / "2 no", or quote the card you mean.`
+          : `等你决定的有：\n${lines}\n\n回复「1 同意」或「2 拒绝」，也可以直接引用对应卡片回复。`,
+      );
+    }
+    return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+  }
+  const decisionLang: 'zh' | 'en' =
+    resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en' ? 'en' : 'zh';
+  let resolvedDecision: { decision: PendingDecision; verdictText: string } | null = null;
+  if (outstandingDecisions.length > 0) {
+    const { quoted, reply } = splitQuotedReply(userMessage);
+    const routed = routeReply(reply || userMessage, outstandingDecisions, {
+      now: Date.now(),
+      quotedText: quoted,
+      snapshot: pendingDecisions.lastSnapshot(sessionId),
+    });
+
+    if (routed.kind === 'ambiguous' || routed.kind === 'needs-address') {
+      const shown = routed.kind === 'ambiguous' ? routed.candidates : [routed.decision];
+      pendingDecisions.snapshot(sessionId, shown);
+      const text =
+        routed.kind === 'ambiguous'
+          ? renderAmbiguityPrompt(shown, decisionLang)
+          : renderNeedsAddressPrompt(routed.decision, decisionLang);
+      console.log(
+        `[pending] session=${safeSessionId(sessionId)} ${routed.kind}: ` +
+          `${shown.length} outstanding, nothing consumed`,
+      );
+      onDelta(text);
+      return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
+    }
+
+    if (routed.kind === 'addressed') {
+      const decision = outstandingDecisions.find((d) => d.id === routed.id)!;
+      if (needsVerdict(decision, routed.verdictText)) {
+        // Which one was answered; whether they agree was not. Pointing is not agreeing.
+        pendingDecisions.snapshot(sessionId, [decision]);
+        onDelta(renderVerdictPrompt(decision, decisionLang));
+        return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
+      }
+      if (pendingRouterMode() === 'enforce') {
+        resolvedDecision = { decision, verdictText: routed.verdictText };
+        signalBus.resolvedDecisionId = decision.id;
+        signalBus.resolvedVerdictText = routed.verdictText;
+        auditDecisionResolution(sessionId, decision, routed.how, routed.verdictText);
+      } else {
+        console.log(
+          `[pending] session=${safeSessionId(sessionId)} shadow: would resolve ${decision.id} ` +
+            `(${decision.kind}) by ${routed.how} — not applied`,
+        );
+      }
+    }
+  }
+
+  // Ask-tier deep_explore routing: resolved only when the address above says this message is for it.
   // 进/好/yes → restore the original goal and force the engine; 直接/不/no → restore the goal and run
-  // flat; anything else (or expired) → treat this message as brand-new input.
+  // flat; anything else → this is a new message, and the offer STAYS (it used to be deleted before the
+  // reply was even read, so "帮我看下日志" silently discarded a question the owner had been asked).
   {
     const exploreAsk = pendingExploreAsk.get(sessionId);
-    if (exploreAsk) {
+    const addressedToAsk =
+      exploreAsk?.decisionId !== undefined &&
+      resolvedDecision?.decision.id === exploreAsk.decisionId;
+    if (exploreAsk && addressedToAsk) {
       pendingExploreAsk.delete(sessionId);
+      pendingDecisions.resolve(sessionId, exploreAsk.decisionId!);
       if (Date.now() - exploreAsk.ts <= EXPLORE_ASK_TTL_MS) {
         // Match the vocabulary the ask itself offered ("进" / "直接") BEFORE consulting the generic
         // authorisation classifier — that classifier only knows "did the user authorise?", so it read
@@ -7307,7 +7490,25 @@ export async function handleChatSend(
         messageIsSelfContainedGoal(userMessage) &&
         !hasRecentlyActiveExploreSession(sessionId);
       if (askTier) {
-        pendingExploreAsk.set(sessionId, { goal: userMessage, decision: intentDecision, ts: Date.now() });
+        const askDecisionId = `d${Math.random().toString(36).slice(2, 6)}`;
+        pendingExploreAsk.set(sessionId, {
+          goal: userMessage,
+          decision: intentDecision,
+          ts: Date.now(),
+          decisionId: askDecisionId,
+        });
+        pendingDecisions.add(sessionId, {
+          id: askDecisionId,
+          kind: 'deep_explore_entry',
+          // The offered words are its own: 1/2 answer THIS card, and only a freshly shown list turns
+          // numbers into positions instead. A routing choice costs a round if misread, so a bare
+          // reply may settle it when it is the only thing outstanding.
+          title: `要为「${userMessage.slice(0, 24)}」进入深度推理吗`,
+          offered: ['1', '2', '进', '进入', '深入', '深度推理', '直接', '平铺', '快速', '不用'],
+          resolutionPolicy: 'unique_bare_reply_allowed',
+          createdAt: Date.now(),
+          expiresAt: Date.now() + EXPLORE_ASK_TTL_MS,
+        });
         onDelta(buildDeepExploreAskText(intentDecision));
         console.log(`[intent-router] session=${safeSessionId(sessionId)} ask-tier question sent (conf=${intentDecision.confidence})`);
         return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
@@ -8380,25 +8581,37 @@ async function handleChatSendInner(
   // only needs to write a grant / revoke request.
   // unclear / expired → pass through to normal turn (pending-approval prompt section + grant_research_tool fallback).
   const rg = pendingResearchGrants.get(sessionId);
-  if (rg) {
+  // Only when the address resolved at message entry names THIS card. The reply reaching here used to
+  // mean nothing more than "no earlier module claimed it", which is not the same as "it was meant for
+  // this" — and one message must resolve at most one decision, so a reply already spent upstream is
+  // not re-interpreted here.
+  const addressedToResearch =
+    rg?.decisionId !== undefined && signalBus.resolvedDecisionId === rg.decisionId;
+  if (rg && addressedToResearch) {
     // Quick-check for expiry first (avoids unnecessary LLM intent calls); only classify intent if not expired.
     const expired = Date.now() - rg.ts > RESEARCH_GRANT_PENDING_TTL_MS;
     // The card handed the user a closed enum ("reply 同意 / 拒绝", or approve / reject). Reading our OWN
     // vocabulary back is an exact match, not a semantic-classification problem — we have already shipped a
     // bug where the user replied with one of our own offered words and the general classifier read it as the
     // opposite. Only genuinely open language reaches the classifier.
-    const offered = expired ? null : classifyGrantReply(userMessage);
+    //
+    // The classifier reads the VERDICT only. Which card this is about was settled upstream by exact
+    // means — a quote, an id, a position in a list the owner was shown — and a semantic classifier is
+    // not allowed to pick the target.
+    const verdictText = signalBus.resolvedVerdictText ?? userMessage;
+    const offered = expired ? null : classifyGrantReply(verdictText);
     const intent = expired
       ? 'unclear'
       : (offered ??
         (await classifyAuthIntent(
-          userMessage,
+          verdictText,
           `Background research requests use of tool "${rg.tool}" (execute/system)`,
         )));
     const action = decideResearchGrantAction(rg, intent, Date.now(), RESEARCH_GRANT_PENDING_TTL_MS);
 
     if (action === 'grant') {
       pendingResearchGrants.delete(sessionId);
+      if (rg.decisionId) pendingDecisions.resolve(sessionId, rg.decisionId);
       grants.grant({
         toolName: rg.tool,
         capability: 'execute',
@@ -8422,6 +8635,7 @@ async function handleChatSendInner(
       return { outcome: { outcomeType: 'response' }, auditEvents: audit.length };
     } else if (action === 'deny') {
       pendingResearchGrants.delete(sessionId);
+      if (rg.decisionId) pendingDecisions.resolve(sessionId, rg.decisionId);
       // Revoke the request: clear question.pendingTool → driver no longer replays, pending-approval section no longer shown.
       try {
         memory.pursuits.setQuestionPendingTool(rg.pursuitId, rg.questionId, null);
@@ -9883,6 +10097,13 @@ interface TurnSignalBus {
    * a word is how the same "OK" gets typed twice (prod 2026-08-09 12:43:29 → 12:43:50).
    */
   droppedExpiredAuth?: { toolName: string; ageMinutes: number };
+  /**
+   * The one decision this message was addressed to, settled at entry by exact means. At most one per
+   * message: once a module claims it, no other may reinterpret the same sentence.
+   */
+  resolvedDecisionId?: string;
+  /** What the reply said once the addressing tokens were stripped — the part that decides. */
+  resolvedVerdictText?: string;
   /**
    * A tool that was mid-execution when the process died and never got an explicit retry/skip decision.
    * Recorded as unresolved — NOT as a user refusal. Anything downstream that reasons about what the
