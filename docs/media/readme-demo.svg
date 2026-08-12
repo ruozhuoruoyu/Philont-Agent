@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600" class="FRAME_CLASS">
+  <style>
+    text { font-family: Inter, ui-sans-serif, system-ui, sans-serif; fill: #172033; }
+    .muted { fill: #64748b; } .blue { fill: #1769d2; } .green { fill: #16803c; }
+    .small { font-size: 12px; } .body { font-size: 14px; } .title { font-size: 20px; font-weight: 700; }
+    .label { font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+    .card { fill: #fff; stroke: #dce3ec; } .tag { fill: #eff6ff; }
+    .s2,.s3,.s4,.s5,.s6,.cursor,.caption { display:none; }
+    .frame2 .s2,.frame3 .s2,.frame4 .s2,.frame5 .s2,.frame6 .s2,.frame7 .s2 { display:inline; }
+    .frame3 .s3,.frame4 .s3,.frame5 .s3,.frame6 .s3,.frame7 .s3 { display:inline; }
+    .frame4 .s4,.frame5 .s4,.frame6 .s4,.frame7 .s4 { display:inline; }
+    .frame6 .s5,.frame7 .s5 { display:inline; }
+    .frame7 .s6 { display:inline; }
+    .frame5 .cursor { display:inline; }
+    .caption text { fill: #fff; }
+    .frame1 .cap1,.frame2 .cap2,.frame3 .cap3,.frame4 .cap4,.frame5 .cap5,.frame6 .cap6,.frame7 .cap7 { display:inline; }
+    .frame1 .prog { width:24px}.frame2 .prog{width:55px}.frame3 .prog{width:102px}.frame4 .prog{width:138px}.frame5 .prog{width:158px}.frame6 .prog{width:224px}.frame7 .prog{width:265px}
+  </style>
+  <rect width="960" height="600" fill="#f8fafc"/>
+  <rect width="960" height="62" fill="#fff"/><line x1="0" y1="62" x2="960" y2="62" stroke="#dce3ec"/>
+  <text x="25" y="38" class="blue" font-size="20" font-weight="800" letter-spacing="2">PHILONT</text>
+  <rect x="132" y="15" width="72" height="34" rx="7" fill="#fff"/><text x="146" y="37" class="body muted">Chat</text>
+  <rect x="211" y="15" width="82" height="34" rx="7" fill="#fff"/><text x="225" y="37" class="body muted">Memory</text>
+  <rect x="300" y="15" width="94" height="34" rx="7" fill="#1769d2"/><text x="315" y="37" class="body" fill="#fff">Autonomy</text>
+  <circle cx="873" cy="31" r="5" fill="#22c55e"/><text x="886" y="36" class="small green">running</text>
+
+  <rect x="0" y="62" width="290" height="538" fill="#f1f5f9"/><line x1="290" y1="62" x2="290" y2="600" stroke="#dce3ec"/>
+  <text x="23" y="100" class="label blue">COMPASS FOCUS</text>
+  <text x="23" y="136" class="title">Make small-model</text><text x="23" y="163" class="title">agents dependable</text>
+  <text x="23" y="192" class="small muted">Persistent work continues between</text><text x="23" y="210" class="small muted">conversations.</text>
+  <rect x="22" y="236" width="246" height="154" rx="10" class="card"/>
+  <text x="38" y="264" class="body" font-weight="700">Research: reliable</text><text x="38" y="284" class="body" font-weight="700">long-running work</text>
+  <text x="38" y="311" class="small muted">Pursuit active</text>
+  <rect x="38" y="329" width="214" height="7" rx="4" fill="#e2e8f0"/><rect class="prog" x="38" y="329" height="7" rx="4" fill="#1769d2"/>
+  <text x="38" y="362" class="small muted">3 open questions · stake 8/10</text>
+
+  <g transform="translate(320 88)">
+    <g class="s2"><circle cx="12" cy="12" r="12" fill="#22a55a"/><text x="8" y="17" font-size="12" fill="#fff">✓</text></g>
+    <g class="s1"><circle cx="12" cy="12" r="12" fill="#1769d2"/><text x="8" y="17" font-size="12" fill="#fff">1</text></g><text x="31" y="17" class="small" font-weight="700">Pursue</text>
+    <line x1="86" y1="12" x2="132" y2="12" stroke="#dbe3ed" stroke-width="2"/>
+    <circle cx="146" cy="12" r="12" fill="#e2e8f0"/><text x="142" y="17" class="small">2</text><text x="165" y="17" class="small" font-weight="700">Research</text>
+    <line x1="231" y1="12" x2="275" y2="12" stroke="#dbe3ed" stroke-width="2"/>
+    <circle cx="289" cy="12" r="12" fill="#e2e8f0"/><text x="285" y="17" class="small">3</text><text x="308" y="17" class="small" font-weight="700">Ask</text>
+    <line x1="346" y1="12" x2="390" y2="12" stroke="#dbe3ed" stroke-width="2"/>
+    <circle cx="404" cy="12" r="12" fill="#e2e8f0"/><text x="400" y="17" class="small">4</text><text x="423" y="17" class="small" font-weight="700">Resume</text>
+    <line x1="489" y1="12" x2="530" y2="12" stroke="#dbe3ed" stroke-width="2"/>
+    <circle cx="544" cy="12" r="12" fill="#e2e8f0"/><text x="540" y="17" class="small">5</text><text x="563" y="17" class="small" font-weight="700">Verify</text>
+  </g>
+
+  <g class="s1"><rect x="318" y="135" width="614" height="76" rx="10" class="card"/><text x="337" y="162" class="body" font-weight="700">Persistent pursuit</text><rect x="820" y="147" width="92" height="22" rx="11" class="tag"/><text x="836" y="162" class="small blue">compass.md</text><text x="337" y="190" class="body muted">Track whether explicit runtime loops make lower-cost models more reliable.</text></g>
+  <g class="s3"><rect x="318" y="224" width="614" height="74" rx="10" class="card"/><text x="337" y="251" class="body" font-weight="700">Background research</text><rect x="838" y="236" width="74" height="22" rx="11" class="tag"/><text x="850" y="251" class="small blue">read-only</text><text x="337" y="279" class="body muted">Collected prior notes and identified a missing verification run.</text></g>
+  <g class="s4"><rect x="318" y="311" width="614" height="113" rx="10" fill="#fffbeb" stroke="#f5c86a"/><text x="337" y="339" class="body" font-weight="700">Authorization required</text><rect x="788" y="323" width="124" height="22" rx="11" class="tag"/><text x="802" y="338" class="small blue">research:r-42</text><text x="337" y="367" class="body muted">Research needs shell to run a deterministic comparison.</text><rect x="337" y="383" width="151" height="27" rx="7" fill="#1769d2"/><text x="351" y="402" class="small" fill="#fff" font-weight="700">Approve this request</text><rect x="496" y="383" width="54" height="27" rx="7" fill="#fff" stroke="#cbd5e1"/><text x="508" y="402" class="small muted">Deny</text></g>
+  <g class="s5"><rect x="318" y="437" width="614" height="91" rx="10" class="card"/><text x="337" y="465" class="body" font-weight="700">Resumed from checkpoint</text><rect x="804" y="449" width="108" height="22" rx="11" class="tag"/><text x="817" y="464" class="small blue">no re-planning</text><text x="337" y="493" class="small green">✓ readFile    prior evidence retained</text><text x="337" y="514" class="small green">✓ shell       comparison completed</text></g>
+  <g class="s6"><rect x="318" y="437" width="614" height="91" rx="10" fill="#f0fdf4" stroke="#9bd7b1"/><text x="337" y="465" class="body" font-weight="700">Evidence-backed result</text><rect x="843" y="449" width="69" height="22" rx="11" fill="#dcfce7"/><text x="854" y="464" class="small green">verified</text><text x="337" y="493" class="small muted">The comparison ran successfully and is linked to the execution ledger.</text><text x="337" y="514" class="small muted">One follow-up question remains open.</text></g>
+  <g class="cursor"><path d="M472 380 L482 407 L489 397 L499 414 L505 410 L495 393 L507 390 Z" fill="#172033" stroke="#fff" stroke-width="2"/></g>
+  <rect x="318" y="548" width="614" height="37" rx="8" fill="#172033" opacity=".94"/>
+  <g class="caption cap1"><text x="625" y="572" text-anchor="middle" font-size="14" fill="#fff" font-weight="700">Give Philont a long-term direction.</text></g>
+  <g class="caption cap2"><text x="625" y="572" text-anchor="middle" font-size="14" fill="#fff" font-weight="700">A pursuit survives after the conversation ends.</text></g>
+  <g class="caption cap3"><text x="625" y="572" text-anchor="middle" font-size="14" fill="#fff" font-weight="700">Background research advances with read-only tools.</text></g>
+  <g class="caption cap4"><text x="625" y="572" text-anchor="middle" font-size="14" fill="#fff" font-weight="700">Crossing a permission boundary pauses and asks.</text></g>
+  <g class="caption cap5"><text x="625" y="572" text-anchor="middle" font-size="14" fill="#fff" font-weight="700">The owner approves this request—not every shell call.</text></g>
+  <g class="caption cap6"><text x="625" y="572" text-anchor="middle" font-size="14" fill="#fff" font-weight="700">Philont resumes from the checkpoint and keeps prior work.</text></g>
+  <g class="caption cap7"><text x="625" y="572" text-anchor="middle" font-size="14" fill="#fff" font-weight="700">The final claim is tied to what actually executed.</text></g>
+</svg>

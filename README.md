@@ -11,6 +11,12 @@ Give Philont a direction in `compass.md`. It keeps persistent pursuits across co
 
 The bet is simple: **reliability should live in the runtime, not only in model scale.** Plans, checkpoints, tool policy, execution evidence, memory, and skill lifecycle are explicit mechanisms around the model. That makes lower-cost compatible models a practical first-class target while keeping Claude, DeepSeek, GLM, Kimi, MiniMax, Gemini, and other compatible endpoints interchangeable.
 
+<p align="center">
+  <img src="docs/media/philont-demo.gif" alt="Philont carries a persistent pursuit through background research, scoped authorization, checkpoint resume, and an evidence-backed result" width="960">
+</p>
+
+<p align="center"><i>Persistent pursuit → background research → scoped approval → checkpoint resume → execution-backed result.</i></p>
+
 > **Developer preview.** Philont is dogfooded on lower-cost models, but reproducible cost-per-success benchmarks are not published yet. Its policy layer is defense in depth, not an OS sandbox. See [Current maturity](#current-maturity) and [Permission & Security](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security).
 
 **Start here:** [Quick start](#quick-start) · [How it works](#why-philont) · [Wiki](https://github.com/ruozhuoruoyu/Philont-Agent/wiki) · [Security model](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security) · [Why smaller models](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough)
