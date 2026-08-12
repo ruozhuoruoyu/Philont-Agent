@@ -3135,9 +3135,33 @@ const RESEARCH_TOOLS_NEEDING_EXPLICIT_ADDRESS: ReadonlySet<string> = new Set([
   'shell', 'process', 'http', 'securedHttp', 'downloadFile', 'writeFile', 'patch', 'deleteFile', 'moveFile',
 ]);
 
-/** `shadow` compares old and new routing without letting the router decide; `enforce` is live. */
-const pendingRouterMode = (): 'shadow' | 'enforce' =>
-  process.env.PHILONT_PENDING_ROUTER === 'shadow' ? 'shadow' : 'enforce';
+/**
+ * There is no shadow mode.
+ *
+ * One was written as `shadow | enforce`, and it did not compare anything: in shadow the router
+ * declined to set the resolved id, while both wired branches now require it — so the old paths were
+ * already closed by their address checks and the new one never opened. The net effect was that
+ * research authorization and the deep-explore ask could be neither approved nor denied, under a name
+ * that reads like a safe observation mode. A switch that silently disables the thing it claims to
+ * merely watch is worse than not having one, so it is gone rather than repaired.
+ */
+
+/**
+ * A message belongs to one decision, and a module that is not that decision may not read it.
+ *
+ * The address book only registers research authorization and the deep-explore ask so far, and the
+ * conclusion drawn from that was that the others could migrate later. They cannot wait, because they
+ * still CONSUME: pendingAuth is consulted before the research branch, so a "同意" quoted at a research
+ * card resolved correctly at entry and was then spent by the tool authorization anyway — the exact
+ * mis-addressing the router exists to end, surviving underneath it.
+ *
+ * Payload and continuation migration can wait. Obedience to the address cannot.
+ */
+export function claimedByAnotherDecision(signalBus: TurnSignalBus, ownDecisionId?: string): boolean {
+  const resolved = signalBus.resolvedDecisionId;
+  if (!resolved) return false;
+  return resolved !== ownDecisionId;
+}
 
 /** WeChat folds a quoted message into the text as `[引用: …]`; that quote is the exact address. */
 function splitQuotedReply(message: string): { quoted?: string; reply: string } {
@@ -3146,8 +3170,17 @@ function splitQuotedReply(message: string): { quoted?: string; reply: string } {
   return { quoted: m[1], reply: m[2] ?? '' };
 }
 
-/** One line per resolution, so who decided what — and how they addressed it — is on the record. */
-function auditDecisionResolution(
+/**
+ * ADDRESSED is not APPLIED.
+ *
+ * One record was written the moment the router matched, before the owning module had validated its
+ * payload, decided grant or deny, written a grant or resumed anything. In the case that prompted
+ * this — an approval for research A landing while only B's payload survived — the ledger said
+ * `resolved A` and nothing whatsoever had happened to A. A ledger that records intentions as
+ * outcomes is the failure this project keeps writing gates against; it must not be the gate's own
+ * bookkeeping.
+ */
+function auditDecisionAddressed(
   sessionId: string,
   decision: PendingDecision,
   how: string,
@@ -3156,7 +3189,7 @@ function auditDecisionResolution(
   internalAudit.append('self_domain_write', {
     source: 'pending_decision',
     origin: 'External',
-    toolName: 'decision_resolved',
+    toolName: 'decision_addressed',
     sessionId,
     decisionId: decision.id,
     decisionKind: decision.kind,
@@ -3166,12 +3199,49 @@ function auditDecisionResolution(
     at: Date.now(),
   });
   console.log(
-    `[pending] session=${safeSessionId(sessionId)} resolved ${decision.id} (${decision.kind}) ` +
-      `addressed-by=${how} verdict="${verdict.slice(0, 24)}"`,
+    `[pending] session=${safeSessionId(sessionId)} addressed ${decision.id} (${decision.kind}) ` +
+      `by=${how} verdict="${verdict.slice(0, 24)}"`,
   );
 }
 
-const pendingResearchGrants = new Map<string, PendingResearchGrant>();
+/** What actually happened to it, written by the module that made it happen — or failed to. */
+function auditDecisionApplied(
+  sessionId: string,
+  decisionId: string,
+  outcome: 'granted' | 'denied' | 'expired' | 'failed',
+  detail: string,
+): void {
+  internalAudit.append('self_domain_write', {
+    source: 'pending_decision',
+    origin: 'Internal',
+    toolName: outcome === 'failed' ? 'decision_failed' : 'decision_applied',
+    sessionId,
+    decisionId,
+    outcome,
+    detail: detail.slice(0, 120),
+    at: Date.now(),
+  });
+  console.log(
+    `[pending] session=${safeSessionId(sessionId)} ${decisionId} → ${outcome}: ${detail.slice(0, 60)}`,
+  );
+}
+
+/**
+ * Keyed by DECISION id, not by session.
+ *
+ * `Map<sessionId, …>` held one request per conversation and set it unconditionally, so research B's
+ * request replaced research A's. Giving the address book a list fixed the ADDRESSES and left this
+ * untouched: A stayed answerable in name and had no payload behind it, so approving A found B's id
+ * on the only surviving record, matched nothing, and did nothing at all. Half a fix reads exactly
+ * like a whole one from the outside — the card is there, the reply is understood, and the grant
+ * silently never happens.
+ */
+const pendingResearchGrants = new Map<string, PendingResearchGrant & { sessionId: string }>();
+
+/** Every outstanding research request of one conversation (for expiry sweeps and the pending list). */
+function researchGrantsOf(sessionId: string): Array<PendingResearchGrant & { sessionId: string }> {
+  return [...pendingResearchGrants.values()].filter((r) => r.sessionId === sessionId);
+}
 /** Do not consume if pending is too old (a user replying "approve" after a long time is likely out of context). Reuses the research authorization TTL. */
 const RESEARCH_GRANT_PENDING_TTL_MS = DEFAULT_RESEARCH_GRANT_TTL_MS;
 
@@ -3301,13 +3371,15 @@ function enqueueResearchGrantPush(
   for (const sub of memory.pushSubscriptions.listActive()) {
     const sid = reconstructDmSessionId(sub.channel, sub.peer);
     if (!sid) continue;
-    pendingResearchGrants.set(sid, {
+    const decisionId = registerResearchDecision(sid);
+    pendingResearchGrants.set(decisionId, {
       pursuitId: parsed.pursuitId,
       questionId: parsed.questionId,
       tool,
       why,
       ts: Date.now(),
-      decisionId: registerResearchDecision(sid),
+      decisionId,
+      sessionId: sid,
     });
   }
 
@@ -3315,13 +3387,14 @@ function enqueueResearchGrantPush(
   // (Mirrors the WeChat/Telegram path; the front-end renders the structured payload bilingually.)
   for (const [sid, send] of webuiClients) {
     const decisionId = registerResearchDecision(sid);
-    pendingResearchGrants.set(sid, {
+    pendingResearchGrants.set(decisionId, {
       pursuitId: parsed.pursuitId,
       questionId: parsed.questionId,
       tool,
       why,
       ts: Date.now(),
       decisionId,
+      sessionId: sid,
     });
     send({
       type: 'research_grant_request',
@@ -7264,17 +7337,11 @@ export async function handleChatSend(
         onDelta(renderVerdictPrompt(decision, decisionLang));
         return { outcome: { outcomeType: 'question_pending' }, auditEvents: 0 };
       }
-      if (pendingRouterMode() === 'enforce') {
-        resolvedDecision = { decision, verdictText: routed.verdictText };
-        signalBus.resolvedDecisionId = decision.id;
-        signalBus.resolvedVerdictText = routed.verdictText;
-        auditDecisionResolution(sessionId, decision, routed.how, routed.verdictText);
-      } else {
-        console.log(
-          `[pending] session=${safeSessionId(sessionId)} shadow: would resolve ${decision.id} ` +
-            `(${decision.kind}) by ${routed.how} — not applied`,
-        );
-      }
+      // Addressed. Whether anything HAPPENS is the owning module's to report — see auditDecisionApplied.
+      resolvedDecision = { decision, verdictText: routed.verdictText };
+      signalBus.resolvedDecisionId = decision.id;
+      signalBus.resolvedVerdictText = routed.verdictText;
+      auditDecisionAddressed(sessionId, decision, routed.how, routed.verdictText);
     }
   }
 
@@ -7305,11 +7372,13 @@ export async function handleChatSend(
           signalBus.exploreAskApproved = true;
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
+          auditDecisionApplied(sessionId, exploreAsk.decisionId!, 'granted', 'deep_explore entry');
           console.log(`[intent-router] session=${safeSessionId(sessionId)} ask-tier APPROVED → deep_explore on restored goal`);
         } else if (askIntent === 'deny') {
           signalBus.exploreAskDeclined = true;
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
+          auditDecisionApplied(sessionId, exploreAsk.decisionId!, 'denied', 'flat run instead');
           console.log(`[intent-router] session=${safeSessionId(sessionId)} ask-tier declined → flat run on restored goal`);
         }
         // unclear → fall through: the reply is a new message; the offer is dropped.
@@ -8310,8 +8379,12 @@ async function handleChatSendInner(
   }
 
   // ── Check for pending authorization requests ──────────────────────────────────────────────────
+  //
+  // Not yet in the address book — it carries provider tool_use pairing and a continuation, and gets
+  // its own pass. But it must already OBEY the book: this branch runs before the research branch, so
+  // without the guard a reply the owner clearly aimed at a research card is spent here instead.
   const pending = pendingAuth.get(sessionId);
-  pendingAuthBlock: if (pending) {
+  pendingAuthBlock: if (pending && !claimedByAnotherDecision(signalBus)) {
     // Captured before the block below flips it back to `awaiting_auth` on an explicit retry.
     const wasUncertain = pending.executionState === 'uncertain';
 
@@ -8580,7 +8653,11 @@ async function handleChatSendInner(
   // Mirrors pendingAuth but lighter: no tool-chain resume (continuation is done automatically by the next autonomous tick's driver replay);
   // only needs to write a grant / revoke request.
   // unclear / expired → pass through to normal turn (pending-approval prompt section + grant_research_tool fallback).
-  const rg = pendingResearchGrants.get(sessionId);
+  // By the id the entry router resolved — never "the most recent one in this conversation", which is
+  // what let an answer meant for A be applied to B.
+  const rg = signalBus.resolvedDecisionId
+    ? pendingResearchGrants.get(signalBus.resolvedDecisionId)
+    : undefined;
   // Only when the address resolved at message entry names THIS card. The reply reaching here used to
   // mean nothing more than "no earlier module claimed it", which is not the same as "it was meant for
   // this" — and one message must resolve at most one decision, so a reply already spent upstream is
@@ -8610,8 +8687,9 @@ async function handleChatSendInner(
     const action = decideResearchGrantAction(rg, intent, Date.now(), RESEARCH_GRANT_PENDING_TTL_MS);
 
     if (action === 'grant') {
-      pendingResearchGrants.delete(sessionId);
-      if (rg.decisionId) pendingDecisions.resolve(sessionId, rg.decisionId);
+      pendingResearchGrants.delete(rg.decisionId!);
+      pendingDecisions.resolve(sessionId, rg.decisionId!);
+      auditDecisionApplied(sessionId, rg.decisionId!, 'granted', `${rg.tool} for research ${rg.pursuitId}`);
       grants.grant({
         toolName: rg.tool,
         capability: 'execute',
@@ -8634,8 +8712,9 @@ async function handleChatSendInner(
       onDelta(reply);
       return { outcome: { outcomeType: 'response' }, auditEvents: audit.length };
     } else if (action === 'deny') {
-      pendingResearchGrants.delete(sessionId);
-      if (rg.decisionId) pendingDecisions.resolve(sessionId, rg.decisionId);
+      pendingResearchGrants.delete(rg.decisionId!);
+      pendingDecisions.resolve(sessionId, rg.decisionId!);
+      auditDecisionApplied(sessionId, rg.decisionId!, 'denied', `${rg.tool} for research ${rg.pursuitId}`);
       // Revoke the request: clear question.pendingTool → driver no longer replays, pending-approval section no longer shown.
       try {
         memory.pursuits.setQuestionPendingTool(rg.pursuitId, rg.questionId, null);
@@ -8654,7 +8733,9 @@ async function handleChatSendInner(
       onDelta(reply);
       return { outcome: { outcomeType: 'response' }, auditEvents: audit.length };
     } else if (action === 'expired') {
-      pendingResearchGrants.delete(sessionId); // stale pending; clear it and pass through
+      pendingResearchGrants.delete(rg.decisionId!); // stale pending; clear it and pass through
+      pendingDecisions.resolve(sessionId, rg.decisionId!);
+      auditDecisionApplied(sessionId, rg.decisionId!, 'expired', `${rg.tool} request timed out`);
     }
     // passthrough / expired: not consumed (or already cleared); pass through to normal turn (LLM sees pending-approval section)
   }
@@ -8663,7 +8744,7 @@ async function handleChatSendInner(
   // Design mirrors pendingAuth: stores inflightMessages + remainingCalls; on resume,
   // wraps the user reply as a tool_result and injects it, then continues runToolLoop.
   const pendingQ = pendingQuestion.get(sessionId);
-  if (pendingQ) {
+  if (pendingQ && !claimedByAnotherDecision(signalBus)) {
 
     // Timeout: treat as "give up" — return a cancelled placeholder for the current tool_call + skip
     // remaining calls; let the LLM decide how to proceed based on history.
@@ -10441,14 +10522,26 @@ function emitFinalText(opts: {
   // Anti-fabrication backstop: replace a fabricated deep_explore recite with an honest message before
   // it goes out, whichever exit produced it.
   const safeText = guardDeepExploreFabrication(opts.text, signalBus, sessionId);
-  messages.push({ role: 'assistant', content: safeText });
+  // An ordinary reply while cards are outstanding gets a nudge — one line, no re-offer of the words
+  // that would make it a second card competing for the next message. This is the "user sent a normal
+  // message" trigger of the digest; nothing is consumed and nothing is re-asked.
+  const stillWaiting = pendingDecisions.list(sessionId).filter((d) => d.id !== signalBus.resolvedDecisionId);
+  const withTail =
+    stillWaiting.length > 0
+      ? safeText +
+        renderPendingTail(
+          stillWaiting,
+          resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en' ? 'en' : 'zh',
+        )
+      : safeText;
+  messages.push({ role: 'assistant', content: withTail });
   // Invariant: onDelta BEFORE returning outcome.text — the frontend treats a final `outcome=response`
   // as "already delivered via the delta stream" and stays silent otherwise.
-  onDelta(safeText);
+  onDelta(withTail);
   memory.raw.appendMessage({
     sessionId: GLOBAL_TIMELINE_SESSION_ID,
     role: 'assistant',
-    content: safeText,
+    content: withTail,
     originSessionId: sessionId,
   });
 

@@ -187,7 +187,7 @@ test('research grants are issued with an audience on every path that issues them
 test('the address is resolved once, before any module reads its own map', () => {
   const entry = chatHandler.indexOf('const outstandingDecisions = pendingDecisions.list(sessionId);');
   const askRead = chatHandler.indexOf('const exploreAsk = pendingExploreAsk.get(sessionId);');
-  const researchRead = chatHandler.indexOf('const rg = pendingResearchGrants.get(sessionId);');
+  const researchRead = chatHandler.indexOf('pendingResearchGrants.get(signalBus.resolvedDecisionId)');
   assert.ok(entry > 0, 'entry resolution not found');
   assert.ok(entry < askRead, 'the deep-explore ask must not read its map before the address is known');
   assert.ok(entry < researchRead, 'nor may research authorization');
@@ -227,7 +227,7 @@ test('an unaddressed message no longer destroys the deep-explore ask', () => {
 });
 
 test('the semantic classifier reads the verdict, never picks the target', () => {
-  const block = chatHandler.slice(chatHandler.indexOf('const rg = pendingResearchGrants.get(sessionId);'));
+  const block = chatHandler.slice(chatHandler.indexOf('pendingResearchGrants.get(signalBus.resolvedDecisionId)'));
   assert.match(
     block.slice(0, 2000),
     /classifyGrantReply\(verdictText\)/,
@@ -237,22 +237,92 @@ test('the semantic classifier reads the verdict, never picks the target', () => 
 });
 
 test('every card carries an id before it is shown', () => {
-  assert.match(chatHandler, /decisionId: registerResearchDecision\(sid\)/, 'wechat/telegram push');
+  assert.match(chatHandler, /const decisionId = registerResearchDecision\(sid\);/, 'wechat/telegram push');
   assert.match(chatHandler, /payload: \{ decisionId/, 'the web-ui card carries it too, for a button');
   assert.match(chatHandler, /decisionId: askDecisionId/, 'the deep-explore ask');
 });
 
 test('resolving a card takes it out of the book on every terminal path', () => {
-  const block = chatHandler.slice(chatHandler.indexOf('const rg = pendingResearchGrants.get(sessionId);'));
-  const resolves = block.split('pendingDecisions.resolve(sessionId, rg.decisionId)').length - 1;
-  assert.ok(resolves >= 2, `grant and deny must both clear the card, found ${resolves}`);
+  const block = chatHandler.slice(chatHandler.indexOf('pendingResearchGrants.get(signalBus.resolvedDecisionId)'));
+  const resolves = block.split('pendingDecisions.resolve(sessionId, rg.decisionId!)').length - 1;
+  assert.ok(resolves >= 3, `grant, deny and expiry must all clear the card, found ${resolves}`);
 });
 
-test('a resolution is audited as it happens, not reconstructed later', () => {
-  assert.match(chatHandler, /function auditDecisionResolution/);
-  assert.match(chatHandler, /auditDecisionResolution\(sessionId, decision, routed\.how, routed\.verdictText\)/);
-  const fn = chatHandler.slice(chatHandler.indexOf('function auditDecisionResolution'));
+test('addressing and applying are recorded separately', () => {
+  // One record used to be written the moment the router matched — before the module validated its
+  // payload, decided, granted or resumed anything. In the case that prompted the split, the ledger
+  // said "resolved A" while nothing had happened to A at all.
+  assert.match(chatHandler, /function auditDecisionAddressed/);
+  assert.match(chatHandler, /function auditDecisionApplied/);
+  assert.match(chatHandler, /auditDecisionAddressed\(sessionId, decision, routed\.how, routed\.verdictText\)/);
+  for (const outcome of ["'granted'", "'denied'", "'expired'"]) {
+    assert.ok(chatHandler.includes(`auditDecisionApplied(sessionId, rg.decisionId!, ${outcome}`), `research ${outcome}`);
+  }
+  const fn = chatHandler.slice(chatHandler.indexOf('function auditDecisionAddressed'));
   for (const field of ['decisionId', 'decisionKind', 'addressedBy', 'verdict', 'principal']) {
     assert.match(fn.slice(0, 900), new RegExp(field), `the record must carry ${field}`);
   }
+});
+
+test('the research payload is keyed by decision, not by conversation', () => {
+  // The book held [A, B] while the payload map held only B, so approving A matched nothing and did
+  // nothing — a card that is addressable with no record behind it. Half a fix reads exactly like a
+  // whole one from outside: the card is there, the reply is understood, the grant never happens.
+  assert.match(
+    chatHandler,
+    /const pendingResearchGrants = new Map<string, PendingResearchGrant & \{ sessionId: string \}>\(\);/,
+    'keyed by decision id, with the session carried inside',
+  );
+  assert.doesNotMatch(
+    chatHandler,
+    /pendingResearchGrants\.(get|set)\(sessionId/,
+    'never "the most recent one in this conversation" — that is what applied A\'s answer to B',
+  );
+  assert.match(chatHandler, /pendingResearchGrants\.get\(signalBus\.resolvedDecisionId\)/);
+});
+
+test('modules that have not migrated still obey the address', () => {
+  // pendingAuth is consulted BEFORE research, so without this a "同意" quoted at a research card
+  // resolves correctly at entry and is then spent by the tool authorization anyway.
+  assert.match(
+    chatHandler,
+    /pendingAuthBlock: if \(pending && !claimedByAnotherDecision\(signalBus\)\) \{/,
+    'tool authorization must yield when the message was addressed elsewhere',
+  );
+  assert.match(
+    chatHandler,
+    /if \(pendingQ && !claimedByAnotherDecision\(signalBus\)\) \{/,
+    'and so must askUserQuestion',
+  );
+});
+
+test('there is no mode in which the router silently disables the decisions it watches', async () => {
+  // `shadow` set no resolved id while both wired branches required one, so research and the
+  // deep-explore ask could be neither approved nor denied — under a name that reads like observation.
+  assert.doesNotMatch(chatHandler, /PHILONT_PENDING_ROUTER/);
+  assert.doesNotMatch(chatHandler, /pendingRouterMode/);
+});
+
+test('claimedByAnotherDecision: a module acts only on its own decision', async () => {
+  const { claimedByAnotherDecision } = await import('../src/chat-handler.js');
+  // Nothing addressed: every module behaves as it always did.
+  assert.equal(claimedByAnotherDecision({} as never, undefined), false);
+  assert.equal(claimedByAnotherDecision({} as never, 'r1'), false);
+  // Addressed elsewhere: hands off, even though this module has no id of its own yet.
+  assert.equal(claimedByAnotherDecision({ resolvedDecisionId: 'r1' } as never, undefined), true);
+  assert.equal(claimedByAnotherDecision({ resolvedDecisionId: 'r1' } as never, 'other'), true);
+  // Addressed to me.
+  assert.equal(claimedByAnotherDecision({ resolvedDecisionId: 'r1' } as never, 'r1'), false);
+});
+
+test('the tail I claimed was wired actually is', () => {
+  // It was imported and never called, while the summary said ordinary replies carried a reminder.
+  // A claim about behaviour with no call site is the same defect as a gate with no call site.
+  assert.match(chatHandler, /renderPendingTail\(\s*\n?\s*stillWaiting,/);
+  assert.match(chatHandler, /const stillWaiting = pendingDecisions\.list\(sessionId\)/);
+  assert.match(
+    chatHandler,
+    /filter\(\(d\) => d\.id !== signalBus\.resolvedDecisionId\)/,
+    'the one just answered is not still waiting',
+  );
 });
