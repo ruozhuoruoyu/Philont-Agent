@@ -13,12 +13,6 @@ The bet is simple: **reliability should live in the runtime, not only in model s
 
 **Built for developers who run agents every day, care about model cost, and want long-running work to survive beyond one chat.**
 
-<p align="center">
-  <img src="docs/media/philont-demo.gif" alt="Philont carries a persistent pursuit through background research, scoped authorization, checkpoint resume, and an evidence-backed result" width="960">
-</p>
-
-<p align="center"><i>Persistent pursuit → background research → scoped approval → checkpoint resume → execution-backed result.</i></p>
-
 > **Developer preview.** Philont is dogfooded on lower-cost models, but reproducible cost-per-success benchmarks are not published yet. Its policy layer is defense in depth, not an OS sandbox. See [Current maturity](#current-maturity) and [Permission & Security](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security).
 
 **Start here:** [Quick start](#quick-start) · [How it works](#why-philont) · [Wiki](https://github.com/ruozhuoruoyu/Philont-Agent/wiki) · [Security model](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security) · [Why smaller models](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough)
@@ -56,9 +50,10 @@ Then **open `compass.md`** in the repo root (created for you on first start from
 
 ## Why Philont
 
-One idea, applied everywhere: **an agent's reliability comes from the loop it runs, not only from the prompt it reads.** Four parts make that concrete:
+One idea, applied everywhere: **an agent's reliability comes from the loop it runs, not only from the prompt it reads.** Five parts make that concrete:
 
 - **Persistent pursuits.** Curiosity, pursuit, and commitment drives can advance work between conversations. A `compass.md` you own declares the focus areas and clamps how those drives may tune themselves. → [Compass](#compass--you-say-where-it-points)
+- **Approvals that stay attached to their purpose.** Research grants are scoped to the pursuit that requested them. Destructive or externally consequential command shapes remain separately gated, and ambiguous replies resolve nothing rather than being consumed by the wrong pending request. → [Permission & Security](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security)
 - **Evidence-aware execution.** Tool calls produce an execution ledger. Completion claims such as “done”, “sent”, or “proved” are checked against that ledger, and unsupported claims can be intercepted and regenerated. These checks reduce known false-completion patterns; they do not prove arbitrary external truth. → [Honesty Gates](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Honesty-Gates)
 - **Runtime support for smaller models.** Complex work can be decomposed, reviewed, executed, checkpointed, and revised by explicit state machines instead of asking one model call to hold the whole job together. → [Plan Protocol](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Plan-Protocol) · [Why smaller models](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Why-a-Cheap-Model-Is-Enough)
 - **Governed adaptation.** Memory persists across channels, while learned rules and skill recipes have maturity, reuse checks, demotion, revision history, and repair paths. The learning judge is still in shadow: the lifecycle exists, but long-term improvement is not yet a proven result. → [Autonomy & Self-Learning](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Autonomy-and-Self-Learning)

@@ -1,5 +1,7 @@
 # Demo GIF storyboards
 
+> The current `readme-demo.svg` and generated `philont-demo.gif` are concept illustrations, not recordings of the product UI or real run data. They are retained only as storyboards and must not be presented as product evidence. Replace them with a reproducible screen recording before restoring a demo to the README.
+
 The README's cold visitor decides in ~5 seconds; a 30-second GIF at the top of the page is the
 single highest-leverage asset. Two candidate scripts below — **candidate A is the recommendation**
 (it demonstrates the differentiator no other agent shows). Record at 760px+ width, web-ui light

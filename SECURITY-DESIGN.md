@@ -1,10 +1,6 @@
 # philont Security Design
 
-> **Status:** draft / direction. No code shipped yet — P0/P1/P2 are planned; a blanket autonomous-egress
-> stopgap was prototyped and reverted (§6). This document is the agreed threat model and layered defense for
-> philont. It exists because an agent with arbitrary shell, filesystem, network, and an *unattended* idle loop
-> cannot be made safe by detecting dangerous commands — detection is a losing game. The design contains by
-> default and gates only at the exits.
+> **Historical design record — not the current security contract.** This document preserves the threat-model and implementation discussion that guided several security changes. Its dated status notes describe different stages of the codebase and can contradict one another when read as current documentation. For the presently enforced controls, production wiring, and known limits, read the [Permission & Security wiki page](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security). That page is the maintained public security model; this file provides design history and rationale.
 
 ---
 
