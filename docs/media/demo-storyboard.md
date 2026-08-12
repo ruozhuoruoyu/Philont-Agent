@@ -7,7 +7,7 @@ theme, ~15fps; trim dead time between steps aggressively (viewers accept jump cu
 
 ## Candidate A (recommended): the honesty gate catches a fabricated success
 
-**Claim demonstrated:** "built so it can't fake success" — the tagline, on screen, in one take.
+**Claim demonstrated:** an unsupported completion claim is checked against the execution ledger and corrected on screen.
 
 Setup: any task where the model is likely to overclaim. A reliable reproduction: ask for a file
 conversion involving a tool that is not installed (e.g. pandoc), or replay a task where a gate
@@ -26,7 +26,7 @@ execution ledger, blocked it, and forced the honest version you see.*
 
 ## Candidate B: continuous math computation (pariGp loop)
 
-**Claim demonstrated:** research-grade tool loop on a ~100× cheaper model.
+**Claim demonstrated:** a lower-cost model can be carried through a multi-step computation by the runtime. This is a product demo, not a cost benchmark.
 
 | t | shot | on screen |
 |---|---|---|

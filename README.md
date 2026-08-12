@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Status: developer preview](https://img.shields.io/badge/status-developer%20preview-orange.svg)](#status)
+[![Status: developer preview](https://img.shields.io/badge/status-developer%20preview-orange.svg)](#current-maturity)
 [![Wiki](https://img.shields.io/badge/docs-Wiki-2563eb.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/wiki)
 
 Give Philont a direction in `compass.md`. It keeps persistent pursuits across conversations, researches them while you are away, asks before crossing permission boundaries, and checks completion claims against what its tools actually executed.
@@ -73,14 +73,14 @@ Philont borrows ideas and compatible conventions from both projects; see [Acknow
 
 | | |
 |---|---|
-| **Honesty guardrails** | Gates catch pretended success, fabricated numbers, false "sent it to you" claims, and half-finished hand-offs — and force an honest regeneration. You can't learn from a failure you pretended didn't happen. |
+| **Honesty guardrails** | Gates compare recognized completion, artifact, numeric, and reasoning claims with the execution ledger, then request an honest regeneration when evidence is missing. They cover known claim shapes; they are not a proof that every statement is true. |
 | **Plan → execute → revise, enforced** | For a multi-step, world-changing job (deploy, register, send, deliver) the agent is mechanism-forced through *plan → step-by-step execution → revise around failures → close only with a verified outcome*. The gate blocks **world-changing** write/execute tools until a plan is executing — reads, `deep_explore`, and local computation (PARI/GP, z3, Lean — a calculator changes nothing) always flow. When the task comes with a written guide, a **deterministic state machine** owns the whole turn instead: the model fills in each state's content and cannot skip verification or declare itself done. → [Plan Protocol](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Plan-Protocol) |
 | **Deep exploring** | Hard questions get a `deep_explore` session: a persistent reasoning **tree** (*decompose → claim → verify → backtrack*) you can resume days later. `formal` mode settles a claim only when it's **machine-checked** (z3 · PARI/GP · an asymptotic-order algebra · curated lemma & no-go libraries); `deliberate` mode settles only on **cited evidence** that survives an adversarial reviewer. A turn-entry router sends reasoning-shaped requests here — high-confidence ones are **guaranteed** into the engine, mid-confidence ones ask you first. → [Deep Reasoning](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Deep-Reasoning) |
 | **Two weak models, one plan** | The plan for a guide-driven job is *drafted* by one model and *reviewed* by a second, independent one alongside a deterministic coverage check — and the loop supplies the memory neither of them has: revisions build on the accepted plan instead of restarting, the best-scoring round is the one executed, a repeated complaint is escalated, and reviewer-vs-checker disagreement becomes a question for the author. The reviewer is deliberately never shown its own past verdicts — its independence is the whole reason its opinion is worth anything. (It is the `AUX_LLM_*` model; leave that unset and verification degrades to the deterministic check alone.) |
 | **Guards a service can't provide itself** | The runtime enforces only what the service cannot correct on its own: a **host allowlist** derived by deterministic parsing (a wrong host surfaces as an opaque `fetch failed`, which an agent will misread for days), and a guard against writing an identifier the agent never actually read (fabricating a plausible token at a knowledge gap is the weak model's signature failure). Wrong endpoint, wrong auth, wrong body are left to the service to answer — `404`/`401`/`400` are free and exact. Asking a weak model to *compile* the guide into an authoritative contract is available (`PHILONT_SPEC_COMPILE=1`) but **off by default**: a wrong call gets corrected, a wrong contract does not, because the contract *is* the corrector. |
-| **Permission & audit layer** | Every tool call passes a 3×4 capability matrix (read/write/execute × local/network/system/self) with a SHA-256-chained audit log. Approving one local write/execute unlocks the **research workflow set** (write → run → download loop) for 30 minutes — one "ok" per task, not twelve — while destructive deletes and external/untrusted execution stay per-call. A validator chain blocks sensitive paths (`~/.ssh`, `.env`, …) and catastrophic commands (`rm -rf /`, fork bombs, secret-exfil pipes). See **[SECURITY-DESIGN.md](SECURITY-DESIGN.md)** for exactly what is and isn't enforced today. |
+| **Permission & audit layer** | Supported execution paths use a 3×4 capability matrix (read/write/execute × local/network/system/self), scoped grants, a validator chain, and a SHA-256-chained audit log. Sensitive paths and catastrophic command shapes are hard-denied. This is application-layer defense in depth, not OS containment. See the **[Security model](https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security)** for coverage and limits. |
 | **5-layer persistent memory** | SQLite-backed raw timeline, action log, FTS notes, structured facts, and learned skills — cross-session, cross-channel. Skills carry maturity grades, decay, and **reuse-time verification**: a recipe that stops working is caught by its own check, demoted, then diagnosed and rewritten — the prior version kept in a revision history. |
-| **Autonomy you can see — and aim** | While you're away, drives research knowledge gaps and advance stalled goals under strict budgets, anchored to the focus areas in your **compass** rather than to whatever is nearest in its history; important findings (new sourced facts only) reach you at discovery time via push. `/autonomy` in chat — or the Web UI dashboard — shows the agenda, live traits, self-observations, and anything awaiting your approval. |
+| **Autonomy you can see — and aim** | While you're away, drives research knowledge gaps and advance stalled goals under configurable budgets, anchored to the focus areas in your **compass** rather than to whatever is nearest in its history; important findings can reach you at discovery time via push. `/autonomy` in chat — or the Web UI dashboard — shows the agenda, live traits, self-observations, and anything awaiting your approval. |
 | **MCP, plugins & BYOM** | Mount any MCP server (Playwright gives it a full browser), load sandboxed plugins, add vision on a dedicated multimodal endpoint if your main model isn't multimodal, and point it at any Anthropic- or OpenAI-compatible model with a config change. |
 
 ---
@@ -190,9 +190,19 @@ done
 (cd server && npx tsx --test --test-force-exit tests/*.test.ts)
 ```
 
-## Status
+## Current maturity
 
-**Developer preview (v0.x).** Core features are implemented and covered by tests; production hardening (sandbox stress/escape testing, cross-platform binaries) is in progress. Good for research, experimentation, and self-hosted personal assistants — not yet for unattended production workloads.
+**Developer preview (v0.x).** Philont is suitable for research, dogfooding, and a self-hosted personal assistant under a trusted operator. It is not ready for unattended high-risk production work.
+
+| Area | Status |
+|---|---|
+| Persistent memory, pursuits, channels, plan/deep-reasoning loops | **Active** |
+| Execution ledger and claim checks | **Active, heuristic** — coverage is intentionally incomplete |
+| Permission matrix, scoped grants, validator chain, audit log | **Active, application-level** — not an OS sandbox |
+| Autonomous research | **Active, bounded** — write/execute capabilities require authorization |
+| Learning judge | **Shadow** — scores and logs; does not mint skills from verdicts |
+| Skill validation, demotion, and repair | **Experimental** — mechanisms exist; longitudinal benefit is not yet established |
+| Lower-cost-model economics | **Dogfooded, not benchmarked** — task-level cost-per-success results are still needed |
 
 **Roadmap (selected):** self-learning Phase 2 — crystallizing skills from judge-verified successes — gated on the shadow judge proving trustworthy in real logs first · compass Phase 2 (an observed durable interest proposes a focus area, you ratify it) · write-capable autonomous actions behind stricter budget + audit · npm / Docker publishing.
 
