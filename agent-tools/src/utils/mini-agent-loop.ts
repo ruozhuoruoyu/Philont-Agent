@@ -103,6 +103,14 @@ export interface MiniLoopToolRunResult {
    * would have turned each of them into a resumable authorization checkpoint.
    */
   policyDenied?: boolean;
+  /**
+   * When policyDenied: WHICH capability was refused. A sub-loop cannot ask for it, but the turn above
+   * can — and only if it is told what to ask for. "planAndExecute needs something" is not a question
+   * an owner can answer; "shell (execute/local)" is.
+   */
+  deniedTool?: string;
+  deniedCapability?: string;
+  deniedDomain?: string;
 }
 
 export interface MiniAgentLoopOptions {

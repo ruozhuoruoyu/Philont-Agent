@@ -125,3 +125,53 @@ test('a chat approval reaching the background loop no longer brings the whole sh
   assert.ok(await check(call('shell', { command: 'rm -rf /' })), 'but not this');
   assert.ok(await check(call('shell', { command: 'git push origin main' })), 'and not an unattended publish');
 });
+
+// ── the card the sub-loop cannot raise ──────────────────────────────────────────────────────────
+
+test('a blocked plan is turned into a question the owner can answer', async () => {
+  const { subLoopBlockedAuthorization } = await import('../src/chat-handler.js');
+
+  // What planAndExecute returns when the policy layer refused one of its steps.
+  const blocked = subLoopBlockedAuthorization({
+    success: false,
+    data: {
+      outcome: 'blocked',
+      authorizationRequired: true,
+      resumable: true,
+      blockedSubTaskId: 'st-2',
+      blockedTool: 'shell',
+      blockedCapability: 'execute',
+      blockedDomain: 'local',
+    },
+  });
+  assert.deepEqual(blocked, { tool: 'shell', capability: 'execute', domain: 'local', subTaskId: 'st-2' });
+
+  // An ordinary result is not a request for authorization.
+  assert.equal(subLoopBlockedAuthorization({ success: true, data: { results: [] } }), null);
+  assert.equal(subLoopBlockedAuthorization({ success: false }), null);
+});
+
+test('without a named capability there is no card, because there is no answerable question', async () => {
+  const { subLoopBlockedAuthorization } = await import('../src/chat-handler.js');
+  // "planAndExecute needs something" is not something an owner can say yes or no to; the report
+  // speaks for itself instead of interrupting with a blank.
+  assert.equal(
+    subLoopBlockedAuthorization({
+      success: false,
+      data: { authorizationRequired: true, blockedSubTaskId: 'st-2' },
+    }),
+    null,
+  );
+});
+
+test('the structured channel is read, not the prose', async () => {
+  const { subLoopBlockedAuthorization } = await import('../src/chat-handler.js');
+  // A model writing the words in its own summary must not be able to conjure an approval card.
+  assert.equal(
+    subLoopBlockedAuthorization({
+      success: true,
+      data: { summary: 'AUTHORIZATION_REQUIRED — blockedTool: shell (execute/local)' },
+    }),
+    null,
+  );
+});

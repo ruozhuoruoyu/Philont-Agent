@@ -68,6 +68,10 @@ export interface PlanExecCheckpoint {
   completed: SubTaskResult[];
   blockedSubTaskId: string;
   blockedReason: string;
+  /** The capability the refused call needed, so the turn above can ask for exactly that. */
+  blockedTool?: string;
+  blockedCapability?: string;
+  blockedDomain?: string;
   createdAt: number;
 }
 
@@ -679,6 +683,9 @@ function blockedResult(
       authorizationRequired: true,
       resumable: true,
       blockedSubTaskId: checkpoint.blockedSubTaskId,
+      blockedTool: checkpoint.blockedTool,
+      blockedCapability: checkpoint.blockedCapability,
+      blockedDomain: checkpoint.blockedDomain,
     },
   };
 }
@@ -858,9 +865,15 @@ async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult
     // sub-model is told to stop and report, and it usually will — but a mechanism that only works
     // when the model cooperates is a suggestion, not a mechanism.
     let authDenial: string | null = null;
+    let deniedCapability: { tool?: string; capability?: string; domain?: string } = {};
     const watchedRunner = async (name: string, input: Record<string, unknown>) => {
       const r = await toolRunner(name, input);
-      if (!r.ok && r.policyDenied === true) authDenial ??= r.error ?? SUBLOOP_AUTH_DENIED;
+      if (!r.ok && r.policyDenied === true) {
+        authDenial ??= r.error ?? SUBLOOP_AUTH_DENIED;
+        if (!deniedCapability.tool) {
+          deniedCapability = { tool: r.deniedTool, capability: r.deniedCapability, domain: r.deniedDomain };
+        }
+      }
       return r;
     };
 
@@ -937,6 +950,9 @@ async function runExecutePhase(opts: ExecutePhaseOptions): Promise<SubTaskResult
           .filter((x): x is SubTaskResult => x !== undefined),
         blockedSubTaskId: st.id,
         blockedReason: authDenial,
+        blockedTool: deniedCapability.tool,
+        blockedCapability: deniedCapability.capability,
+        blockedDomain: deniedCapability.domain,
         createdAt: Date.now(),
       });
       onProgress?.(

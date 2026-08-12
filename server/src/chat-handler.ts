@@ -2519,13 +2519,46 @@ function getSubLoopChecker() {
   return subLoopChecker;
 }
 
+/**
+ * Did this tool result say "a plan stopped because it lacked an approval, and here is which one"?
+ *
+ * Reads the structured channel rather than the prose: the same report in `output` is what the model
+ * sees, and a turn that decided whether to interrupt its owner by matching sentences would be one
+ * more mechanism resting on how a model chose to phrase something.
+ */
+export function subLoopBlockedAuthorization(
+  result: { success: boolean; data?: Record<string, unknown> },
+): { tool: string; capability: string; domain: string; subTaskId: string } | null {
+  const d = result.data;
+  if (!d || d.authorizationRequired !== true) return null;
+  const tool = typeof d.blockedTool === 'string' ? d.blockedTool : null;
+  const capability = typeof d.blockedCapability === 'string' ? d.blockedCapability : null;
+  const domain = typeof d.blockedDomain === 'string' ? d.blockedDomain : null;
+  // Without a named capability there is no answerable question; let the report speak for itself.
+  if (!tool || !capability || !domain) return null;
+  return {
+    tool,
+    capability,
+    domain,
+    subTaskId: typeof d.blockedSubTaskId === 'string' ? d.blockedSubTaskId : '?',
+  };
+}
+
 /** Escape hatch if this turns out to break a flow at an inconvenient hour. Default: enforced. */
 const subLoopPolicyEnabled = (): boolean => process.env.PHILONT_SUBLOOP_POLICY !== 'off';
 
 const subTurnToolRunner = async (
   name: string,
   input: Record<string, unknown>,
-): Promise<{ ok: boolean; output: string; error?: string; policyDenied?: boolean }> => {
+): Promise<{
+  ok: boolean;
+  output: string;
+  error?: string;
+  policyDenied?: boolean;
+  deniedTool?: string;
+  deniedCapability?: string;
+  deniedDomain?: string;
+}> => {
   try {
     if (subLoopPolicyEnabled()) {
       const denial = await getSubLoopChecker()({
@@ -2543,6 +2576,9 @@ const subTurnToolRunner = async (
           // Structured, so a business error that happens to say "not authorized" — an HTTP 401 body,
           // say — is never mistaken for OUR refusal and turned into a resumable checkpoint.
           policyDenied: true,
+          deniedTool: name,
+          deniedCapability: cls?.capability,
+          deniedDomain: cls?.domain,
           error:
             `${SUBLOOP_AUTH_DENIED} for this sub-task: ${name} (${capability}). ${denial}\n` +
             `A sub-task inherits the approvals this turn already has and cannot request new ones — ` +
@@ -10724,6 +10760,55 @@ async function runToolLoop(
       },
       { sessionId, excludeDirs: [memory.planFiles.baseDir] },
     );
+    // A SUB-LOOP CANNOT ASK. THIS TURN CAN.
+    //
+    // planAndExecute stops when the policy layer refuses one of its steps, keeps what it finished,
+    // and says which capability it needed. Up to here that report went into the transcript and the
+    // owner learned about it only if the model chose to mention it — which is the shape of every
+    // other thing that quietly did not happen.
+    //
+    // So the turn raises the card itself, and raises it for the CAPABILITY THAT WAS REFUSED rather
+    // than for the wrapper: "shell (execute/local)" is a question an owner can answer;
+    // "planAndExecute needs something" is not. Approving it grants that capability and replays this
+    // same call, which resumes from the checkpoint instead of re-running the finished steps.
+    const blocked = subLoopBlockedAuthorization(result);
+    if (blocked && !isAutonomousTurn) {
+      const remainingCalls = calls.slice(calls.indexOf(call) + 1);
+      pendingAuth.set(sessionId, {
+        goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
+        executionState: 'awaiting_auth',
+        callLedger: [
+          ...toolResults.map((r) => ({ id: r.tool_use_id, name: ledgerToolName(r.tool_use_id, calls), state: 'completed' as const })),
+          { id: call.id, name: call.name, state: 'awaiting_auth' as const },
+          ...remainingCalls.map((c) => ({ id: c.id, name: c.name, state: 'queued' as const })),
+        ],
+        capability: blocked.capability,
+        domain: blocked.domain,
+        toolName: blocked.tool,
+        toolCallId: call.id,
+        // Replaying planAndExecute is what resumes the plan; the checkpoint holds the finished work.
+        input: call.input,
+        remainingCalls,
+        collectedResults: toolResults,
+        iteration: startIteration,
+        inflightMessages: [...messages],
+        priorInTurnRecords: [...(signalBus.inTurnRecords ?? [])],
+        ts: Date.now(),
+      });
+      persistContinuation(sessionId);
+      console.warn(
+        `[plan-execute] session=${safeSessionId(sessionId)} plan blocked at ${blocked.subTaskId}; ` +
+          `raising a card for ${blocked.tool} (${blocked.capability}/${blocked.domain}) — approval resumes the plan`,
+      );
+      onAuthRequest({
+        toolName: blocked.tool,
+        capability: blocked.capability,
+        domain: blocked.domain,
+        input: { neededBy: `plan sub-task ${blocked.subTaskId}` },
+      });
+      return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+    }
+
     const rawResultText = formatToolResultContent(result);
     toolResults.push({
       type: 'tool_result',
