@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# CONCEPT ART ONLY — this renders a hand-authored SVG with invented UI/data.
+# It is not a screen recording and must not be presented as product evidence.
+# The README intentionally does not embed this output; replace it with a real,
+# reproducible recording before adding a demo there.
+
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 svg_path="$repo_dir/docs/media/readme-demo.svg"
 output_path="$repo_dir/docs/media/philont-demo.gif"
@@ -25,4 +30,4 @@ ffmpeg -y -framerate 0.55 -i "$frames_dir/frame-%d.png" \
   -vf "split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
   -loop 0 "$output_path" >/dev/null 2>&1
 
-echo "Wrote $output_path"
+echo "Wrote concept illustration (NOT a product recording): $output_path"
