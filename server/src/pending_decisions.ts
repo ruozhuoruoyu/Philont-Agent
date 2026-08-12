@@ -68,7 +68,20 @@ export interface DecisionListSnapshot {
 export const SNAPSHOT_TTL_MS = 30 * 60_000;
 
 export type ReplyRouting =
-  | { kind: 'addressed'; id: string; how: 'quoted' | 'indexed' | 'named' | 'only-one' }
+  | {
+      kind: 'addressed';
+      id: string;
+      how: 'quoted' | 'indexed' | 'named' | 'only-one';
+      /**
+       * What is left of the reply once the addressing tokens are removed — the part that actually
+       * says yes or no, for the module to classify with its own vocabulary.
+       *
+       * Separating these two is not tidiness. "1" addresses the first item and states NOTHING about
+       * it; reading an address as an approval is how a card gets authorized by a person who was only
+       * pointing at it. Empty here means "which one" was answered and "well?" was not.
+       */
+      verdictText: string;
+    }
   | { kind: 'ambiguous'; candidates: PendingDecision[] }
   /** Exactly one candidate, but it is not the kind of thing a bare yes may decide. */
   | { kind: 'needs-address'; decision: PendingDecision }
@@ -101,7 +114,7 @@ function resolveOrdinal(
   live: readonly PendingDecision[],
   snapshot: DecisionListSnapshot | undefined,
   now: number,
-): PendingDecision | null {
+): { decision: PendingDecision; remainder: string } | null {
   if (!snapshot || now - snapshot.displayedAt > SNAPSHOT_TTL_MS) return null;
   const normalized = normalize(reply);
   const m = normalized.match(/^第?([0-9１-９]{1,2})[个号.、]?/) ?? normalized.match(/第([0-9１-９]{1,2})个?/);
@@ -114,9 +127,9 @@ function resolveOrdinal(
   if (!target) return null; // that slot has since been resolved or expired
 
   const remainder = normalized.replace(m[0], '');
-  if (remainder.length === 0) return target;
+  if (remainder.length === 0) return { decision: target, remainder: '' };
   return target.offered.length === 0 || target.offered.some((w) => remainder === normalize(w))
-    ? target
+    ? { decision: target, remainder }
     : null;
 }
 
@@ -144,16 +157,26 @@ export function routeReply(
   if (opts.quotedText && opts.quotedText.trim()) {
     const quoted = normalize(opts.quotedText);
     const hit = live.find((d) => quoted.includes(normalize(d.title)) || quoted.includes(normalize(d.id)));
-    if (hit) return { kind: 'addressed', id: hit.id, how: 'quoted' };
+    if (hit) return { kind: 'addressed', id: hit.id, how: 'quoted', verdictText: reply };
   }
 
   // 2. An id, said outright — the form that survives arriving in a different conversation.
   const named = live.find((d) => mentionsId(reply, d.id));
-  if (named) return { kind: 'addressed', id: named.id, how: 'named' };
+  if (named) {
+    const verdictText = normalize(reply).replace(normalize(named.id), '');
+    return { kind: 'addressed', id: named.id, how: 'named', verdictText };
+  }
 
   // 3. A position in the list as it was shown.
   const byOrdinal = resolveOrdinal(reply, live, opts.snapshot, opts.now);
-  if (byOrdinal) return { kind: 'addressed', id: byOrdinal.id, how: 'indexed' };
+  if (byOrdinal) {
+    return {
+      kind: 'addressed',
+      id: byOrdinal.decision.id,
+      how: 'indexed',
+      verdictText: byOrdinal.remainder,
+    };
+  }
 
   // 4. Nothing points at a specific one. A reply using none of the offered vocabulary is not an
   //    answer to a card at all — it is a new message, and every card stays up.
@@ -170,7 +193,7 @@ export function routeReply(
   if (only.resolutionPolicy === 'explicit_address_required') {
     return { kind: 'needs-address', decision: only };
   }
-  return { kind: 'addressed', id: only.id, how: 'only-one' };
+  return { kind: 'addressed', id: only.id, how: 'only-one', verdictText: reply };
 }
 
 /**
@@ -212,6 +235,24 @@ export function renderNeedsAddressPrompt(
       `Reply "1 yes", quote the card, or say the id ${decision.id}.`
     : `这一件需要你明确指向，所以我没有执行：\n1. ${decision.title}${what}\n\n` +
       `回复「1 同意」、引用那张卡片，或者说出编号 ${decision.id}。`;
+}
+
+/**
+ * Addressed, but with nothing said about it. "1" points at the first item and states no opinion of
+ * it, and a card whose own vocabulary is "1 = go deep / 2 = answer flat" makes that collision easy
+ * to walk into: the same character is a position in one context and an answer in the other. Which
+ * one it is depends on whether a numbered list was just shown, and the part that decides — yes or
+ * no — has to be present either way.
+ */
+export function needsVerdict(decision: PendingDecision, verdictText: string): boolean {
+  return decision.offered.length > 0 && verdictText.trim().length === 0;
+}
+
+export function renderVerdictPrompt(decision: PendingDecision, lang: 'zh' | 'en' = 'zh'): string {
+  const options = decision.offered.slice(0, 4).join(' / ');
+  return lang === 'en'
+    ? `Got which one — ${decision.title} — but not your answer. Reply ${options}.`
+    : `知道你说的是哪一件了——${decision.title}——但还不知道你的决定。请回复 ${options}。`;
 }
 
 /**

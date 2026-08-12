@@ -46,9 +46,17 @@ const publish = decision({
   resolutionPolicy: 'explicit_address_required',
 });
 
+/** Addressing is what these assert; the verdict text is checked where it is the point. */
+function assertAddressed(r: ReturnType<typeof routeReply>, id: string, how: string) {
+  assert.equal(r.kind, 'addressed');
+  if (r.kind !== 'addressed') return;
+  assert.equal(r.id, id);
+  assert.equal(r.how, how);
+}
+
 test('one thing outstanding: a bare yes answers it', () => {
   const r = routeReply('同意', [research], { now: NOW });
-  assert.deepEqual(r, { kind: 'addressed', id: 'r7k2', how: 'only-one' });
+  assertAddressed(r, 'r7k2', 'only-one');
 });
 
 test('two things outstanding: a bare yes is NOT applied to either', () => {
@@ -66,18 +74,14 @@ test('quoting the card is exact, and costs the owner nothing', () => {
     now: NOW,
     quotedText: '后台研究「LRC k=13」请求使用 shell 跑数值验证',
   });
-  assert.deepEqual(r, { kind: 'addressed', id: 'r7k2', how: 'quoted' });
+  assertAddressed(r, 'r7k2', 'quoted');
 });
 
 const shown = { displayedAt: NOW, ordinals: ['r7k2', 'p4m8'] };
 
 test('a number picks one out of the list that was shown', () => {
-  assert.deepEqual(routeReply('2 同意', [research, publish], { now: NOW, snapshot: shown }), {
-    kind: 'addressed', id: 'p4m8', how: 'indexed',
-  });
-  assert.deepEqual(routeReply('第1个', [research, publish], { now: NOW, snapshot: shown }), {
-    kind: 'addressed', id: 'r7k2', how: 'indexed',
-  });
+  assertAddressed(routeReply('2 同意', [research, publish], { now: NOW, snapshot: shown }), 'p4m8', 'indexed');
+  assertAddressed(routeReply('第1个', [research, publish], { now: NOW, snapshot: shown }), 'r7k2', 'indexed');
   // Out of range is not an index, and a bare number answers nothing on its own: unaddressed beats
   // confidently wrong, and every card stays up.
   assert.equal(routeReply('9', [research, publish], { now: NOW, snapshot: shown }).kind, 'unaddressed');
@@ -93,9 +97,7 @@ test('a number picks one out of the list that was shown', () => {
 });
 
 test('an id said outright works, for a reply that arrives somewhere else entirely', () => {
-  assert.deepEqual(routeReply('允许 r7k2', [research, publish], { now: NOW }), {
-    kind: 'addressed', id: 'r7k2', how: 'named',
-  });
+  assertAddressed(routeReply('允许 r7k2', [research, publish], { now: NOW }), 'r7k2', 'named');
 });
 
 test('an ordinary message leaves every card standing', () => {
@@ -108,22 +110,16 @@ test('an ordinary message leaves every card standing', () => {
 
 test('expired cards are not answerable, and do not make a live one ambiguous', () => {
   const stale = decision({ id: 'old', expiresAt: NOW - 1 });
-  assert.deepEqual(routeReply('同意', [stale, research], { now: NOW }), {
-    kind: 'addressed', id: 'r7k2', how: 'only-one',
-  });
+  assertAddressed(routeReply('同意', [stale, research], { now: NOW }), 'r7k2', 'only-one');
   assert.deepEqual(routeReply('同意', [stale], { now: NOW }), { kind: 'unaddressed' });
 });
 
 test('an open question has no offered words, so anything can be its answer', () => {
   const question = decision({ id: 'q2n6', kind: 'question', title: '部署到 staging 还是 production？', offered: [] });
-  assert.deepEqual(routeReply('用 staging', [question], { now: NOW }), {
-    kind: 'addressed', id: 'q2n6', how: 'only-one',
-  });
+  assertAddressed(routeReply('用 staging', [question], { now: NOW }), 'q2n6', 'only-one');
   // With an authorization also outstanding, free text still lands on the question — it is the only
   // one that COULD be answered this way, and "同意/拒绝" is not what was typed.
-  assert.deepEqual(routeReply('用 staging', [question, research], { now: NOW }), {
-    kind: 'addressed', id: 'q2n6', how: 'only-one',
-  });
+  assertAddressed(routeReply('用 staging', [question, research], { now: NOW }), 'q2n6', 'only-one');
   // Whereas a word both could take is refused, as always.
   assert.equal(routeReply('同意', [question, research], { now: NOW }).kind, 'ambiguous');
 });
@@ -177,9 +173,7 @@ test('an ordinal means the list the owner SAW, not the list as it is now', () =>
   const arrivedLater = decision({ id: 'z9', title: '另一个研究请求 http' });
   const live = [arrivedLater, research, publish];
 
-  assert.deepEqual(routeReply('1 同意', live, { now: NOW, snapshot: shownList }), {
-    kind: 'addressed', id: 'r7k2', how: 'indexed',
-  });
+  assertAddressed(routeReply('1 同意', live, { now: NOW, snapshot: shownList }), 'r7k2', 'indexed');
 });
 
 test('a stale snapshot stops addressing by number', () => {
@@ -238,4 +232,52 @@ test('the book records the list it rendered', () => {
   book.add('s1', publish);
   book.snapshot('s1', book.list('s1', NOW), NOW);
   assert.deepEqual(book.lastSnapshot('s1')?.ordinals, ['r7k2', 'p4m8']);
+});
+
+// ── pointing at something is not agreeing to it ─────────────────────────────────────────────────
+
+test('a bare ordinal addresses without deciding', async () => {
+  const { needsVerdict, renderVerdictPrompt } = await import('../src/pending_decisions.js');
+  const shownList = { displayedAt: NOW, ordinals: ['r7k2', 'p4m8'] };
+
+  const r = routeReply('1', [research, publish], { now: NOW, snapshot: shownList });
+  assert.equal(r.kind, 'addressed');
+  if (r.kind !== 'addressed') return;
+  assert.equal(r.id, 'r7k2');
+  assert.equal(r.verdictText, '', 'nothing was said about it');
+  assert.equal(needsVerdict(research, r.verdictText), true, 'so it must be asked, not assumed');
+  assert.match(renderVerdictPrompt(research), /同意/);
+
+  // With the answer attached it resolves in one go.
+  const full = routeReply('1 同意', [research, publish], { now: NOW, snapshot: shownList });
+  assert.equal(full.kind === 'addressed' && needsVerdict(research, full.verdictText), false);
+});
+
+test('the deep-explore ask answers 1/2 itself — a shown list is what makes numbers positions', async () => {
+  const { needsVerdict } = await import('../src/pending_decisions.js');
+  // Its own vocabulary, from classifyExploreAskReply: 1 = go deep, 2 = answer flat.
+  const ask = decision({
+    id: 'de1',
+    kind: 'deep_explore_entry',
+    title: '要为这个问题进入深度推理吗',
+    offered: ['1', '2', '进', '直接'],
+  });
+
+  // No list shown: "1" is the ask's own answer, and it carries a verdict.
+  const alone = routeReply('1', [ask], { now: NOW });
+  assert.equal(alone.kind, 'addressed');
+  if (alone.kind === 'addressed') {
+    assert.equal(alone.id, 'de1');
+    assert.equal(needsVerdict(ask, alone.verdictText), false, '"1" IS the answer here');
+  }
+
+  // A list was shown: now "1" is a position, and the module must still ask what the owner wants.
+  const shownList = { displayedAt: NOW, ordinals: ['de1', 'r7k2'] };
+  const listed = routeReply('1', [ask, research], { now: NOW, snapshot: shownList });
+  assert.equal(listed.kind === 'addressed' && listed.id, 'de1');
+  assert.equal(
+    listed.kind === 'addressed' && needsVerdict(ask, listed.verdictText),
+    true,
+    'the same character must not silently mean "go deep" once it also means "the first one"',
+  );
 });
