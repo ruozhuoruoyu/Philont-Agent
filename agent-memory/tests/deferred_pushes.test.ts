@@ -15,8 +15,8 @@ test('deferred pushes upsert by semantic identity and acknowledge only explicitl
 
   assert.equal(h.deferredPushes.count(), 1);
   assert.equal(updated.id, first.id);
-  assert.equal(h.deferredPushes.peek('wechat', 'owner', 3_000)?.text, 'new');
-  assert.equal(h.deferredPushes.count(), 1, 'peek must not consume before a confirmed send');
+  assert.equal(h.deferredPushes.listPending('wechat', 'owner', 1, 3_000)[0]?.text, 'new');
+  assert.equal(h.deferredPushes.count(), 1, 'listing must not consume before a confirmed send');
   assert.equal(h.deferredPushes.markDelivered(first.id), true);
   assert.equal(h.deferredPushes.count(), 0);
   h.close();
@@ -37,7 +37,12 @@ test('deferred pushes expire and urgent notices are selected before digests', ()
     targetRef: 'u', text: 'urgent', expiresAt: 20_000,
   }, 1_200);
 
-  assert.equal(h.deferredPushes.pruneExpired(3_000), 1);
+  assert.deepEqual(h.deferredPushes.pruneExpired(3_000), {
+    count: 1, byKind: { old: 1 }, byChannel: { wechat: 1 },
+  });
+  assert.deepEqual(h.deferredPushes.takePrunedSummary(), {
+    count: 1, byKind: { old: 1 }, byChannel: { wechat: 1 },
+  });
   assert.deepEqual(h.deferredPushes.listPending('wechat', 'owner', 3, 3_000).map((p) => p.text), ['urgent', 'digest']);
   assert.equal(h.deferredPushes.count(), 2, 'expired rows are pruned');
   h.close();

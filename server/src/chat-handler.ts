@@ -997,11 +997,18 @@ export async function runDailyHealthCheck(force = false): Promise<string | null>
       consequence: v.consequence,
     }));
 
-    if (!shouldSendHealthReport(ratios, broken)) {
+    const expiredDeferred = dayCount(metricsSnap, 'push.deferred_expired.day', today);
+
+    if (!shouldSendHealthReport(ratios, broken) && expiredDeferred === 0) {
       console.log('[health] daily self-check: nothing degenerate — not interrupting the owner');
       return null;
     }
-    const text = renderHealthReport(ratios, broken, lang);
+    let text = renderHealthReport(ratios, broken, lang);
+    if (expiredDeferred > 0) {
+      text += lang === 'en'
+        ? `\n· Proactive delivery: ${expiredDeferred} queued notice(s) expired before reaching you.`
+        : `\n· 主动送达:${expiredDeferred} 条排队通知在送达你之前已过期。`;
+    }
     console.log(`[health] daily self-check reporting to owner:\n${text}`);
     for (const [, send] of webuiClients) {
       try { send({ type: 'finding', text }); } catch { /* one dead client must not stop the rest */ }

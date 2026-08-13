@@ -45,7 +45,7 @@ import { BackupRunner, type BackupConfig } from './backup.js';
 
 export { MemoryStore } from './store.js';
 export { DeferredPushStore } from './deferred_pushes.js';
-export type { DeferredPush, DeferredPushSeverity } from './deferred_pushes.js';
+export type { DeferredPush, DeferredPushSeverity, DeferredPushExpirySummary } from './deferred_pushes.js';
 export { NotesStore } from './notes.js';
 export { RawStore } from './raw.js';
 export { ActionLog } from './actions.js';

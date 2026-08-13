@@ -19,7 +19,6 @@ test('next inbound appends one deferred notice to the normal reply in a single s
     accountId: 'account', outbound: new OutboundQueue(sender), logger,
     chatSend: async (_sid, _text, onDelta) => { onDelta('## For User\nnormal reply'); },
     deferredPushes: {
-      pruneExpired: () => 0,
       listPending: () => [{ id: 'd1', kind: 'health_selfcheck', text: 'daily health report' }],
       markManyDelivered: (ids) => { acked = ids.includes('d1'); return acked ? 1 : 0; },
     },
@@ -39,7 +38,6 @@ test('a rejected combined reply does not consume the deferred notice', async () 
     accountId: 'account', outbound: new OutboundQueue(sender), logger,
     chatSend: async (_sid, _text, onDelta) => { onDelta('## For User\nnormal reply'); },
     deferredPushes: {
-      pruneExpired: () => 0,
       listPending: () => [{ id: 'd1', kind: 'health_selfcheck', text: 'daily health report' }],
       markManyDelivered: () => { acked = true; return 1; },
     },
@@ -59,7 +57,6 @@ test('an authorization card takes priority and leaves deferred notices untouched
       onAuth({ toolName: 'shell', capability: 'execute', domain: 'local', input: { command: 'echo ok' } });
     },
     deferredPushes: {
-      pruneExpired: () => 0,
       listPending: () => [{ id: 'd1', kind: 'health_selfcheck', text: 'daily health report' }],
       markManyDelivered: () => { acked = true; return 1; },
     },
@@ -81,7 +78,6 @@ test('bounded batching appends at most three notices and marks truncation explic
     accountId: 'account', outbound: new OutboundQueue(sender), logger,
     chatSend: async (_sid, _text, onDelta) => { onDelta('## For User\nreply'); },
     deferredPushes: {
-      pruneExpired: () => 2,
       listPending: (_c, _p, limit = 0) => {
         requestedLimit = limit;
         return [

@@ -380,9 +380,35 @@ test('dispatcher: WeChat ret=-2 becomes one durable next-inbound item, not a bli
   assert.equal(first.deferred, 1);
   assert.equal(second.deferred, 1);
   assert.equal(h.deferredPushes.count(), 1, 'semantic upsert prevents duplicate cards');
-  const pending = h.deferredPushes.peek(f.channel.name, 'p1', now)!;
+  const pending = h.deferredPushes.listPending(f.channel.name, 'p1', 1, now)[0]!;
   assert.equal(pending.text, URGENT_REQ.text);
   assert.equal(h.pushSubscriptions.get(f.channel.name, 'p1')!.lastUrgentAt, null);
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
+
+test('dispatcher: partial delivery queues only the remainder and does not claim completion', async () => {
+  const now = 10_000;
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  f.setReturn({
+    ok: false, retry: 'next_inbound', partiallyDelivered: true,
+    deferredText: 'unsent remainder', error: 'allowance exhausted',
+  });
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1', urgentMinIntervalMs: 0 });
+
+  const first = await dispatcher.enqueue(URGENT_REQ);
+  assert.deepEqual(
+    { delivered: first.delivered, partial: first.partiallyDelivered, deferred: first.deferred },
+    { delivered: 0, partial: 1, deferred: 1 },
+  );
+  assert.equal(h.deferredPushes.listPending(f.channel.name, 'p1', 1, now)[0]?.text, 'unsent remainder');
+  assert.equal(h.pushSubscriptions.get(f.channel.name, 'p1')!.lastUrgentAt, null,
+    'partial_deferred must not advance the subscription limiter');
+  await dispatcher.enqueue(URGENT_REQ);
+  assert.equal(f.sent.length, 2, 'partial_deferred is not a complete-delivery dedup fingerprint');
+  assert.equal(h.deferredPushes.count(), 1, 'semantic mailbox upsert keeps one queued remainder');
   unregisterPushChannel(f.channel.name);
   h.close();
 });

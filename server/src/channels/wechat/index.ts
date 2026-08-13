@@ -90,7 +90,6 @@ export interface MountOptions {
   policy?: PolicyConfig;
   logger?: GatewayLogger;
   deferredPushes?: {
-    pruneExpired(now?: number): number;
     listPending(channel: string, peer: string, limit?: number, now?: number): Array<{ id: string; kind: string; text: string }>;
     markManyDelivered(ids: readonly string[]): number;
   };
@@ -366,8 +365,6 @@ export function makeDispatcher(opts: {
     // A failed proactive push is not sent separately here: that would spend the inbound allowance
     // before the current answer. It is appended to the final answer and acknowledged only when the
     // entire combined send succeeds.
-    const expired = deferredPushes?.pruneExpired() ?? 0;
-    if (expired > 0) logger.warn('expired deferred proactive notices pruned', { count: expired });
     const deferred = event.groupId ? [] : (() => {
       const qualified = deferredPushes?.listPending(`wechat:${accountId}`, replyTo, 3) ?? [];
       return qualified.length > 0 ? qualified : deferredPushes?.listPending('wechat', replyTo, 3) ?? [];

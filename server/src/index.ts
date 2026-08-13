@@ -87,6 +87,7 @@ import {
   runDailyHealthCheck,
 } from './chat-handler.js';
 import { currentPhraseLang } from './response_language.js';
+import { maintainDeferredPushes } from './deferred_push_maintenance.js';
 import { readdirSync } from 'node:fs';
 import { utcDateString, groupFailures } from '@agent/memory';
 import {
@@ -892,6 +893,14 @@ server.listen(PORT, () => {
     void runDailyHealthCheck().catch(() => {});
   }, 24 * 60 * 60 * 1000);
   healthTimer.unref?.();
+
+  // Mailbox lifetime is infrastructure, not a WeChat side effect. Run even when WECHAT_ENABLED=0,
+  // and periodically thereafter so an idle/disabled channel cannot make expiry silent.
+  maintainDeferredPushes(memory.deferredPushes, memory.metrics);
+  const deferredPushMaintenanceTimer = setInterval(() => {
+    maintainDeferredPushes(memory.deferredPushes, memory.metrics);
+  }, 60 * 60_000);
+  deferredPushMaintenanceTimer.unref?.();
 
   // Aux-LLM health probe. The aux model is shared by reflection, the learning judge, auth-intent and the
   // intent router; when its endpoint is misconfigured it fails SILENTLY (each caller degrades gracefully,
