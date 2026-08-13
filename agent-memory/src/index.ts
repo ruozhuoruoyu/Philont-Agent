@@ -232,7 +232,13 @@ export {
 } from './drive_config.js';
 export { DriveOutcomeStore } from './drive_outcome.js';
 export { BOOTSTRAP_ROOT_PURSUIT_ID, GLOBAL_TIMELINE_SESSION_ID } from './schema.js';
-export { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES, AGENT_SELF_REFERENCE_NOTE } from './constitution_defaults.js';
+export {
+  DEFAULT_CONSTITUTION_VALUES,
+  LEGACY_DEFAULT_CONSTITUTION_VALUES_V42,
+  DEFAULT_IDENTITY_SELF_DESCRIPTION,
+  DEFAULT_CONSTITUTION_RED_LINES,
+  AGENT_SELF_REFERENCE_NOTE,
+} from './constitution_defaults.js';
 export { inferOriginFromCreatedBy } from './types.js';
 export { startScheduler } from './scheduler.js';
 export type { SchedulerHandle, SchedulerOptions } from './scheduler.js';

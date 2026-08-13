@@ -14,9 +14,13 @@
  */
 
 import type Database from 'better-sqlite3';
-import { DEFAULT_CONSTITUTION_VALUES, DEFAULT_CONSTITUTION_RED_LINES } from './constitution_defaults.js';
+import {
+  DEFAULT_CONSTITUTION_VALUES,
+  LEGACY_DEFAULT_CONSTITUTION_VALUES_V42,
+  DEFAULT_CONSTITUTION_RED_LINES,
+} from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 42;
+export const SCHEMA_VERSION = 43;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -1286,6 +1290,27 @@ function migrateV41ToV42(db: Database.Database): void {
   `);
 }
 
+/** v43: update only the untouched factory identity; owner-authored/ratified constitutions are sacred. */
+function migrateV42ToV43(db: Database.Database): void {
+  db.prepare(
+    `UPDATE memory_pursuits SET constitution_values=?, updated_at=?
+     WHERE id=? AND parent_pursuit_id IS NULL AND constitution_values=?`,
+  ).run(
+    DEFAULT_CONSTITUTION_VALUES,
+    Date.now(),
+    BOOTSTRAP_ROOT_PURSUIT_ID,
+    LEGACY_DEFAULT_CONSTITUTION_VALUES_V42,
+  );
+  db.prepare(
+    `UPDATE memory_pursuits SET intent=?, updated_at=?
+     WHERE id=? AND parent_pursuit_id IS NULL AND intent='serve whoever talks to me'`,
+  ).run(
+    'build a grounded understanding of one owner and advance their directions',
+    Date.now(),
+    BOOTSTRAP_ROOT_PURSUIT_ID,
+  );
+}
+
 function migrateV39ToV40(db: Database.Database): void {
   addColumnIfMissing(db, 'memory_raw_messages', 'origin_session_id', 'TEXT');
 }
@@ -1392,7 +1417,7 @@ function ensureBootstrapRoot(db: Database.Database): void {
     BOOTSTRAP_ROOT_PURSUIT_ID,
     BOOTSTRAP_ROOT_PURSUIT_ID,
     'general assistance',
-    'serve whoever talks to me',
+    'build a grounded understanding of one owner and advance their directions',
     // Seed philont's charter (who it is / how it serves) as the root constitution — see constitution_defaults.ts.
     DEFAULT_CONSTITUTION_VALUES,
     JSON.stringify(DEFAULT_CONSTITUTION_RED_LINES),
@@ -1561,6 +1586,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 42) {
     migrateV41ToV42(db);
+  }
+  if (current < 43) {
+    migrateV42ToV43(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

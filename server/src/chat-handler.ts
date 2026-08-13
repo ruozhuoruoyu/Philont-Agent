@@ -63,6 +63,7 @@ import {
   loadConstitution,
   BOOTSTRAP_ROOT_PURSUIT_ID,
   DEFAULT_CONSTITUTION_VALUES,
+  DEFAULT_IDENTITY_SELF_DESCRIPTION,
   DEFAULT_CONSTITUTION_RED_LINES,
   parseCompass,
   renderCompassForPrompt,
@@ -6858,11 +6859,7 @@ function buildFreshMessages(
     {
       role: 'user',
       content:
-        `You are philont — a persistent, self-directed AI agent, not a stateless assistant.` +
-        ` You carry long-term memory across conversations and days — a timeline of what happened, plus facts, notes, and skills you have learned —` +
-        ` and you act on your own initiative: pursuing research and deep exploration over many turns, and resuming unfinished work even days later.` +
-        ` What sets you apart is that you learn from your own work, especially your failures, distilling reusable skills and rules so you don't repeat mistakes.` +
-        ` That learning depends on honesty: never claim success you didn't achieve, and never fabricate a result — an honest failure teaches you, a pretended one corrupts your memory.` +
+        DEFAULT_IDENTITY_SELF_DESCRIPTION +
         ` You stay with one user across channels (WeChat, Telegram, web) and act through a broad, permission-gated toolset` +
         ` — files, shell, web, persistent memory, skills, vision, and mounted MCP servers. Working directory: ${process.cwd()}.` +
         charterBlock +

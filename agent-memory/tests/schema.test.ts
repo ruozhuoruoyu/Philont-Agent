@@ -10,6 +10,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { initSchema, getSchemaVersion, SCHEMA_VERSION } from '../src/schema.js';
+import {
+  DEFAULT_CONSTITUTION_VALUES,
+  LEGACY_DEFAULT_CONSTITUTION_VALUES_V42,
+} from '../src/constitution_defaults.js';
 
 interface ColumnInfo {
   name: string;
@@ -36,7 +40,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 42);
+  assert.equal(SCHEMA_VERSION, 43);
   assert.ok(tableExists(db, 'deferred_pushes'), 'v42: deferred push mailbox must exist');
 
   // v25: 深度推理两表;v26: value-guided 选点列;v27: technique(MAP-Elites 分桶);v28: owner_session_id(渠道隔离);v29: no_progress_rounds(卡死计数)
@@ -472,7 +476,7 @@ test('migration v36 → v37: reasoning_sessions gets followup_asked_at, existing
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 42);
+  assert.equal(SCHEMA_VERSION, 43);
   assert.ok(hasColumn(db, 'reasoning_sessions', 'followup_asked_at'), 'v37 must add followup_asked_at');
   const row = db.prepare(`SELECT goal, followup_asked_at FROM reasoning_sessions WHERE id = 'rs-old'`).get() as
     { goal: string; followup_asked_at: number | null };
@@ -498,7 +502,7 @@ test('migration v37 → v38: reasoning_nodes gets check_criterion, existing node
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 42);
+  assert.equal(SCHEMA_VERSION, 43);
   assert.ok(hasColumn(db, 'reasoning_nodes', 'check_criterion'), 'v38 must add check_criterion');
   const row = db.prepare(`SELECT claim, check_criterion FROM reasoning_nodes WHERE id = 'rn-old'`).get() as
     { claim: string; check_criterion: string | null };
@@ -525,7 +529,7 @@ test('migration v38 → v39: memory_skills gets from_disk, backfilled to 0', () 
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 42);
+  assert.equal(SCHEMA_VERSION, 43);
   assert.ok(hasColumn(db, 'memory_skills', 'from_disk'), 'v39 must add from_disk');
   const row = db.prepare(`SELECT name, from_disk FROM memory_skills WHERE id = 'sk-old'`).get() as
     { name: string; from_disk: number };
@@ -592,4 +596,34 @@ test('migration v41 → v42: creates the durable deferred-push mailbox', () => {
   initSchema(db);
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
   assert.ok(tableExists(db, 'deferred_pushes'));
+});
+
+test('migration v42 → v43: updates an untouched factory identity', () => {
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.prepare(`UPDATE memory_pursuits SET constitution_values=? WHERE id='default'`)
+    .run(LEGACY_DEFAULT_CONSTITUTION_VALUES_V42);
+  db.prepare(`UPDATE memory_meta SET value = '42' WHERE key = 'schema_version'`).run();
+
+  initSchema(db);
+  const row = db.prepare(`SELECT constitution_values, intent FROM memory_pursuits WHERE id='default'`)
+    .get() as { constitution_values: string; intent: string };
+  assert.equal(row.constitution_values, DEFAULT_CONSTITUTION_VALUES);
+  assert.match(row.constitution_values, /Learn and evolve from actual outcomes/);
+  assert.equal(row.intent, 'build a grounded understanding of one owner and advance their directions');
+});
+
+test('migration v42 → v43: never overwrites an owner-authored constitution', () => {
+  const db = new Database(':memory:');
+  initSchema(db);
+  const ownerAuthored = 'I chose this constitution explicitly.';
+  db.prepare(`UPDATE memory_pursuits SET constitution_values=?, intent=? WHERE id='default'`)
+    .run(ownerAuthored, 'my explicitly chosen root intent');
+  db.prepare(`UPDATE memory_meta SET value = '42' WHERE key = 'schema_version'`).run();
+
+  initSchema(db);
+  const row = db.prepare(`SELECT constitution_values, intent FROM memory_pursuits WHERE id='default'`)
+    .get() as { constitution_values: string; intent: string };
+  assert.equal(row.constitution_values, ownerAuthored);
+  assert.equal(row.intent, 'my explicitly chosen root intent');
 });
