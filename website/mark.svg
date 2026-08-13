@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Philont">
+  <rect width="64" height="64" rx="14" fill="#d8ff47"/>
+  <path d="M18 16h18c8.8 0 15 5.7 15 14.1C51 39 44.5 45 35.2 45H28v7H18V16Zm10 9v11h7.1c3.7 0 6-2.2 6-5.7 0-3.3-2.3-5.3-6-5.3H28Z" fill="#0b0d0c"/>
+</svg>

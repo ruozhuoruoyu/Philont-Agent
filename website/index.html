@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Philont is a self-hosted agent runtime for dependable long-running work with smaller models.">
+  <meta name="theme-color" content="#0b0d0c">
+  <meta property="og:title" content="Philont — reliability lives in the runtime">
+  <meta property="og:description" content="Persistent pursuits, scoped authorization, execution evidence, recovery, memory, and governed learning.">
+  <title>Philont — A runtime for work that outlives a chat</title>
+  <link rel="icon" href="./mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="nav shell">
+    <a class="brand" href="#top" aria-label="Philont home">
+      <img src="./mark.svg" width="30" height="30" alt="">
+      <span>PHILONT</span>
+      <small>developer preview</small>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="#runtime">Runtime</a>
+      <a href="#principles">Principles</a>
+      <a href="#start">Start</a>
+      <a href="https://github.com/ruozhuoruoyu/Philont-Agent/wiki">Docs</a>
+    </nav>
+    <a class="button button-small" href="https://github.com/ruozhuoruoyu/Philont-Agent">GitHub <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <main id="main">
+    <section class="hero shell" id="top">
+      <div class="hero-copy reveal">
+        <p class="eyebrow"><span class="pulse"></span> Self-hosted agent runtime</p>
+        <h1>Work that outlives<br><em>a chat window.</em></h1>
+        <p class="lede">Philont gives smaller models the runtime around intelligence: persistent pursuits, scoped authorization, execution evidence, recovery, memory, and governed learning.</p>
+        <div class="hero-actions">
+          <a class="button" href="#start">Run it locally <span aria-hidden="true">→</span></a>
+          <a class="text-link" href="https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Permission-and-Security">Read the security model</a>
+        </div>
+        <p class="maturity"><strong>Developer preview.</strong> Dogfooded on lower-cost models; task-level cost-per-success benchmarks are not published yet.</p>
+      </div>
+
+      <div class="runtime-card reveal" aria-label="Illustration of the Philont runtime loop">
+        <div class="card-head">
+          <span>RUNTIME / PURSUIT-17</span>
+          <span class="live"><i></i> ACTIVE</span>
+        </div>
+        <div class="objective">
+          <small>OWNER DIRECTION</small>
+          <p>Ship the release only after tests and evidence agree.</p>
+        </div>
+        <ol class="trace" aria-label="Runtime stages">
+          <li class="done" data-stage="1"><b>01</b><span><strong>Persist</strong><small>goal survives the session</small></span><i>✓</i></li>
+          <li class="active" data-stage="2"><b>02</b><span><strong>Plan</strong><small>decompose · review · checkpoint</small></span><i></i></li>
+          <li data-stage="3"><b>03</b><span><strong>Authorize</strong><small>grant stays with its purpose</small></span><i></i></li>
+          <li data-stage="4"><b>04</b><span><strong>Execute</strong><small>tools write an evidence ledger</small></span><i></i></li>
+          <li data-stage="5"><b>05</b><span><strong>Verify</strong><small>claim and execution must agree</small></span><i></i></li>
+        </ol>
+        <div class="ledger">
+          <span>EXECUTION LEDGER</span>
+          <code><i></i> awaiting authorized step</code>
+        </div>
+        <p class="illustration-note">Architecture illustration — not a product recording.</p>
+      </div>
+    </section>
+
+    <section class="thesis-band">
+      <div class="shell thesis">
+        <p>The bet</p>
+        <h2>Reliability should live in the runtime,<br>not only in model scale.</h2>
+        <div class="signal" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+      </div>
+    </section>
+
+    <section class="section shell" id="runtime">
+      <div class="section-heading reveal">
+        <p class="eyebrow">The runtime around the model</p>
+        <h2>Explicit mechanisms.<br><em>Inspectable consequences.</em></h2>
+        <p>The model proposes. The runtime remembers what matters, controls what may happen, and records what actually did.</p>
+      </div>
+      <div class="mechanism-grid">
+        <article class="mechanism reveal">
+          <span class="index">01 / CONTINUITY</span>
+          <div class="glyph orbit" aria-hidden="true"><i></i><i></i><i></i></div>
+          <h3>Persistent pursuits</h3>
+          <p>Long-running goals survive sessions. A plain-text <code>compass.md</code> declares what the owner wants the agent to pursue—and where it must stop.</p>
+        </article>
+        <article class="mechanism reveal">
+          <span class="index">02 / AUTHORITY</span>
+          <div class="glyph scope" aria-hidden="true"><i></i><i></i></div>
+          <h3>Scoped authorization</h3>
+          <p>A permission stays attached to the pursuit that requested it. Ambiguous replies resolve nothing; consequential commands remain separately gated.</p>
+        </article>
+        <article class="mechanism reveal">
+          <span class="index">03 / EVIDENCE</span>
+          <div class="glyph bars" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+          <h3>Execution evidence</h3>
+          <p>Tool calls create a ledger. Recognized completion claims are checked against it and can be intercepted when the claimed work did not occur.</p>
+        </article>
+        <article class="mechanism reveal">
+          <span class="index">04 / RECOVERY</span>
+          <div class="glyph checkpoint" aria-hidden="true"><i></i><i></i><i></i></div>
+          <h3>Checkpointed recovery</h3>
+          <p>Plans revise around failure and resume from useful work instead of silently restarting. Deferred channel messages survive until delivery or visible expiry.</p>
+        </article>
+        <article class="mechanism reveal">
+          <span class="index">05 / ADAPTATION</span>
+          <div class="glyph branch" aria-hidden="true"><i></i><i></i><i></i></div>
+          <h3>Governed learning</h3>
+          <p>Rules and skills carry maturity, reuse checks, demotion, revision history, and repair paths. The learning judge remains in shadow while its signal earns trust.</p>
+        </article>
+        <article class="mechanism boundary reveal">
+          <span class="index">CURRENT BOUNDARY</span>
+          <h3>Defense in depth,<br>not a sandbox.</h3>
+          <p>Philont is suitable for dogfooding under a trusted operator—not unattended high-risk production changes.</p>
+          <a class="text-link" href="https://github.com/ruozhuoruoyu/Philont-Agent/wiki/Evaluation-Status">See evaluation status →</a>
+        </article>
+      </div>
+    </section>
+
+    <section class="section contrast" id="principles">
+      <div class="shell split">
+        <div class="section-heading reveal">
+          <p class="eyebrow">Why smaller models</p>
+          <h2>Spend intelligence<br><em>where it matters.</em></h2>
+        </div>
+        <div class="argument reveal">
+          <p class="large">Model scale is valuable. It should not have to carry the plan, permissions, memory, retries, and proof of execution inside one transient context.</p>
+          <div class="equation">
+            <div><span>MODEL</span><strong>reason · propose · judge</strong></div>
+            <b>+</b>
+            <div><span>RUNTIME</span><strong>persist · constrain · verify</strong></div>
+          </div>
+          <p>Philont makes Anthropic- and OpenAI-compatible endpoints interchangeable and treats lower-cost models as a first-class target. The claim is practical—not magical: task-level economics still need reproducible benchmarks.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell">
+      <div class="section-heading compact reveal">
+        <p class="eyebrow">Designed for</p>
+        <h2>Developers who keep<br><em>agents running.</em></h2>
+      </div>
+      <div class="fit-list reveal">
+        <div><b>01</b><p>Multi-step, interruptible work</p><span>software · research · automation</span></div>
+        <div><b>02</b><p>Model-cost-aware deployments</p><span>hosted · compatible · local</span></div>
+        <div><b>03</b><p>Inspectable autonomy</p><span>traces · grants · checkpoints</span></div>
+        <div><b>04</b><p>Long-lived collaboration</p><span>memory · pursuits · skills</span></div>
+      </div>
+    </section>
+
+    <section class="section start" id="start">
+      <div class="shell start-grid">
+        <div class="section-heading reveal">
+          <p class="eyebrow">Run it yourself</p>
+          <h2>Point a second mind<br><em>at something real.</em></h2>
+          <p>Pure TypeScript. Self-hosted. Bring an Anthropic- or OpenAI-compatible endpoint.</p>
+        </div>
+        <div class="terminal reveal">
+          <div class="terminal-head"><span></span><span></span><span></span><button type="button" data-copy aria-label="Copy install commands">COPY</button></div>
+          <pre><code><span>$</span> git clone https://github.com/ruozhuoruoyu/Philont-Agent.git
+<span>$</span> cd Philont-Agent
+<span>$</span> ./scripts/start.sh
+
+<i># Windows: .\scripts\start.ps1</i></code></pre>
+          <p data-copy-status aria-live="polite"></p>
+        </div>
+      </div>
+      <div class="shell final-cta reveal">
+        <p>Read the code. Inspect the boundaries. Shape the runtime.</p>
+        <div>
+          <a class="button light" href="https://github.com/ruozhuoruoyu/Philont-Agent">View on GitHub <span aria-hidden="true">↗</span></a>
+          <a class="text-link light-link" href="https://github.com/ruozhuoruoyu/Philont-Agent/wiki">Explore the wiki</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer shell">
+    <div class="brand"><img src="./mark.svg" width="26" height="26" alt=""><span>PHILONT</span></div>
+    <p>Open source under MIT · Developer preview</p>
+    <nav aria-label="Footer navigation">
+      <a href="https://github.com/ruozhuoruoyu/Philont-Agent">GitHub</a>
+      <a href="https://github.com/ruozhuoruoyu/Philont-Agent/wiki">Wiki</a>
+      <a href="https://github.com/ruozhuoruoyu/Philont-Agent/blob/main/SECURITY.md">Security</a>
+    </nav>
+  </footer>
+</body>
+</html>
