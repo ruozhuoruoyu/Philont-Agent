@@ -42,17 +42,29 @@ const rowToPush = (r: DeferredPushRow): DeferredPush => ({
   createdAt: r.created_at, updatedAt: r.updated_at, expiresAt: r.expires_at,
 });
 
+/**
+ * Ownership convention: **an expired row should only be deleted by a caller that durably records the
+ * expiry first.** This is call-site discipline, not a guarantee — `pruneExpired` is public (the only
+ * maintainer lives in the server package) and nothing here stops a future caller from bypassing it. What
+ * enforces it today is a single production call site plus a test that fails if an ordinary write starts
+ * pruning again.
+ *
+ * The convention exists because DELETE and the durable account of it are two statements, not one
+ * transaction: whoever deletes can crash before recording. Keeping the deleter singular reduces that to
+ * one narrow window inside the maintenance pass; it does not remove it. Strictly never losing an expiry
+ * would need an expiry ledger written in the same SQLite transaction as the DELETE, which would couple
+ * this store to the metrics schema — deliberately not done, because expiry counts are observability, not
+ * business state.
+ *
+ * Reads never depended on pruning: `listPending` filters on `expires_at > now`, so an unpruned expired
+ * row is undeliverable, merely still resident. Leaving it until the next maintenance pass costs at most
+ * an hour of dead rows.
+ */
 export class DeferredPushStore {
-  private lastLazyPruneAt = Number.NEGATIVE_INFINITY;
-  private unreportedExpiry: DeferredPushExpirySummary = { count: 0, byKind: {}, byChannel: {} };
-
   constructor(private readonly db: Database.Database) {}
 
   /** Upsert by semantic identity so repeated retries never create duplicate cards. */
   enqueue(input: Omit<DeferredPush, 'id' | 'createdAt' | 'updatedAt'>, now = Date.now()): DeferredPush {
-    // The timer is the primary lifecycle owner. This bounded lazy pass covers long event-loop stalls and
-    // embeddings that use the memory package without starting the server maintenance timer.
-    if (now - this.lastLazyPruneAt >= 60_000) this.pruneExpired(now);
     const id = randomUUID();
     this.db.prepare(
       `INSERT INTO deferred_pushes
@@ -73,9 +85,12 @@ export class DeferredPushStore {
     return row ? rowToPush(row) : null;
   }
 
-  /** Remove expired rows and retain a non-sensitive aggregate until the maintenance reporter drains it. */
+  /**
+   * Remove expired rows and return the non-sensitive aggregate. The caller MUST persist the returned
+   * summary before doing anything else — see the ownership invariant on this class. Aggregate only:
+   * message text, peer and targetRef never leave the store.
+   */
   pruneExpired(now = Date.now()): DeferredPushExpirySummary {
-    this.lastLazyPruneAt = now;
     const rows = this.db.prepare(
       `SELECT kind, channel, COUNT(*) AS count FROM deferred_pushes
        WHERE expires_at <= ? GROUP BY kind, channel`,
@@ -88,15 +103,7 @@ export class DeferredPushStore {
     }
     if (summary.count > 0) {
       this.db.prepare(`DELETE FROM deferred_pushes WHERE expires_at <= ?`).run(now);
-      this.mergeExpiry(this.unreportedExpiry, summary);
     }
-    return summary;
-  }
-
-  /** Aggregate rows pruned by both timer and lazy-write paths, then clear the reporting buffer. */
-  takePrunedSummary(): DeferredPushExpirySummary {
-    const summary = this.unreportedExpiry;
-    this.unreportedExpiry = { count: 0, byKind: {}, byChannel: {} };
     return summary;
   }
 
@@ -123,11 +130,5 @@ export class DeferredPushStore {
 
   count(): number {
     return (this.db.prepare(`SELECT COUNT(*) AS n FROM deferred_pushes`).get() as { n: number }).n;
-  }
-
-  private mergeExpiry(into: DeferredPushExpirySummary, from: DeferredPushExpirySummary): void {
-    into.count += from.count;
-    for (const [kind, count] of Object.entries(from.byKind)) into.byKind[kind] = (into.byKind[kind] ?? 0) + count;
-    for (const [channel, count] of Object.entries(from.byChannel)) into.byChannel[channel] = (into.byChannel[channel] ?? 0) + count;
   }
 }
