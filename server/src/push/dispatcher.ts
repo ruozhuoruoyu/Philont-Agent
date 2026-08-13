@@ -52,6 +52,8 @@ export interface DispatchResult {
   failed: number;
   /** Accepted into a durable next-inbound mailbox (not yet delivered). */
   deferred: number;
+  /** At least one chunk arrived, but the logical push was not complete. */
+  partiallyDelivered: number;
 }
 
 export interface SkipReason {
@@ -123,7 +125,7 @@ export class PushDispatcher {
 
   /** Main entry point. Caller fire-and-forget; dispatcher does not throw internally. */
   async enqueue(req: PushRequest): Promise<DispatchResult> {
-    const result: DispatchResult = { delivered: 0, skipped: [], failed: 0, deferred: 0 };
+    const result: DispatchResult = { delivered: 0, skipped: [], failed: 0, deferred: 0, partiallyDelivered: 0 };
     const now = this.opts.now();
 
     // 1. Global kill switch
@@ -188,13 +190,16 @@ export class PushDispatcher {
           } else {
             this.opts.subscriptions.markDigestSent(t.channel, t.peer, now);
           }
+          const stale = this.deferredPushes?.get(t.channel, t.peer, req.kind, req.targetRef);
+          if (stale) this.deferredPushes?.markDelivered(stale.id);
         } else {
+          if (sendResult.partiallyDelivered) result.partiallyDelivered += 1;
           if (sendResult.retry === 'next_inbound' && this.deferredPushes) {
             this.deferredPushes.enqueue({
               channel: t.channel, peer: t.peer, severity: req.severity,
               kind: req.kind, targetRef: req.targetRef,
               text: sendResult.deferredText ?? req.text,
-              expiresAt: now + 24 * 60 * 60_000,
+              expiresAt: now + (req.severity === 'urgent' ? 72 : 48) * 60 * 60_000,
             }, now);
             result.deferred += 1;
           } else {
@@ -231,7 +236,7 @@ export class PushDispatcher {
    * would be tuning a funnel we still could not watch.
    */
   private finish(req: PushRequest, result: DispatchResult): DispatchResult {
-    if (result.delivered > 0 && result.skipped.length === 0 && result.failed === 0 && result.deferred === 0) {
+    if (result.delivered > 0 && result.skipped.length === 0 && result.failed === 0 && result.deferred === 0 && result.partiallyDelivered === 0) {
       this.opts.logger.log(`[push] ${req.kind} delivered to ${result.delivered} target(s)`);
       return result;
     }
@@ -239,7 +244,7 @@ export class PushDispatcher {
       .map((s) => `${s.channel}:${s.peer}=${s.reason}${s.detail ? ` (${s.detail})` : ''}`)
       .join(', ');
     this.opts.logger.log(
-      `[push-funnel] ${req.kind} (${req.severity}) → delivered=${result.delivered} deferred=${result.deferred} failed=${result.failed}` +
+      `[push-funnel] ${req.kind} (${req.severity}) → delivered=${result.delivered} partial=${result.partiallyDelivered} deferred=${result.deferred} failed=${result.failed}` +
         (why ? ` skipped=[${why}]` : ''),
     );
     return result;

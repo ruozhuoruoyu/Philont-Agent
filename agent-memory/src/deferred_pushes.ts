@@ -61,19 +61,36 @@ export class DeferredPushStore {
     return row ? rowToPush(row) : null;
   }
 
-  /** One message per inbound turn: urgent first, then oldest digest. Expired rows are removed. */
-  peek(channel: string, peer: string, now = Date.now()): DeferredPush | null {
-    this.db.prepare(`DELETE FROM deferred_pushes WHERE expires_at <= ?`).run(now);
-    const row = this.db.prepare(
+  /** Remove expired rows and return the count so expiration can never be silent. */
+  pruneExpired(now = Date.now()): number {
+    return this.db.prepare(`DELETE FROM deferred_pushes WHERE expires_at <= ?`).run(now).changes;
+  }
+
+  /** Bounded selection: urgent first, then oldest digest. Reading never consumes. */
+  listPending(channel: string, peer: string, limit = 3, now = Date.now()): DeferredPush[] {
+    if (!Number.isInteger(limit) || limit < 1) return [];
+    const rows = this.db.prepare(
       `SELECT * FROM deferred_pushes
        WHERE channel=? AND peer=? AND expires_at>?
-       ORDER BY CASE severity WHEN 'urgent' THEN 0 ELSE 1 END, created_at ASC LIMIT 1`,
-    ).get(channel, peer, now) as DeferredPushRow | undefined;
-    return row ? rowToPush(row) : null;
+       ORDER BY CASE severity WHEN 'urgent' THEN 0 ELSE 1 END, created_at ASC LIMIT ?`,
+    ).all(channel, peer, now, limit) as DeferredPushRow[];
+    return rows.map(rowToPush);
+  }
+
+  /** Compatibility helper for callers that need exactly one. */
+  peek(channel: string, peer: string, now = Date.now()): DeferredPush | null {
+    this.pruneExpired(now);
+    return this.listPending(channel, peer, 1, now)[0] ?? null;
   }
 
   markDelivered(id: string): boolean {
     return this.db.prepare(`DELETE FROM deferred_pushes WHERE id=?`).run(id).changes > 0;
+  }
+
+  markManyDelivered(ids: readonly string[]): number {
+    if (ids.length === 0) return 0;
+    const remove = this.db.prepare(`DELETE FROM deferred_pushes WHERE id=?`);
+    return this.db.transaction((xs: readonly string[]) => xs.reduce((n, id) => n + remove.run(id).changes, 0))(ids);
   }
 
   count(): number {

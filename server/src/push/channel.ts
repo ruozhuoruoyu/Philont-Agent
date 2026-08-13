@@ -51,6 +51,8 @@ export interface PushTextResult {
   code?: number;
   /** Unsent portion when a chunked channel partially delivered before deferring. */
   deferredText?: string;
+  /** At least one chunk arrived but the whole logical message did not. */
+  partiallyDelivered?: boolean;
 }
 
 const channels = new Map<string, PushChannel>();

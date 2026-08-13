@@ -386,3 +386,20 @@ test('dispatcher: WeChat ret=-2 becomes one durable next-inbound item, not a bli
   unregisterPushChannel(f.channel.name);
   h.close();
 });
+
+test('dispatcher: later direct success removes a stale deferred copy of the same notice', async () => {
+  const { h, dispatcher } = setup();
+  const f = fakeChannel();
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1', urgentMinIntervalMs: 0 });
+  h.deferredPushes.enqueue({
+    channel: f.channel.name, peer: 'p1', severity: 'urgent', kind: URGENT_REQ.kind,
+    targetRef: URGENT_REQ.targetRef, text: 'stale', expiresAt: Date.now() + 100_000,
+  });
+
+  const r = await dispatcher.enqueue(URGENT_REQ);
+  assert.equal(r.delivered, 1);
+  assert.equal(h.deferredPushes.count(), 0, 'the old mailbox copy must not be replayed later');
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});

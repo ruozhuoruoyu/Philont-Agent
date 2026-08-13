@@ -37,7 +37,8 @@ test('deferred pushes expire and urgent notices are selected before digests', ()
     targetRef: 'u', text: 'urgent', expiresAt: 20_000,
   }, 1_200);
 
-  assert.equal(h.deferredPushes.peek('wechat', 'owner', 3_000)?.text, 'urgent');
+  assert.equal(h.deferredPushes.pruneExpired(3_000), 1);
+  assert.deepEqual(h.deferredPushes.listPending('wechat', 'owner', 3, 3_000).map((p) => p.text), ['urgent', 'digest']);
   assert.equal(h.deferredPushes.count(), 2, 'expired rows are pruned');
   h.close();
 });
