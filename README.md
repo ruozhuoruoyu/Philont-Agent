@@ -1,4 +1,8 @@
-# Philont
+<p align="center">
+  <img src="website/mark.svg" width="112" height="112" alt="Philont elephant logo">
+</p>
+
+<h1 align="center">Philont</h1>
 
 <p align="center"><b>A self-hosted agent runtime designed to make smaller models dependable on long-running work.</b></p>
 
