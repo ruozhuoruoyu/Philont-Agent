@@ -12,6 +12,7 @@ python3 -m http.server 8080
 
 Then open <http://localhost:8080>.
 
-Deploy the directory as-is to Cloudflare Pages, GitHub Pages, Vercel, Netlify, or any static host. No
-build command is required; the output directory is `website`. Add the production domain only after DNS
-and hosting are chosen (for GitHub Pages, add it as `website/CNAME`).
+The repository's `pages.yml` publishes this directory with GitHub Actions. No build command is required.
+The production domain is `https://philont.ai` and must be configured in **Settings → Pages → Custom
+domain**. GitHub ignores repository `CNAME` files when Pages uses a custom Actions workflow, so this
+directory deliberately does not contain one.
