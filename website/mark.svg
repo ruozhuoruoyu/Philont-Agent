@@ -1,4 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Philont">
-  <rect width="64" height="64" rx="14" fill="#d8ff47"/>
-  <path d="M18 16h18c8.8 0 15 5.7 15 14.1C51 39 44.5 45 35.2 45H28v7H18V16Zm10 9v11h7.1c3.7 0 6-2.2 6-5.7 0-3.3-2.3-5.3-6-5.3H28Z" fill="#0b0d0c"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Philont elephant mark</title>
+  <desc id="desc">A calm elephant whose curled trunk suggests the letter P, representing memory, persistence, and bounded strength.</desc>
+  <rect x="2" y="2" width="60" height="60" rx="17" fill="#111411"/>
+  <path d="M29 13c-9.4 0-17 7.8-17 17.4 0 8.2 5.5 14.9 13.2 16.8V32.5c0-7.2 4.4-13.4 10.7-16A16.6 16.6 0 0 0 29 13Z" fill="#d8ff47"/>
+  <path d="M34.7 14.8c7.7 0 14 6.3 14 14v9.8c0 3.8 2.2 5.7 5.3 5.7v5.4c-7.7 0-12-4.1-12-11.1v-3.8h-4.8v8.9c0 5.8-3.5 9.3-9.2 9.3h-2.8v-6h2.2c2.2 0 3.2-1.1 3.2-3.5V29.1c0-3.3 1.3-6.4 3.5-8.7-2.6.3-4.9 1.4-6.8 3.2l-4-4.4a16.6 16.6 0 0 1 11.4-4.4Z" fill="#f1f0e9"/>
+  <circle cx="41.5" cy="25.3" r="2.25" fill="#111411"/>
+  <circle cx="42.2" cy="24.6" r=".7" fill="#d8ff47"/>
+  <path d="M47.4 30.2h5.2l-4.1 4.2Z" fill="#d8ff47"/>
 </svg>
