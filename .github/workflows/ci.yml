@@ -215,8 +215,8 @@ jobs:
             $env:PATH = "$installDir\runtime\node;$env:PATH"
             Push-Location "$installDir\web-ui"
             try {
-              & npx playwright install chromium
-              if ($LASTEXITCODE -ne 0) { throw 'Chromium installation failed.' }
+              # playwright.config.ts uses the Chrome already installed on
+              # GitHub-hosted runners. Do not download a second browser here.
               & npm run test:e2e
               if ($LASTEXITCODE -ne 0) { throw 'Windows browser workflow failed.' }
             } finally { Pop-Location }
