@@ -96,6 +96,68 @@ jobs:
           pkill -f "tsx src/index.ts" || true
           test "$up" = "1" && test "$stats" = "200"
 
+  macos-user-path:
+    # A separate, pinned Apple Silicon job exercises the path a user actually
+    # takes: full repository build, launcher, bundled UI in a real browser,
+    # mock chat, tab navigation, supervised restart, and SQLite persistence.
+    name: macOS clean install & browser workflow
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Build through the documented user path
+        env:
+          PHILONT_PYENV_DIR: ${{ runner.temp }}/philont-pyenv
+        run: ./scripts/build-all.sh
+
+      - name: Exercise launcher, browser UI, chat, navigation, and restart
+        env:
+          PHILONT_HOME: ${{ runner.temp }}/philont-home
+          PHILONT_NO_OPEN: "1"
+          PHILONT_LAUNCHER_QUIET: "1"
+          PHILONT_E2E_BASE_URL: http://127.0.0.1:20267
+          PHILONT_E2E_AGENT_URL: http://127.0.0.1:21266
+        run: |
+          set -euo pipefail
+          launcher_log="$RUNNER_TEMP/philont-launcher.log"
+          ./scripts/start.sh > "$launcher_log" 2>&1 &
+          launcher_pid=$!
+          cleanup() {
+            kill -TERM "$launcher_pid" 2>/dev/null || true
+            wait "$launcher_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          ready=0
+          for i in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:20267/api/launcher/status >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+            cat "$launcher_log"
+            exit 1
+          fi
+
+          (cd web-ui && npm run test:e2e)
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-platform-smoke-diagnostics
+          path: |
+            ${{ runner.temp }}/philont-launcher.log
+            web-ui/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
   typecheck:
     name: Type-check server & web-ui
     runs-on: ubuntu-latest
