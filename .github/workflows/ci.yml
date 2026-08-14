@@ -158,6 +158,84 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  windows-installer:
+    # Exercise the public no-admin path from an empty directory. The installer
+    # downloads its own pinned Node.js, verifies its checksum, builds the exact
+    # commit under test, launches it, and drives the real Web UI in Chromium.
+    name: Windows one-click install & browser workflow
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install from a clean Windows user environment
+        shell: powershell
+        env:
+          PHILONT_PYENV_DIR: ${{ runner.temp }}\philont-pyenv
+        run: |
+          .\website\install.ps1 `
+            -InstallDir "$env:RUNNER_TEMP\Philont" `
+            -Ref $env:GITHUB_SHA `
+            -NoLaunch `
+            -NoShortcut
+          if (-not (Test-Path "$env:RUNNER_TEMP\Philont\runtime\node\node.exe")) {
+            throw 'Installer did not provision portable Node.js.'
+          }
+          if (-not (Test-Path "$env:RUNNER_TEMP\Philont\Philont.cmd")) {
+            throw 'Installer did not create the stable launcher command.'
+          }
+
+      - name: Launch installed copy and exercise the browser workflow
+        shell: powershell
+        env:
+          PHILONT_HOME: ${{ runner.temp }}\philont-home
+          PHILONT_NO_OPEN: "1"
+          PHILONT_LAUNCHER_QUIET: "1"
+          PHILONT_E2E_BASE_URL: http://127.0.0.1:20267
+          PHILONT_E2E_AGENT_URL: http://127.0.0.1:21266
+        run: |
+          $installDir = "$env:RUNNER_TEMP\Philont"
+          $launcherLog = "$env:RUNNER_TEMP\philont-windows-launcher.log"
+          $process = Start-Process -FilePath "$installDir\Philont.cmd" `
+            -WorkingDirectory $installDir `
+            -RedirectStandardOutput $launcherLog `
+            -RedirectStandardError "$env:RUNNER_TEMP\philont-windows-launcher.err.log" `
+            -PassThru
+          try {
+            $ready = $false
+            foreach ($i in 1..60) {
+              try {
+                $status = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:20267/api/launcher/status' -TimeoutSec 2
+                if ($status.StatusCode -eq 200) { $ready = $true; break }
+              } catch { }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ready) { Get-Content $launcherLog; throw 'Installed launcher did not become ready.' }
+
+            $env:PATH = "$installDir\runtime\node;$env:PATH"
+            Push-Location "$installDir\web-ui"
+            try {
+              & npx playwright install chromium
+              if ($LASTEXITCODE -ne 0) { throw 'Chromium installation failed.' }
+              & npm run test:e2e
+              if ($LASTEXITCODE -ne 0) { throw 'Windows browser workflow failed.' }
+            } finally { Pop-Location }
+          } finally {
+            & taskkill /PID $process.Id /T /F 2>$null
+          }
+
+      - name: Upload Windows diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-diagnostics
+          path: |
+            ${{ runner.temp }}\philont-windows-launcher.log
+            ${{ runner.temp }}\philont-windows-launcher.err.log
+            ${{ runner.temp }}\Philont\web-ui\test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
   typecheck:
     name: Type-check server & web-ui
     runs-on: ubuntu-latest

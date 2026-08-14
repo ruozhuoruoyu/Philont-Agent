@@ -26,7 +26,20 @@ The bet is simple: **reliability should live in the runtime, not only in model s
 ## Quick start
 
 > **Platform status:** Developed on **Windows**; **Linux and macOS (Apple Silicon) build & boot are verified in CI** on every push.
-> **Prerequisites:** Node.js ≥ 20 and an Anthropic- or OpenAI-compatible API key. No Rust toolchain — the runtime is pure TypeScript.
+
+### Windows — no administrator access or preinstalled Node.js required
+
+Open PowerShell and run:
+
+```powershell
+irm https://philont.ai/install.ps1 | iex
+```
+
+Philont installs under `%LOCALAPPDATA%\Philont`, creates a Start menu shortcut, and opens the local setup wizard. Your model keys and memory remain under `%USERPROFILE%\.philont`; they are not stored in the program directory.
+
+### From source — Windows, macOS, or Linux
+
+**Prerequisite:** Node.js ≥ 20 and an Anthropic- or OpenAI-compatible API key. No Rust toolchain — the runtime is pure TypeScript.
 
 ```bash
 git clone https://github.com/ruozhuoruoyu/Philont-Agent.git
@@ -34,7 +47,7 @@ cd Philont-Agent
 
 # Build everything and start. The launcher opens your browser
 # to a setup wizard, then supervises the agent.
-./scripts/start.sh            # Windows: .\scripts\start.ps1
+./scripts/start.sh            # Windows: .\scripts\build-all.ps1; .\scripts\start.ps1
 ```
 
 Or step by step:

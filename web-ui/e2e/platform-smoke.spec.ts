@@ -54,9 +54,9 @@ test('clean launcher setup, browser chat, stable navigation, and restart persist
   await expect.poll(() => sockets.length).toBe(1);
 
   const input = page.locator('agent-chat input[placeholder]');
-  await input.fill('macOS platform smoke');
+  await input.fill('platform smoke');
   await page.locator('agent-chat .send-btn').click();
-  await expect(page.locator('agent-chat .message.user .bubble')).toContainText('macOS platform smoke');
+  await expect(page.locator('agent-chat .message.user .bubble')).toContainText('platform smoke');
   await expect(page.locator('agent-chat .message.assistant .bubble')).toContainText('Mock response to:');
 
   // Navigation is not a conversation boundary. Chat remains mounted, so these

@@ -159,15 +159,16 @@
         <div class="section-heading reveal">
           <p class="eyebrow">Run it yourself</p>
           <h2>Point a second mind<br><em>at something real.</em></h2>
-          <p>Pure TypeScript. Self-hosted. Bring an Anthropic- or OpenAI-compatible endpoint.</p>
+          <p>No administrator access or preinstalled Node.js required on Windows. Bring an Anthropic- or OpenAI-compatible endpoint.</p>
         </div>
         <div class="terminal reveal">
           <div class="terminal-head"><span></span><span></span><span></span><button type="button" data-copy aria-label="Copy install commands">COPY</button></div>
-          <pre><code><span>$</span> git clone https://github.com/ruozhuoruoyu/Philont-Agent.git
-<span>$</span> cd Philont-Agent
-<span>$</span> ./scripts/start.sh
+          <pre><code><i># Windows PowerShell</i>
+<span>&gt;</span> irm https://philont.ai/install.ps1 | iex
 
-<i># Windows: .\scripts\start.ps1</i></code></pre>
+<i># Or build from source on macOS / Linux</i>
+<span>$</span> git clone https://github.com/ruozhuoruoyu/Philont-Agent.git
+<span>$</span> cd Philont-Agent &amp;&amp; ./scripts/start.sh</code></pre>
           <p data-copy-status aria-live="polite"></p>
         </div>
       </div>

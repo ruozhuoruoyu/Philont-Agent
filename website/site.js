@@ -28,7 +28,7 @@ if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
 
 const copyButton = document.querySelector('[data-copy]');
 copyButton?.addEventListener('click', async () => {
-  const commands = 'git clone https://github.com/ruozhuoruoyu/Philont-Agent.git\ncd Philont-Agent\n./scripts/start.sh';
+  const commands = 'irm https://philont.ai/install.ps1 | iex';
   const status = document.querySelector('[data-copy-status]');
   try {
     await navigator.clipboard.writeText(commands);
