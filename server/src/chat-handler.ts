@@ -2868,7 +2868,7 @@ const conservativeValidatorChain = createDefaultChain({
 /**
  * Which command gates are live. `full` (default) honours every pattern the list was written with;
  * `publish` keeps only the ones whose damage leaves this machine — publishing, where a push would go,
- * stored credentials, and piping the network into a shell — and lets the local-destructive ones
+ * stored credentials, and piping the network into an interpreter — and lets the local-destructive ones
  * (git reset --hard, git clean -fdx, chmod 777, systemctl stop …) through as before.
  *
  * The knob exists because the failure mode of a gate is not only "too loose". An owner who is asked
@@ -2883,6 +2883,7 @@ function commandGatePatterns(): typeof DEFAULT_DANGEROUS_PATTERNS {
     const leavesTheMachine = new Set([
       'git_push', 'git_force_push', 'git_remote_write', 'git_credential_config',
       'curl_pipe_shell', 'wget_pipe_shell',
+      'powershell_download_pipe_expression', 'network_pipe_interpreter',
     ]);
     return DEFAULT_DANGEROUS_PATTERNS.filter(
       (p) => p.defaultAction === 'deny' || leavesTheMachine.has(p.id),

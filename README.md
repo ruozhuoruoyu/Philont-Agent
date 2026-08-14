@@ -47,7 +47,14 @@ cd Philont-Agent
 
 # Build everything and start. The launcher opens your browser
 # to a setup wizard, then supervises the agent.
-./scripts/start.sh            # Windows: .\scripts\build-all.ps1; .\scripts\start.ps1
+./scripts/build-all.sh && ./scripts/start.sh
+```
+
+Windows PowerShell from-source equivalent:
+
+```powershell
+.\scripts\build-all.ps1
+.\scripts\start.ps1
 ```
 
 Or step by step:

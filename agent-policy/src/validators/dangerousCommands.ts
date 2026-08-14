@@ -90,6 +90,33 @@ export const DEFAULT_DANGEROUS_PATTERNS: DangerousCommandPattern[] = [
     description: 'eval $(curl ...)',
     defaultAction: 'deny',
   },
+  // Windows/PowerShell equivalents. `irm | iex` is the installation shape
+  // shown on philont.ai itself: fetching is harmless, but handing the fetched
+  // body directly to an interpreter crosses an execution boundary.
+  {
+    id: 'powershell_download_pipe_expression',
+    regex: /\b(?:irm|iwr|Invoke-RestMethod|Invoke-WebRequest)\b[^|\r\n]*\|\s*(?:iex|Invoke-Expression)\b/i,
+    description: 'PowerShell download piped to expression execution',
+    defaultAction: 'grant',
+  },
+  {
+    id: 'network_pipe_interpreter',
+    regex: /\b(?:curl|wget)\b[^|\r\n]*\|\s*(?:zsh|python(?:3)?|node|pwsh(?:\.exe)?|powershell(?:\.exe)?)\b/i,
+    description: 'network response piped directly to an interpreter',
+    defaultAction: 'grant',
+  },
+  {
+    id: 'powershell_encoded_command',
+    regex: /\b(?:pwsh|powershell)(?:\.exe)?\b[^\r\n]*\s-(?:e|enc|encodedcommand)\s+\S+/i,
+    description: 'PowerShell encoded command execution',
+    defaultAction: 'deny',
+  },
+  {
+    id: 'base64_pipe_interpreter',
+    regex: /\bbase64\b[^|\r\n]*-[dD][^|\r\n]*\|\s*(?:zsh|python(?:3)?|node|pwsh(?:\.exe)?|powershell(?:\.exe)?)\b/i,
+    description: 'decoded base64 payload piped directly to an interpreter',
+    defaultAction: 'deny',
+  },
 
   // fork bomb
   {
