@@ -15,9 +15,12 @@ export async function checkForUpdates(): Promise<UpdateStatus[]> {
   for (const rec of Object.values(lock)) {
     let latestHash: string | null = null;
     let latestVersion: string | undefined;
+    // Compare bundle hashes when both sides have one: a companion script can change while the
+    // SKILL.md text stays byte-identical, and that is still a new version of the skill.
+    const current = rec.bundleHash ?? rec.contentHash;
     try {
       const bundle = await fetchFrom(rec.sourceId, rec.identifier);
-      latestHash = bundle.contentHash;
+      latestHash = rec.bundleHash && bundle.bundleHash ? bundle.bundleHash : bundle.contentHash;
       latestVersion = bundle.meta.version;
     } catch {
       latestHash = null;
@@ -25,10 +28,10 @@ export async function checkForUpdates(): Promise<UpdateStatus[]> {
     out.push({
       name: rec.name,
       sourceTag: rec.sourceTag,
-      currentHash: rec.contentHash,
+      currentHash: current,
       latestHash,
       latestVersion,
-      changed: latestHash != null && latestHash !== rec.contentHash,
+      changed: latestHash != null && latestHash !== current,
     });
   }
   return out;

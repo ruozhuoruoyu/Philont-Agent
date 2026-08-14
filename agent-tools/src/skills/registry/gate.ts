@@ -12,7 +12,10 @@
  * - allow : install proceeds.
  * - ask   : caller must re-submit with confirm:true (web-ui confirm / agent askUserQuestion in
  *           interactive turns; treated as block in non-interactive sub-loops / autonomous turns).
- * - block : install refused, scan report returned.
+ * - block : install refused, scan report returned. A USER (never the agent) can still force it with
+ *           InstallRequest.override — the scanner is a regex heuristic over documents that legitimately
+ *           contain shell snippets, and a wall with no door just pushes the user to hand-copy the same
+ *           files with no provenance or audit record. Overrides are logged and marked in the lock file.
  */
 
 import type { GateDecision, TrustLevel, Verdict } from './types.js';

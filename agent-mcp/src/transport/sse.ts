@@ -19,6 +19,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { McpSseConfig } from '../config.js';
+import { withProtocolMeta, type ProtocolVersion } from '../protocol.js';
 
 /** Split an SSE buffer into complete frames plus the remaining incomplete tail. Exported for testing. */
 export function parseSseFrames(buffer: string): {
@@ -59,6 +60,7 @@ export class SseTransport extends EventEmitter {
   private abort: AbortController | null = null;
   private sseBuffer = '';
   private isConnected = false;
+  private protocolVersion: ProtocolVersion | null = null;
 
   constructor(config: McpSseConfig, timeout = 30000) {
     super();
@@ -157,10 +159,15 @@ export class SseTransport extends EventEmitter {
     }
   }
 
+  /** Adopt the negotiated protocol version (see protocol.ts); attached to every later request. */
+  setProtocolVersion(version: ProtocolVersion | null): void {
+    this.protocolVersion = version;
+  }
+
   async request(method: string, params?: unknown): Promise<unknown> {
     if (!this.postUrl) throw new Error('SSE not connected (no endpoint)');
     const id = this.nextId++;
-    const body = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+    const body = JSON.stringify({ jsonrpc: '2.0', id, method, params: withProtocolMeta(params, this.protocolVersion) });
 
     const responsePromise = new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -206,7 +213,7 @@ export class SseTransport extends EventEmitter {
 
   notify(method: string, params?: unknown): void {
     if (!this.postUrl) return;
-    const body = JSON.stringify({ jsonrpc: '2.0', method, params });
+    const body = JSON.stringify({ jsonrpc: '2.0', method, params: withProtocolMeta(params, this.protocolVersion) });
     fetch(this.postUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this.headers },

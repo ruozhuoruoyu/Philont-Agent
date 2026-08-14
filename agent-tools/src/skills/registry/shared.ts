@@ -11,6 +11,15 @@ export function sha256(s: string): string {
   return createHash('sha256').update(s, 'utf-8').digest('hex');
 }
 
+/**
+ * Hash a whole bundle (entry + companions) so update checks see a changed script even when the
+ * SKILL.md text is byte-identical. Order-independent: paths are sorted before hashing.
+ */
+export function bundleHash(entryContent: string, files: Array<{ path: string; content: string }> = []): string {
+  const parts = [`SKILL.md:${sha256(entryContent)}`, ...files.map((f) => `${f.path}:${sha256(f.content)}`)].sort();
+  return sha256(parts.join('\n'));
+}
+
 /** Normalize an arbitrary string into a valid skill name: [a-z0-9_-], 1-64 chars. */
 export function normalizeName(raw: string): string {
   let n = raw

@@ -11,15 +11,18 @@ export type {
   GateDecision,
   SkillMeta,
   SkillBundle,
+  CompanionFile,
   SkillSource,
   ScanHit,
   ScanReport,
+  NotInstalledReport,
   ProvenanceRecord,
   InstallOutcome,
   UpdateStatus,
 } from './types.js';
 
-export { scanSkillContent } from './scanner.js';
+export { scanSkillContent, scanSkillBundle } from './scanner.js';
+export { applyBundleBudget, isInstallableCompanion, MAX_BUNDLE_FILES, MAX_BUNDLE_BYTES } from './bundle.js';
 export { gateDecision } from './gate.js';
 export { readLock, getProvenance, upsertLock, removeLock, appendAudit } from './lockStore.js';
 export { SOURCES, searchAll, resolveSource, fetchFrom, inspectFrom } from './router.js';

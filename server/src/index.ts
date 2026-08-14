@@ -76,6 +76,7 @@ import {
   closeIdleConsolidator,
   closeAutonomousLoop,
   closeMcpBridgesOnShutdown,
+  getMcpStatus,
   closeFetchedStore,
   autonomousLoop,
   autonomousDriverNames,
@@ -345,6 +346,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
+  // ── GET /api/mcp/status ───────────────────────────────────────────────────
+  // Which external MCP servers are actually connected right now, and what they mounted. Without this
+  // a failed or dead server is invisible: the tools simply are not there and nothing says why.
+  if (req.method === 'GET' && path === '/api/mcp/status') {
+    sendJson(res, 200, getMcpStatus());
+    return true;
+  }
+
   // ══ Skill marketplace (aggregator client over git/URL + clawhub) ══════════
   // GET /api/skills/registry/search?q=&limit=
   if (req.method === 'GET' && path === '/api/skills/registry/search') {
@@ -363,7 +372,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     if (!sourceId || !id) { sendJson(res, 400, { error: 'sourceId and id are required' }); return true; }
     try {
       const { bundle, scan, decision } = await inspectBundle(sourceId, id);
-      sendJson(res, 200, { meta: bundle.meta, content: bundle.content, scan, decision });
+      // notInstalled: companion files the source ships that a SKILL.md-only install drops. Surfaced
+      // in the preview so the user sees it before installing, not after.
+      sendJson(res, 200, {
+        meta: bundle.meta,
+        content: bundle.content,
+        scan,
+        decision,
+        notInstalled: bundle.notInstalled ?? null,
+      });
     } catch (e) {
       sendJson(res, 502, { error: (e as Error).message });
     }
@@ -382,6 +399,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         identifier,
         name: body.name ? String(body.name) : undefined,
         confirm: body.confirm === true,
+        // override: only ever set from this endpoint (a human clicking through the scan findings in
+        // the UI). The agent-facing tool has no such parameter and always sends actor:'agent', which
+        // installFromSource refuses to honour.
+        override: body.override === true,
         actor: 'user',
         now: new Date().toISOString(),
       });
@@ -877,6 +898,18 @@ server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`  HTTP API:  http://localhost:${PORT}/api/memory/stats`);
   console.log(`  WebSocket: ws://localhost:${PORT}`);
+
+  // MCP connection assertion. External servers connect asynchronously, so this is deferred a few
+  // seconds — but it must be PRINTED either way: a configured server that never connected is otherwise
+  // invisible (its tools simply are not in the list, and nothing says why).
+  if (getMcpStatus().configured > 0) {
+    setTimeout(() => {
+      const s = getMcpStatus();
+      const down = s.servers.filter((x) => x.state !== 'connected');
+      console[down.length ? 'warn' : 'log'](`[boot] ${s.summary}`);
+      for (const d of down) console.warn(`[boot] MCP server "${d.name}" not connected: ${d.lastError ?? d.state}`);
+    }, 10_000).unref?.();
+  }
 
   // Referential integrity. Deferred to here rather than run at module load: the push channels and the
   // skill registry are populated by the gateway/hot-reload startup paths above, and a check that runs

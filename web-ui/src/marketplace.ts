@@ -25,6 +25,8 @@ interface Provenance {
   trust: 'official' | 'community';
   version?: string;
   installedAt?: string;
+  /** Installed despite a `block` scan verdict, by explicit user override. */
+  overridden?: boolean;
 }
 
 interface InstalledItem {
@@ -46,11 +48,15 @@ function isDownloaded(s: InstalledItem): boolean {
 interface ScanHit { category: string; pattern: string; line: number; excerpt: string }
 interface ScanReport { verdict: 'safe' | 'caution' | 'dangerous'; hits: ScanHit[] }
 
+/** Companion files the source ships that a SKILL.md-only install does not write. */
+interface NotInstalled { total: number; sample: string[] }
+
 interface Inspected {
   meta: MarketMeta;
   content: string;
   scan: ScanReport;
   decision: 'allow' | 'ask' | 'block';
+  notInstalled?: NotInstalled | null;
 }
 
 interface UpdateStatus { name: string; changed: boolean; latestVersion?: string }
@@ -146,7 +152,7 @@ export class SkillsMarketplace extends LitElement {
     }
   }
 
-  private async install(m: MarketMeta, confirm = false) {
+  private async install(m: MarketMeta, confirm = false, override = false) {
     this.busy = { ...this.busy, [m.name]: 'install' };
     this.error = null;
     this.notice = null;
@@ -154,11 +160,24 @@ export class SkillsMarketplace extends LitElement {
       const r = await fetch(`${API()}/registry/install`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceId: m.sourceId, identifier: m.slug, confirm }),
+        body: JSON.stringify({ sourceId: m.sourceId, identifier: m.slug, confirm, override }),
       });
       const outcome = await r.json();
       if (outcome.status === 'installed') {
-        this.notice = t(`已安装 ${outcome.name}`, `Installed ${outcome.name}`);
+        const left = outcome.notInstalled as NotInstalled | undefined;
+        const wrote = typeof outcome.installedFiles === 'number' && outcome.installedFiles > 1
+          ? t(`,共 ${outcome.installedFiles} 个文件`, `, ${outcome.installedFiles} files`)
+          : '';
+        // Never report a bare "installed" when the source shipped more than we wrote.
+        this.notice = left && left.total > 0
+          ? t(
+              `已安装 ${outcome.name}${wrote};${left.total} 个来源文件未安装`,
+              `Installed ${outcome.name}${wrote} — ${left.total} source file(s) not installed`,
+            )
+          : t(`已安装 ${outcome.name}${wrote}`, `Installed ${outcome.name}${wrote}`);
+        if (outcome.overridden) {
+          this.notice += t('(已越过安全门,记入审计)', ' (safety gate overridden — recorded in the audit log)');
+        }
         this.selected = null;
         await this.refreshInstalled();
       } else if (outcome.status === 'ask') {
@@ -273,6 +292,11 @@ export class SkillsMarketplace extends LitElement {
                   <span class="name">${s.name}</span>
                   ${p?.version ? html`<span class="ver">v${p.version}</span>` : null}
                   ${this.trustBadge(p?.trust ?? 'community')}
+                  ${p?.overridden
+                    ? html`<span class="badge danger" title=${t('安装时越过了安全门', 'Installed past the safety gate')}>
+                        ⚠ ${t('越权安装', 'Gate overridden')}
+                      </span>`
+                    : null}
                   <span class="src">${srcLabel}</span>
                 </div>
                 <div class="desc">${s.description}</div>
@@ -367,6 +391,42 @@ export class SkillsMarketplace extends LitElement {
       </div>`;
   }
 
+  /**
+   * Warn that only SKILL.md gets written. Most real skills are bundles (scripts/, reference/,
+   * sub-skills); installing the markdown alone yields a skill that looks present but cannot run what
+   * its own instructions reference. Shown in the preview so the user learns it before installing.
+   */
+  private partialBanner(n: NotInstalled | null | undefined) {
+    if (!n || n.total <= 0) return null;
+    const shown = n.sample.join(', ');
+    const more = n.total > n.sample.length ? ` …(+${n.total - n.sample.length})` : '';
+    return html`<div class="warn-banner">
+      ${t(
+        `⚠ 来源里有 ${n.total} 个文件不会被安装(超出打包预算或非可安装类型):${shown}${more}。若技能内容引用了这些脚本/文档,安装后将用不了。`,
+        `⚠ ${n.total} file(s) from this source will NOT be installed (over the bundle budget, or not an installable type): ${shown}${more}. If the skill references those scripts/docs, they will be missing.`,
+      )}
+    </div>`;
+  }
+
+  /**
+   * Install past a `block` verdict. The scanner is a regex heuristic, so a legitimate devops skill can
+   * trip it; a hard wall only pushes the user to copy the files in by hand, losing the provenance and
+   * audit trail. The door exists, but it is deliberately narrow: the findings are restated here and
+   * the user has to confirm them one more time. Only this human path can send override — the agent's
+   * own install tool has no such parameter.
+   */
+  private async forceInstall(s: Inspected) {
+    const findings = s.scan.hits.slice(0, 6).map((h) => `• ${h.category}: ${h.pattern} (L${h.line})`).join('\n');
+    const ok = confirm(
+      t(
+        `安全扫描判定为 ${s.scan.verdict},发现:\n${findings}\n\n仍要安装 ${s.meta.name} 吗?此次越权会记入审计日志。`,
+        `The safety scan returned ${s.scan.verdict}:\n${findings}\n\nInstall ${s.meta.name} anyway? The override is written to the audit log.`,
+      ),
+    );
+    if (!ok) return;
+    await this.install(s.meta, true, true);
+  }
+
   private modal() {
     if (!this.selected) return null;
     const s = this.selected;
@@ -385,6 +445,7 @@ export class SkillsMarketplace extends LitElement {
           ${s.meta.trust === 'community'
             ? html`<div class="warn-banner">${t('社区技能,安装前请审阅内容。', 'Community skill — review the content before installing.')}</div>`
             : null}
+          ${this.partialBanner(s.notInstalled)}
           ${s.scan.hits.length
             ? html`<div class="scan">
                 <div class="scan-title">${t('安全扫描发现', 'Safety scan findings')} (${s.scan.verdict}):</div>
@@ -394,7 +455,10 @@ export class SkillsMarketplace extends LitElement {
           <pre class="skillmd">${s.content}</pre>
           <div class="dialog-actions">
             ${blocked
-              ? html`<span class="blocked">${t('已被安全门拦截,无法安装', 'Blocked by the safety gate — cannot install')}</span>`
+              ? html`<span class="blocked">${t('已被安全门拦截', 'Blocked by the safety gate')}</span>
+                  <button class="danger" @click=${() => this.forceInstall(s)}>
+                    ${t('仍要安装(风险自负)', 'Install anyway (at your own risk)')}
+                  </button>`
               : html`<button class="primary" @click=${() => this.install(s.meta, needsConfirm)}>
                   ${needsConfirm ? t('确认安装', 'Confirm install') : t('安装', 'Install')}
                 </button>`}
@@ -428,8 +492,8 @@ export class SkillsMarketplace extends LitElement {
           </button>
         </div>
         <div class="searchhint">${t(
-          '关键词搜索走 clawhub(需本机装 clawhub CLI);git 来源请粘贴 GitHub owner/repo、blob 链接或 raw SKILL.md 链接。',
-          'Keyword search uses clawhub (needs the clawhub CLI installed); for git, paste a GitHub owner/repo, blob URL, or raw SKILL.md URL.',
+          '关键词搜索走 clawhub(需本机装 clawhub CLI,且当前版本尚不提供机器可读输出,通常搜不到结果);可直接按 clawhub slug(如 @publisher/skill)安装,或粘贴 GitHub owner/repo、blob 链接、raw SKILL.md 链接。',
+          'Keyword search goes through clawhub (needs the clawhub CLI, and the current CLI has no machine-readable search output, so it usually returns nothing). You can install by exact clawhub slug (e.g. @publisher/skill), or paste a GitHub owner/repo, blob URL, or raw SKILL.md URL.',
         )}</div>
 
         ${this.notice ? html`<div class="notice">${this.notice}</div>` : null}
@@ -495,6 +559,7 @@ export class SkillsMarketplace extends LitElement {
     .badge.verdict-safe { background: #e8f5e9; color: #2e7d32; }
     .badge.verdict-caution { background: #fff8e1; color: #f57f17; }
     .badge.verdict-dangerous { background: #ffebee; color: #c62828; }
+    .badge.danger { background: #ffebee; color: #c62828; }
     .notice { background: #e8f5e9; color: #2e7d32; padding: 8px 12px; border-radius: 6px; margin-top: 12px; }
     .err { background: #ffebee; color: #c62828; padding: 8px 12px; border-radius: 6px; margin-top: 12px; }
     .warns { background: #fff8e1; color: #f57f17; padding: 8px 12px; border-radius: 6px; margin-top: 12px; font-size: 13px; }

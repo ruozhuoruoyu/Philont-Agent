@@ -62,10 +62,16 @@ export async function searchAll(query: string, perSourceLimit = 10): Promise<Sea
     (a, b) => (TRUST_RANK[a.trust] ?? 9) - (TRUST_RANK[b.trust] ?? 9),
   );
 
-  // Help the user understand an empty keyword search: clawhub keyword search needs the CLI,
-  // and the git source only resolves explicit identifiers (owner/repo, blob/raw URL), not keywords.
-  if (!results.length && !(await clawhubAvailable())) {
-    warnings.push('clawhub CLI not installed — keyword search is unavailable. Paste a GitHub owner/repo or a SKILL.md URL to install via git.');
+  // Help the user understand an empty keyword search: the git source only resolves explicit
+  // identifiers (owner/repo, blob/raw URL), never keywords, so clawhub is the only keyword path.
+  // Say which of the two reasons applies — the old message claimed "CLI not installed" in both
+  // cases, which sent users who HAD installed it off to reinstall it.
+  if (!results.length) {
+    warnings.push(
+      (await clawhubAvailable())
+        ? 'clawhub is installed but this version exposes no machine-readable search output, so keyword search returns nothing. Paste a GitHub owner/repo or a SKILL.md URL to install via git, or install by exact clawhub slug.'
+        : 'clawhub CLI not found on PATH — keyword search is unavailable. Paste a GitHub owner/repo or a SKILL.md URL to install via git.',
+    );
   }
 
   return { results, warnings };

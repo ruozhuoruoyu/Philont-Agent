@@ -40,6 +40,29 @@ export interface SkillMeta {
   category?: string;
 }
 
+/**
+ * What a source shipped alongside the SKILL.md that philont does NOT install.
+ *
+ * philont installs exactly one SKILL.md, but real skills are bundles: 16 of the 18 skills in
+ * anthropics/skills carry scripts/ or reference/ files, and a clawhub package can be 25 files. A
+ * SKILL.md that says "run scripts/fill_fillable_fields.py" installs fine and then cannot work.
+ * Sources report the gap here and every caller surfaces it — an install that delivers 2% of a
+ * package must not read as success.
+ */
+export interface NotInstalledReport {
+  /** How many files/entries from the source were left behind. */
+  total: number;
+  /** First few of them, for display (sorted, truncated). */
+  sample: string[];
+}
+
+/** A companion file installed alongside SKILL.md (scripts/, reference/, …). */
+export interface CompanionFile {
+  /** Path relative to the skill directory, posix separators. Never absolute, never contains '..'. */
+  path: string;
+  content: string;
+}
+
 /** A fetched skill ready for the install pipeline (metadata + full SKILL.md text). */
 export interface SkillBundle {
   meta: SkillMeta;
@@ -47,6 +70,17 @@ export interface SkillBundle {
   content: string;
   /** sha256(content), hex. */
   contentHash: string;
+  /** Which file inside the source package became this bundle (relative path), when meaningful. */
+  installedEntry?: string;
+  /** Companion files fetched within the bundle budget (see registry/bundle.ts). */
+  files?: CompanionFile[];
+  /**
+   * sha256 over the entry + every companion (path and content), so update checks notice a change in
+   * a script even when the SKILL.md text is untouched.
+   */
+  bundleHash?: string;
+  /** Source files this install leaves behind. Absent = the source was a single file. */
+  notInstalled?: NotInstalledReport;
 }
 
 /**
@@ -70,6 +104,8 @@ export interface ScanHit {
   pattern: string;
   line: number;
   excerpt: string;
+  /** Which file in the bundle the hit came from; absent means the entry SKILL.md. */
+  file?: string;
 }
 
 /** Scanner report. */
@@ -88,11 +124,15 @@ export interface ProvenanceRecord {
   trust: TrustLevel;
   /** sha256 of the installed SKILL.md content. */
   contentHash: string;
+  /** sha256 over the whole installed bundle (entry + companions), when companions were installed. */
+  bundleHash?: string;
   version?: string;
   verdict: Verdict;
   decision: GateDecision;
   /** Who confirmed an `ask`-gated install ('user' | 'agent'), or null when allowed outright. */
   confirmedBy?: 'user' | 'agent' | null;
+  /** True when the user knowingly installed past a `block` verdict (see InstallRequest.override). */
+  overridden?: boolean;
   /** ISO timestamp. */
   installedAt: string;
   /** Absolute file paths written. */
@@ -108,6 +148,12 @@ export interface InstallOutcome {
   decision?: GateDecision;
   report?: ScanReport;
   provenance?: ProvenanceRecord;
+  /** True when this install went through on a user override of a `block` verdict. */
+  overridden?: boolean;
+  /** How many files were written (SKILL.md + companions). */
+  installedFiles?: number;
+  /** Source files this install left behind (see NotInstalledReport). Must be shown to the user. */
+  notInstalled?: NotInstalledReport;
   error?: string;
 }
 

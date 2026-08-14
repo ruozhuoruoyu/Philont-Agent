@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Skills install as bundles, not as a single markdown file.** A skill is written as if the
+  agent were standing in its directory ("read FORMS.md", "run scripts/fill_fillable_fields.py"),
+  and 16 of the 18 skills in `anthropics/skills` ship such companions — philont installed the
+  SKILL.md alone, reported success, and produced a skill that could not work. Companions now come
+  along under an explicit budget (≤30 files, ≤2 MB, text-ish types), the whole bundle is scanned
+  rather than just the entry file, everything the budget drops is **named** in the install result
+  and the UI, and `use_skill` ends with a `## Files` section giving the absolute install directory
+  and its contents (the loader had always known that path; nothing consumed it).
+- **MCP Streamable HTTP transport and real protocol negotiation.** The client spoke stdio and the
+  HTTP+SSE transport that 2025-03-26 deprecated, with `2024-11-05` hardcoded into the handshake and
+  the server's reply discarded — so essentially no current remote server could be reached. It now
+  tries `server/discover`, falls back to an initialize handshake, adopts the version the server
+  answers with, walks down known revisions when refused, and carries the agreed version in
+  `_meta` (and the `MCP-Protocol-Version` header, where a mismatch is a 400).
+- **MCP supervision** (`McpSupervisor`) — mount/unmount, death detection (the stdio `exit` event
+  finally has a subscriber; a `tools/list` ping covers remote servers), reconnect with backoff,
+  `notifications/tools/list_changed` handling, a `GET /api/mcp/status` endpoint and a boot line.
+  Previously a crashed server kept its tools advertised forever and every call failed silently.
+- **MCP resources and prompts** are mounted as ordinary tools (`<server>_list_resources`,
+  `<server>_read_resource`, `<server>_get_prompt`) when a server declares those capabilities.
+  Sampling/roots/logging are deliberately not implemented (deprecated in the 2026-07-28 revision);
+  elicitation still needs a server→client request path.
+- **Per-tool MCP classification** (`toolCapabilities`) and `toolAllowlist`: one capability label for
+  a whole server is either too strict (every read needs approval, so approval becomes reflex) or too
+  loose (writes wave through).
+- **A user-only override for the install gate.** The scanner is a regex heuristic and scanning whole
+  bundles pushes real packages to `dangerous`; a wall with no door just pushes the user to hand-copy
+  files with no provenance. Reachable only from the UI, never from the agent's own tool, recorded in
+  the lock file and the audit log.
+
+### Fixed
+
+- **The clawhub source was entirely dead, and said the wrong thing about why.** Availability was
+  probed with `clawhub --version`, which that CLI spells `-V` (exit 1 on the long form), so an
+  installed CLI was reported missing and the user was told to install it again. Detection is now on
+  the executable itself, never on another project's flag spelling. Publisher-scoped slugs were also
+  eaten by `split('@')[0]` (`@openclaw/demo` → empty), and keyword search asked for a `--json` flag
+  `clawhub search` does not have — so the marketplace's only keyword path silently returned nothing.
+  All three are covered by a contract test that runs the real binary and skips (never fake-passes)
+  when it is absent.
+- **MCP binary results no longer land in the conversation.** Non-text content fell through to
+  `JSON.stringify(result)`, so a Playwright screenshot pasted its entire base64 payload into the
+  context. Images/audio/blobs are written to disk and represented by a one-line reference, and any
+  unrecognised result shape is bounded before being shown.
+- **MCP child processes no longer inherit the whole environment.** A server fetched by `npx` at
+  startup received every API key philont holds; it now gets an operational base set plus whatever the
+  config names explicitly.
+- Deterministic entry-file selection inside a bundle (shallowest `SKILL.md`, not whatever `readdir`
+  returned first), actionable errors for the per-skill size cap and 404/rate-limit cases, and
+  `PHILONT_GITHUB_TOKEN` support so provenance pinning stops degrading silently at 60 requests/hour.
+
 - **Compass** (`compass.md`, template `compass.example.md`) — the owner-authored source
   that orients the intrinsic drives. Others use a `soul.md` to give the *agent* a
   persona; a compass records where the *owner* wants their second mind pointed, and it

@@ -70,6 +70,28 @@ const DANGEROUS: ReadonlySet<Category> = new Set<Category>(['exfiltration', 'rce
  *   - only obfuscation / secret_access hits   → 'caution'
  *   - no hits                                 → 'safe'
  */
+/**
+ * Scan a whole bundle: the entry SKILL.md plus every companion file, worst verdict wins.
+ *
+ * Scanning only the entry file was safe while only the entry file was installed. Now that scripts come
+ * along, the scripts are exactly where the risk lives — a real clawhub package's root SKILL.md scans
+ * `caution` while one of its sub-skill documents scans `dangerous`. Hits carry their file so the user
+ * is told *which* file tripped the gate rather than being handed an unattributable verdict.
+ */
+export function scanSkillBundle(
+  entryContent: string,
+  files: Array<{ path: string; content: string }> = [],
+): ScanReport {
+  const hits: ScanHit[] = [...scanSkillContent(entryContent).hits];
+  for (const f of files) {
+    for (const h of scanSkillContent(f.content).hits) hits.push({ ...h, file: f.path });
+  }
+  let verdict: Verdict = 'safe';
+  if (hits.some((h) => DANGEROUS.has(h.category))) verdict = 'dangerous';
+  else if (hits.length > 0) verdict = 'caution';
+  return { verdict, hits };
+}
+
 export function scanSkillContent(content: string): ScanReport {
   const hits: ScanHit[] = [];
   const lines = content.split('\n');

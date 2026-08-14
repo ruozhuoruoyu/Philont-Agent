@@ -99,6 +99,17 @@ export class ToolRegistry {
     };
   }
 
+  /**
+   * Unregister a tool. Returns true if it was present.
+   *
+   * Needed because tools can go away at runtime: an MCP server is a separate process, and when it
+   * dies its tools must stop being offered. Leaving them registered means every later call fails
+   * against a corpse — the model keeps trying a tool that cannot work.
+   */
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
   /** List all tools */
   list(): Tool[] {
     return Array.from(this.tools.values());

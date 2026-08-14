@@ -1,5 +1,6 @@
 {
   "_comment": "Copy to ~/.philont/mcp.json (or point PHILONT_MCP_CONFIG at this file). Each entry mounts an external MCP server whose tools automatically become agent-callable tools. 'browser' uses Microsoft's official Playwright (pure local stdio, free). capability=execute routes browser actions through onAuthRequest approval rather than auto-allowing them. You can also skip this file entirely and just set PHILONT_MCP_BROWSER=1 to enable the browser in one step.",
+  "_transports": "stdio = local child process. http = Streamable HTTP (MCP 2025-03-26+), the transport current remote servers use. sse = the ORIGINAL HTTP+SSE transport, deprecated since 2025-03-26 — only for servers that still speak nothing else. The protocol version is negotiated automatically (server/discover, else an initialize handshake); set \"protocolVersion\" on an entry only to pin it.",
   "servers": [
     {
       "name": "browser",
@@ -11,6 +12,18 @@
       "domain": "network",
       "capability": "execute",
       "timeout": 60000
+    },
+    {
+      "_comment": "Example remote server over Streamable HTTP. Headers are sent verbatim — put the token in the config file, not in the URL.",
+      "name": "example-remote",
+      "transport": {
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "headers": { "Authorization": "Bearer YOUR_TOKEN" }
+      },
+      "domain": "network",
+      "capability": "read",
+      "timeout": 30000
     }
   ]
 }

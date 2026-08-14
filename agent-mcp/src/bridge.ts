@@ -15,14 +15,28 @@ import type { Tool } from '@agent/policy';
 import { ToolRegistry } from '@agent/policy';
 import { StdioTransport } from './transport/stdio.js';
 import { SseTransport } from './transport/sse.js';
-import { wrapMcpTool, type McpToolDefinition } from './wrapper.js';
+import { HttpTransport } from './transport/http.js';
+import { wrapMcpTool, renderMcpContent, type McpToolDefinition } from './wrapper.js';
 import type { McpServerConfig } from './config.js';
+import {
+  PREFERRED_INITIALIZE_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  isMethodNotFound,
+  isUnsupportedVersionError,
+  type NegotiationResult,
+  type ProtocolVersion,
+} from './protocol.js';
+
+type AnyTransport = StdioTransport | SseTransport | HttpTransport;
+
+const CLIENT_INFO = { name: 'philont-agent', version: '0.1.0' };
 
 export class McpBridge {
-  private transport: StdioTransport | SseTransport;
+  private transport: AnyTransport;
   private tools: Tool[] = [];
   private serverName: string;
   private config: McpServerConfig;
+  private negotiation: NegotiationResult | null = null;
 
   constructor(config: McpServerConfig) {
     this.config = config;
@@ -32,27 +46,109 @@ export class McpBridge {
 
     if (config.transport.transport === 'stdio') {
       this.transport = new StdioTransport(config.transport, timeout);
+    } else if (config.transport.transport === 'http') {
+      this.transport = new HttpTransport(config.transport, timeout);
     } else {
       this.transport = new SseTransport(config.transport, timeout);
     }
   }
 
-  /** Connect to the MCP server and perform the initialize handshake */
+  /** Which protocol revision this connection settled on, and how. Null until connect() succeeds. */
+  get protocol(): NegotiationResult | null {
+    return this.negotiation;
+  }
+
+  private applyVersion(version: ProtocolVersion): void {
+    // Only the HTTP transport needs the header; _meta injection is handled per transport.
+    (this.transport as { setProtocolVersion?: (v: ProtocolVersion) => void }).setProtocolVersion?.(version);
+  }
+
+  /**
+   * Connect and agree on a protocol version.
+   *
+   * The old code sent `initialize` with a hardcoded `2024-11-05` and threw the server's answer away.
+   * Now: try the modern discovery method first, fall back to an initialize handshake, adopt whatever
+   * the server reports, and walk down the known revisions if it refuses ours outright.
+   */
   async connect(): Promise<void> {
     await this.transport.connect();
 
-    // MCP initialize handshake
-    await this.transport.request('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: {
-        name: 'philont-agent',
-        version: '0.1.0',
-      },
-    });
+    // An explicit pin skips negotiation entirely (escape hatch for a misbehaving server).
+    if (this.config.protocolVersion) {
+      this.negotiation = { version: this.config.protocolVersion, via: 'assumed' };
+      this.applyVersion(this.config.protocolVersion);
+      return;
+    }
 
-    // Send initialized notification
-    this.transport.notify('notifications/initialized');
+    // 1) server/discover (2026-07-28+). Absent on older servers → method-not-found, which is fine.
+    try {
+      const discovered = (await this.transport.request('server/discover', {})) as {
+        protocolVersion?: string;
+        capabilities?: Record<string, unknown>;
+        serverInfo?: { name?: string; version?: string };
+      } | null;
+      if (discovered?.protocolVersion) {
+        this.negotiation = {
+          version: discovered.protocolVersion,
+          via: 'discover',
+          capabilities: discovered.capabilities,
+          serverInfo: discovered.serverInfo,
+        };
+        this.applyVersion(discovered.protocolVersion);
+        return;
+      }
+    } catch (e) {
+      // Anything other than "no such method" is worth surfacing as a log, not as a failure: an
+      // initialize handshake may still work.
+      if (!isMethodNotFound(e)) {
+        this.emitLog(`server/discover failed (${(e as Error).message}); falling back to initialize`);
+      }
+    }
+
+    // 2) initialize handshake, walking down revisions if the server rejects our offer.
+    const offers: ProtocolVersion[] = [
+      PREFERRED_INITIALIZE_VERSION,
+      ...SUPPORTED_PROTOCOL_VERSIONS.filter((v) => v !== PREFERRED_INITIALIZE_VERSION && v !== '2026-07-28'),
+    ];
+
+    let lastErr: unknown = null;
+    for (const offer of offers) {
+      try {
+        const result = (await this.transport.request('initialize', {
+          protocolVersion: offer,
+          capabilities: {},
+          clientInfo: CLIENT_INFO,
+        })) as {
+          protocolVersion?: string;
+          capabilities?: Record<string, unknown>;
+          serverInfo?: { name?: string; version?: string };
+        } | null;
+
+        // Adopt the server's answer — that is the whole point of the handshake.
+        const agreed = result?.protocolVersion || offer;
+        this.negotiation = {
+          version: agreed,
+          via: 'initialize',
+          capabilities: result?.capabilities,
+          serverInfo: result?.serverInfo,
+        };
+        this.applyVersion(agreed);
+        this.transport.notify('notifications/initialized');
+        return;
+      } catch (e) {
+        lastErr = e;
+        if (!isUnsupportedVersionError(e)) throw e; // a real failure, not a version disagreement
+      }
+    }
+
+    throw new Error(
+      `MCP handshake failed: server accepted none of ${offers.join(', ')}` +
+        (lastErr instanceof Error ? ` (last error: ${lastErr.message})` : ''),
+    );
+  }
+
+  private emitLog(msg: string): void {
+    console.warn(`[mcp] ${this.serverName}: ${msg}`);
   }
 
   /** Discover all tools on the MCP server */
@@ -63,6 +159,25 @@ export class McpBridge {
     return result?.tools || [];
   }
 
+  /** Wrap the server's tool definitions, applying the allowlist and per-tool capability overrides. */
+  private wrapAll(mcpTools: McpToolDefinition[]): Tool[] {
+    const prefix = this.config.toolPrefix ?? this.serverName;
+    const allow = this.config.toolAllowlist;
+    const perTool = this.config.toolCapabilities ?? {};
+
+    return mcpTools
+      .filter((t) => !allow || allow.includes(t.name))
+      .map((t) =>
+        wrapMcpTool(t, this.transport, {
+          prefix,
+          domain: this.config.domain || 'network',
+          // Per-tool classification wins: one label for a whole server is either too strict (every
+          // read needs approval, so approval becomes reflex) or too loose (writes wave through).
+          capability: perTool[t.name] || this.config.capability || 'read',
+        }),
+      );
+  }
+
   /**
    * Connect + discover + wrap all tools
    *
@@ -70,19 +185,184 @@ export class McpBridge {
    */
   async connectAndDiscover(): Promise<Tool[]> {
     await this.connect();
-    const mcpTools = await this.discover();
-
-    const prefix = this.config.toolPrefix ?? this.serverName;
-
-    this.tools = mcpTools.map((t) =>
-      wrapMcpTool(t, this.transport, {
-        prefix,
-        domain: this.config.domain || 'network',
-        capability: this.config.capability || 'read',
-      }),
-    );
-
+    this.tools = [...this.wrapAll(await this.discover()), ...(await this.buildResourceTools())];
     return this.tools;
+  }
+
+  /**
+   * Expose the server's resources and prompts as ordinary philont tools.
+   *
+   * MCP has three things a server can offer; philont only ever mounted one of them. Resources (files,
+   * database rows, docs the server can hand over) and prompts (server-authored templates) were simply
+   * unreachable. Rather than inventing new plumbing, each becomes a normal tool the model can call.
+   *
+   * Deliberately NOT implemented here: sampling, roots and logging (all deprecated as of the 2026-07-28
+   * revision — implementing them now would be building on a scheduled removal), and elicitation, which
+   * needs a server→client request path this client does not have yet.
+   */
+  private async buildResourceTools(): Promise<Tool[]> {
+    const caps = this.negotiation?.capabilities;
+    const prefix = this.config.toolPrefix ?? this.serverName;
+    const domain = this.config.domain || 'network';
+    const out: Tool[] = [];
+
+    // When the server never declared its capabilities, probe once rather than assume either way.
+    const supports = async (cap: 'resources' | 'prompts', probe: () => Promise<unknown>): Promise<boolean> => {
+      if (caps && typeof caps === 'object') return Boolean((caps as Record<string, unknown>)[cap]);
+      try {
+        await probe();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    if (await supports('resources', () => this.listResources())) {
+      out.push(
+        {
+          name: `${prefix}_list_resources`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+          description: `List the resources exposed by the "${this.serverName}" MCP server (uri + description).`,
+          schema: { type: 'object', properties: {} },
+          capability: 'read',
+          domain,
+          execute: async () => {
+            try {
+              const list = await this.listResources();
+              if (!list.length) return { success: true, output: `No resources exposed by "${this.serverName}".` };
+              return {
+                success: true,
+                output: list
+                  .map((r) => `• ${r.uri}${r.name ? ` (${r.name})` : ''}${r.description ? ` — ${r.description}` : ''}`)
+                  .join('\n'),
+              };
+            } catch (e) {
+              return { success: false, output: '', error: `resources/list failed: ${(e as Error).message}` };
+            }
+          },
+        },
+        {
+          name: `${prefix}_read_resource`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+          description: `Read one resource from the "${this.serverName}" MCP server by uri (see ${prefix}_list_resources).`,
+          schema: {
+            type: 'object',
+            properties: { uri: { type: 'string', description: 'Resource URI as returned by list_resources.' } },
+            required: ['uri'],
+          },
+          capability: 'read',
+          domain,
+          execute: async (params: Record<string, unknown>) => {
+            try {
+              const contents = await this.readResource(String(params.uri ?? ''));
+              // Binary contents are written to disk instead of inlined — same rule as tool results.
+              const { text } = renderMcpContent(
+                contents.map((c) => ({ type: 'resource', resource: c })),
+                `${this.serverName}_resource`,
+              );
+              return { success: true, output: text || '(empty resource)' };
+            } catch (e) {
+              return { success: false, output: '', error: `resources/read failed: ${(e as Error).message}` };
+            }
+          },
+        },
+      );
+    }
+
+    if (await supports('prompts', () => this.listPrompts())) {
+      out.push({
+        name: `${prefix}_get_prompt`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+        description:
+          `Fetch a prompt template from the "${this.serverName}" MCP server. Omit "name" to list the ` +
+          `available templates.`,
+        schema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Prompt name; omit to list what is available.' },
+            arguments: { type: 'object', description: 'Template arguments.' },
+          },
+        },
+        capability: 'read',
+        domain,
+        execute: async (params: Record<string, unknown>) => {
+          try {
+            if (!params.name) {
+              const list = await this.listPrompts();
+              return {
+                success: true,
+                output: list.length
+                  ? list.map((p) => `• ${p.name}${p.description ? ` — ${p.description}` : ''}`).join('\n')
+                  : `No prompts exposed by "${this.serverName}".`,
+              };
+            }
+            const result = (await this.getPrompt(
+              String(params.name),
+              (params.arguments as Record<string, unknown>) ?? {},
+            )) as { messages?: Array<{ role?: string; content?: unknown }> } | null;
+            const messages = result?.messages ?? [];
+            const rendered = messages
+              .map((m) => {
+                const c = m.content as { type?: string; text?: string } | undefined;
+                return `[${m.role ?? 'user'}] ${c?.text ?? JSON.stringify(c ?? '').slice(0, 500)}`;
+              })
+              .join('\n');
+            return { success: true, output: rendered || JSON.stringify(result ?? null).slice(0, 2000) };
+          } catch (e) {
+            return { success: false, output: '', error: `prompts failed: ${(e as Error).message}` };
+          }
+        },
+      });
+    }
+
+    return out;
+  }
+
+  /** Re-run discovery and re-wrap (used after notifications/tools/list_changed). */
+  async rediscover(): Promise<Tool[]> {
+    this.tools = this.wrapAll(await this.discover());
+    return this.tools;
+  }
+
+  /**
+   * Subscribe to the server announcing that its tool list changed (`notifications/tools/list_changed`).
+   *
+   * Servers are allowed to gain and lose tools at runtime — philont held whatever list it saw at
+   * connect time forever, so a server that added a tool later was simply never offering it.
+   */
+  onToolsChanged(cb: () => void): void {
+    const t = this.transport as unknown as { on?: (ev: string, fn: (arg: unknown) => void) => void };
+    if (typeof t.on !== 'function') return;
+    t.on('notification', (msg: unknown) => {
+      const method = (msg as { method?: string } | null)?.method;
+      if (method === 'notifications/tools/list_changed') cb();
+    });
+  }
+
+  /** List resources the server exposes (MCP `resources/list`). Empty when unsupported. */
+  async listResources(): Promise<Array<{ uri: string; name?: string; description?: string; mimeType?: string }>> {
+    const res = (await this.transport.request('resources/list', {})) as {
+      resources?: Array<{ uri: string; name?: string; description?: string; mimeType?: string }>;
+    } | null;
+    return res?.resources ?? [];
+  }
+
+  /** Read one resource (MCP `resources/read`). */
+  async readResource(uri: string): Promise<Array<{ uri?: string; mimeType?: string; text?: string; blob?: string }>> {
+    const res = (await this.transport.request('resources/read', { uri })) as {
+      contents?: Array<{ uri?: string; mimeType?: string; text?: string; blob?: string }>;
+    } | null;
+    return res?.contents ?? [];
+  }
+
+  /** List prompt templates the server exposes (MCP `prompts/list`). Empty when unsupported. */
+  async listPrompts(): Promise<Array<{ name: string; description?: string; arguments?: unknown }>> {
+    const res = (await this.transport.request('prompts/list', {})) as {
+      prompts?: Array<{ name: string; description?: string; arguments?: unknown }>;
+    } | null;
+    return res?.prompts ?? [];
+  }
+
+  /** Fetch one prompt template, rendered with arguments (MCP `prompts/get`). */
+  async getPrompt(name: string, args?: Record<string, unknown>): Promise<unknown> {
+    return this.transport.request('prompts/get', { name, arguments: args ?? {} });
   }
 
   /**
@@ -94,6 +374,19 @@ export class McpBridge {
       registry.register(tool);
     }
     return tools;
+  }
+
+  /**
+   * Subscribe to the server going away.
+   *
+   * The stdio transport has always emitted 'exit' when its child process died; nothing listened, so a
+   * crashed MCP server kept its tools advertised forever. The supervisor uses this to unmount them.
+   * Transports without a process (HTTP) never fire it — they are covered by the health ping instead.
+   */
+  onExit(cb: (reason: string) => void): void {
+    const t = this.transport as unknown as { on?: (ev: string, fn: (arg: unknown) => void) => void };
+    if (typeof t.on !== 'function') return;
+    t.on('exit', (code: unknown) => cb(`server process exited (code ${code ?? 'null'})`));
   }
 
   /** Get the discovered tools */

@@ -133,7 +133,7 @@ import { createHash } from 'node:crypto';
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 import { createLLMAdapter, ContextTooLargeError, type NativeMessage, type LLMResponse } from './llm-adapter.js';
 import { registerMainLLM, renderQuestion, parseQuestionAnswer, callAuxLLM, isAuxLLMConfigured, type AuxLLMRequest } from '@agent/tools';
-import { loadMcpConfig, connectMcpServers, closeMcpBridges, type McpBridge } from '@agent/mcp';
+import { loadMcpConfig, McpSupervisor, type McpServerStatus } from '@agent/mcp';
 import {
   truncateToolResultContent,
   evictOldToolResults,
@@ -2790,47 +2790,64 @@ const toolDefs: ToolDefinition[] = tools.list().map(t => ({
 // set capability='execute' → under the read-only matrix, the first call triggers onAuthRequest rather than auto-allowing.
 // autonomous loop uses an independent whitelist (DEFAULT_TOOL_WHITELIST, which does not include MCP tool names); background
 // does not browse live websites.
-let mcpBridges: McpBridge[] = [];
+// Supervised, not fire-and-forget: an MCP server is a separate process (or a remote host) and can die
+// at any time. Mount adds to the same registry + toolDefs array; unmount takes them straight back out,
+// so a crashed server stops being advertised to the model instead of failing every call forever.
 const mcpServerConfigs = loadMcpConfig();
+let mcpSupervisor: McpSupervisor | null = null;
+
 if (mcpServerConfigs.length > 0) {
-  connectMcpServers(mcpServerConfigs)
-    .then((bridges) => {
-      mcpBridges = bridges;
-      let mounted = 0;
-      // Name-based dedup: after sanitizing tool names, collisions may occur (with each other or with built-in tools);
-      // if duplicate tool names enter toolDefs simultaneously, the LLM receives a duplicate tool name and returns 400.
-      // Existing tool names take precedence; duplicates are skipped.
+  mcpSupervisor = new McpSupervisor(mcpServerConfigs, {
+    onMount: (server, mcpTools) => {
+      // Name-based dedup: after sanitizing tool names, collisions may occur (with each other or with
+      // built-in tools); duplicate names in toolDefs make the LLM API return 400. Existing names win.
       const existingNames = new Set(toolDefs.map((d) => d.name));
-      for (const bridge of bridges) {
-        for (const tool of bridge.getTools()) {
-          if (existingNames.has(tool.name)) {
-            console.warn(`[mcp] skipped duplicate tool name ${tool.name} (conflicts with existing tool)`);
-            continue;
-          }
-          try {
-            tools.register(tool);
-            toolDefs.push({
-              name: tool.name,
-              description: tool.description,
-              parameters: JSON.stringify(tool.schema),
-            });
-            existingNames.add(tool.name);
-            mounted++;
-          } catch (e) {
-            console.warn(`[mcp] register tool ${tool.name} failed: ${(e as Error)?.message ?? e}`);
-          }
+      let mounted = 0;
+      for (const tool of mcpTools) {
+        if (existingNames.has(tool.name)) {
+          console.warn(`[mcp] skipped duplicate tool name ${tool.name} (conflicts with existing tool)`);
+          continue;
+        }
+        try {
+          tools.register(tool);
+          toolDefs.push({
+            name: tool.name,
+            description: tool.description,
+            parameters: JSON.stringify(tool.schema),
+          });
+          existingNames.add(tool.name);
+          mounted++;
+        } catch (e) {
+          console.warn(`[mcp] register tool ${tool.name} failed: ${(e as Error)?.message ?? e}`);
         }
       }
-      if (mounted > 0) {
-        console.log(`[mcp] mounted ${mounted} external tool(s) from ${bridges.length} server(s)`);
+      if (mounted > 0) console.log(`[mcp] mounted ${mounted} tool(s) from "${server}"`);
+    },
+    onUnmount: (server, toolNames) => {
+      for (const name of toolNames) {
+        tools.unregister(name);
+        const idx = toolDefs.findIndex((d) => d.name === name);
+        if (idx >= 0) toolDefs.splice(idx, 1);
       }
-    })
-    .catch((e) => console.warn(`[mcp] connection failed: ${(e as Error)?.message ?? e}`));
+      console.warn(`[mcp] unmounted ${toolNames.length} tool(s) from "${server}" (server unavailable)`);
+    },
+  });
+
+  mcpSupervisor.start().catch((e) => console.warn(`[mcp] supervisor start failed: ${(e as Error)?.message ?? e}`));
 }
 
-/** Close all MCP connections (subprocesses / SSE) during graceful shutdown. Called by index.ts. */
+/** Live MCP connection status (for /api/mcp/status and the health report). */
+export function getMcpStatus(): { servers: McpServerStatus[]; summary: string; configured: number } {
+  return {
+    servers: mcpSupervisor?.status() ?? [],
+    summary: mcpSupervisor ? mcpSupervisor.summary() : 'MCP: no servers configured',
+    configured: mcpServerConfigs.length,
+  };
+}
+
+/** Close all MCP connections (subprocesses / HTTP sessions) during graceful shutdown. Called by index.ts. */
 export function closeMcpBridgesOnShutdown(): Promise<void> {
-  return closeMcpBridges(mcpBridges);
+  return mcpSupervisor ? mcpSupervisor.stop() : Promise.resolve();
 }
 
 const permissions = createReadOnlyMatrix();

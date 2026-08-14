@@ -16,6 +16,7 @@ import type { RawStore } from './raw.js';
 import type { Fact, FactKind, ScheduleActionType } from './types.js';
 import { CONVENTIONAL_NAMESPACES } from './types.js';
 import { isDuplicateRoutine, scheduleIntentText, schedulesOverCap } from './schedule_dedup.js';
+import { skillFilesSection } from './skill_files.js';
 
 // ── 2026-05-14: auth prefix mis-storage detector (common weak LLM mistake) ──────────────
 // LLM stores "Bearer xxx" / "Authorization: ..." as the value; when later referenced it concatenates to
@@ -681,7 +682,10 @@ export function createMemoryTools(
             output:
               `# Skill: ${skill.name}\n` +
               `${skill.description}\n\n` +
-              `## Action Template\n${skill.actionTemplate}`,
+              `## Action Template\n${skill.actionTemplate}` +
+              // Marketplace skills ship scripts/references next to the SKILL.md; without the install
+              // directory the "run scripts/x.py" steps above are unusable. See skill_files.ts.
+              skillFilesSection(skill.name),
             data: skill,
           };
         } catch (e) {

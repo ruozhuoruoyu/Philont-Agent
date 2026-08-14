@@ -71,7 +71,15 @@ export function removeLock(name: string): void {
 
 export interface AuditEvent {
   ts: string;
-  action: 'install' | 'update' | 'uninstall' | 'blocked';
+  action:
+    | 'install'
+    | 'update'
+    | 'uninstall'
+    | 'blocked'
+    /** A user knowingly installed past a `block` verdict. */
+    | 'override_install'
+    /** An override was requested but not honoured (agent-initiated overrides are never honoured). */
+    | 'override_refused';
   name: string;
   sourceTag?: string;
   verdict?: string;

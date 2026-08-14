@@ -18,7 +18,7 @@
  */
 
 import { mkdir, readFile, writeFile, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import type { Tool } from '@agent/policy';
 
 /**
@@ -90,6 +90,50 @@ function injectFrontmatterField(content: string, key: string, value: string): st
     newYaml = yamlBlock.trimEnd() + '\n' + line;
   }
   return `---\n${newYaml}\n---\n${body}`;
+}
+
+/**
+ * Write companion files (scripts/, reference/, …) into an installed skill's directory.
+ *
+ * Not part of the agent-facing tool schema on purpose: this is the marketplace install pipeline's
+ * write step, not a capability the model gets to aim anywhere it likes. Every path is validated to be
+ * relative and inside the skill directory before it is written — a source-controlled path like
+ * `../../.ssh/authorized_keys` is exactly the kind of thing an untrusted registry would try.
+ *
+ * @returns the absolute paths written, plus per-file rejections (never throws for a single bad file).
+ */
+export async function writeSkillCompanions(
+  name: string,
+  files: Array<{ path: string; content: string }>,
+): Promise<{ written: string[]; rejected: string[] }> {
+  const written: string[] = [];
+  const rejected: string[] = [];
+
+  const nameErr = validateSkillName(name);
+  if (nameErr) return { written, rejected: [`(all): ${nameErr}`] };
+
+  const root = join(installRoot(), name);
+  for (const f of files) {
+    const rel = f.path.replace(/\\/g, '/');
+    if (!rel || rel.startsWith('/') || /^[a-zA-Z]:/.test(rel) || rel.split('/').includes('..') || rel.includes('\0')) {
+      rejected.push(`${f.path}: unsafe path`);
+      continue;
+    }
+    const target = join(root, ...rel.split('/'));
+    // Belt and braces: even after the checks above, the resolved path must stay under the skill dir.
+    if (target !== root && !target.startsWith(root + sep)) {
+      rejected.push(`${f.path}: escapes the skill directory`);
+      continue;
+    }
+    try {
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, f.content, 'utf-8');
+      written.push(target);
+    } catch (e) {
+      rejected.push(`${f.path}: ${(e as Error).message}`);
+    }
+  }
+  return { written, rejected };
 }
 
 /**

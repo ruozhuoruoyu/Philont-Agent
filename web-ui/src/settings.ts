@@ -173,6 +173,11 @@ const FIELDS: Field[] = [
   { key: 'PHILONT_MCP_CONFIG', label: { zh: 'MCP 配置文件', en: 'MCP Config' }, type: 'text', group: '通用',
     placeholder: { zh: '留空 = 默认', en: 'empty = default' },
     help: { zh: '自定义 MCP server 配置文件路径。留空用默认:用户主目录下的 .philont/mcp.json。须填绝对路径,不支持 ~ 缩写。', en: 'Path to a custom MCP server config file. Empty = default: .philont/mcp.json under your home. Use an absolute path; ~ is NOT expanded.' } },
+  { key: 'PHILONT_GITHUB_TOKEN', label: { zh: 'GitHub Token', en: 'GitHub Token' }, type: 'secret', group: '通用',
+    help: { zh: '技能市场从 GitHub 装技能时用。留空也能用,但未认证的 GitHub API 每小时只有 60 次,超了就无法把技能锁到具体 commit(会退化成 HEAD)。填了还能装私有仓库里的技能。', en: 'Used when installing skills from GitHub. Optional, but unauthenticated GitHub API allows only 60 requests/hour — past that a skill cannot be pinned to a commit (it degrades to HEAD). A token also reaches private repositories.' } },
+  { key: 'PHILONT_CLAWHUB_BIN', label: { zh: 'clawhub 路径', en: 'clawhub Path' }, type: 'text', group: '通用',
+    placeholder: { zh: '留空 = 在 PATH 里找', en: 'empty = look on PATH' },
+    help: { zh: 'clawhub CLI 的绝对路径。留空时在 PATH 里找;装了但 philont 找不到时才需要填。', en: 'Absolute path to the clawhub CLI. Empty = look on PATH; only needed when it is installed somewhere philont cannot find.' } },
   { key: 'PHILONT_PORT', label: { zh: 'Agent 端口', en: 'Agent Port' }, type: 'number', group: '通用', placeholder: '20266',
     help: { zh: '默认 20266。改了需重启 launcher 才彻底生效。', en: 'Defaults to 20266. Restart the launcher for it to fully take effect.' } },
 

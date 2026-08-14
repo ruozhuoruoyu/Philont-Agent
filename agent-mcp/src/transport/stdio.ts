@@ -7,6 +7,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import type { McpStdioConfig } from '../config.js';
+import { withProtocolMeta, type ProtocolVersion } from '../protocol.js';
 
 export interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -22,10 +23,43 @@ export interface JsonRpcResponse {
   error?: { code: number; message: string; data?: unknown };
 }
 
+/**
+ * Variables an MCP server process legitimately needs, and nothing else.
+ *
+ * Everything under here exists because the previous code did `{ ...process.env, ...config.env }`: a
+ * third-party package pulled by `npx` at startup received philont's entire environment — LLM API keys,
+ * channel credentials, database paths. An MCP server is exactly the kind of dependency that gets
+ * compromised upstream, and there is no reason a weather server should be able to read
+ * ANTHROPIC_API_KEY. A server that truly needs a variable gets it via `env` or `inheritEnv`.
+ */
+const BASE_ENV_KEYS = [
+  'PATH', 'Path', 'PATHEXT',
+  'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+  'TMP', 'TEMP', 'TMPDIR',
+  'SystemRoot', 'SYSTEMROOT', 'windir', 'COMSPEC', 'ComSpec',
+  'LANG', 'LC_ALL', 'TZ',
+  'APPDATA', 'LOCALAPPDATA', 'ProgramFiles', 'ProgramData',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  'NODE_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'npm_config_registry', 'npm_config_cache',
+];
+
+/** Build the child process environment: safe base + explicitly allowed passthroughs + explicit values. */
+export function buildChildEnv(
+  config: Pick<McpStdioConfig, 'env' | 'inheritEnv'>,
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of [...BASE_ENV_KEYS, ...(config.inheritEnv ?? [])]) {
+    if (source[key] !== undefined) env[key] = source[key];
+  }
+  return { ...env, ...(config.env ?? {}) };
+}
+
 export class StdioTransport extends EventEmitter {
   private proc: ChildProcess | null = null;
   private buffer = '';
   private nextId = 1;
+  private protocolVersion: ProtocolVersion | null = null;
   private pending = new Map<number, {
     resolve: (value: unknown) => void;
     reject: (reason: Error) => void;
@@ -41,7 +75,7 @@ export class StdioTransport extends EventEmitter {
 
   /** Start the child process */
   async connect(): Promise<void> {
-    const env = { ...process.env, ...this.config.env };
+    const env = buildChildEnv(this.config);
     const proc = spawn(this.config.command, this.config.args || [], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
@@ -98,6 +132,11 @@ export class StdioTransport extends EventEmitter {
     });
   }
 
+  /** Adopt the negotiated protocol version (see protocol.ts); attached to every later request. */
+  setProtocolVersion(version: ProtocolVersion | null): void {
+    this.protocolVersion = version;
+  }
+
   /** Send a JSON-RPC request and wait for its response */
   async request(method: string, params?: unknown): Promise<unknown> {
     if (!this.proc?.stdin?.writable) {
@@ -105,7 +144,12 @@ export class StdioTransport extends EventEmitter {
     }
 
     const id = this.nextId++;
-    const msg: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
+    const msg: JsonRpcRequest = {
+      jsonrpc: '2.0',
+      id,
+      method,
+      params: withProtocolMeta(params, this.protocolVersion),
+    };
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -123,7 +167,7 @@ export class StdioTransport extends EventEmitter {
   /** Send a notification (no response needed) */
   notify(method: string, params?: unknown): void {
     if (!this.proc?.stdin?.writable) return;
-    const msg = { jsonrpc: '2.0', method, params };
+    const msg = { jsonrpc: '2.0', method, params: withProtocolMeta(params, this.protocolVersion) };
     this.proc.stdin.write(JSON.stringify(msg) + '\n');
   }
 

@@ -12,6 +12,25 @@
 
 import type { Tool } from '@agent/policy';
 import { searchAll, installFromSource } from './registry/index.js';
+import type { NotInstalledReport } from './registry/index.js';
+
+/**
+ * Render what the install left behind. philont writes a single SKILL.md, but most real skills are
+ * bundles (scripts/, reference/, sub-skills). Reporting "installed" while silently dropping the files
+ * the SKILL.md itself tells the agent to run produces a skill that looks present and cannot work —
+ * so the omission is always stated, and the agent is told to verify before relying on it.
+ */
+function partialInstallNotice(report: NotInstalledReport | undefined, installedFiles?: number): string {
+  const wrote = installedFiles && installedFiles > 1 ? `\nInstalled ${installedFiles} files (SKILL.md + companions).` : '';
+  if (!report || report.total <= 0) return wrote;
+  const shown = report.sample.join(', ');
+  const more = report.total > report.sample.length ? `, …(+${report.total - report.sample.length})` : '';
+  return (
+    `${wrote}\n⚠ PARTIAL: ${report.total} file(s) from the source were NOT installed (${shown}${more}). ` +
+    `If the skill's instructions reference those files or scripts, they are missing — say so instead of ` +
+    `assuming the skill is fully functional.`
+  );
+}
 
 export const searchSkillsTool: Tool = {
   name: 'searchSkills',
@@ -97,15 +116,21 @@ export const installSkillFromRegistryTool: Tool = {
 
       switch (outcome.status) {
         case 'installed':
-          return { success: true, output: `📥 Installed "${outcome.name}" (${outcome.sourceTag}, scan: ${outcome.verdict}). It is usable now.` };
+          return {
+            success: true,
+            output:
+              `📥 Installed "${outcome.name}" (${outcome.sourceTag}, scan: ${outcome.verdict}). It is usable now.` +
+              partialInstallNotice(outcome.notInstalled, outcome.installedFiles),
+          };
         case 'ask': {
           const hits = outcome.report?.hits.map((h) => `${h.category}: ${h.pattern} (line ${h.line})`).join('; ') || 'none';
           return {
             success: true,
             output:
               `⚠ "${outcome.name}" is a community skill with a ${outcome.verdict} scan and needs confirmation before install.\n` +
-              `Scan findings: ${hits}\n` +
-              `Ask the user to confirm, then call installSkillFromRegistry again with confirm:true.`,
+              `Scan findings: ${hits}` +
+              partialInstallNotice(outcome.notInstalled) +
+              `\nAsk the user to confirm, then call installSkillFromRegistry again with confirm:true.`,
           };
         }
         case 'blocked': {

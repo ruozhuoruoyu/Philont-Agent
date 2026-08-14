@@ -28,6 +28,9 @@ const SECRET_KEYS = new Set([
   'SERPER_API_KEY',
   'BRAVE_SEARCH_API_KEY',
   'TELEGRAM_BOT_TOKEN',
+  // Declared 'secret' in the web-ui settings form; must be masked here too, or the value is echoed
+  // back in plaintext on every GET /api/launcher/config.
+  'PHILONT_GITHUB_TOKEN',
 ]);
 
 /**

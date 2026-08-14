@@ -1,6 +1,9 @@
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { wrapMcpTool, type McpToolDefinition } from '../src/wrapper.js';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { wrapMcpTool, renderMcpContent, type McpToolDefinition } from '../src/wrapper.js';
 
 // Mock transport
 const mockTransport = {
@@ -119,5 +122,93 @@ describe('wrapMcpTool', () => {
   it('respects custom domain override', () => {
     const tool = wrapMcpTool(mcpTool, mockTransport, { domain: 'local' });
     assert.equal(tool.domain, 'local');
+  });
+});
+
+describe('renderMcpContent — binary payloads never reach the context', () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'philont-mcp-artifacts-'));
+  const prevDownloadDir = process.env.PHILONT_DOWNLOAD_DIR;
+  before(() => { process.env.PHILONT_DOWNLOAD_DIR = tmpRoot; });
+  after(() => {
+    if (prevDownloadDir === undefined) delete process.env.PHILONT_DOWNLOAD_DIR;
+    else process.env.PHILONT_DOWNLOAD_DIR = prevDownloadDir;
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  /** A base64 payload big enough that inlining it would be obvious. */
+  const bigB64 = Buffer.alloc(64 * 1024, 7).toString('base64');
+
+  it('writes image content to disk and reports a path instead of base64', () => {
+    const { text, artifacts } = renderMcpContent(
+      [{ type: 'image', data: bigB64, mimeType: 'image/png' }],
+      'browser_take_screenshot',
+    );
+    assert.equal(artifacts.length, 1);
+    assert.ok(existsSync(artifacts[0]), 'artifact was written to disk');
+    assert.match(artifacts[0], /\.png$/);
+    assert.ok(text.includes(artifacts[0]));
+    assert.ok(!text.includes(bigB64.slice(0, 64)), 'base64 payload must not appear in the text');
+    assert.ok(text.length < 400, `reference should be short, got ${text.length} chars`);
+  });
+
+  it('keeps text content verbatim and joins mixed content', () => {
+    const { text } = renderMcpContent(
+      [
+        { type: 'text', text: 'page loaded' },
+        { type: 'image', data: bigB64, mimeType: 'image/png' },
+        { type: 'resource_link', uri: 'file:///tmp/x.pdf', name: 'report' },
+      ],
+      'mixed',
+    );
+    assert.ok(text.startsWith('page loaded\n'));
+    assert.ok(text.includes('[image saved to '));
+    assert.ok(text.includes('resource_link file:///tmp/x.pdf'));
+  });
+
+  it('inlines an embedded text resource but saves an embedded blob', () => {
+    const inline = renderMcpContent(
+      [{ type: 'resource', resource: { uri: 'file:///a.txt', text: 'hello' } }],
+      'res',
+    );
+    assert.ok(inline.text.includes('hello'));
+    assert.equal(inline.artifacts.length, 0);
+
+    const blob = renderMcpContent(
+      [{ type: 'resource', resource: { uri: 'file:///a.bin', blob: bigB64, mimeType: 'application/pdf' } }],
+      'res',
+    );
+    assert.equal(blob.artifacts.length, 1);
+    assert.ok(!blob.text.includes(bigB64.slice(0, 64)));
+  });
+
+  it('describes unknown content types rather than dumping them', () => {
+    const { text } = renderMcpContent([{ type: 'hologram', data: bigB64 } as never], 'weird');
+    assert.ok(text.includes("unsupported MCP content type 'hologram'"));
+    assert.ok(!text.includes(bigB64.slice(0, 64)));
+  });
+
+  it('execute(): an image-only result yields a path reference, not a base64 dump', async () => {
+    const imageTransport = {
+      async request() {
+        return { content: [{ type: 'image', data: bigB64, mimeType: 'image/png' }] };
+      },
+    } as any;
+    const tool = wrapMcpTool({ name: 'screenshot', inputSchema: { type: 'object', properties: {} } }, imageTransport);
+    const result = await tool.execute({});
+    assert.equal(result.success, true);
+    assert.ok(!result.output.includes(bigB64.slice(0, 64)), 'regression: base64 was dumped into the output');
+    assert.match(result.output, /image saved to .*\.png/);
+  });
+
+  it('execute(): an unrecognised result shape is truncated, not pasted whole', async () => {
+    const oddTransport = {
+      async request() {
+        return { weird: bigB64 }; // no content array at all
+      },
+    } as any;
+    const tool = wrapMcpTool({ name: 'odd', inputSchema: { type: 'object', properties: {} } }, oddTransport);
+    const result = await tool.execute({});
+    assert.ok(result.output.length < 5000, `fallback must stay bounded, got ${result.output.length}`);
+    assert.ok(result.output.includes('[truncated'));
   });
 });
