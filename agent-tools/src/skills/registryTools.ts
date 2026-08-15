@@ -12,7 +12,20 @@
 
 import type { Tool } from '@agent/policy';
 import { searchAll, installFromSource } from './registry/index.js';
-import type { NotInstalledReport } from './registry/index.js';
+import type { NotInstalledReport, ScanHit } from './registry/index.js';
+
+/**
+ * Render scan findings WITH the file they came from.
+ *
+ * The scanner has always attributed each hit to a file, and nothing printed it: a hit inside
+ * `skills/observability/SKILL.md` was shown as "(line 153)" next to the entry SKILL.md the reader was
+ * looking at, so they would reasonably conclude the line was in the file on screen. The user's consent
+ * to override the gate is built on this text.
+ */
+function formatHits(hits: ScanHit[] | undefined): string {
+  if (!hits?.length) return 'none';
+  return hits.map((h) => `${h.category}: ${h.pattern} (${h.file ?? 'SKILL.md'}:${h.line})`).join('; ');
+}
 
 /**
  * Render what the install left behind. philont writes a single SKILL.md, but most real skills are
@@ -123,7 +136,7 @@ export const installSkillFromRegistryTool: Tool = {
               partialInstallNotice(outcome.notInstalled, outcome.installedFiles),
           };
         case 'ask': {
-          const hits = outcome.report?.hits.map((h) => `${h.category}: ${h.pattern} (line ${h.line})`).join('; ') || 'none';
+          const hits = formatHits(outcome.report?.hits);
           return {
             success: true,
             output:
@@ -134,7 +147,7 @@ export const installSkillFromRegistryTool: Tool = {
           };
         }
         case 'blocked': {
-          const hits = outcome.report?.hits.map((h) => `${h.category}: ${h.pattern} (line ${h.line})`).join('; ') || 'none';
+          const hits = formatHits(outcome.report?.hits);
           return { success: false, output: '', error: `Blocked: "${outcome.name}" failed the safety gate (${outcome.verdict}). Findings: ${hits}` };
         }
         default:

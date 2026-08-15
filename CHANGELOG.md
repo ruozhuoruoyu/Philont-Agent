@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files with no provenance. Reachable only from the UI, never from the agent's own tool, recorded in
   the lock file and the audit log.
 
+- **A boundary around the local HTTP API.** It answered every caller with
+  `Access-Control-Allow-Origin: *` and no authentication — survivable until the install endpoint
+  gained a flag that walks a skill past the safety gate, at which point any page the owner has open
+  could POST a skill (i.e. instructions the agent then follows) into the library. CORS is now echoed
+  only for trusted origins, state-changing requests carrying a foreign `Origin` or
+  `Sec-Fetch-Site: cross-site` are refused, and the gate override additionally requires a single-use
+  nonce fetched first. Residual, and stated rather than papered over: any process already on this
+  machine can walk the same two steps, so the audit records the raw evidence (origin, user-agent) and
+  only calls a caller `user` when it took the two-step path — an anonymous POST is recorded as `api`
+  and cannot override at all.
+
 ### Fixed
 
 - **The clawhub source was entirely dead, and said the wrong thing about why.** Availability was

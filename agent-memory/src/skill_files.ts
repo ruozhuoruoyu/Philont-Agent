@@ -70,11 +70,14 @@ export function listSkillFiles(dir: string, limit = 40): string[] {
 export function skillFilesSection(name: string): string {
   const dir = resolveSkillDir(name);
   if (!dir) return '';
-  const files = listSkillFiles(dir);
+  const SHOWN = 40;
+  // Ask for one more than we display, so "there are more" is a fact we observed rather than a branch
+  // that can never be true — listSkillFiles stops at its own limit.
+  const files = listSkillFiles(dir, SHOWN + 1);
   if (!files.length) return '';
 
-  const lines = files.slice(0, 40).map((f) => `- ${f}`);
-  const more = files.length > 40 ? `\n- …(${files.length - 40} more)` : '';
+  const lines = files.slice(0, SHOWN).map((f) => `- ${f}`);
+  const more = files.length > SHOWN ? `\n- …(and more; ${SHOWN} shown)` : '';
   return (
     `\n\n## Files\n` +
     `This skill is installed at: ${dir}\n` +

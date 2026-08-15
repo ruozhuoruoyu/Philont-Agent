@@ -113,6 +113,28 @@ test('install: the agent cannot override the gate, and the attempt is audited', 
   });
 });
 
+test('install: an unauthenticated API caller cannot override either', async () => {
+  await withStubSource(async () => {
+    const outcome = await installFromSource({
+      sourceId: 'test-stub',
+      identifier: 'risky-ops',
+      override: true,
+      // What the HTTP endpoint passes when the request carried no UI-issued nonce. The API has no
+      // authentication and philont's own shell can post to it, so "arrived over HTTP" is not a person.
+      actor: 'api',
+      auditNote: 'local(no-origin) ua=curl/8.0',
+      now: '2026-08-14T00:00:00Z',
+    });
+    assert.equal(outcome.status, 'blocked');
+    assert.deepEqual(readLock(), {});
+    const audit = auditLines(process.cwd());
+    const refusal = audit.find((a) => a.action === 'override_refused');
+    assert.ok(refusal, 'the attempt must be recorded');
+    assert.equal(refusal!.actor, 'api', 'and recorded as what it was, not as the user');
+    assert.equal(refusal!.note, 'local(no-origin) ua=curl/8.0');
+  });
+});
+
 test('install: a user override installs and is marked as such', async () => {
   await withStubSource(async () => {
     const outcome = await installFromSource({

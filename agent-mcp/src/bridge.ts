@@ -73,46 +73,27 @@ export class McpBridge {
   async connect(): Promise<void> {
     await this.transport.connect();
 
-    // An explicit pin skips negotiation entirely (escape hatch for a misbehaving server).
-    if (this.config.protocolVersion) {
-      this.negotiation = { version: this.config.protocolVersion, via: 'assumed' };
-      this.applyVersion(this.config.protocolVersion);
-      return;
-    }
+    // A pin NARROWS the offer to one version. It must never skip the handshake: a conforming
+    // pre-2026 server refuses every call until it has been initialized (-32002 "Server not
+    // initialized"), so "assume the version and start talking" breaks the escape hatch in exactly the
+    // situation it exists for. The only pin that legitimately has no initialize is 2026-07-28+, where
+    // the method no longer exists.
+    const pinned = this.config.protocolVersion;
+    const modernPin = pinned !== undefined && pinned >= '2026-07-28';
 
-    // 1) server/discover (2026-07-28+). Absent on older servers → method-not-found, which is fine.
-    try {
-      const discovered = (await this.transport.request('server/discover', {})) as {
-        protocolVersion?: string;
-        capabilities?: Record<string, unknown>;
-        serverInfo?: { name?: string; version?: string };
-      } | null;
-      if (discovered?.protocolVersion) {
-        this.negotiation = {
-          version: discovered.protocolVersion,
-          via: 'discover',
-          capabilities: discovered.capabilities,
-          serverInfo: discovered.serverInfo,
-        };
-        this.applyVersion(discovered.protocolVersion);
-        return;
-      }
-    } catch (e) {
-      // Anything other than "no such method" is worth surfacing as a log, not as a failure: an
-      // initialize handshake may still work.
-      if (!isMethodNotFound(e)) {
-        this.emitLog(`server/discover failed (${(e as Error).message}); falling back to initialize`);
-      }
-    }
-
-    // 2) initialize handshake, walking down revisions if the server rejects our offer.
-    const offers: ProtocolVersion[] = [
-      PREFERRED_INITIALIZE_VERSION,
-      ...SUPPORTED_PROTOCOL_VERSIONS.filter((v) => v !== PREFERRED_INITIALIZE_VERSION && v !== '2026-07-28'),
-    ];
+    // 1) initialize handshake, walking down revisions if the server rejects our offer.
+    //    Tried FIRST because it is what nearly every server in the wild still speaks; asking a strict
+    //    pre-2026 server for `server/discover` before initializing earns a protocol error every time.
+    const offers: ProtocolVersion[] = pinned
+      ? [pinned]
+      : [
+          PREFERRED_INITIALIZE_VERSION,
+          ...SUPPORTED_PROTOCOL_VERSIONS.filter((v) => v !== PREFERRED_INITIALIZE_VERSION && v !== '2026-07-28'),
+        ];
 
     let lastErr: unknown = null;
-    for (const offer of offers) {
+    let initializeMissing = modernPin;
+    for (const offer of modernPin ? [] : offers) {
       try {
         const result = (await this.transport.request('initialize', {
           protocolVersion: offer,
@@ -124,11 +105,11 @@ export class McpBridge {
           serverInfo?: { name?: string; version?: string };
         } | null;
 
-        // Adopt the server's answer — that is the whole point of the handshake.
-        const agreed = result?.protocolVersion || offer;
+        // Adopt the server's answer — that is the whole point of the handshake — unless pinned.
+        const agreed = pinned || result?.protocolVersion || offer;
         this.negotiation = {
           version: agreed,
-          via: 'initialize',
+          via: pinned ? 'assumed' : 'initialize',
           capabilities: result?.capabilities,
           serverInfo: result?.serverInfo,
         };
@@ -137,7 +118,37 @@ export class McpBridge {
         return;
       } catch (e) {
         lastErr = e;
+        if (isMethodNotFound(e)) {
+          // No `initialize` at all → this is a 2026-07-28+ server; discovery is the way in.
+          initializeMissing = true;
+          break;
+        }
         if (!isUnsupportedVersionError(e)) throw e; // a real failure, not a version disagreement
+      }
+    }
+
+    // 2) server/discover (2026-07-28+), for servers that have dropped initialize.
+    if (initializeMissing) {
+      try {
+        const discovered = (await this.transport.request('server/discover', {})) as {
+          protocolVersion?: string;
+          capabilities?: Record<string, unknown>;
+          serverInfo?: { name?: string; version?: string };
+        } | null;
+        const agreed = pinned || discovered?.protocolVersion;
+        if (agreed) {
+          this.negotiation = {
+            version: agreed,
+            via: pinned ? 'assumed' : 'discover',
+            capabilities: discovered?.capabilities,
+            serverInfo: discovered?.serverInfo,
+          };
+          this.applyVersion(agreed);
+          return;
+        }
+      } catch (e) {
+        lastErr = e;
+        this.emitLog(`server/discover failed after initialize was unavailable: ${(e as Error).message}`);
       }
     }
 
@@ -317,7 +328,10 @@ export class McpBridge {
 
   /** Re-run discovery and re-wrap (used after notifications/tools/list_changed). */
   async rediscover(): Promise<Tool[]> {
-    this.tools = this.wrapAll(await this.discover());
+    // Resource/prompt tools have to be rebuilt too. Returning only the tools/* set here meant a single
+    // list_changed notification permanently deleted this server's resource and prompt tools: the
+    // supervisor unmounts the previous set and mounts what it is handed.
+    this.tools = [...this.wrapAll(await this.discover()), ...(await this.buildResourceTools())];
     return this.tools;
   }
 

@@ -31,6 +31,11 @@ import './proxy-bootstrap.js'; // second: install global outbound proxy before a
 // evaluated — and anything they logged while loading (the compass diagnostics among them) never reached
 // the file. See boot_logging.ts.
 import './boot_logging.js';
+// Local-API boundary: per-request CORS + a cross-site guard for state-changing calls, and single-use
+// nonces for the one action (safety-gate override) whose whole value depends on a person having asked
+// for it. See http_origin.ts / override_nonce.ts.
+import { corsHeaders, rejectCrossSite, describeCaller } from './http_origin.js';
+import { issueOverrideNonce, consumeOverrideNonce } from './override_nonce.js';
 
 // Wall-clock watchdog — must load after the tee like everything else. See suspend_detector.
 import { startSuspendDetector } from './suspend_detector.js';
@@ -121,13 +126,16 @@ const PORT = resolvePort();
 
 // ── HTTP route handler ──────────────────────────────────────────────────────
 
+/**
+ * JSON response.
+ *
+ * CORS headers are NOT set here: they are per-request (only trusted origins are echoed) and are
+ * applied once at the top of the request handler with res.setHeader, which writeHead preserves. The
+ * previous blanket `Access-Control-Allow-Origin: *` let any page on the internet talk to this port —
+ * see http_origin.ts for why that became untenable.
+ */
 function sendJson(res: ServerResponse, status: number, data: unknown) {
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  });
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(data));
 }
 
@@ -185,9 +193,24 @@ function matchPath(
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
   const path = url.pathname;
 
+  // Per-request CORS: echo only trusted origins (loopback / PHILONT_ALLOWED_ORIGINS), never '*'.
+  // Set here rather than in sendJson so every response on this path carries it; writeHead keeps
+  // headers set this way.
+  for (const [k, v] of Object.entries(corsHeaders(req))) res.setHeader(k, v);
+
   // CORS preflight
   if (req.method === 'OPTIONS') {
     sendJson(res, 200, {});
+    return true;
+  }
+
+  // Cross-site guard for state-changing requests. A browser cannot forge Origin or Sec-Fetch-Site, so
+  // this is what stops a random page the owner has open from driving this API. Requests with no Origin
+  // (curl, a local script) pass — they are a legitimate way to use it and cannot be produced by a page.
+  const crossSite = rejectCrossSite(req);
+  if (crossSite) {
+    console.warn(`[api] refused ${req.method} ${path}: ${crossSite}`);
+    sendJson(res, 403, { error: crossSite });
     return true;
   }
 
@@ -387,23 +410,42 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
-  // POST /api/skills/registry/install  {sourceId, identifier, name?, confirm?}
+  // GET /api/skills/registry/override-nonce
+  // Step one of overriding the safety gate. Issued only to a request that passed the cross-site guard,
+  // single-use, two-minute life. See override_nonce.ts for what this does and does not prove.
+  if (req.method === 'GET' && path === '/api/skills/registry/override-nonce') {
+    sendJson(res, 200, issueOverrideNonce());
+    return true;
+  }
+
+  // POST /api/skills/registry/install  {sourceId, identifier, name?, confirm?, override?}
   if (req.method === 'POST' && path === '/api/skills/registry/install') {
     const body = await readJsonBody(req);
     const sourceId = String(body.sourceId || '');
     const identifier = String(body.identifier || '');
     if (!sourceId || !identifier) { sendJson(res, 400, { error: 'sourceId and identifier are required' }); return true; }
     try {
+      // Who is really asking? This endpoint has no authentication, so "it arrived over HTTP" is not
+      // evidence of a person: philont's own shell tool can post to it. Only a request carrying a
+      // freshly issued, single-use nonce is attributed to the user — and installFromSource honours
+      // `override` for that actor alone. Everything else is recorded as 'api', which cannot override.
+      // Getting this wrong would not just weaken the gate, it would write the owner's name on a
+      // decision they never made.
+      const wantsOverride = body.override === true;
+      const nonce = (req.headers['x-philont-override-nonce'] as string | undefined) ?? (body.overrideNonce ? String(body.overrideNonce) : undefined);
+      const provenUser = wantsOverride ? consumeOverrideNonce(nonce) : false;
+      if (wantsOverride && !provenUser) {
+        console.warn(`[api] override requested without a valid nonce (${describeCaller(req)}) — refused`);
+      }
+
       const outcome = await installFromSource({
         sourceId,
         identifier,
         name: body.name ? String(body.name) : undefined,
         confirm: body.confirm === true,
-        // override: only ever set from this endpoint (a human clicking through the scan findings in
-        // the UI). The agent-facing tool has no such parameter and always sends actor:'agent', which
-        // installFromSource refuses to honour.
-        override: body.override === true,
-        actor: 'user',
+        override: wantsOverride,
+        actor: provenUser ? 'user' : 'api',
+        auditNote: describeCaller(req),
         now: new Date().toISOString(),
       });
       if (outcome.status === 'installed') await reloadSkillsFromDisk();
@@ -429,15 +471,19 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const now = new Date().toISOString();
     try {
       let updated: Awaited<ReturnType<typeof updateSkill>>[] = [];
+      // actor 'api', not 'user': this endpoint has no authentication, so the audit line records where
+      // the request came from rather than asserting a person made the decision. (Updates cannot
+      // override the gate in any case — a newly dangerous version is blocked and must be decided again.)
+      const caller = { actor: 'api' as const, auditNote: describeCaller(req) };
       if (body.all === true) {
         const statuses = await checkForUpdates();
         for (const s of statuses) {
-          if (s.changed) updated.push(await updateSkill(s.name, { confirm: true, actor: 'user', now }));
+          if (s.changed) updated.push(await updateSkill(s.name, { confirm: true, ...caller, now }));
         }
       } else {
         const name = String(body.name || '');
         if (!name) { sendJson(res, 400, { error: 'name or all:true is required' }); return true; }
-        updated = [await updateSkill(name, { confirm: true, actor: 'user', now })];
+        updated = [await updateSkill(name, { confirm: true, ...caller, now })];
       }
       if (updated.some((u) => u.status === 'installed')) await reloadSkillsFromDisk();
       // Always 200: per-skill outcomes (installed/blocked/error) are data, not HTTP errors.

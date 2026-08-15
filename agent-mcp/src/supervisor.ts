@@ -40,8 +40,16 @@ export interface McpServerStatus {
 }
 
 export interface SupervisorOptions {
-  /** Called when a server's tools become available. */
-  onMount?: (server: string, tools: Tool[]) => void;
+  /**
+   * Called when a server's tools become available.
+   *
+   * MUST return the tool names the owner actually accepted. The owner can reject some — a name that
+   * collides with a built-in tool or with another server is skipped rather than overwritten — and if
+   * the supervisor books the bridge's full list instead, unmounting this server later deletes a tool
+   * belonging to somebody else. That tool never comes back either, because its own server never
+   * disconnected and so never remounts.
+   */
+  onMount?: (server: string, tools: Tool[]) => string[] | void;
   /** Called when a server's tools must stop being offered (crash, health-check failure, shutdown). */
   onUnmount?: (server: string, toolNames: string[]) => void;
   /** How often to ping each connected server with tools/list. 0 disables. Default 60s. */
@@ -104,7 +112,6 @@ export class McpSupervisor {
       if (this.stopped) { await bridge.close().catch(() => {}); return; }
 
       entry.bridge = bridge;
-      entry.tools = tools.map((t) => t.name);
       entry.state = 'connected';
       entry.failures = 0;
       entry.lastError = undefined;
@@ -115,8 +122,13 @@ export class McpSupervisor {
       // Servers may gain or lose tools while running and say so; take them up on it.
       bridge.onToolsChanged(() => void this.remount(entry));
 
-      this.opts.onMount?.(entry.config.name, tools);
-      this.log(`connected "${entry.config.name}" — ${tools.length} tools (protocol ${bridge.protocol?.version ?? 'unknown'} via ${bridge.protocol?.via ?? '?'})`);
+      // Book what the owner accepted, not what the server offered (see onMount's contract).
+      const accepted = this.opts.onMount?.(entry.config.name, tools);
+      entry.tools = Array.isArray(accepted) ? accepted : tools.map((t) => t.name);
+      this.log(
+        `connected "${entry.config.name}" — ${entry.tools.length}/${tools.length} tools mounted ` +
+          `(protocol ${bridge.protocol?.version ?? 'unknown'} via ${bridge.protocol?.via ?? '?'})`,
+      );
     } catch (e) {
       entry.lastError = (e as Error)?.message ?? String(e);
       await bridge.close().catch(() => {});
@@ -130,10 +142,10 @@ export class McpSupervisor {
     try {
       const tools = await entry.bridge.rediscover();
       const previous = entry.tools;
-      entry.tools = tools.map((t) => t.name);
       if (previous.length) this.opts.onUnmount?.(entry.config.name, previous);
-      this.opts.onMount?.(entry.config.name, tools);
-      this.log(`"${entry.config.name}" announced a tool list change — now ${tools.length} tool(s)`);
+      const accepted = this.opts.onMount?.(entry.config.name, tools);
+      entry.tools = Array.isArray(accepted) ? accepted : tools.map((t) => t.name);
+      this.log(`"${entry.config.name}" announced a tool list change — now ${entry.tools.length} tool(s)`);
     } catch (e) {
       this.handleLoss(entry, `re-discovery failed: ${(e as Error)?.message ?? e}`);
     }

@@ -85,6 +85,8 @@ export interface AuditEvent {
   verdict?: string;
   decision?: string;
   actor?: string;
+  /** Where the request came from (HTTP origin / local caller), when the caller knows. */
+  note?: string;
 }
 
 /** Append a JSONL audit line. Best-effort: never throws. */

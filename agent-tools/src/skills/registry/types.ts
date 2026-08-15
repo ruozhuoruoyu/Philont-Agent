@@ -114,6 +114,9 @@ export interface ScanReport {
   hits: ScanHit[];
 }
 
+/** Who is asking for an install. See ProvenanceRecord.confirmedBy for why 'api' is separate. */
+export type InstallActor = 'user' | 'agent' | 'api';
+
 /** A provenance record persisted to .philont/skills.lock.json. */
 export interface ProvenanceRecord {
   name: string;
@@ -129,8 +132,16 @@ export interface ProvenanceRecord {
   version?: string;
   verdict: Verdict;
   decision: GateDecision;
-  /** Who confirmed an `ask`-gated install ('user' | 'agent'), or null when allowed outright. */
-  confirmedBy?: 'user' | 'agent' | null;
+  /**
+   * Who confirmed an `ask`-gated install, or null when allowed outright.
+   *
+   * 'api' means "arrived over the local HTTP API as a single anonymous POST". 'user' means it came
+   * through the UI's two-step confirmation (a single-use nonce fetched first). Neither is a
+   * cryptographic identity — the API has no authentication and any process on this machine can walk
+   * the same two steps — but the distinction is what a blind cross-site POST cannot fake, and the
+   * audit note records the raw evidence (origin / user-agent) rather than an assumption.
+   */
+  confirmedBy?: InstallActor | null;
   /** True when the user knowingly installed past a `block` verdict (see InstallRequest.override). */
   overridden?: boolean;
   /** ISO timestamp. */

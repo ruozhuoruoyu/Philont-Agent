@@ -9,6 +9,7 @@ export type {
   TrustLevel,
   Verdict,
   GateDecision,
+  InstallActor,
   SkillMeta,
   SkillBundle,
   CompanionFile,

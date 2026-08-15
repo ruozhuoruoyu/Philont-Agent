@@ -45,7 +45,7 @@ function isDownloaded(s: InstalledItem): boolean {
   return !!s.source && /^(github:|clawhub:|url:)/.test(s.source);
 }
 
-interface ScanHit { category: string; pattern: string; line: number; excerpt: string }
+interface ScanHit { category: string; pattern: string; line: number; excerpt: string; file?: string }
 interface ScanReport { verdict: 'safe' | 'caution' | 'dangerous'; hits: ScanHit[] }
 
 /** Companion files the source ships that a SKILL.md-only install does not write. */
@@ -157,9 +157,18 @@ export class SkillsMarketplace extends LitElement {
     this.error = null;
     this.notice = null;
     try {
+      // Overriding the safety gate needs a single-use nonce fetched right before the call. That is what
+      // separates "a person clicked through the findings" from "something posted JSON at the port" —
+      // the API has no authentication, so without it the server cannot honestly record who decided.
+      let nonce: string | null = null;
+      if (override) {
+        const nr = await fetch(`${API()}/registry/override-nonce`);
+        if (!nr.ok) { this.error = t('无法获取越权凭据', 'Could not obtain an override token'); return; }
+        nonce = (await nr.json()).nonce ?? null;
+      }
       const r = await fetch(`${API()}/registry/install`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(nonce ? { 'X-Philont-Override-Nonce': nonce } : {}) },
         body: JSON.stringify({ sourceId: m.sourceId, identifier: m.slug, confirm, override }),
       });
       const outcome = await r.json();
@@ -416,7 +425,9 @@ export class SkillsMarketplace extends LitElement {
    * own install tool has no such parameter.
    */
   private async forceInstall(s: Inspected) {
-    const findings = s.scan.hits.slice(0, 6).map((h) => `• ${h.category}: ${h.pattern} (L${h.line})`).join('\n');
+    // Name the FILE each finding came from: a hit inside a sub-skill document shown as a bare line
+    // number reads as if it were in the SKILL.md on screen, and this text is what the consent rests on.
+    const findings = s.scan.hits.slice(0, 6).map((h) => `• ${h.category}: ${h.pattern} (${h.file ?? 'SKILL.md'}:${h.line})`).join('\n');
     const ok = confirm(
       t(
         `安全扫描判定为 ${s.scan.verdict},发现:\n${findings}\n\n仍要安装 ${s.meta.name} 吗?此次越权会记入审计日志。`,
@@ -449,7 +460,7 @@ export class SkillsMarketplace extends LitElement {
           ${s.scan.hits.length
             ? html`<div class="scan">
                 <div class="scan-title">${t('安全扫描发现', 'Safety scan findings')} (${s.scan.verdict}):</div>
-                <ul>${s.scan.hits.map((h) => html`<li><b>${h.category}</b>: ${h.pattern} <span class="ln">L${h.line}</span></li>`)}</ul>
+                <ul>${s.scan.hits.map((h) => html`<li><b>${h.category}</b>: ${h.pattern} <span class="ln">${h.file ?? 'SKILL.md'}:${h.line}</span></li>`)}</ul>
               </div>`
             : html`<div class="scan ok">${t('安全扫描:未发现可疑模式', 'Safety scan: no suspicious patterns')}</div>`}
           <pre class="skillmd">${s.content}</pre>

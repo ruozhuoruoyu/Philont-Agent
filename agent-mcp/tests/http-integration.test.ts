@@ -24,7 +24,7 @@ const SESSION_ID = 'sess-abc123';
 
 interface Rpc { id?: number; method?: string; params?: Record<string, unknown> }
 
-function startServer(opts: { supportsDiscover: boolean }): Promise<{ server: Server; url: string; seen: Rpc[]; headers: Array<Record<string, string | undefined>> }> {
+function startServer(opts: { supportsDiscover: boolean; noInitialize?: boolean }): Promise<{ server: Server; url: string; seen: Rpc[]; headers: Array<Record<string, string | undefined>> }> {
   const seen: Rpc[] = [];
   const headers: Array<Record<string, string | undefined>> = [];
 
@@ -57,6 +57,9 @@ function startServer(opts: { supportsDiscover: boolean }): Promise<{ server: Ser
           return send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: SERVER_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'fake', version: '1' } } });
 
         case 'initialize': {
+          // A 2026-07-28 server has no `initialize` at all — that is precisely when discovery is the
+          // way in, and what makes "initialize first, discover on method-not-found" the right order.
+          if (opts.noInitialize) return fail(-32601, 'Method not found');
           const offered = String(msg.params?.protocolVersion ?? '');
           if (offered !== SERVER_VERSION) {
             return fail(-32602, `Unsupported protocol version: ${offered}`);
@@ -175,12 +178,12 @@ describe('Streamable HTTP transport, end to end', () => {
   });
 });
 
-describe('Streamable HTTP against a server/discover-capable server', () => {
+describe('Streamable HTTP against a modern server (no initialize, discovery only)', () => {
   let ctx: Awaited<ReturnType<typeof startServer>>;
-  before(async () => { ctx = await startServer({ supportsDiscover: true }); });
+  before(async () => { ctx = await startServer({ supportsDiscover: true, noInitialize: true }); });
   after(() => { ctx.server.close(); });
 
-  it('prefers server/discover and skips the initialize handshake', async () => {
+  it('falls through to server/discover when the server has dropped initialize', async () => {
     const bridge = new McpBridge({
       name: 'modern',
       transport: { transport: 'http', url: ctx.url },
@@ -189,7 +192,11 @@ describe('Streamable HTTP against a server/discover-capable server', () => {
     await bridge.connect();
     assert.equal(bridge.protocol?.via, 'discover');
     assert.equal(bridge.protocol?.version, SERVER_VERSION);
-    assert.ok(!ctx.seen.some((m) => m.method === 'initialize'), 'initialize must not be sent when discovery works');
+    // initialize IS attempted first — that is deliberate: nearly every server in the wild still speaks
+    // it, and asking a strict pre-2026 server for server/discover before initializing is a protocol
+    // error every time. What matters is that a -32601 leads to discovery rather than to a dead end.
+    assert.ok(ctx.seen.some((m) => m.method === 'initialize'), 'initialize is tried first');
+    assert.ok(ctx.seen.some((m) => m.method === 'server/discover'), 'and discovery follows the refusal');
     await bridge.close();
   });
 

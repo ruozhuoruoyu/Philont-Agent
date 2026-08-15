@@ -74,7 +74,11 @@ describe('supervisor: http server that stops answering', () => {
     const sup = new McpSupervisor(
       [{ name: 'remote', transport: { transport: 'http', url: ctx.url }, timeout: 2000 }],
       {
-        onMount: (_s, tools) => mounted.push(...tools.map((t) => t.name)),
+        onMount: (_s, tools) => {
+          const names = tools.map((t) => t.name);
+          mounted.push(...names);
+          return names; // the owner reports what it actually accepted
+        },
         onUnmount: (_s, names) => unmounted.push(...names),
         healthIntervalMs: 0, // driven manually below, so the test is deterministic
         baseBackoffMs: 50,

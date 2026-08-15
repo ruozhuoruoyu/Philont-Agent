@@ -17,7 +17,7 @@ import { fetchFrom } from './router.js';
 import { scanSkillBundle } from './scanner.js';
 import { gateDecision } from './gate.js';
 import { upsertLock, appendAudit } from './lockStore.js';
-import type { InstallOutcome, ProvenanceRecord, ScanReport, SkillBundle } from './types.js';
+import type { InstallActor, InstallOutcome, ProvenanceRecord, ScanReport, SkillBundle } from './types.js';
 
 export interface InstallRequest {
   sourceId: string;
@@ -29,6 +29,11 @@ export interface InstallRequest {
   /**
    * Set true to install despite a `block` decision. **Honoured only when `actor === 'user'`.**
    *
+   * 'user' is a claim the caller has to earn: the HTTP endpoint only passes it when the request
+   * carried a single-use nonce issued to the UI (server/src/override_nonce.ts). An unauthenticated
+   * POST is 'api' and cannot override — which matters because the API has no auth and the agent has a
+   * shell.
+   *
    * The gate's block arm is a regex heuristic over a document that legitimately contains shell and
    * python snippets, so it has false positives — and a hard block with no way through means a user
    * who has read the findings and still wants the skill has to hand-copy files, i.e. the same install
@@ -39,7 +44,9 @@ export interface InstallRequest {
    */
   override?: boolean;
   /** Who confirmed, for the audit trail. */
-  actor?: 'user' | 'agent';
+  actor?: InstallActor;
+  /** Free-text provenance of the request (origin / caller), recorded in the audit log. */
+  auditNote?: string;
   /** ISO timestamp to stamp provenance with (caller supplies; agent-tools has no clock side-effects). */
   now?: string;
 }
@@ -95,9 +102,9 @@ export async function installFromSource(req: InstallRequest): Promise<InstallOut
   const overridden = decision === 'block' && req.override === true && req.actor === 'user';
   if (decision === 'block' && !overridden) {
     if (req.override === true) {
-      appendAudit({ ts: req.now ?? '', action: 'override_refused', name, sourceTag: bundle.meta.sourceTag, verdict: scan.verdict, decision, actor: req.actor });
+      appendAudit({ ts: req.now ?? '', action: 'override_refused', name, sourceTag: bundle.meta.sourceTag, verdict: scan.verdict, decision, actor: req.actor, note: req.auditNote });
     }
-    appendAudit({ ts: req.now ?? '', action: 'blocked', name, sourceTag: bundle.meta.sourceTag, verdict: scan.verdict, decision, actor: req.actor });
+    appendAudit({ ts: req.now ?? '', action: 'blocked', name, sourceTag: bundle.meta.sourceTag, verdict: scan.verdict, decision, actor: req.actor, note: req.auditNote });
     return {
       status: 'blocked',
       name,
@@ -164,6 +171,7 @@ export async function installFromSource(req: InstallRequest): Promise<InstallOut
     verdict: scan.verdict,
     decision,
     actor: req.actor,
+    note: req.auditNote,
   });
 
   return {

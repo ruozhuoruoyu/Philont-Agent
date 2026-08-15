@@ -2802,7 +2802,7 @@ if (mcpServerConfigs.length > 0) {
       // Name-based dedup: after sanitizing tool names, collisions may occur (with each other or with
       // built-in tools); duplicate names in toolDefs make the LLM API return 400. Existing names win.
       const existingNames = new Set(toolDefs.map((d) => d.name));
-      let mounted = 0;
+      const mounted: string[] = [];
       for (const tool of mcpTools) {
         if (existingNames.has(tool.name)) {
           console.warn(`[mcp] skipped duplicate tool name ${tool.name} (conflicts with existing tool)`);
@@ -2816,12 +2816,15 @@ if (mcpServerConfigs.length > 0) {
             parameters: JSON.stringify(tool.schema),
           });
           existingNames.add(tool.name);
-          mounted++;
+          mounted.push(tool.name);
         } catch (e) {
           console.warn(`[mcp] register tool ${tool.name} failed: ${(e as Error)?.message ?? e}`);
         }
       }
-      if (mounted > 0) console.log(`[mcp] mounted ${mounted} tool(s) from "${server}"`);
+      if (mounted.length) console.log(`[mcp] mounted ${mounted.length} tool(s) from "${server}"`);
+      // Return what was ACTUALLY mounted: a name we skipped belongs to someone else, and unmounting
+      // this server must not take it away from them.
+      return mounted;
     },
     onUnmount: (server, toolNames) => {
       for (const name of toolNames) {

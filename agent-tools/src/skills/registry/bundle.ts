@@ -78,6 +78,12 @@ export function applyBundleBudget<T extends CompanionCandidate>(candidates: T[])
 
   let bytes = 0;
   for (const c of ordered) {
+    if (EXCLUDED_PATH.test(c.path)) {
+      // Registry bookkeeping, not part of the skill. Reported for completeness, with the right reason:
+      // labelling it "not an installable file type" sends the reader looking for a format problem.
+      dropped.push(`${c.path} (source-registry bookkeeping)`);
+      continue;
+    }
     if (!isInstallableCompanion(c.path)) {
       dropped.push(`${c.path} (not an installable file type)`);
       continue;
