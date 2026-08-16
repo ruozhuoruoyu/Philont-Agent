@@ -338,7 +338,8 @@ export interface HonestyEvaluation {
     | 'fabricated_execution_claim'
     | 'run_promise_without_exec'
     | 'announced_action_without_doing'
-    | 'deferred_promise_unarmed';
+    | 'deferred_promise_unarmed'
+    | 'formal_claim_without_verifier';
   /** Matched claim phrase (used as reference in reminder message) */
   matchedClaim: string;
   /**
@@ -420,6 +421,63 @@ export interface EvaluateOptions {
    * "nothing happened" from "my window reset" is not measuring honesty, it is measuring its own amnesia.
    */
   turnHadAnyToolCall?: boolean;
+}
+
+export type EvidenceLevel =
+  | 'drafted'
+  | 'executed'
+  | 'experimentally_supported'
+  | 'formally_proved';
+
+const FORMAL_CLAIM_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:Lean|Coq|Isabelle)[^。！？\n]{0,20}(?:编译通过|验证通过|无\s*sorry|proved)/i,
+  /(?:形式化证明|机器证明)[^。！？\n]{0,20}(?:已完成|已证|通过|闭合)/,
+  /\b(?:formally\s+proved|formal\s+proof\s+is\s+complete)\b/i,
+];
+
+function findFormalClaim(text: string): string | null {
+  for (const pattern of FORMAL_CLAIM_PATTERNS) {
+    const match = text.match(pattern);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+/** Extract a shell command solely for evidence classification. */
+function evidenceShellCommand(input: ToolResultRecord['toolInput']): string | null {
+  if (!input) return null;
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input) as { command?: unknown; cmd?: unknown };
+      const value = parsed.command ?? parsed.cmd;
+      return typeof value === 'string' ? value : null;
+    } catch {
+      return null;
+    }
+  }
+  const record = input as { command?: unknown; cmd?: unknown };
+  const value = record.command ?? record.cmd;
+  return typeof value === 'string' ? value : null;
+}
+
+function successfulFormalVerifier(record: ToolResultRecord): boolean {
+  if (classifyToolResult(record.content) !== 'ok') return false;
+  if (['leanCheck', 'z3Verify', 'coqCheck', 'isabelleCheck'].includes(record.toolName)) return true;
+  if (record.toolName !== 'shell') return false;
+  const command = evidenceShellCommand(record.toolInput) ?? '';
+  return /(?:lake\s+env\s+lean|\blean(?:\.exe)?\b|\bcoqc\b|\bisabelle\b)/i.test(command);
+}
+
+/** Highest evidence level actually reached by this turn's successful tools. */
+export function assessEvidenceLevel(records: ReadonlyArray<ToolResultRecord>): EvidenceLevel {
+  if (records.some(successfulFormalVerifier)) return 'formally_proved';
+  const successful = records.filter((r) => classifyToolResult(r.content) === 'ok');
+  if (successful.some((r) =>
+    ['pariGp', 'python', 'process'].includes(r.toolName)
+    || (r.toolName === 'shell' && /(?:python|pytest|npm\s+test|cargo\s+test)/i.test(evidenceShellCommand(r.toolInput) ?? ''))
+  )) return 'experimentally_supported';
+  if (successful.length > 0) return 'executed';
+  return 'drafted';
 }
 
 /**
@@ -1216,6 +1274,21 @@ export function evaluateHonesty(
             `or say plainly you will not.`,
       };
     }
+  }
+
+  // Formal-proof wording requires a successful verifier in this turn.
+  const formalClaim = findFormalClaim(assistantText);
+  const evidenceLevel = assessEvidenceLevel(records);
+  if (formalClaim && evidenceLevel !== 'formally_proved') {
+    return {
+      severity: 'high',
+      reason: 'formal_claim_without_verifier',
+      matchedClaim: formalClaim,
+      okCount: ok,
+      failCount: fail,
+      unknownCount: unknown,
+      evidence: `This turn reached only ${evidenceLevel}; no Lean/Coq/Isabelle/Z3 verifier succeeded.`,
+    };
   }
 
   // 3 branches after the completion claim

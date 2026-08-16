@@ -209,7 +209,7 @@ test('renderAuthPromptForWeChat: 完整消息含标题 / 工具详情 / 决策�
   assert.match(out, /权限: write\/local/);
   assert.match(out, /同意/);
   assert.match(out, /拒绝/);
-  assert.match(out, /10 分钟有效/);
+  assert.match(out, /30 分钟有效/);
 });
 
 test('renderAuthPromptForWeChat: clarification 非空时插入', () => {

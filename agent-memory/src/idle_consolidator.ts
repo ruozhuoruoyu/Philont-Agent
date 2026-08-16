@@ -145,18 +145,22 @@ export function startIdleConsolidator(
 
       try {
         const ext = await opts.extractor.extractFromTimeRange(fromTs, actualToTs);
-        log.log(
-          `[idle-consolidator] extractor: ${ext.factsStored} facts + ${ext.notesStored} notes`,
-        );
+        if (ext.factsStored > 0 || ext.notesStored > 0) {
+          log.log(
+            `[idle-consolidator] extractor: ${ext.factsStored} facts + ${ext.notesStored} notes`,
+          );
+        }
       } catch (e) {
         log.error('[idle-consolidator] extractor failed', e);
       }
 
       try {
         const ref = await opts.reflector.reflectFromTimeRange(fromTs, actualToTs);
-        log.log(
-          `[idle-consolidator] reflector: ${ref.skillsCreated} new skills, ${ref.skillsUpdated} updated`,
-        );
+        if (ref.skillsCreated > 0 || ref.skillsUpdated > 0) {
+          log.log(
+            `[idle-consolidator] reflector: ${ref.skillsCreated} new skills, ${ref.skillsUpdated} updated`,
+          );
+        }
       } catch (e) {
         log.error('[idle-consolidator] reflector failed', e);
       }

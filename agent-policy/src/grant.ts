@@ -36,7 +36,8 @@ export interface Grant {
   audience?:  string;
 }
 
-const DEFAULT_TTL_MS = 10 * 60 * 1000; // 10 minutes
+/** Default is long enough for a multi-step workflow; callers may still narrow it. */
+export const DEFAULT_GRANT_TTL_MS = 30 * 60 * 1000;
 
 /** Simple glob compiler (supports *, **, ?) */
 function globToRegex(pattern: string): RegExp {
@@ -106,7 +107,7 @@ export class GrantStore {
     capability?: Capability,
     domain?: Domain,
     reason?: string,
-    ttlMs: number = DEFAULT_TTL_MS,
+    ttlMs: number = DEFAULT_GRANT_TTL_MS,
   ): void {
     let g: Grant;
     if (typeof arg === 'string') {
@@ -125,7 +126,7 @@ export class GrantStore {
         pattern: arg.pattern,
         capability: arg.capability,
         domain: arg.domain,
-        expiresAt: Date.now() + (arg.ttlMs ?? DEFAULT_TTL_MS),
+        expiresAt: Date.now() + (arg.ttlMs ?? DEFAULT_GRANT_TTL_MS),
         reason: arg.reason,
         audience: arg.audience,
       };

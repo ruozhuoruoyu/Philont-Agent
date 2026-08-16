@@ -846,7 +846,7 @@ wss.on('connection', (ws) => {
             const text =
               `Agent requests to run tool "${req.toolName}" (${req.capability}/${req.domain})` +
               (req.clarification ? `\n${req.clarification}` : '') +
-              `\nParams: ${paramSummary}\nAllow? (grant valid for 10 minutes)`;
+              `\nParams: ${paramSummary}\nAllow? (grant valid for 30 minutes by default)`;
             safeSend({ type: 'auth_request', text, payload: req });
           },
           // 2026-05-19 three-stream split: onStatus = Tier 2 semantic progress.

@@ -286,6 +286,7 @@ export {
   isPureOpenQuestion,
 } from './kernel_drives.js';
 export {
+  assessEvidenceLevel,
   evaluateHonesty,
   findCompletionClaim,
   findOrderClaim,
@@ -312,6 +313,7 @@ export {
 } from './refutable_goal.js';
 export type { RefutableGoal } from './refutable_goal.js';
 export type {
+  EvidenceLevel,
   HonestyEvaluation,
   EvaluateOptions as HonestyEvaluateOptions,
   HonestySessionSnapshot,

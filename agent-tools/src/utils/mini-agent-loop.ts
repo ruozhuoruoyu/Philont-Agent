@@ -175,6 +175,7 @@ export interface MiniAgentLoopResult {
 const DEFAULT_MAX_ITERS = 8;
 const PREVIEW_MAX = 200;
 const TOOL_RESULT_MAX = 16_000;
+const REPEATED_FAILURE_LIMIT = 2;
 
 /**
  * No-progress early exit (2026-07-15). The loop otherwise runs its FULL iteration budget whenever the LLM
@@ -277,6 +278,7 @@ export async function runMiniAgentLoop(
   let toolCallsSpent = 0;
   let unproductiveRounds = 0;
   let stoppedNoProgress = false;
+  const failureCounts = new Map<string, number>();
 
   for (let i = 0; i < maxIters; i++) {
     if (abortSignal?.aborted) {
@@ -381,6 +383,26 @@ export async function runMiniAgentLoop(
         ok: runResult.ok,
         outputPreview: previewText(runResult.ok ? runResult.output : runResult.error ?? ''),
       });
+      if (!runResult.ok) {
+        const normalized = (runResult.error ?? runResult.output ?? 'unknown')
+          .toLowerCase()
+          .replace(/\d+/g, '#')
+          .slice(0, 180);
+        const signature = `${call.name}:${normalized}`;
+        const count = (failureCounts.get(signature) ?? 0) + 1;
+        failureCounts.set(signature, count);
+        if (count >= REPEATED_FAILURE_LIMIT) {
+          return {
+            finalText: '',
+            toolCallHistory,
+            itersUsed: i + 1,
+            hitCap: false,
+            llmTokensSpent,
+            toolCallsSpent,
+            error: `repeated_tool_failure:${call.name}: same failure ${count} times; revise the approach before retrying`,
+          };
+        }
+      }
       onStatus?.(
         `${runResult.ok ? '✓' : '⚠'} ${call.name} (iter ${i + 1}/${maxIters})`,
       );

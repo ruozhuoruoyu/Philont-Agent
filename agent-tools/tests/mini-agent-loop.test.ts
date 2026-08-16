@@ -290,6 +290,27 @@ test('toolRunner throw:捕获并转 tool error,loop 继续', async () => {
   assert.equal(r.finalText, 'handled');
 });
 
+test('same tool failure twice stops the sub-loop and requires a revised approach', async () => {
+  const llm = stubLLM([
+    toolCallResponse([{ id: 'tc-1', name: 'pariGp', input: { script: '(bad' } }]),
+    toolCallResponse([{ id: 'tc-2', name: 'pariGp', input: { script: '(bad' } }]),
+    textResponse('must not reach'),
+  ]);
+  const r = await runMiniAgentLoop({
+    systemPrompt: 'sys',
+    userMessage: 'prove it',
+    llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: async () => ({ ok: false, output: '', error: 'unclosed parenthesis at line 3' }),
+    maxIters: 8,
+  });
+
+  assert.match(r.error ?? '', /repeated_tool_failure:pariGp/);
+  assert.equal(r.itersUsed, 2);
+  assert.equal(r.toolCallsSpent, 2);
+  assert.equal(r.hitCap, false);
+});
+
 // ── 测试 8(额外):多 tool calls 一轮 → 全部跑 ───────────────────────
 
 test('单轮多 tool_use:全部跑完再下一轮', async () => {

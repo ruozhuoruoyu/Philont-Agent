@@ -309,6 +309,6 @@ export function renderAuthPromptForWeChat(req: {
       ? 'Reply "approve" / "yes" to allow; "reject" / "no" to refuse'
       : '回复 "同意" / "yes" 允许;回复 "拒绝" / "no" 拒绝',
   );
-  lines.push(en ? '(valid for 10 minutes)' : '(10 分钟有效)');
+  lines.push(en ? '(valid for 30 minutes by default)' : '(默认 30 分钟有效)');
   return lines.join('\n');
 }

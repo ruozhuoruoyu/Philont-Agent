@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  assessEvidenceLevel,
   evaluateHonesty,
   findCompletionClaim,
   findOrderClaim,
@@ -33,6 +34,25 @@ test('findOrderClaim: casual Landau in prose does NOT fire (no false positive)',
   assert.equal(findOrderClaim('we use an O(n log n) sorting algorithm here'), null);
   assert.equal(findOrderClaim('the proof proceeds by induction on n, base case n=1'), null);
   assert.equal(findOrderClaim('this lemma follows from the pigeonhole principle'), null);
+});
+
+test('evidence levels distinguish draft, execution, experiment, and formal proof', () => {
+  assert.equal(assessEvidenceLevel([]), 'drafted');
+  assert.equal(assessEvidenceLevel([{ toolName: 'writeFile', content: '✓ TOOL OK' }]), 'executed');
+  assert.equal(assessEvidenceLevel([{ toolName: 'pariGp', content: '✓ TOOL OK' }]), 'experimentally_supported');
+  assert.equal(assessEvidenceLevel([{ toolName: 'leanCheck', content: '✓ TOOL OK' }]), 'formally_proved');
+});
+
+test('formal proof claim requires a successful verifier in the same turn', () => {
+  const blocked = evaluateHonesty('LowerRegion 引理的 Lean 形式化证明已完成，无 sorry。', {
+    toolResults: [{ toolName: 'writeFile', content: '✓ TOOL OK' }],
+  });
+  assert.equal(blocked?.reason, 'formal_claim_without_verifier');
+
+  const accepted = evaluateHonesty('LowerRegion 引理的 Lean 形式化证明已完成，无 sorry。', {
+    toolResults: [{ toolName: 'leanCheck', content: '✓ TOOL OK\nexit 0' }],
+  });
+  assert.equal(accepted, null);
 });
 
 // ── classifyToolResult ─────────────────────────────────────────────────

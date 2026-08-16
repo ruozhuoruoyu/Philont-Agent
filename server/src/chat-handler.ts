@@ -151,6 +151,7 @@ import {
   detectTimeRetrospectiveQuery,
 } from '@agent/memory';
 import {
+  assessEvidenceLevel,
   evaluateHonesty,
   detectHalfFinishedTurn,
   findCompletionClaim,
@@ -249,6 +250,11 @@ import {
   buildFailureRecoveryInjection,
   detectUserDissatisfaction,
 } from './failure_recovery_inject.js';
+import {
+  classifyPendingAuthReply,
+  PENDING_AUTH_TTL_MS,
+  WORKFLOW_GRANT_TTL_MS,
+} from './auth-continuation.js';
 import {
   detectInTurnFailurePattern,
   isMechanicalFailure,
@@ -1869,7 +1875,8 @@ const planToolAdapters: Tool[] = createPlanTools({
 //
 // Current createReadOnlyMatrix(): read=local/network/self, write=self only, execute=all blocked.
 // So writeFile/shell/git/process etc. trigger onAuthRequest to ask the user on the first call;
-// user replies "allow" → grants.grant(tool, capability, domain) authorizes this session for 10 minutes.
+// user replies with an offered approval word (including OK/继续) → the suspended call resumes;
+// the pending card and resumed local workflow use configurable 30-minute defaults.
 //
 // The old utility/memory (volatile Map) is still included automatically from full, but we additionally inject
 // persistent agent-memory tools via extraInternalTools — the conflict between the two sets of memory tools needs attention;
@@ -4116,7 +4123,7 @@ if (!UNDER_TEST) deepExploreFollowUp.start();
 // See plan: K0 working memory architecture de-sessionization.
 //
 // K0.4: authorization uses time-based TTL rather than binding to ws connection — users who reconnect within the
-// 10-minute window do not need to re-authorize. `pendingAuth` is still keyed by ws sid: the same agent runs
+// 30-minute default window do not need to re-authorize. `pendingAuth` is still keyed by ws sid: the same agent runs
 // the auth flow with only one user at a time; sid is an appropriate reverse-lookup key.
 // (globalGrants has been moved up to be defined before researchToolAdapters.)
 
@@ -4286,7 +4293,6 @@ function lastAssistantText(msgs: NativeMessage[]): string {
  */
 // Research-workflow grant set + applier live in research_grant.ts (LOCAL_RESEARCH_WORKFLOW /
 // localWorkflowGrants), keyed by (tool, capability, domain) so one approval covers the whole local loop.
-const WORKFLOW_GRANT_TTL_MS = 30 * 60_000;
 
 // skill-reflex (2026-06-17): sessionIds already nudged once to search_skills before hand-rolling a
 // document parser. One nudge per session, then parser shells run as-is (no loop).
@@ -4297,7 +4303,9 @@ const skillReflexNudged = new Set<string>();
  * a normal turn (no auth re-prompt), so questions like "is the session still active?" are answered
  * instead of being bounced as "please reply allow/deny". Keyed by ws sid like the rest of the auth state.
  *
- * Stays at 10 minutes. It was briefly raised to 30 to stop late replies being eaten — in the
+ * Defaults to 30 minutes to accommodate long-running local workflows and delayed channel replies.
+ * It remains independently configurable from the post-approval workflow grant.
+ * Previously it stayed at 10 minutes. It was briefly raised to 30 to stop late replies being eaten — in the
  * 2026-08-09 log the owner's reply gap ran 8 min at the median with a 35–60 min tail, and 12:43:29's
  * "OK" arrived 35.6 min late, was dropped in silence, and cost a second "ok" 21 seconds later.
  *
@@ -4309,9 +4317,8 @@ const skillReflexNudged = new Set<string>();
  * poison the context, the turn says the request expired and re-issues it, and the owner's message is
  * answered instead of consumed. With that fixed, the case for a longer unapproved window is gone.
  *
- * PENDING_AUTH_TTL_MS overrides it for anyone who wants the trade anyway.
+ * PHILONT_PENDING_AUTH_TTL_MS overrides it for deployments that want a different tradeoff.
  */
-const PENDING_AUTH_TTL_MS = Number(process.env.PENDING_AUTH_TTL_MS) || 10 * 60_000;
 
 /**
  * How long an `uncertain` (process died mid-execution) entry may keep asking the owner for an explicit
@@ -7010,6 +7017,8 @@ export interface ChannelTraceEvent {
     gateName?: string;
     severity?: string;
     iteration?: number;
+    evidenceLevel?: string;
+    successfulTools?: string[];
   };
 }
 
@@ -8632,11 +8641,18 @@ async function handleChatSendInner(
     // classifier — with a word the owner was never offered for that purpose.
     const explicitRecoveryRetry =
       wasUncertain && classifyUncertainToolReply(userMessage) === 'retry';
-    const intent = explicitRecoveryRetry ? 'grant' : expired ? 'unclear' : await classifyAuthIntent(userMessage, context);
+    const fastIntent = classifyPendingAuthReply(userMessage);
+    const intent = explicitRecoveryRetry
+      ? 'grant'
+      : expired
+        ? 'unclear'
+        : fastIntent === 'unclear'
+          ? await classifyAuthIntent(userMessage, context)
+          : fastIntent;
 
     if (intent === 'grant') {
       // deep_explore runs multi-round sessions where a single round can outlast the default
-      // 10-min grant (round deadline is 12 min), forcing a re-auth every round. Give it a longer
+      // default grant (round deadline is 12 min), forcing a re-auth every round. Give it a longer
       // window so one approval covers the session.
       // The approved tool must not expire BEFORE the tools its approval granted as a side effect.
       //
@@ -9814,8 +9830,11 @@ async function handleChatSendInner(
         ) {
           let strongSignal: string | null = null;
           if (signalBus.honesty) {
-            const ev = signalBus.honesty.evaluation;
-            strongSignal = `honesty fired (severity=${ev.severity} reason=${ev.reason})`;
+            // A reporting correction does not establish that the work plan failed.
+            // Preserve the active plan so the next turn can verify or repair its step.
+            console.log(
+              `[plan-lifecycle] session=${safeSessionId(sessionId)} honesty correction kept plan ${lastPlan.id} active`,
+            );
           } else {
             try {
               // THIS TURN's failures only. The old global-24h window closed a healthy executing
@@ -11813,6 +11832,18 @@ async function runToolLoop(
       // regenerate once so the lie never leaves.
       if (honestyAttempts < 1) {
         const recentToolResults = extractRecentToolResults(messages);
+        const evidenceLevel = assessEvidenceLevel(recentToolResults);
+        onTrace?.({
+          kind: 'internal-gate', tier: 4,
+          text: `evidence checkpoint: ${evidenceLevel}`,
+          meta: {
+            gateName: 'EvidenceCheckpoint',
+            evidenceLevel,
+            successfulTools: recentToolResults
+              .filter((r) => r.content.startsWith('✓'))
+              .map((r) => r.toolName),
+          },
+        });
         // Ground truth for the deep_explore honesty checks: the owner-scoped active reasoning session's
         // tree state (null if none). Lets the gate catch "全部闭合 / proved / 最终判决" claims the tree
         // doesn't support, and round-result narration with no actual round this turn.
