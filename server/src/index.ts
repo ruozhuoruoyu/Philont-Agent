@@ -31,11 +31,9 @@ import './proxy-bootstrap.js'; // second: install global outbound proxy before a
 // evaluated — and anything they logged while loading (the compass diagnostics among them) never reached
 // the file. See boot_logging.ts.
 import './boot_logging.js';
-// Local-API boundary: per-request CORS + a cross-site guard for state-changing calls, and single-use
-// nonces for the one action (safety-gate override) whose whole value depends on a person having asked
-// for it. See http_origin.ts / override_nonce.ts.
+// Local-API boundary: per-request CORS + a cross-site guard for state-changing calls.
 import { corsHeaders, rejectCrossSite, describeCaller } from './http_origin.js';
-import { issueOverrideNonce, consumeOverrideNonce } from './override_nonce.js';
+import { rejectUnauthenticatedSkillOverride } from './skill_install_boundary.js';
 
 // Wall-clock watchdog — must load after the tee like everything else. See suspend_detector.
 import { startSuspendDetector } from './suspend_detector.js';
@@ -410,32 +408,21 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
-  // GET /api/skills/registry/override-nonce
-  // Step one of overriding the safety gate. Issued only to a request that passed the cross-site guard,
-  // single-use, two-minute life. See override_nonce.ts for what this does and does not prove.
-  if (req.method === 'GET' && path === '/api/skills/registry/override-nonce') {
-    sendJson(res, 200, issueOverrideNonce());
-    return true;
-  }
-
-  // POST /api/skills/registry/install  {sourceId, identifier, name?, confirm?, override?}
+  // POST /api/skills/registry/install  {sourceId, identifier, name?, confirm?}
   if (req.method === 'POST' && path === '/api/skills/registry/install') {
     const body = await readJsonBody(req);
     const sourceId = String(body.sourceId || '');
     const identifier = String(body.identifier || '');
     if (!sourceId || !identifier) { sendJson(res, 400, { error: 'sourceId and identifier are required' }); return true; }
     try {
-      // Who is really asking? This endpoint has no authentication, so "it arrived over HTTP" is not
-      // evidence of a person: philont's own shell tool can post to it. Only a request carrying a
-      // freshly issued, single-use nonce is attributed to the user — and installFromSource honours
-      // `override` for that actor alone. Everything else is recorded as 'api', which cannot override.
-      // Getting this wrong would not just weaken the gate, it would write the owner's name on a
-      // decision they never made.
-      const wantsOverride = body.override === true;
-      const nonce = (req.headers['x-philont-override-nonce'] as string | undefined) ?? (body.overrideNonce ? String(body.overrideNonce) : undefined);
-      const provenUser = wantsOverride ? consumeOverrideNonce(nonce) : false;
-      if (wantsOverride && !provenUser) {
-        console.warn(`[api] override requested without a valid nonce (${describeCaller(req)}) — refused`);
+      // This API is intentionally unauthenticated and the agent itself can reach it through shell.
+      // Consequently no value obtained from another anonymous HTTP endpoint can prove a human is
+      // present. Keep block overrides unavailable here until they are backed by an authenticated,
+      // out-of-band approval channel; otherwise the agent can mint its own "user" approval.
+      const overrideRejection = rejectUnauthenticatedSkillOverride(body);
+      if (overrideRejection) {
+        sendJson(res, 403, { status: 'blocked', error: overrideRejection });
+        return true;
       }
 
       const outcome = await installFromSource({
@@ -443,8 +430,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         identifier,
         name: body.name ? String(body.name) : undefined,
         confirm: body.confirm === true,
-        override: wantsOverride,
-        actor: provenUser ? 'user' : 'api',
+        actor: 'api',
         auditNote: describeCaller(req),
         now: new Date().toISOString(),
       });

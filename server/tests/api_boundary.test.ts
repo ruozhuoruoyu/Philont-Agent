@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { IncomingMessage } from 'node:http';
 import { isAllowedOrigin, corsHeaders, rejectCrossSite, describeCaller } from '../src/http_origin.js';
-import { issueOverrideNonce, consumeOverrideNonce, _clearOverrideNoncesForTest } from '../src/override_nonce.js';
+import { rejectUnauthenticatedSkillOverride } from '../src/skill_install_boundary.js';
 
 function fakeReq(method: string, headers: Record<string, string> = {}): IncomingMessage {
   return { method, headers } as unknown as IncomingMessage;
@@ -66,27 +66,8 @@ test('caller description records the evidence, not an assumption', () => {
   assert.match(describeCaller(fakeReq('POST', { 'user-agent': 'curl/8.0' })), /^local\(no-origin\) ua=curl/);
 });
 
-test('override nonce: single use, and unknown values are refused', () => {
-  _clearOverrideNoncesForTest();
-  const { nonce } = issueOverrideNonce();
-  assert.ok(nonce.length > 20);
-  assert.equal(consumeOverrideNonce(nonce), true);
-  assert.equal(consumeOverrideNonce(nonce), false, 'a nonce must not be reusable');
-  assert.equal(consumeOverrideNonce('made-up'), false);
-  assert.equal(consumeOverrideNonce(undefined), false);
-});
-
-test('override nonce: expires', () => {
-  _clearOverrideNoncesForTest();
-  const t0 = 1_000_000;
-  const { nonce, expiresInMs } = issueOverrideNonce(t0);
-  assert.equal(consumeOverrideNonce(nonce, t0 + expiresInMs + 1), false, 'an expired nonce is not a nonce');
-});
-
-test('override nonce: the outstanding table is bounded', () => {
-  _clearOverrideNoncesForTest();
-  const issued = Array.from({ length: 100 }, (_, i) => issueOverrideNonce(1_000_000 + i).nonce);
-  // The oldest are evicted; the most recent must still work.
-  assert.equal(consumeOverrideNonce(issued[issued.length - 1], 1_000_100), true);
-  assert.equal(consumeOverrideNonce(issued[0], 1_000_100), false);
+test('anonymous HTTP callers cannot turn themselves into a user with an override token', () => {
+  assert.match(String(rejectUnauthenticatedSkillOverride({ override: true })), /authenticated user approval/);
+  assert.match(String(rejectUnauthenticatedSkillOverride({ overrideNonce: 'self-minted' })), /authenticated user approval/);
+  assert.equal(rejectUnauthenticatedSkillOverride({ confirm: true }), null);
 });

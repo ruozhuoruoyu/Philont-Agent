@@ -24,7 +24,7 @@
 import { EventEmitter } from 'node:events';
 import type { McpHttpConfig } from '../config.js';
 import { parseSseFrames } from './sse.js';
-import { withProtocolMeta, type ProtocolVersion } from '../protocol.js';
+import { isModernProtocolVersion, withProtocolMeta, type ProtocolVersion } from '../protocol.js';
 
 interface JsonRpcMessage {
   id?: number | string;
@@ -67,16 +67,26 @@ export class HttpTransport extends EventEmitter {
   /** Called by the bridge once the protocol version is settled (see protocol.ts). */
   setProtocolVersion(version: ProtocolVersion | null): void {
     this.protocolVersion = version;
+    if (isModernProtocolVersion(version)) this.sessionId = null;
   }
 
-  private headers(): Record<string, string> {
+  private headers(method?: string, params?: unknown): Record<string, string> {
     const h: Record<string, string> = {
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
       ...this.baseHeaders,
     };
     if (this.sessionId) h['Mcp-Session-Id'] = this.sessionId;
-    if (this.protocolVersion) h['MCP-Protocol-Version'] = String(this.protocolVersion);
+    if (this.protocolVersion) {
+      h['MCP-Protocol-Version'] = String(this.protocolVersion);
+      if (isModernProtocolVersion(this.protocolVersion) && method) {
+        h['Mcp-Method'] = method;
+        const name = params && typeof params === 'object' && !Array.isArray(params)
+          ? (params as Record<string, unknown>).name
+          : undefined;
+        if (typeof name === 'string' && name) h['Mcp-Name'] = name;
+      }
+    }
     return h;
   }
 
@@ -94,7 +104,7 @@ export class HttpTransport extends EventEmitter {
     const timer = setTimeout(() => ctrl.abort(), this.timeout);
     let resp: Response;
     try {
-      resp = await fetch(this.url, { method: 'POST', headers: this.headers(), body, signal: ctrl.signal });
+      resp = await fetch(this.url, { method: 'POST', headers: this.headers(method, params), body, signal: ctrl.signal });
     } catch (e) {
       clearTimeout(timer);
       const err = e as Error;
@@ -108,7 +118,7 @@ export class HttpTransport extends EventEmitter {
     try {
       // A session id may be issued on any response; hold on to the first one we see.
       const sid = resp.headers.get('mcp-session-id');
-      if (sid && !this.sessionId) this.sessionId = sid;
+      if (sid && !this.sessionId && !isModernProtocolVersion(this.protocolVersion)) this.sessionId = sid;
 
       if (!resp.ok) {
         const detail = (await resp.text().catch(() => '')).slice(0, 300);
@@ -177,7 +187,7 @@ export class HttpTransport extends EventEmitter {
       method,
       params: withProtocolMeta(params, this.protocolVersion),
     });
-    fetch(this.url, { method: 'POST', headers: this.headers(), body }).catch(() => {
+    fetch(this.url, { method: 'POST', headers: this.headers(method, params), body }).catch(() => {
       // notifications are fire-and-forget
     });
   }
@@ -185,7 +195,7 @@ export class HttpTransport extends EventEmitter {
   /** Politely end the session if the server issued one (DELETE is optional and may 405 — ignore). */
   async close(): Promise<void> {
     this.open = false;
-    if (this.sessionId) {
+    if (this.sessionId && !isModernProtocolVersion(this.protocolVersion)) {
       await fetch(this.url, { method: 'DELETE', headers: this.headers() }).catch(() => {});
       this.sessionId = null;
     }

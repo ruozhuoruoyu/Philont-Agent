@@ -44,6 +44,13 @@ export const PREFERRED_INITIALIZE_VERSION: ProtocolVersion = '2025-06-18';
 
 /** The `_meta` key carrying the protocol version on every request (2026-07-28+). */
 export const PROTOCOL_VERSION_META_KEY = 'io.modelcontextprotocol/protocolVersion';
+export const CLIENT_INFO_META_KEY = 'io.modelcontextprotocol/clientInfo';
+export const CLIENT_CAPABILITIES_META_KEY = 'io.modelcontextprotocol/clientCapabilities';
+export const MCP_CLIENT_INFO = { name: 'philont-agent', version: '0.1.0' } as const;
+
+export function isModernProtocolVersion(version: ProtocolVersion | null | undefined): boolean {
+  return typeof version === 'string' && version >= '2026-07-28';
+}
 
 /** JSON-RPC "method not found" — how a pre-2026-07-28 server answers `server/discover`. */
 export const METHOD_NOT_FOUND = -32601;
@@ -68,6 +75,10 @@ export function withProtocolMeta(params: unknown, version: ProtocolVersion | nul
   if (base === null) return params; // array/primitive params: leave untouched
   const meta = { ...((base._meta as Record<string, unknown> | undefined) ?? {}) };
   meta[PROTOCOL_VERSION_META_KEY] = version;
+  if (isModernProtocolVersion(version)) {
+    meta[CLIENT_INFO_META_KEY] ??= MCP_CLIENT_INFO;
+    meta[CLIENT_CAPABILITIES_META_KEY] ??= {};
+  }
   return { ...base, _meta: meta };
 }
 

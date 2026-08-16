@@ -17,7 +17,8 @@
  *     The size cap in loader.parseSkillFile (8KB) blocks the extreme case of "stuffing a long doc into a prompt".
  */
 
-import { mkdir, readFile, writeFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, rm, stat, rename } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join, dirname, sep } from 'node:path';
 import type { Tool } from '@agent/policy';
 
@@ -121,6 +122,101 @@ export async function writeSkillCompanions(
     }
     const target = join(root, ...rel.split('/'));
     // Belt and braces: even after the checks above, the resolved path must stay under the skill dir.
+    if (target !== root && !target.startsWith(root + sep)) {
+      rejected.push(`${f.path}: escapes the skill directory`);
+      continue;
+    }
+    try {
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, f.content, 'utf-8');
+      written.push(target);
+    } catch (e) {
+      rejected.push(`${f.path}: ${(e as Error).message}`);
+    }
+  }
+  return { written, rejected };
+}
+
+/**
+ * Replace a marketplace-managed skill as one directory transaction.
+ *
+ * Updates used to overwrite the files present in the new bundle and leave everything else behind.
+ * A script removed upstream therefore stayed executable forever. Build the complete replacement away
+ * from the watched skills directory, then swap directories; a failed swap restores the old bundle.
+ */
+export async function writeSkillBundleAtomically(
+  name: string,
+  content: string,
+  source: string,
+  files: Array<{ path: string; content: string }>,
+  replaceExisting: boolean,
+): Promise<{ written: string[]; rejected: string[]; error?: string }> {
+  const nameErr = validateSkillName(name);
+  if (nameErr) return { written: [], rejected: [], error: nameErr };
+
+  const root = installRoot();
+  const philont = dirname(root);
+  await mkdir(philont, { recursive: true });
+  const stage = await mkdtemp(join(philont, `.skill-stage-${name}-`));
+  const destination = join(root, name);
+  const backup = join(philont, `.skill-backup-${name}-${randomUUID()}`);
+  let movedOld = false;
+
+  try {
+    let finalContent = injectFrontmatterField(content, 'name', name);
+    finalContent = injectFrontmatterField(finalContent, 'source', source);
+    await writeFile(join(stage, 'SKILL.md'), finalContent, 'utf-8');
+
+    const companionWrite = await writeSkillCompanionsAtRoot(stage, files);
+    if (companionWrite.rejected.length) {
+      return { written: [], rejected: companionWrite.rejected, error: 'one or more companion files could not be staged' };
+    }
+
+    await mkdir(root, { recursive: true });
+    const exists = await stat(destination).then(() => true, (e: NodeJS.ErrnoException) => {
+      if (e.code === 'ENOENT') return false;
+      throw e;
+    });
+    if (exists && !replaceExisting) {
+      return { written: [], rejected: [], error: `skill directory already exists but is not marketplace-managed: ${destination}` };
+    }
+    if (exists) {
+      await rename(destination, backup);
+      movedOld = true;
+    }
+    try {
+      await rename(stage, destination);
+    } catch (e) {
+      if (movedOld) await rename(backup, destination).catch(() => {});
+      throw e;
+    }
+    if (movedOld) await rm(backup, { recursive: true, force: true }).catch(() => {});
+
+    return {
+      written: [join(destination, 'SKILL.md'), ...files.map((f) => join(destination, ...f.path.replace(/\\/g, '/').split('/')))],
+      rejected: [],
+    };
+  } catch (e) {
+    return { written: [], rejected: [], error: (e as Error).message };
+  } finally {
+    await rm(stage, { recursive: true, force: true }).catch(() => {});
+    if (!movedOld) await rm(backup, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function writeSkillCompanionsAtRoot(
+  root: string,
+  files: Array<{ path: string; content: string }>,
+): Promise<{ written: string[]; rejected: string[] }> {
+  const written: string[] = [];
+  const rejected: string[] = [];
+  for (const f of files) {
+    const rel = f.path.replace(/\\/g, '/');
+    if (!rel || rel.startsWith('/') || /^[a-zA-Z]:/.test(rel) || rel.split('/').includes('..') || rel.includes('\0')) {
+      rejected.push(`${f.path}: unsafe path`);
+      continue;
+    }
+    const target = join(root, ...rel.split('/'));
     if (target !== root && !target.startsWith(root + sep)) {
       rejected.push(`${f.path}: escapes the skill directory`);
       continue;

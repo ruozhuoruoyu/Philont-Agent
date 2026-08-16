@@ -20,6 +20,7 @@ import { HttpTransport } from '../src/transport/http.js';
 import { McpBridge } from '../src/bridge.js';
 
 const SERVER_VERSION = '2025-06-18';
+const MODERN_VERSION = '2026-07-28';
 const SESSION_ID = 'sess-abc123';
 
 interface Rpc { id?: number; method?: string; params?: Record<string, unknown> }
@@ -38,11 +39,17 @@ function startServer(opts: { supportsDiscover: boolean; noInitialize?: boolean }
       headers.push({
         version: req.headers['mcp-protocol-version'] as string | undefined,
         session: req.headers['mcp-session-id'] as string | undefined,
+        method: req.headers['mcp-method'] as string | undefined,
+        name: req.headers['mcp-name'] as string | undefined,
         accept: req.headers.accept as string | undefined,
       });
 
       const send = (payload: unknown, extra: Record<string, string> = {}) => {
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Mcp-Session-Id': SESSION_ID, ...extra });
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          ...(!opts.noInitialize ? { 'Mcp-Session-Id': SESSION_ID } : {}),
+          ...extra,
+        });
         res.end(JSON.stringify(payload));
       };
       const fail = (code: number, message: string) =>
@@ -52,13 +59,20 @@ function startServer(opts: { supportsDiscover: boolean; noInitialize?: boolean }
       if (msg.id === undefined) { res.writeHead(202).end(); return; }
 
       switch (msg.method) {
-        case 'server/discover':
+        case 'server/discover': {
           if (!opts.supportsDiscover) return fail(-32601, 'Method not found');
-          return send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: SERVER_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'fake', version: '1' } } });
+          const meta = (msg.params?._meta ?? {}) as Record<string, unknown>;
+          if (req.headers['mcp-protocol-version'] !== MODERN_VERSION) return fail(-32602, 'missing modern version header');
+          if (req.headers['mcp-method'] !== 'server/discover') return fail(-32602, 'missing method header');
+          if (meta['io.modelcontextprotocol/protocolVersion'] !== MODERN_VERSION) return fail(-32602, 'missing version meta');
+          if (!meta['io.modelcontextprotocol/clientInfo']) return fail(-32602, 'missing client info meta');
+          if (!meta['io.modelcontextprotocol/clientCapabilities']) return fail(-32602, 'missing client capabilities meta');
+          return send({ jsonrpc: '2.0', id: msg.id, result: { supportedVersions: [MODERN_VERSION], capabilities: { tools: {} }, resultType: 'complete', ttlMs: 0, cacheScope: 'private' } });
+        }
 
         case 'initialize': {
-          // A 2026-07-28 server has no `initialize` at all — that is precisely when discovery is the
-          // way in, and what makes "initialize first, discover on method-not-found" the right order.
+          // A 2026-07-28 server has no `initialize`; auto negotiation must discover it before falling
+          // back to this legacy handshake.
           if (opts.noInitialize) return fail(-32601, 'Method not found');
           const offered = String(msg.params?.protocolVersion ?? '');
           if (offered !== SERVER_VERSION) {
@@ -69,9 +83,12 @@ function startServer(opts: { supportsDiscover: boolean; noInitialize?: boolean }
 
         case 'tools/list': {
           // From here on the negotiated version must be echoed in the header.
+          const expectedVersion = opts.noInitialize ? MODERN_VERSION : SERVER_VERSION;
           const v = req.headers['mcp-protocol-version'];
-          if (v !== SERVER_VERSION) { res.writeHead(400).end('protocol version mismatch'); return; }
-          if (req.headers['mcp-session-id'] !== SESSION_ID) { res.writeHead(400).end('missing session'); return; }
+          if (v !== expectedVersion) { res.writeHead(400).end('protocol version mismatch'); return; }
+          if (!opts.noInitialize && req.headers['mcp-session-id'] !== SESSION_ID) { res.writeHead(400).end('missing session'); return; }
+          if (opts.noInitialize && req.headers['mcp-session-id']) { res.writeHead(400).end('modern request carried a session'); return; }
+          if (opts.noInitialize && req.headers['mcp-method'] !== 'tools/list') { res.writeHead(400).end('missing method header'); return; }
           return send({
             jsonrpc: '2.0',
             id: msg.id,
@@ -86,6 +103,8 @@ function startServer(opts: { supportsDiscover: boolean; noInitialize?: boolean }
 
         case 'tools/call': {
           const name = String(msg.params?.name ?? '');
+          if (opts.noInitialize && req.headers['mcp-method'] !== 'tools/call') { res.writeHead(400).end('missing method header'); return; }
+          if (opts.noInitialize && req.headers['mcp-name'] !== name) { res.writeHead(400).end('missing name header'); return; }
           if (name === 'slow') {
             // SSE answer: a progress notification first, then the actual response.
             res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Mcp-Session-Id': SESSION_ID });
@@ -183,7 +202,7 @@ describe('Streamable HTTP against a modern server (no initialize, discovery only
   before(async () => { ctx = await startServer({ supportsDiscover: true, noInitialize: true }); });
   after(() => { ctx.server.close(); });
 
-  it('falls through to server/discover when the server has dropped initialize', async () => {
+  it('negotiates from the official supportedVersions discovery result', async () => {
     const bridge = new McpBridge({
       name: 'modern',
       transport: { transport: 'http', url: ctx.url },
@@ -191,12 +210,9 @@ describe('Streamable HTTP against a modern server (no initialize, discovery only
     });
     await bridge.connect();
     assert.equal(bridge.protocol?.via, 'discover');
-    assert.equal(bridge.protocol?.version, SERVER_VERSION);
-    // initialize IS attempted first — that is deliberate: nearly every server in the wild still speaks
-    // it, and asking a strict pre-2026 server for server/discover before initializing is a protocol
-    // error every time. What matters is that a -32601 leads to discovery rather than to a dead end.
-    assert.ok(ctx.seen.some((m) => m.method === 'initialize'), 'initialize is tried first');
-    assert.ok(ctx.seen.some((m) => m.method === 'server/discover'), 'and discovery follows the refusal');
+    assert.equal(bridge.protocol?.version, MODERN_VERSION);
+    assert.equal(ctx.seen[0]?.method, 'server/discover', 'auto negotiation probes the modern era first');
+    assert.ok(!ctx.seen.some((m) => m.method === 'initialize'), 'a successful modern discovery never initializes');
     await bridge.close();
   });
 
@@ -209,7 +225,18 @@ describe('Streamable HTTP against a modern server (no initialize, discovery only
     await bridge.connectAndDiscover();
     const listCall = ctx.seen.find((m) => m.method === 'tools/list');
     const meta = listCall?.params?._meta as Record<string, unknown> | undefined;
-    assert.equal(meta?.['io.modelcontextprotocol/protocolVersion'], SERVER_VERSION);
+    assert.equal(meta?.['io.modelcontextprotocol/protocolVersion'], MODERN_VERSION);
+    assert.deepEqual(meta?.['io.modelcontextprotocol/clientCapabilities'], {});
+    assert.equal((meta?.['io.modelcontextprotocol/clientInfo'] as { name?: string })?.name, 'philont-agent');
+    const listHeaders = ctx.headers[ctx.seen.findIndex((m) => m.method === 'tools/list')];
+    assert.equal(listHeaders?.method, 'tools/list');
+    assert.equal(listHeaders?.session, undefined);
+    const echo = bridge.getTools().find((t) => t.name === 'modern_echo')!;
+    const result = await echo.execute({ text: 'modern' });
+    assert.equal(result.output, 'echo:modern');
+    const callIndex = ctx.seen.findIndex((m) => m.method === 'tools/call');
+    assert.equal(ctx.headers[callIndex]?.method, 'tools/call');
+    assert.equal(ctx.headers[callIndex]?.name, 'echo');
     await bridge.close();
   });
 });

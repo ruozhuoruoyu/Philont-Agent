@@ -152,24 +152,15 @@ export class SkillsMarketplace extends LitElement {
     }
   }
 
-  private async install(m: MarketMeta, confirm = false, override = false) {
+  private async install(m: MarketMeta, confirm = false) {
     this.busy = { ...this.busy, [m.name]: 'install' };
     this.error = null;
     this.notice = null;
     try {
-      // Overriding the safety gate needs a single-use nonce fetched right before the call. That is what
-      // separates "a person clicked through the findings" from "something posted JSON at the port" —
-      // the API has no authentication, so without it the server cannot honestly record who decided.
-      let nonce: string | null = null;
-      if (override) {
-        const nr = await fetch(`${API()}/registry/override-nonce`);
-        if (!nr.ok) { this.error = t('无法获取越权凭据', 'Could not obtain an override token'); return; }
-        nonce = (await nr.json()).nonce ?? null;
-      }
       const r = await fetch(`${API()}/registry/install`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(nonce ? { 'X-Philont-Override-Nonce': nonce } : {}) },
-        body: JSON.stringify({ sourceId: m.sourceId, identifier: m.slug, confirm, override }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceId: m.sourceId, identifier: m.slug, confirm }),
       });
       const outcome = await r.json();
       if (outcome.status === 'installed') {
@@ -184,9 +175,6 @@ export class SkillsMarketplace extends LitElement {
               `Installed ${outcome.name}${wrote} — ${left.total} source file(s) not installed`,
             )
           : t(`已安装 ${outcome.name}${wrote}`, `Installed ${outcome.name}${wrote}`);
-        if (outcome.overridden) {
-          this.notice += t('(已越过安全门,记入审计)', ' (safety gate overridden — recorded in the audit log)');
-        }
         this.selected = null;
         await this.refreshInstalled();
       } else if (outcome.status === 'ask') {
@@ -417,27 +405,6 @@ export class SkillsMarketplace extends LitElement {
     </div>`;
   }
 
-  /**
-   * Install past a `block` verdict. The scanner is a regex heuristic, so a legitimate devops skill can
-   * trip it; a hard wall only pushes the user to copy the files in by hand, losing the provenance and
-   * audit trail. The door exists, but it is deliberately narrow: the findings are restated here and
-   * the user has to confirm them one more time. Only this human path can send override — the agent's
-   * own install tool has no such parameter.
-   */
-  private async forceInstall(s: Inspected) {
-    // Name the FILE each finding came from: a hit inside a sub-skill document shown as a bare line
-    // number reads as if it were in the SKILL.md on screen, and this text is what the consent rests on.
-    const findings = s.scan.hits.slice(0, 6).map((h) => `• ${h.category}: ${h.pattern} (${h.file ?? 'SKILL.md'}:${h.line})`).join('\n');
-    const ok = confirm(
-      t(
-        `安全扫描判定为 ${s.scan.verdict},发现:\n${findings}\n\n仍要安装 ${s.meta.name} 吗?此次越权会记入审计日志。`,
-        `The safety scan returned ${s.scan.verdict}:\n${findings}\n\nInstall ${s.meta.name} anyway? The override is written to the audit log.`,
-      ),
-    );
-    if (!ok) return;
-    await this.install(s.meta, true, true);
-  }
-
   private modal() {
     if (!this.selected) return null;
     const s = this.selected;
@@ -466,10 +433,10 @@ export class SkillsMarketplace extends LitElement {
           <pre class="skillmd">${s.content}</pre>
           <div class="dialog-actions">
             ${blocked
-              ? html`<span class="blocked">${t('已被安全门拦截', 'Blocked by the safety gate')}</span>
-                  <button class="danger" @click=${() => this.forceInstall(s)}>
-                    ${t('仍要安装(风险自负)', 'Install anyway (at your own risk)')}
-                  </button>`
+              ? html`<span class="blocked">${t(
+                  '已被安全门拦截；当前 HTTP 界面不能安全证明人在场，因此不提供越权安装。',
+                  'Blocked by the safety gate. Override is unavailable here because this unauthenticated HTTP UI cannot prove human presence.',
+                )}</span>`
               : html`<button class="primary" @click=${() => this.install(s.meta, needsConfirm)}>
                   ${needsConfirm ? t('确认安装', 'Confirm install') : t('安装', 'Install')}
                 </button>`}

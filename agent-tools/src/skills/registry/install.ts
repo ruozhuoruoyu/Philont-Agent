@@ -11,12 +11,11 @@
  * reloadSkillsFromDisk; agent-tools stays free of an agent-memory dependency.
  */
 
-import { join } from 'node:path';
-import { installSkillTool, writeSkillCompanions } from '../installTool.js';
+import { writeSkillBundleAtomically } from '../installTool.js';
 import { fetchFrom } from './router.js';
 import { scanSkillBundle } from './scanner.js';
 import { gateDecision } from './gate.js';
-import { upsertLock, appendAudit } from './lockStore.js';
+import { upsertLock, appendAudit, readLock } from './lockStore.js';
 import type { InstallActor, InstallOutcome, ProvenanceRecord, ScanReport, SkillBundle } from './types.js';
 
 export interface InstallRequest {
@@ -29,10 +28,9 @@ export interface InstallRequest {
   /**
    * Set true to install despite a `block` decision. **Honoured only when `actor === 'user'`.**
    *
-   * 'user' is a claim the caller has to earn: the HTTP endpoint only passes it when the request
-   * carried a single-use nonce issued to the UI (server/src/override_nonce.ts). An unauthenticated
-   * POST is 'api' and cannot override — which matters because the API has no auth and the agent has a
-   * shell.
+   * 'user' is a claim the caller has to earn through an authenticated, out-of-band approval channel.
+   * The unauthenticated HTTP endpoint always passes 'api' and rejects override fields outright —
+   * which matters because the agent itself can reach that endpoint through shell.
    *
    * The gate's block arm is a regex heuristic over a document that legitimately contains shell and
    * python snippets, so it has false positives — and a hard block with no way through means a user
@@ -127,20 +125,21 @@ export async function installFromSource(req: InstallRequest): Promise<InstallOut
     };
   }
 
-  // write via the shared primitive (validates name, injects name+source frontmatter, lands in .philont/skills/)
-  const res = await installSkillTool.execute({ name, content: bundle.content, source: bundle.meta.sourceTag });
-  if (!res.success) {
-    return { status: 'error', name, error: res.error ?? 'installSkill failed' };
-  }
+  // Build the complete bundle outside the watched skills directory and swap it in as one operation.
+  // This also removes companions deleted upstream; overwriting only files present in the new version
+  // left obsolete scripts executable indefinitely.
+  const previous = readLock()[name];
+  const bundleWrite = await writeSkillBundleAtomically(
+    name,
+    bundle.content,
+    bundle.meta.sourceTag,
+    bundle.files ?? [],
+    Boolean(previous),
+  );
+  if (bundleWrite.error) return { status: 'error', name, error: `installSkill failed: ${bundleWrite.error}` };
 
-  // Companion files (scripts/, reference/, …) go into the same directory, so the relative paths the
-  // SKILL.md text refers to actually resolve. Rejections join the not-installed report.
-  const companionWrite = bundle.files?.length
-    ? await writeSkillCompanions(name, bundle.files)
-    : { written: [], rejected: [] };
-
-  const droppedSample = [...(bundle.notInstalled?.sample ?? []), ...companionWrite.rejected];
-  const droppedTotal = (bundle.notInstalled?.total ?? 0) + companionWrite.rejected.length;
+  const droppedSample = [...(bundle.notInstalled?.sample ?? []), ...bundleWrite.rejected];
+  const droppedTotal = (bundle.notInstalled?.total ?? 0) + bundleWrite.rejected.length;
   const notInstalled = droppedTotal ? { total: droppedTotal, sample: droppedSample.slice(0, 8) } : undefined;
 
   const installedAt = req.now ?? '';
@@ -160,7 +159,7 @@ export async function installFromSource(req: InstallRequest): Promise<InstallOut
     // in the UI, so an overridden skill never looks like an ordinary clean install afterwards.
     overridden: overridden || undefined,
     installedAt,
-    paths: [join(process.cwd(), '.philont', 'skills', name, 'SKILL.md'), ...companionWrite.written],
+    paths: bundleWrite.written,
   };
   upsertLock(provenance);
   appendAudit({
@@ -183,7 +182,7 @@ export async function installFromSource(req: InstallRequest): Promise<InstallOut
     report: scan,
     provenance,
     overridden: overridden || undefined,
-    installedFiles: 1 + companionWrite.written.length,
+    installedFiles: bundleWrite.written.length,
     // Whatever the budget or a write error left out. Carried to every caller so "installed" never
     // silently means "installed the markdown and none of the scripts it tells you to run".
     notInstalled,

@@ -23,13 +23,13 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
   isMethodNotFound,
   isUnsupportedVersionError,
+  isModernProtocolVersion,
+  MCP_CLIENT_INFO,
   type NegotiationResult,
   type ProtocolVersion,
 } from './protocol.js';
 
 type AnyTransport = StdioTransport | SseTransport | HttpTransport;
-
-const CLIENT_INFO = { name: 'philont-agent', version: '0.1.0' };
 
 export class McpBridge {
   private transport: AnyTransport;
@@ -58,9 +58,9 @@ export class McpBridge {
     return this.negotiation;
   }
 
-  private applyVersion(version: ProtocolVersion): void {
+  private applyVersion(version: ProtocolVersion | null): void {
     // Only the HTTP transport needs the header; _meta injection is handled per transport.
-    (this.transport as { setProtocolVersion?: (v: ProtocolVersion) => void }).setProtocolVersion?.(version);
+    (this.transport as { setProtocolVersion?: (v: ProtocolVersion | null) => void }).setProtocolVersion?.(version);
   }
 
   /**
@@ -73,17 +73,41 @@ export class McpBridge {
   async connect(): Promise<void> {
     await this.transport.connect();
 
-    // A pin NARROWS the offer to one version. It must never skip the handshake: a conforming
-    // pre-2026 server refuses every call until it has been initialized (-32002 "Server not
-    // initialized"), so "assume the version and start talking" breaks the escape hatch in exactly the
-    // situation it exists for. The only pin that legitimately has no initialize is 2026-07-28+, where
-    // the method no longer exists.
     const pinned = this.config.protocolVersion;
-    const modernPin = pinned !== undefined && pinned >= '2026-07-28';
+    const modernPin = isModernProtocolVersion(pinned);
 
-    // 1) initialize handshake, walking down revisions if the server rejects our offer.
-    //    Tried FIRST because it is what nearly every server in the wild still speaks; asking a strict
-    //    pre-2026 server for `server/discover` before initializing earns a protocol error every time.
+    // 1) Probe the modern era first. A 2026 server returns supportedVersions[]; a legacy server may
+    // reject, time out, or complain that it has not been initialized, all of which mean "try legacy".
+    // Set the candidate version before the probe because modern requests are self-describing.
+    if (!pinned || modernPin) {
+      const probeVersion = pinned ?? '2026-07-28';
+      this.applyVersion(probeVersion);
+      try {
+        const discovered = (await this.transport.request('server/discover', {})) as {
+          supportedVersions?: string[];
+          capabilities?: Record<string, unknown>;
+        } | null;
+        const advertised = Array.isArray(discovered?.supportedVersions) ? discovered!.supportedVersions : [];
+        const agreed = pinned
+          ? (advertised.includes(pinned) ? pinned : null)
+          : SUPPORTED_PROTOCOL_VERSIONS.find((v) => advertised.includes(v) && isModernProtocolVersion(v)) ?? null;
+        if (!agreed) {
+          throw new Error(
+            pinned
+              ? `server/discover did not advertise pinned protocol version ${pinned}`
+              : `server/discover advertised no supported modern version (${advertised.join(', ') || 'none'})`,
+          );
+        }
+        this.negotiation = { version: agreed, via: 'discover', capabilities: discovered?.capabilities };
+        this.applyVersion(agreed);
+        return;
+      } catch (e) {
+        if (modernPin) throw new Error(`MCP modern negotiation failed: ${(e as Error).message}`);
+        this.applyVersion(null);
+      }
+    }
+
+    // 2) Legacy initialize handshake, walking down revisions if the server rejects our offer.
     const offers: ProtocolVersion[] = pinned
       ? [pinned]
       : [
@@ -92,13 +116,12 @@ export class McpBridge {
         ];
 
     let lastErr: unknown = null;
-    let initializeMissing = modernPin;
-    for (const offer of modernPin ? [] : offers) {
+    for (const offer of offers) {
       try {
         const result = (await this.transport.request('initialize', {
           protocolVersion: offer,
           capabilities: {},
-          clientInfo: CLIENT_INFO,
+          clientInfo: MCP_CLIENT_INFO,
         })) as {
           protocolVersion?: string;
           capabilities?: Record<string, unknown>;
@@ -118,37 +141,8 @@ export class McpBridge {
         return;
       } catch (e) {
         lastErr = e;
-        if (isMethodNotFound(e)) {
-          // No `initialize` at all → this is a 2026-07-28+ server; discovery is the way in.
-          initializeMissing = true;
-          break;
-        }
+        if (isMethodNotFound(e)) break;
         if (!isUnsupportedVersionError(e)) throw e; // a real failure, not a version disagreement
-      }
-    }
-
-    // 2) server/discover (2026-07-28+), for servers that have dropped initialize.
-    if (initializeMissing) {
-      try {
-        const discovered = (await this.transport.request('server/discover', {})) as {
-          protocolVersion?: string;
-          capabilities?: Record<string, unknown>;
-          serverInfo?: { name?: string; version?: string };
-        } | null;
-        const agreed = pinned || discovered?.protocolVersion;
-        if (agreed) {
-          this.negotiation = {
-            version: agreed,
-            via: pinned ? 'assumed' : 'discover',
-            capabilities: discovered?.capabilities,
-            serverInfo: discovered?.serverInfo,
-          };
-          this.applyVersion(agreed);
-          return;
-        }
-      } catch (e) {
-        lastErr = e;
-        this.emitLog(`server/discover failed after initialize was unavailable: ${(e as Error).message}`);
       }
     }
 

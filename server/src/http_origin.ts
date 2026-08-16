@@ -16,8 +16,8 @@
  *
  * What this does NOT solve, stated plainly: a process already running on this machine — including
  * philont's own shell tool — can call the API with no Origin at all and is indistinguishable from a
- * local script. The gate override therefore needs its own proof of UI provenance (see
- * override_nonce.ts); everything else here is about keeping the wider internet out.
+ * local script. Safety-gate overrides therefore remain unavailable on the unauthenticated HTTP API;
+ * everything here is about keeping the wider internet out.
  */
 
 import type { IncomingMessage } from 'node:http';
@@ -46,7 +46,7 @@ export function corsHeaders(req: IncomingMessage): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': origin!,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Philont-Override-Nonce',
+    'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '600',
     Vary: 'Origin',
   };

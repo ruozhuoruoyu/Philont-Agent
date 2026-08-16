@@ -135,11 +135,10 @@ export interface ProvenanceRecord {
   /**
    * Who confirmed an `ask`-gated install, or null when allowed outright.
    *
-   * 'api' means "arrived over the local HTTP API as a single anonymous POST". 'user' means it came
-   * through the UI's two-step confirmation (a single-use nonce fetched first). Neither is a
-   * cryptographic identity — the API has no authentication and any process on this machine can walk
-   * the same two steps — but the distinction is what a blind cross-site POST cannot fake, and the
-   * audit note records the raw evidence (origin / user-agent) rather than an assumption.
+   * 'api' means "arrived over the unauthenticated local HTTP API". That path cannot override a block.
+   * 'user' is reserved for a trusted caller backed by an authenticated, out-of-band approval channel;
+   * browser origin and anonymous HTTP tokens are not identity. The audit note records raw evidence
+   * (origin / user-agent) rather than upgrading it into an identity claim.
    */
   confirmedBy?: InstallActor | null;
   /** True when the user knowingly installed past a `block` verdict (see InstallRequest.override). */

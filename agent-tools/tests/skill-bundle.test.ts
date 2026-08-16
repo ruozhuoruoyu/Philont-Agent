@@ -20,7 +20,7 @@ import {
 } from '../src/skills/registry/bundle.js';
 import { scanSkillBundle } from '../src/skills/registry/scanner.js';
 import { bundleHash } from '../src/skills/registry/shared.js';
-import { writeSkillCompanions } from '../src/skills/installTool.js';
+import { writeSkillBundleAtomically, writeSkillCompanions } from '../src/skills/installTool.js';
 
 function withTmpCwd<T>(fn: () => T | Promise<T>): Promise<T> {
   const prev = process.cwd();
@@ -123,5 +123,28 @@ test('writeSkillCompanions: refuses paths that escape the skill directory', asyn
     assert.equal(rejected.length, 4, `expected 4 rejections, got ${JSON.stringify(rejected)}`);
     assert.ok(!existsSync(join(process.cwd(), 'evil.md')));
     assert.ok(!existsSync(join(process.cwd(), 'outside.py')));
+  });
+});
+
+test('atomic bundle update removes companion files deleted by the new version', async () => {
+  await withTmpCwd(async () => {
+    const entry = '---\nname: demo\n---\nbody\n';
+    const first = await writeSkillBundleAtomically(
+      'demo', entry, 'test:v1',
+      [{ path: 'scripts/removed.py', content: 'print("old")' }, { path: 'keep.md', content: 'v1' }],
+      false,
+    );
+    assert.equal(first.error, undefined);
+    const root = join(process.cwd(), '.philont', 'skills', 'demo');
+    assert.ok(existsSync(join(root, 'scripts', 'removed.py')));
+
+    const second = await writeSkillBundleAtomically(
+      'demo', entry, 'test:v2',
+      [{ path: 'keep.md', content: 'v2' }],
+      true,
+    );
+    assert.equal(second.error, undefined);
+    assert.equal(existsSync(join(root, 'scripts', 'removed.py')), false, 'removed upstream means removed locally');
+    assert.equal(readFileSync(join(root, 'keep.md'), 'utf-8'), 'v2');
   });
 });
