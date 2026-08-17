@@ -33,6 +33,26 @@ interface JsonRpcMessage {
   method?: string;
 }
 
+const BASE64_SENTINEL_PREFIX = '=?base64?';
+const BASE64_SENTINEL_SUFFIX = '?=';
+
+/** Encode a modern MCP metadata header value per the 2026-07-28 transport rules. */
+export function encodeMcpHeaderValue(value: string): string {
+  const plainAscii = /^[\x20-\x7e]*$/.test(value);
+  const hasOuterWhitespace = value !== value.trim();
+  const looksEncoded = value.startsWith(BASE64_SENTINEL_PREFIX)
+    && value.endsWith(BASE64_SENTINEL_SUFFIX);
+  if (plainAscii && !hasOuterWhitespace && !looksEncoded) return value;
+  return `${BASE64_SENTINEL_PREFIX}${Buffer.from(value, 'utf8').toString('base64')}${BASE64_SENTINEL_SUFFIX}`;
+}
+
+function requestPrincipalName(method: string, params: unknown): string | undefined {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return undefined;
+  const record = params as Record<string, unknown>;
+  const value = method === 'resources/read' ? record.uri : record.name;
+  return typeof value === 'string' && value ? value : undefined;
+}
+
 export class HttpTransport extends EventEmitter {
   private url: string;
   private baseHeaders: Record<string, string>;
@@ -80,11 +100,9 @@ export class HttpTransport extends EventEmitter {
     if (this.protocolVersion) {
       h['MCP-Protocol-Version'] = String(this.protocolVersion);
       if (isModernProtocolVersion(this.protocolVersion) && method) {
-        h['Mcp-Method'] = method;
-        const name = params && typeof params === 'object' && !Array.isArray(params)
-          ? (params as Record<string, unknown>).name
-          : undefined;
-        if (typeof name === 'string' && name) h['Mcp-Name'] = name;
+        h['Mcp-Method'] = encodeMcpHeaderValue(method);
+        const name = requestPrincipalName(method, params);
+        if (name) h['Mcp-Name'] = encodeMcpHeaderValue(name);
       }
     }
     return h;

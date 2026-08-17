@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { agentHttpBase } from './config.js';
 import { LangController, t } from './i18n.js';
+import { isDownloadedSkill } from './marketplace_model.js';
 
 const API = () => `${agentHttpBase()}/api/skills`;
 
@@ -37,12 +38,6 @@ interface InstalledItem {
   maturity?: string;
   useCount?: number;
   provenance: Provenance | null;
-}
-
-/** A downloaded skill: installed via the marketplace (provenance) or any external source tag. */
-function isDownloaded(s: InstalledItem): boolean {
-  if (s.provenance) return true;
-  return !!s.source && /^(github:|clawhub:|url:)/.test(s.source);
 }
 
 interface ScanHit { category: string; pattern: string; line: number; excerpt: string; file?: string }
@@ -271,7 +266,7 @@ export class SkillsMarketplace extends LitElement {
 
   private downloadedSection() {
     // Skills installed from the marketplace (provenance) or any external source (git/clawhub).
-    const items = this.allSkills.filter(isDownloaded).sort((a, b) => a.name.localeCompare(b.name));
+    const items = this.allSkills.filter(isDownloadedSkill).sort((a, b) => a.name.localeCompare(b.name));
     if (!items.length) return null;
     return html`
       <div class="section">
@@ -313,7 +308,7 @@ export class SkillsMarketplace extends LitElement {
   private selfLearnedSection() {
     // Skills philont generated itself (skill-creator / reflection): not bundled, no marketplace provenance.
     const items = this.allSkills
-      .filter((s) => !s.bundled && !isDownloaded(s))
+      .filter((s) => !s.bundled && !isDownloadedSkill(s))
       .sort((a, b) => a.name.localeCompare(b.name));
     if (!items.length) return null;
     return html`

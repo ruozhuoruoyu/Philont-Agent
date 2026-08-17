@@ -429,6 +429,12 @@ export type EvidenceLevel =
   | 'experimentally_supported'
   | 'formally_proved';
 
+/** Native tools whose successful structured result is accepted as formal proof evidence. */
+export const FORMAL_VERIFIER_TOOLS: ReadonlySet<string> = new Set([
+  'leanCheck',
+  'z3Verify',
+]);
+
 const FORMAL_CLAIM_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:Lean|Coq|Isabelle)[^。！？\n]{0,20}(?:编译通过|验证通过|无\s*sorry|proved)/i,
   /(?:形式化证明|机器证明)[^。！？\n]{0,20}(?:已完成|已证|通过|闭合)/,
@@ -482,7 +488,7 @@ function successfulFormalVerifier(record: ToolResultRecord): boolean {
   // Only native verifier tools produce structured, policy-checked proof evidence.
   // A successful shell command merely proves that a command exited zero: `lean
   // --version`, `echo lean ok`, and even `git commit -m lean` are not proofs.
-  return record.toolName === 'leanCheck' || record.toolName === 'z3Verify';
+  return FORMAL_VERIFIER_TOOLS.has(record.toolName);
 }
 
 /** Highest evidence level actually reached by this turn's successful tools. */

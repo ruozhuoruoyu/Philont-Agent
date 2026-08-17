@@ -16,7 +16,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { HttpTransport } from '../src/transport/http.js';
+import { encodeMcpHeaderValue, HttpTransport } from '../src/transport/http.js';
 import { McpBridge } from '../src/bridge.js';
 
 const SERVER_VERSION = '2025-06-18';
@@ -115,6 +115,13 @@ function startServer(opts: { supportsDiscover: boolean; noInitialize?: boolean }
           }
           const args = (msg.params?.arguments ?? {}) as { text?: string };
           return send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: `echo:${args.text ?? ''}` }] } });
+        }
+
+        case 'resources/read': {
+          const uri = String(msg.params?.uri ?? '');
+          if (opts.noInitialize && req.headers['mcp-method'] !== 'resources/read') return fail(-32020, 'method header mismatch');
+          if (opts.noInitialize && req.headers['mcp-name'] !== encodeMcpHeaderValue(uri)) return fail(-32020, 'name header mismatch');
+          return send({ jsonrpc: '2.0', id: msg.id, result: { contents: [{ uri, text: 'resource ok' }] } });
         }
 
         default:
@@ -238,5 +245,24 @@ describe('Streamable HTTP against a modern server (no initialize, discovery only
     assert.equal(ctx.headers[callIndex]?.method, 'tools/call');
     assert.equal(ctx.headers[callIndex]?.name, 'echo');
     await bridge.close();
+  });
+
+  it('uses params.uri as Mcp-Name and sentinel-encodes unsafe values', async () => {
+    const transport = new HttpTransport({ transport: 'http', url: ctx.url });
+    await transport.connect();
+    transport.setProtocolVersion(MODERN_VERSION);
+
+    const uri = 'file:///资料/证明.lean';
+    await transport.request('resources/read', { uri });
+    const index = ctx.seen.map((message) => message.method).lastIndexOf('resources/read');
+    assert.equal(ctx.headers[index]?.name, encodeMcpHeaderValue(uri));
+    assert.match(ctx.headers[index]?.name ?? '', /^=\?base64\?.+\?=$/);
+
+    const sentinel = '=?base64?literal?=';
+    await transport.request('resources/read', { uri: sentinel });
+    const sentinelIndex = ctx.seen.map((message) => message.method).lastIndexOf('resources/read');
+    assert.equal(ctx.headers[sentinelIndex]?.name, encodeMcpHeaderValue(sentinel));
+    assert.notEqual(ctx.headers[sentinelIndex]?.name, sentinel, 'literal sentinel must be encoded to avoid ambiguity');
+    await transport.close();
   });
 });

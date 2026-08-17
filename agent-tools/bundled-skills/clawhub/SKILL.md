@@ -45,8 +45,9 @@ Identifiers are `@publisher/slug` (clawhub's canonical form), optionally with `@
   package is usually ~25 files and the install budget may have left some out.
 - `ask` → community skill with a caution-level scan. Show the user the findings, get explicit
   confirmation, call again with `confirm: true`.
-- `blocked` → dangerous patterns somewhere in the bundle. Only the user can override this, from the
-  Skills page in the web UI. Report the findings; do not look for a workaround.
+- `blocked` → dangerous patterns somewhere in the bundle. The current UI and local API cannot safely
+  prove human presence, so neither exposes an override. Report the findings; do not look for a
+  workaround or direct the user to a button that does not exist.
 
 ## Uninstall
 

@@ -34,21 +34,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-tool MCP classification** (`toolCapabilities`) and `toolAllowlist`: one capability label for
   a whole server is either too strict (every read needs approval, so approval becomes reflex) or too
   loose (writes wave through).
-- **A user-only override for the install gate.** The scanner is a regex heuristic and scanning whole
-  bundles pushes real packages to `dangerous`; a wall with no door just pushes the user to hand-copy
-  files with no provenance. Reachable only from the UI, never from the agent's own tool, recorded in
-  the lock file and the audit log.
+- **Dangerous skill installs stay blocked until there is a trustworthy approval channel.** The local
+  HTTP API and web UI are unauthenticated, so neither can prove that an override came from the user
+  rather than the agent calling its own port. The deleted UI override is not advertised as a safety
+  boundary; blocked findings are reported, but the API cannot install past them.
 
 - **A boundary around the local HTTP API.** It answered every caller with
   `Access-Control-Allow-Origin: *` and no authentication — survivable until the install endpoint
   gained a flag that walks a skill past the safety gate, at which point any page the owner has open
   could POST a skill (i.e. instructions the agent then follows) into the library. CORS is now echoed
   only for trusted origins, state-changing requests carrying a foreign `Origin` or
-  `Sec-Fetch-Site: cross-site` are refused, and the gate override additionally requires a single-use
-  nonce fetched first. Residual, and stated rather than papered over: any process already on this
-  machine can walk the same two steps, so the audit records the raw evidence (origin, user-agent) and
-  only calls a caller `user` when it took the two-step path — an anonymous POST is recorded as `api`
-  and cannot override at all.
+  `Sec-Fetch-Site: cross-site` are refused. That protects the local API from drive-by browser calls,
+  but it is not user authentication: any local process can call the same endpoint. Requests are
+  therefore recorded as `api`, with raw caller evidence (origin and user-agent), and anonymous HTTP
+  callers cannot override the install gate at all.
 
 ### Fixed
 

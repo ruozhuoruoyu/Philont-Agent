@@ -30,8 +30,9 @@ skills from sources you (or the user) point at.
    - `ask` → it is a community skill with a caution-level scan. **Show the user the scan findings and get their
      explicit confirmation**, then call again with `confirm: true`.
    - `blocked` → the scan found dangerous patterns (exfiltration / RCE / persistence) somewhere in the bundle.
-     You cannot install it and you cannot override the gate — only the user can, from the Skills page in the
-     web UI, after reading the findings. Report the findings and let them decide; do not look for a way around.
+     You cannot install it or override the gate. The current UI and local API cannot safely prove human presence,
+     so no override control is exposed. Report the findings; do not look for a way around or point the user to a
+     button that does not exist.
 
 3. **Check what actually landed.** A skill is usually a bundle (SKILL.md plus `scripts/`, `reference/`, …).
    The install result says how many files were written and lists anything it did **not** install (over the

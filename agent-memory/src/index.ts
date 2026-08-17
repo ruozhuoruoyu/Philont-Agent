@@ -287,6 +287,7 @@ export {
 } from './kernel_drives.js';
 export {
   assessEvidenceLevel,
+  FORMAL_VERIFIER_TOOLS,
   evaluateHonesty,
   findCompletionClaim,
   findOrderClaim,
