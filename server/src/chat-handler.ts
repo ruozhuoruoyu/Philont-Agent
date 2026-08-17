@@ -2739,15 +2739,17 @@ tools.registerInternal(planAndExecuteTool);
 
 // ── Deep reasoning subsystem (isolated; env flag on by default; only disabled with PHILONT_DEEP_EXPLORE='0') ──────────
 // deep_explore tool is registered by default; skipped only when PHILONT_DEEP_EXPLORE='0' is explicitly set. Reuses miniLoopLLM +
-// subTurnToolRunner; tool subset = autonomous read-only whitelist + verification teeth (z3Verify/pariGp) ∩ registered tools.
-// z3Verify/pariGp are **not** in DEFAULT_TOOL_WHITELIST (so background autonomous cannot access them); they are explicitly included here for deep_explore.
+// subTurnToolRunner; tool subset = autonomous read-only whitelist + native verification tools ∩ registered tools.
+// These verifiers are not all in DEFAULT_TOOL_WHITELIST, so deep_explore opts into them explicitly.
 // Background auto-advance (Part 2) reaches the round runner through this handle; set when deep_explore
 // is enabled, read by the (default-off) auto-advance loop started further down.
 let deepExploreAdvanceSession: ((session: ReasoningSession) => Promise<ToolResult>) | null = null;
+export const DEEP_EXPLORE_VERIFY_TOOL_NAMES = new Set([
+  'z3Verify', 'pariGp', 'leanCheck', 'magnitude', 'lemmaLookup',
+]);
 if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
-  const deepExploreVerifyTools = new Set(['z3Verify', 'pariGp', 'magnitude', 'lemmaLookup']);
   const readOnlyToolDefs: ToolDefinition[] = tools.list()
-    .filter((t) => DEFAULT_TOOL_WHITELIST.has(t.name) || deepExploreVerifyTools.has(t.name))
+    .filter((t) => DEFAULT_TOOL_WHITELIST.has(t.name) || DEEP_EXPLORE_VERIFY_TOOL_NAMES.has(t.name))
     .map((t) => ({ name: t.name, description: t.description, parameters: JSON.stringify(t.schema) }));
   const { tool: deepExploreTool, advanceSession: deepExploreAdvance } = createDeepExploreTool({
     reasoning: memory.reasoning,

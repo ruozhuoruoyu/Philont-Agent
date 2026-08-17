@@ -232,7 +232,7 @@ function makeSessionId(botId: string, e: InboundEvent): string {
 }
 
 /** AuthRequest → human-readable Telegram authorization prompt (plain text). */
-function renderAuthPrompt(req: AuthRequestPayload): string {
+export function renderAuthPrompt(req: AuthRequestPayload): string {
   const en = currentPhraseLang('telegram') === 'en';
   const lines = en
     ? ['🔐 I need your permission', `Tool: ${req.toolName} (${req.capability} / ${req.domain})`]

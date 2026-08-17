@@ -45,6 +45,15 @@ test('matchOfferedAuthWord: a SENTENCE is not one of our words — it must fall 
   }
 });
 
+test('unadvertised historical auth words remain exact compatibility aliases', () => {
+  for (const word of ['允许', '批准', '授权', 'allow', 'granted']) {
+    assert.equal(matchOfferedAuthWord(word), 'grant', word);
+  }
+  for (const word of ['不要', '别', 'decline']) {
+    assert.equal(matchOfferedAuthWord(word), 'deny', word);
+  }
+});
+
 test('classifyAuthIntent: the three production false-grants are no longer grants', async () => {
   // Measured against the old KeywordIntentClassifier: all three returned 'grant' and authorised an
   // execute/system tool. Asking for time, asking what the tool does, and asking whether it is safe are the

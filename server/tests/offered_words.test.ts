@@ -15,13 +15,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   autoSubscribeNotice,
   classifyPushControlReply,
 } from '../src/push/auto_subscribe.js';
 import { renderCheckInText } from '../src/push/service_driver.js';
 import { classifyProposalReply, renderSelfhoodStatusText } from '../src/autonomy_status.js';
-import { matchOfferedAuthWord } from '../src/auth_intent.js';
+import { matchOfferedAuthWord, offeredAuthWords } from '../src/auth_intent.js';
+import { renderAuthPromptForWeChat } from '../src/channels/wechat/wechat_render.js';
+import { renderAuthPrompt as renderAuthPromptForTelegram } from '../src/channels/telegram/index.js';
 import { classifyExploreControlReply } from '../src/explore_control.js';
 
 test('the off-switch we promise in the auto-subscribe notice actually works', () => {
@@ -84,10 +87,47 @@ test('the constitution card offers words the matcher accepts, in both languages'
   assert.ok(classifyProposalReply('approve proposal deadbeef'));
 });
 
-test('the auth card offers words the matcher accepts, in both languages', () => {
-  // Rendered by renderResearchGrantPrompt / the channel auth cards: "回复「同意」/「拒绝」", "approve / reject".
-  for (const w of ['同意', '拒绝', 'approve', 'reject', 'yes', 'no']) {
-    assert.ok(matchOfferedAuthWord(w), `we print "${w}" on the auth card — we must match it exactly`);
+function quotedDecisionWords(card: string): string[] {
+  const line = card.split('\n').find((candidate) => /(?:Reply|回复).*(?:allow|允许|放行)/.test(candidate));
+  assert.ok(line, `missing authorization decision line in:\n${card}`);
+  return [...line.matchAll(/["「]([^"」]+)["」]/g)].map((match) => match[1]);
+}
+
+test('auth card renderers only print words accepted by the parser', () => {
+  const req = { toolName: 'shell', capability: 'execute', domain: 'system', input: {} };
+  for (const [lang, renderers] of [
+    ['zh', [renderAuthPromptForWeChat, renderAuthPromptForTelegram]],
+    ['en', [renderAuthPromptForWeChat, renderAuthPromptForTelegram]],
+  ] as const) {
+    const previous = process.env.AGENT_LANGUAGE;
+    process.env.AGENT_LANGUAGE = lang;
+    try {
+      for (const render of renderers) {
+        const words = quotedDecisionWords(render(req));
+        assert.deepEqual(words, [
+          ...offeredAuthWords(lang, 'grant'),
+          ...offeredAuthWords(lang, 'deny'),
+        ]);
+        for (const word of words) {
+          assert.ok(matchOfferedAuthWord(word), `card prints "${word}" but parser rejects it`);
+        }
+      }
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_LANGUAGE;
+      else process.env.AGENT_LANGUAGE = previous;
+    }
+  }
+});
+
+test('web-ui authorization copy stays inside the accepted auth vocabulary', () => {
+  const source = readFileSync(new URL('../../web-ui/src/chat.ts', import.meta.url), 'utf8');
+  const authLines = source.split('\n').filter((line) => /(?:回复|Reply).*(?:批准|grant)/.test(line));
+  assert.ok(authLines.length > 0);
+  const words = authLines.flatMap((line) =>
+    [...line.matchAll(/["「]([^"」]+)["」]/g)].map((match) => match[1]),
+  ).filter((word) => !word.includes('${'));
+  for (const word of words) {
+    assert.ok(matchOfferedAuthWord(word), `web-ui prints "${word}" but parser rejects it`);
   }
 });
 

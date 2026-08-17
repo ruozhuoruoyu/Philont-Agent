@@ -69,6 +69,16 @@ const OFFERED_DENY_WORD_SET = new Set<string>([
   ...OFFERED_AUTH_WORDS.deny.en,
 ]);
 
+// Exact historical replies remain deterministic for compatibility, but are not
+// advertised on new cards.  This is still parsing a closed enum, not substring
+// intent inference: ambiguous words such as “可以/好/继续/确认” deliberately stay out.
+const COMPAT_GRANT_WORD_SET = new Set([
+  '允许', '批准', '授权', 'allow', 'approved', 'grant', 'granted',
+]);
+const COMPAT_DENY_WORD_SET = new Set([
+  '不同意', '不允许', '不要', '别', 'decline', 'deny', 'denied', 'rejected',
+]);
+
 export function offeredAuthWords(
   language: 'zh' | 'en',
   intent: 'grant' | 'deny',
@@ -87,6 +97,8 @@ export function matchOfferedAuthWord(reply: string): GrantIntent | null {
   if (!r) return null;
   if (OFFERED_GRANT_WORD_SET.has(r)) return 'grant';
   if (OFFERED_DENY_WORD_SET.has(r)) return 'deny';
+  if (COMPAT_GRANT_WORD_SET.has(r)) return 'grant';
+  if (COMPAT_DENY_WORD_SET.has(r)) return 'deny';
   return null;
 }
 
