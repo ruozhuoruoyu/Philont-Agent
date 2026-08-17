@@ -17,6 +17,7 @@
  */
 
 import { currentPhraseLang } from '../../response_language.js';
+import { offeredAuthWords } from '../../auth_intent.js';
 import { TelegramClient } from './client.js';
 import { TelegramGateway, type InboundEvent, type GatewayLogger } from './gateway.js';
 import { renderForTelegram } from './render.js';
@@ -247,11 +248,12 @@ function renderAuthPrompt(req: AuthRequestPayload): string {
     lines.push(en ? `Args: ${truncate(inputStr, 300)}` : `参数:${truncate(inputStr, 300)}`);
   }
   // Matched exactly by matchOfferedAuthWord before any classifier sees the reply.
-  lines.push(
-    en
-      ? 'Reply "approve" / "yes" to allow, or "reject" / "no" to cancel.'
-      : '回复"同意/yes"放行,或"拒绝/no"取消。',
-  );
+  const lang = en ? 'en' : 'zh';
+  const grantWords = offeredAuthWords(lang, 'grant').map((word) => `"${word}"`).join(' / ');
+  const denyWords = offeredAuthWords(lang, 'deny').map((word) => `"${word}"`).join(' / ');
+  lines.push(en
+    ? `Reply ${grantWords} to allow, or ${denyWords} to cancel.`
+    : `回复 ${grantWords} 放行,或 ${denyWords} 取消。`);
   return lines.join('\n');
 }
 

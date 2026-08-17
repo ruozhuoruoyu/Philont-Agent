@@ -438,7 +438,24 @@ const FORMAL_CLAIM_PATTERNS: ReadonlyArray<RegExp> = [
 function findFormalClaim(text: string): string | null {
   for (const pattern of FORMAL_CLAIM_PATTERNS) {
     const match = text.match(pattern);
-    if (match) return match[0];
+    if (!match) continue;
+    const start = match.index ?? 0;
+    const clauseStart = Math.max(
+      text.lastIndexOf('\n', start),
+      text.lastIndexOf('。', start),
+      text.lastIndexOf('！', start),
+      text.lastIndexOf('？', start),
+      text.lastIndexOf('.', start),
+    ) + 1;
+    const clause = text.slice(clauseStart, start + match[0].length + 40);
+    // A claim detector must not turn an honest failure report into a lie.  Keep this
+    // deliberately local to the matched clause so an earlier caveat does not suppress
+    // a later affirmative claim.
+    const negated =
+      /(?:没有|没能|尚未|并未|未能|无法|不能|失败|未)[^。！？\n]{0,40}(?:编译通过|验证通过|已完成|已证|闭合|proved)/i.test(clause)
+      || /\b(?:not|never|isn't|wasn't|hasn't|haven't|cannot|can't|failed\s+to)\b[^.!?\n]{0,50}(?:proved|complete|passed)/i.test(clause)
+      || /\b(?:still\s+has|contains?|with)\s+sorry\b/i.test(clause);
+    if (!negated) return match[0];
   }
   return null;
 }
@@ -462,10 +479,10 @@ function evidenceShellCommand(input: ToolResultRecord['toolInput']): string | nu
 
 function successfulFormalVerifier(record: ToolResultRecord): boolean {
   if (classifyToolResult(record.content) !== 'ok') return false;
-  if (['leanCheck', 'z3Verify', 'coqCheck', 'isabelleCheck'].includes(record.toolName)) return true;
-  if (record.toolName !== 'shell') return false;
-  const command = evidenceShellCommand(record.toolInput) ?? '';
-  return /(?:lake\s+env\s+lean|\blean(?:\.exe)?\b|\bcoqc\b|\bisabelle\b)/i.test(command);
+  // Only native verifier tools produce structured, policy-checked proof evidence.
+  // A successful shell command merely proves that a command exited zero: `lean
+  // --version`, `echo lean ok`, and even `git commit -m lean` are not proofs.
+  return record.toolName === 'leanCheck' || record.toolName === 'z3Verify';
 }
 
 /** Highest evidence level actually reached by this turn's successful tools. */

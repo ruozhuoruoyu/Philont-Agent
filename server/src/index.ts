@@ -34,6 +34,7 @@ import './boot_logging.js';
 // Local-API boundary: per-request CORS + a cross-site guard for state-changing calls.
 import { corsHeaders, rejectCrossSite, describeCaller } from './http_origin.js';
 import { rejectUnauthenticatedSkillOverride } from './skill_install_boundary.js';
+import { offeredAuthWords } from './auth_intent.js';
 
 // Wall-clock watchdog — must load after the tee like everything else. See suspend_detector.
 import { startSuspendDetector } from './suspend_detector.js';
@@ -846,7 +847,9 @@ wss.on('connection', (ws) => {
             const text =
               `Agent requests to run tool "${req.toolName}" (${req.capability}/${req.domain})` +
               (req.clarification ? `\n${req.clarification}` : '') +
-              `\nParams: ${paramSummary}\nAllow? (grant valid for 30 minutes by default)`;
+              `\nParams: ${paramSummary}\nReply ${offeredAuthWords('en', 'grant').join(' / ')} to allow, ` +
+              `or ${offeredAuthWords('en', 'deny').join(' / ')} to refuse ` +
+              `(grant valid for 30 minutes by default)`;
             safeSend({ type: 'auth_request', text, payload: req });
           },
           // 2026-05-19 three-stream split: onStatus = Tier 2 semantic progress.

@@ -165,3 +165,28 @@ test('idle: stop() 是幂等的', async () => {
   consolidator.stop();
   handle.close();
 });
+
+test('idle: zero-result consolidation still emits one compact heartbeat', async () => {
+  const handle = openMemoryDb(':memory:');
+  const llm = emptyArrayLlm();
+  const lines: string[] = [];
+  const consolidator = startIdleConsolidator({
+    raw: handle.raw,
+    facts: handle.facts,
+    extractor: new SessionExtractor(llm, handle.facts, handle.notes, handle.raw),
+    reflector: new SessionReflector(llm, handle.skills, handle.actions, handle.raw),
+    idleThresholdMs: 0,
+    minNewMessages: 2,
+    tickIntervalMs: 1_000_000,
+    logger: { log: (line) => lines.push(line), error: () => undefined },
+  });
+  appendMessages(handle, 2);
+  await consolidator.tick();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  appendMessages(handle, 2, 'new-');
+  assert.equal(await consolidator.tick(), true);
+  assert.ok(lines.some((line) => line.includes('extractor=0 facts + 0 notes')));
+  assert.ok(lines.some((line) => line.includes('reflector=0 new skills + 0 updated')));
+  await consolidator.stop();
+  handle.close();
+});

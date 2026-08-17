@@ -16,6 +16,7 @@
  */
 
 import { currentPhraseLang } from '../../response_language.js';
+import { offeredAuthWords } from '../../auth_intent.js';
 
 // ── 1. markdown → WeChat text ──────────────────────────────────────────────
 
@@ -304,11 +305,12 @@ export function renderAuthPromptForWeChat(req: {
   lines.push('');
   // Every word offered here is matched exactly by matchOfferedAuthWord (auth_intent.ts) before any
   // classifier sees it — reading back our own enum is parsing, not intent inference.
-  lines.push(
-    en
-      ? 'Reply "approve" / "yes" to allow; "reject" / "no" to refuse'
-      : '回复 "同意" / "yes" 允许;回复 "拒绝" / "no" 拒绝',
-  );
+  const lang = en ? 'en' : 'zh';
+  const grantWords = offeredAuthWords(lang, 'grant').map((word) => `"${word}"`).join(' / ');
+  const denyWords = offeredAuthWords(lang, 'deny').map((word) => `"${word}"`).join(' / ');
+  lines.push(en
+    ? `Reply ${grantWords} to allow; ${denyWords} to refuse`
+    : `回复 ${grantWords} 允许;回复 ${denyWords} 拒绝`);
   lines.push(en ? '(valid for 30 minutes by default)' : '(默认 30 分钟有效)');
   return lines.join('\n');
 }

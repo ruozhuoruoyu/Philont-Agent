@@ -55,6 +55,33 @@ test('formal proof claim requires a successful verifier in the same turn', () =>
   assert.equal(accepted, null);
 });
 
+test('formal proof gate does not rewrite honest negative reports', () => {
+  for (const text of [
+    'Lean 没有编译通过，我做不出来。',
+    'not formally proved — the Lean file still has sorry',
+  ]) {
+    assert.equal(evaluateHonesty(text, {
+      toolResults: [{ toolName: 'leanCheck', content: '⚠ TOOL FAILED — exit 1' }],
+    }), null, text);
+  }
+});
+
+test('shell mentions of Lean are execution, never formal proof evidence', () => {
+  for (const command of ['lean --version', 'echo lean ok', 'git commit -m lean']) {
+    const tools = [{
+      toolName: 'shell',
+      toolInput: { command },
+      content: '✓ TOOL OK\nexit 0',
+    }];
+    assert.equal(assessEvidenceLevel(tools), 'executed', command);
+    assert.equal(
+      evaluateHonesty('形式化证明已完成。', { toolResults: tools })?.reason,
+      'formal_claim_without_verifier',
+      command,
+    );
+  }
+});
+
 // ── classifyToolResult ─────────────────────────────────────────────────
 
 test('classifyToolResult: ✓ TOOL OK 前缀 → ok', () => {

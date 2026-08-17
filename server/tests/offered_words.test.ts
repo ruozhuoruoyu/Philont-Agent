@@ -86,7 +86,7 @@ test('the constitution card offers words the matcher accepts, in both languages'
 
 test('the auth card offers words the matcher accepts, in both languages', () => {
   // Rendered by renderResearchGrantPrompt / the channel auth cards: "回复「同意」/「拒绝」", "approve / reject".
-  for (const w of ['同意', '拒绝', 'approve', 'reject']) {
+  for (const w of ['同意', '拒绝', 'approve', 'reject', 'yes', 'no']) {
     assert.ok(matchOfferedAuthWord(w), `we print "${w}" on the auth card — we must match it exactly`);
   }
 });

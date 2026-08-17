@@ -175,7 +175,7 @@ export interface MiniAgentLoopResult {
 const DEFAULT_MAX_ITERS = 8;
 const PREVIEW_MAX = 200;
 const TOOL_RESULT_MAX = 16_000;
-const REPEATED_FAILURE_LIMIT = 2;
+const REPEATED_FAILURE_LIMIT = 3;
 
 /**
  * No-progress early exit (2026-07-15). The loop otherwise runs its FULL iteration budget whenever the LLM
@@ -386,7 +386,9 @@ export async function runMiniAgentLoop(
       if (!runResult.ok) {
         const normalized = (runResult.error ?? runResult.output ?? 'unknown')
           .toLowerCase()
-          .replace(/\d+/g, '#')
+          // Preserve short semantic numbers such as HTTP 404/503 and exit codes;
+          // erase only likely volatile ids, timestamps, and large line offsets.
+          .replace(/\b\d{4,}\b/g, '#')
           .slice(0, 180);
         const signature = `${call.name}:${normalized}`;
         const count = (failureCounts.get(signature) ?? 0) + 1;

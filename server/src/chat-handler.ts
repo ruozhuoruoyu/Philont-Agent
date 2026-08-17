@@ -251,7 +251,7 @@ import {
   detectUserDissatisfaction,
 } from './failure_recovery_inject.js';
 import {
-  classifyPendingAuthReply,
+  isPendingAuthExpired,
   PENDING_AUTH_TTL_MS,
   WORKFLOW_GRANT_TTL_MS,
 } from './auth-continuation.js';
@@ -4382,7 +4382,7 @@ export function pendingAuthIsStale(
 ): boolean {
   if (!pending) return false;
   if (pending.executionState === 'running' || pending.executionState === 'uncertain') return false;
-  return now - pending.ts > PENDING_AUTH_TTL_MS;
+  return isPendingAuthExpired(pending.ts, now);
 }
 
 /**
@@ -8641,14 +8641,11 @@ async function handleChatSendInner(
     // classifier — with a word the owner was never offered for that purpose.
     const explicitRecoveryRetry =
       wasUncertain && classifyUncertainToolReply(userMessage) === 'retry';
-    const fastIntent = classifyPendingAuthReply(userMessage);
     const intent = explicitRecoveryRetry
       ? 'grant'
       : expired
         ? 'unclear'
-        : fastIntent === 'unclear'
-          ? await classifyAuthIntent(userMessage, context)
-          : fastIntent;
+        : await classifyAuthIntent(userMessage, context);
 
     if (intent === 'grant') {
       // deep_explore runs multi-round sessions where a single round can outlast the default

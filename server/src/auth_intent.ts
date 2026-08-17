@@ -55,6 +55,27 @@ import { callAuxLLM, isAuxLLMConfigured } from '@agent/tools';
 
 export type GrantIntent = 'grant' | 'deny' | 'unclear';
 
+export const OFFERED_AUTH_WORDS = {
+  grant: { zh: ['同意', 'yes'], en: ['approve', 'yes'] },
+  deny: { zh: ['拒绝', 'no'], en: ['reject', 'no'] },
+} as const;
+
+const OFFERED_GRANT_WORD_SET = new Set<string>([
+  ...OFFERED_AUTH_WORDS.grant.zh,
+  ...OFFERED_AUTH_WORDS.grant.en,
+]);
+const OFFERED_DENY_WORD_SET = new Set<string>([
+  ...OFFERED_AUTH_WORDS.deny.zh,
+  ...OFFERED_AUTH_WORDS.deny.en,
+]);
+
+export function offeredAuthWords(
+  language: 'zh' | 'en',
+  intent: 'grant' | 'deny',
+): readonly string[] {
+  return OFFERED_AUTH_WORDS[intent][language];
+}
+
 /**
  * Layer 1 — the closed enum WE handed the owner on the auth card, in both languages, always.
  *
@@ -64,8 +85,8 @@ export type GrantIntent = 'grant' | 'deny' | 'unclear';
 export function matchOfferedAuthWord(reply: string): GrantIntent | null {
   const r = (reply ?? '').trim().toLowerCase().replace(/[。！？，,!?.\s"'「」]+/g, '');
   if (!r) return null;
-  if (/^(同意|批准|授权|允许|approve|approved|allow|grant|granted)$/.test(r)) return 'grant';
-  if (/^(拒绝|不同意|不允许|不要|别|reject|rejected|deny|denied|decline)$/.test(r)) return 'deny';
+  if (OFFERED_GRANT_WORD_SET.has(r)) return 'grant';
+  if (OFFERED_DENY_WORD_SET.has(r)) return 'deny';
   return null;
 }
 

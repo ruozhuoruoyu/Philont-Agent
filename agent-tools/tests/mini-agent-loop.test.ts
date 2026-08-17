@@ -290,10 +290,13 @@ test('toolRunner throw:捕获并转 tool error,loop 继续', async () => {
   assert.equal(r.finalText, 'handled');
 });
 
-test('same tool failure twice stops the sub-loop and requires a revised approach', async () => {
+test('same tool failure three times stops the sub-loop and requires a revised approach', async () => {
   const llm = stubLLM([
-    toolCallResponse([{ id: 'tc-1', name: 'pariGp', input: { script: '(bad' } }]),
-    toolCallResponse([{ id: 'tc-2', name: 'pariGp', input: { script: '(bad' } }]),
+    toolCallResponse([
+      { id: 'tc-1', name: 'pariGp', input: { script: '(bad' } },
+      { id: 'tc-2', name: 'pariGp', input: { script: '(bad' } },
+      { id: 'tc-3', name: 'pariGp', input: { script: '(bad' } },
+    ]),
     textResponse('must not reach'),
   ]);
   const r = await runMiniAgentLoop({
@@ -306,9 +309,31 @@ test('same tool failure twice stops the sub-loop and requires a revised approach
   });
 
   assert.match(r.error ?? '', /repeated_tool_failure:pariGp/);
-  assert.equal(r.itersUsed, 2);
-  assert.equal(r.toolCallsSpent, 2);
+  assert.equal(r.itersUsed, 1);
+  assert.equal(r.toolCallsSpent, 3);
   assert.equal(r.hitCap, false);
+});
+
+test('different HTTP status failures do not collapse into one repeated signature', async () => {
+  const llm = stubLLM([
+    toolCallResponse([
+      { id: 'tc-1', name: 'webFetch', input: {} },
+      { id: 'tc-2', name: 'webFetch', input: {} },
+    ]),
+    textResponse('reported both failures'),
+  ]);
+  let calls = 0;
+  const r = await runMiniAgentLoop({
+    systemPrompt: 'sys', userMessage: 'fetch', llm, toolDefs: NO_TOOLS,
+    toolRunner: async () => ({
+      ok: false,
+      output: '',
+      error: calls++ === 0 ? 'HTTP 404 from endpoint' : 'HTTP 503 from endpoint',
+    }),
+    maxIters: 5,
+  });
+  assert.equal(r.error, undefined);
+  assert.equal(r.finalText, 'reported both failures');
 });
 
 // ── 测试 8(额外):多 tool calls 一轮 → 全部跑 ───────────────────────

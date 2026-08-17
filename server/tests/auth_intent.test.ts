@@ -27,8 +27,10 @@ test('matchOfferedAuthWord: reads back OUR closed enum exactly, in both language
   // This layer is parsing, not inference: it recognises a word we ourselves printed on the card.
   assert.equal(matchOfferedAuthWord('同意'), 'grant');
   assert.equal(matchOfferedAuthWord('approve'), 'grant');
+  assert.equal(matchOfferedAuthWord('yes'), 'grant');
   assert.equal(matchOfferedAuthWord('拒绝'), 'deny');
   assert.equal(matchOfferedAuthWord('reject'), 'deny');
+  assert.equal(matchOfferedAuthWord('no'), 'deny');
   assert.equal(matchOfferedAuthWord('「同意」'), 'grant');
 });
 
@@ -38,6 +40,9 @@ test('matchOfferedAuthWord: a SENTENCE is not one of our words — it must fall 
   assert.equal(matchOfferedAuthWord('我可以再想想吗'), null);
   assert.equal(matchOfferedAuthWord('这个工具可以干什么？'), null);
   assert.equal(matchOfferedAuthWord('你确认一下这是安全的吗'), null);
+  for (const ambiguous of ['继续', '好', '可以', '确认']) {
+    assert.equal(matchOfferedAuthWord(ambiguous), null);
+  }
 });
 
 test('classifyAuthIntent: the three production false-grants are no longer grants', async () => {
