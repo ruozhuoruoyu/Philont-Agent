@@ -23,7 +23,7 @@ export type {
 } from './types.js';
 
 export { scanSkillContent, scanSkillBundle } from './scanner.js';
-export { isMarketplaceSourceTag, MARKETPLACE_SOURCE_PREFIX_RE } from './shared.js';
+export { isMarketplaceSourceTag, sameSourceOrigin, sourceOrigin, MARKETPLACE_SOURCE_PREFIX_RE } from './shared.js';
 export { applyBundleBudget, isInstallableCompanion, MAX_BUNDLE_FILES, MAX_BUNDLE_BYTES } from './bundle.js';
 export { gateDecision } from './gate.js';
 export { readLock, getProvenance, upsertLock, removeLock, appendAudit } from './lockStore.js';

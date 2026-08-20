@@ -47,9 +47,43 @@ export function normalizeName(raw: string): string {
  */
 export const MARKETPLACE_SOURCE_PREFIX_RE = /^(github:|clawhub:|url:)/;
 
-/** Was this skill installed from the marketplace, judged by the source tag on disk? */
+/**
+ * Does this source tag have marketplace SHAPE?
+ *
+ * Shape only — never authority. Anything can write `source: github:…` (the agent-facing installSkill
+ * tool takes the string verbatim), so this answers "how should the UI file this skill", not "may we
+ * overwrite this directory". The overwrite decision additionally requires the installer's own marker
+ * plus a matching origin; see installTool.INSTALLED_BY_KEY and sameSourceOrigin.
+ */
 export function isMarketplaceSourceTag(source: string | null | undefined): boolean {
   return typeof source === 'string' && MARKETPLACE_SOURCE_PREFIX_RE.test(source.trim());
+}
+
+/**
+ * The origin part of a source tag, with any pinned version/sha removed:
+ *   github:owner/repo@abc1234    → github:owner/repo
+ *   clawhub:@publisher/skill@2.1 → clawhub:@publisher/skill
+ *   url:https://host/SKILL.md    → url:https://host/SKILL.md
+ *
+ * A leading '@' is a publisher scope, not a version separator (the bug that once turned
+ * '@openclaw/demo' into an empty slug), so only a trailing '@' outside the path counts.
+ */
+export function sourceOrigin(source: string | null | undefined): string | null {
+  const raw = (source ?? '').trim();
+  if (!raw) return null;
+  const at = raw.lastIndexOf('@');
+  if (at > 0 && !raw.slice(at + 1).includes('/')) return raw.slice(0, at);
+  return raw;
+}
+
+/**
+ * Do two source tags name the same origin? Used to decide whether an existing directory is an earlier
+ * version of the thing being installed, rather than a different skill that happens to share a name.
+ */
+export function sameSourceOrigin(a: string | null | undefined, b: string | null | undefined): boolean {
+  const oa = sourceOrigin(a);
+  const ob = sourceOrigin(b);
+  return oa !== null && ob !== null && oa === ob;
 }
 
 /** A lightweight User-Agent so GitHub/raw hosts don't reject the request. */

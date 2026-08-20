@@ -11,12 +11,12 @@
  * reloadSkillsFromDisk; agent-tools stays free of an agent-memory dependency.
  */
 
-import { writeSkillBundleAtomically, readInstalledSourceTag } from '../installTool.js';
+import { writeSkillBundleAtomically, readInstalledProvenance } from '../installTool.js';
 import { fetchFrom } from './router.js';
 import { scanSkillBundle } from './scanner.js';
 import { gateDecision } from './gate.js';
 import { upsertLock, appendAudit, readLock } from './lockStore.js';
-import { isMarketplaceSourceTag } from './shared.js';
+import { sameSourceOrigin } from './shared.js';
 import type { InstallActor, InstallOutcome, ProvenanceRecord, ScanReport, SkillBundle } from './types.js';
 
 export interface InstallRequest {
@@ -129,16 +129,25 @@ export async function installFromSource(req: InstallRequest): Promise<InstallOut
   // Build the complete bundle outside the watched skills directory and swap it in as one operation.
   // This also removes companions deleted upstream; overwriting only files present in the new version
   // left obsolete scripts executable indefinitely.
-  // May we overwrite what is already there? The lock file is the fast answer but not the only one:
-  // readLock() returns {} for a missing OR malformed file by design, so a lost lock used to make every
-  // installed skill look like a stranger's directory and turned each update into a hard error advising
-  // nothing. The durable record is the `source:` tag we wrote into the skill's own SKILL.md, so fall
-  // back to that — an install we can prove we made stays replaceable, and the lock is rewritten below,
-  // which repairs it. A directory with no lock row AND no marketplace tag (a self-learned or
-  // hand-made skill that happens to share the name) is still refused.
+  // May we overwrite what is already there? Three different facts, and only their conjunction is
+  // permission:
+  //   1. a lock row — the fast path, but readLock() returns {} for a missing OR malformed file by
+  //      design, so its absence proves nothing (one corrupt lock used to make every installed skill
+  //      look foreign and turned each update into an unactionable hard error);
+  //   2. failing that, the installer's OWN marker in the file (installTool.INSTALLED_BY_KEY). The
+  //      `source:` tag alone will not do: the agent-facing installSkill tool writes an arbitrary
+  //      source string, so a hand-written or self-learned skill can wear marketplace metadata, and
+  //      ordinary metadata must never authorise destroying local work;
+  //   3. and the same origin — an earlier version of THIS skill, not a different skill from somewhere
+  //      else that happens to share the name. (The lock path is allowed to be laxer: it is a record we
+  //      wrote, not an inference from the artifact.)
+  // A successful install rewrites the lock, so the fallback also repairs what it stood in for.
   const previous = readLock()[name];
-  const onDiskSource = previous ? null : await readInstalledSourceTag(name);
-  const replaceExisting = Boolean(previous) || isMarketplaceSourceTag(onDiskSource);
+  const onDisk = previous ? null : await readInstalledProvenance(name);
+  const selfHealable = Boolean(
+    onDisk?.installedByMarketplace && sameSourceOrigin(onDisk.source, bundle.meta.sourceTag),
+  );
+  const replaceExisting = Boolean(previous) || selfHealable;
   const bundleWrite = await writeSkillBundleAtomically(
     name,
     bundle.content,

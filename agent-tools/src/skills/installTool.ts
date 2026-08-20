@@ -138,14 +138,35 @@ export async function writeSkillCompanions(
 }
 
 /**
- * The `source:` tag written into an installed skill's own SKILL.md, or null when there is no such file.
+ * Frontmatter key stamped ONLY by the marketplace installer below.
+ *
+ * `source:` cannot carry this weight: it is descriptive metadata, and the agent-facing `installSkill`
+ * tool takes an arbitrary `source` string ("github:owner/repo@<sha>" is literally the example in its
+ * schema). A hand-written or self-learned skill can therefore look marketplace-installed, and treating
+ * that as permission to overwrite would let ordinary metadata authorise destroying local work. This key
+ * is written by exactly one code path — the one that also writes the lock row — so its presence is a
+ * fact about who created the directory rather than a claim the file makes about itself.
+ */
+export const INSTALLED_BY_KEY = 'installed_by';
+export const INSTALLED_BY_MARKETPLACE = 'philont-marketplace';
+
+export interface InstalledSkillProvenance {
+  /** The `source:` tag on disk, or null. */
+  source: string | null;
+  /** True when this directory was written by the marketplace installer. */
+  installedByMarketplace: boolean;
+}
+
+/**
+ * Read what the installed skill's own SKILL.md says about where it came from.
  *
  * Deliberately a minimal frontmatter read rather than `parseSkillFile`: that parser throws on a body
  * over the size cap, and "this skill is too big to load" must not be reported as "this directory is
  * not ours" — the two have opposite remedies.
  */
-export async function readInstalledSourceTag(name: string): Promise<string | null> {
-  if (validateSkillName(name)) return null;
+export async function readInstalledProvenance(name: string): Promise<InstalledSkillProvenance> {
+  const none: InstalledSkillProvenance = { source: null, installedByMarketplace: false };
+  if (validateSkillName(name)) return none;
   for (const root of uninstallCandidates()) {
     let text: string;
     try {
@@ -153,12 +174,12 @@ export async function readInstalledSourceTag(name: string): Promise<string | nul
     } catch {
       continue;
     }
-    const fm = text.match(/^---\n([\s\S]*?)\n---/);
-    const line = (fm?.[1] ?? '').match(/^source:\s*(.+)$/m);
-    if (line) return line[1].trim();
-    return null; // the file exists but declares no source: it was not installed by us
+    const block = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
+    const source = block.match(/^source:\s*(.+)$/m)?.[1]?.trim() ?? null;
+    const installedBy = block.match(new RegExp(`^${INSTALLED_BY_KEY}:\\s*(.+)$`, 'm'))?.[1]?.trim() ?? null;
+    return { source, installedByMarketplace: installedBy === INSTALLED_BY_MARKETPLACE };
   }
-  return null;
+  return none;
 }
 
 /**
@@ -189,6 +210,8 @@ export async function writeSkillBundleAtomically(
   try {
     let finalContent = injectFrontmatterField(content, 'name', name);
     finalContent = injectFrontmatterField(finalContent, 'source', source);
+    // Stamped here and nowhere else — see INSTALLED_BY_KEY for why `source:` cannot serve this role.
+    finalContent = injectFrontmatterField(finalContent, INSTALLED_BY_KEY, INSTALLED_BY_MARKETPLACE);
     await writeFile(join(stage, 'SKILL.md'), finalContent, 'utf-8');
 
     const companionWrite = await writeSkillCompanionsAtRoot(stage, files);
@@ -202,17 +225,19 @@ export async function writeSkillBundleAtomically(
       throw e;
     });
     if (exists && !replaceExisting) {
-      // Say which of the two possible situations this is. The old wording ("not marketplace-managed")
-      // was also emitted when the lock file was merely missing, sending the reader to look for a
-      // provenance problem that did not exist. The caller now resolves that ambiguity before we get
-      // here, so reaching this branch means the directory really is someone else's.
+      // Reaching here means neither the lock nor the installer's own marker vouches for this
+      // directory (or it came from a different origin). Name the situation: the previous wording,
+      // "not marketplace-managed", was also emitted when the lock was merely missing, sending the
+      // reader after a provenance problem that did not exist.
       return {
         written: [],
         rejected: [],
         error:
-          `"${name}" already exists at ${destination} and carries no marketplace source tag, so it was ` +
-          `not installed from a registry (a self-learned or hand-written skill with the same name). ` +
-          `Refusing to overwrite it — uninstall it first if you meant to replace it.`,
+          `"${name}" already exists at ${destination} and was not written by the marketplace installer ` +
+          `(no ${INSTALLED_BY_KEY}: ${INSTALLED_BY_MARKETPLACE} marker, or a different origin) — refusing ` +
+          `to overwrite it. It may be a self-learned or hand-written skill that shares this name, or an ` +
+          `install predating this marker whose lock entry is also gone; uninstall it first if you meant ` +
+          `to replace it.`,
       };
     }
     if (exists) {
