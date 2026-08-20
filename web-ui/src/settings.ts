@@ -13,9 +13,9 @@
  * 保存成功且 agent 起来后派发 `configured` 事件,app 据此切回聊天。
  *
  * 字段按**功能区**组织:
- *   启动配置(选供应商→填它的 Key/模型/端点,配完即可启动)/ 网络与时区 / 通用 /
+ *   启动配置(选接口协议→填它的 Key/模型/端点,配完即可启动)/ 网络与时区 / 通用 /
  *   能力开关 / 联网搜索 / 辅助小模型 / 视觉模型 / 通道 / 高级。
- * 启动区不写死某一家:先选 LLM_PROVIDER,再按所选只显示对应字段。
+ * 启动区不写死某一家:先选 LLM_PROVIDER 对应的兼容协议,再按所选只显示对应字段。
  *
  * 文案中英双语:label/help/options/group 都是 Msg,渲染期用 tr()/t() 按当前语言取词。
  */
@@ -57,7 +57,7 @@ const POLICY_OPTS = [
   { value: 'disabled', label: { zh: 'disabled(禁用)', en: 'disabled' } },
 ];
 
-/** 当前主模型供应商(留空回退 anthropic)。 */
+/** 当前主模型接口协议(环境变量沿用历史名称 LLM_PROVIDER;留空回退 anthropic)。 */
 const prov = (v: Values): string => (v.LLM_PROVIDER || '').toLowerCase() || 'anthropic';
 /** 某 bool env 是否为开。 */
 const boolOn = (v: Values, key: string): boolean => {
@@ -113,8 +113,8 @@ const GROUP_LABELS: Record<string, Msg> = {
 
 // 精选「用户该填」字段,按功能区分组。代码里读的 env 有 100+,绝大多数是内部调参不暴露。
 const FIELDS: Field[] = [
-  // ══ 启动配置:选供应商 + 填它的 Key/模型/端点,配完即可启动 ══
-  { key: 'LLM_PROVIDER', label: { zh: '模型供应商', en: 'Model Provider' }, type: 'select', group: '启动配置', core: true,
+  // ══ 启动配置:选兼容协议 + 填它的 Key/模型/端点,配完即可启动 ══
+  { key: 'LLM_PROVIDER', label: { zh: '接口协议', en: 'API Protocol' }, type: 'select', group: '启动配置', core: true,
     options: [
       { value: 'anthropic', label: { zh: 'Anthropic 兼容', en: 'Anthropic-compatible' } },
       { value: 'openai', label: { zh: 'OpenAI 兼容', en: 'OpenAI-compatible' } },
@@ -124,7 +124,7 @@ const FIELDS: Field[] = [
       // "OpenAI-compatible"; GLM/MiniMax/Gemini use non-standard paths and would need
       // their dedicated provider entry, which advanced users can select via .env.
     ],
-    help: { zh: '先选主模型供应商,下面只显示它需要填的项。留空 = Anthropic。', en: 'Pick the main model provider; only its fields show below. Empty = Anthropic.' } },
+    help: { zh: '选择主模型端点兼容的接口协议,下面只显示该协议需要填写的项目。留空 = Anthropic 兼容。', en: 'Choose the API protocol supported by the main-model endpoint; only its fields show below. Empty = Anthropic-compatible.' } },
 
   // — Anthropic —
   { key: 'ANTHROPIC_API_KEY', label: { zh: 'API Key', en: 'API Key' }, type: 'secret', group: '启动配置', core: true,
@@ -193,19 +193,25 @@ const FIELDS: Field[] = [
   { key: 'SERPER_API_KEY', label: { zh: 'Serper Key', en: 'Serper Key' }, type: 'secret', group: '联网搜索' },
   { key: 'BRAVE_SEARCH_API_KEY', label: { zh: 'Brave Key', en: 'Brave Key' }, type: 'secret', group: '联网搜索' },
 
-  // ══ 辅助小模型(四项配齐才生效,省主模型配额)══
-  { key: 'AUX_LLM_PROTOCOL', label: { zh: '协议', en: 'Protocol' }, type: 'select', group: '辅助小模型',
-    options: [{ value: 'openai', label: { zh: 'openai', en: 'openai' } }, { value: 'anthropic', label: { zh: 'anthropic', en: 'anthropic' } }],
-    help: { zh: '可选。配齐协议/端点/Key/模型后,webFetch 蒸馏等杂活走便宜小模型。默认 openai。', en: 'Optional. Once all four are set, chores (webFetch distillation, etc.) use a cheap small model. Defaults to openai.' } },
+  // ══ 辅助小模型(端点/Key/模型三项配齐即生效;协议可选,省主模型配额)══
+  { key: 'AUX_LLM_PROTOCOL', label: { zh: '接口协议', en: 'API Protocol' }, type: 'select', group: '辅助小模型',
+    options: [
+      { value: 'openai', label: { zh: 'OpenAI 兼容', en: 'OpenAI-compatible' } },
+      { value: 'anthropic', label: { zh: 'Anthropic 兼容', en: 'Anthropic-compatible' } },
+    ],
+    help: { zh: '可选。配置端点、Key 和模型后辅助模型即生效;协议留空时根据 URL 判断,无法判断则使用 OpenAI 兼容协议。', en: 'Optional. The auxiliary model is enabled once Base URL, Key, and Model are set. If protocol is empty, it is inferred from the URL and otherwise defaults to OpenAI-compatible.' } },
   { key: 'AUX_LLM_BASE_URL', label: { zh: 'Base URL', en: 'Base URL' }, type: 'text', group: '辅助小模型', placeholder: 'https://api.deepseek.com',
     help: { zh: '可直接填主模型同款地址。光主机名、带 /v1、或完整端点都能识别。', en: 'The same address as the main model works. Bare host, with /v1, or the full endpoint are all accepted.' } },
   { key: 'AUX_LLM_API_KEY', label: { zh: 'Key', en: 'Key' }, type: 'secret', group: '辅助小模型' },
   { key: 'AUX_LLM_MODEL', label: { zh: '模型', en: 'Model' }, type: 'text', group: '辅助小模型', placeholder: 'deepseek-chat' },
 
   // ══ 视觉模型 · 多模态(主模型不多模态时,vision 工具走这个独立模型)══
-  { key: 'VISION_LLM_PROTOCOL', label: { zh: '协议', en: 'Protocol' }, type: 'select', group: '视觉模型 · 多模态',
-    options: [{ value: 'openai', label: { zh: 'openai(通义千问-VL / GLM-4V / GPT-4o 等)', en: 'openai (Qwen-VL / GLM-4V / GPT-4o, etc.)' } }, { value: 'anthropic', label: { zh: 'anthropic(Claude)', en: 'anthropic (Claude)' } }],
-    help: { zh: '主模型(如 DeepSeek)不多模态时配这个。留空按端点 URL 启发式(默认 openai)。', en: 'Set when the main model (e.g. DeepSeek) is not multimodal. Empty = heuristic by URL (defaults openai).' } },
+  { key: 'VISION_LLM_PROTOCOL', label: { zh: '接口协议', en: 'API Protocol' }, type: 'select', group: '视觉模型 · 多模态',
+    options: [
+      { value: 'openai', label: { zh: 'OpenAI 兼容(通义千问-VL / GLM-4V / GPT-4o 等)', en: 'OpenAI-compatible (Qwen-VL / GLM-4V / GPT-4o, etc.)' } },
+      { value: 'anthropic', label: { zh: 'Anthropic 兼容(Claude)', en: 'Anthropic-compatible (Claude)' } },
+    ],
+    help: { zh: '主模型(如 DeepSeek)不多模态时配这个。协议留空时根据端点 URL 判断,无法判断则使用 OpenAI 兼容协议。', en: 'Set when the main model (e.g. DeepSeek) is not multimodal. If protocol is empty, it is inferred from the endpoint URL and otherwise defaults to OpenAI-compatible.' } },
   { key: 'VISION_LLM_BASE_URL', label: { zh: 'Base URL', en: 'Base URL' }, type: 'text', group: '视觉模型 · 多模态',
     placeholder: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     help: { zh: '光主机名、带 /v1、或完整端点都能识别。', en: 'Bare host, with /v1, or the full endpoint are all accepted.' } },
