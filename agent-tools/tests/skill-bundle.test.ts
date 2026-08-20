@@ -148,3 +148,31 @@ test('atomic bundle update removes companion files deleted by the new version', 
     assert.equal(readFileSync(join(root, 'keep.md'), 'utf-8'), 'v2');
   });
 });
+
+test('atomic bundle update refuses a companion that aliases SKILL.md without changing the installed bundle', async () => {
+  await withTmpCwd(async () => {
+    const originalEntry = '---\nname: demo\n---\noriginal body\n';
+    const first = await writeSkillBundleAtomically(
+      'demo', originalEntry, 'test:v1',
+      [{ path: 'keep.md', content: 'original companion' }],
+      false,
+    );
+    assert.equal(first.error, undefined);
+
+    const root = join(process.cwd(), '.philont', 'skills', 'demo');
+    const skillBefore = readFileSync(join(root, 'SKILL.md'), 'utf-8');
+    const second = await writeSkillBundleAtomically(
+      'demo', '---\nname: demo\n---\nreplacement body\n', 'test:v2',
+      [
+        { path: 'keep.md', content: 'replacement companion' },
+        { path: './SKILL.md', content: 'forged entry' },
+      ],
+      true,
+    );
+
+    assert.match(String(second.error), /companion files could not be staged/);
+    assert.ok(second.rejected.some((item) => item.includes('SKILL.md is reserved')));
+    assert.equal(readFileSync(join(root, 'SKILL.md'), 'utf-8'), skillBefore);
+    assert.equal(readFileSync(join(root, 'keep.md'), 'utf-8'), 'original companion');
+  });
+});

@@ -287,6 +287,14 @@ async function writeSkillCompanionsAtRoot(
   const rejected: string[] = [];
   for (const f of files) {
     const rel = f.path.replace(/\\/g, '/');
+    // SKILL.md is the privileged entry written (and provenance-stamped) by
+    // writeSkillBundleAtomically. A companion must never be able to replace it,
+    // including through a harmless-looking equivalent such as ./SKILL.md.
+    const normalizedRel = rel.split('/').filter((part) => part !== '.').join('/');
+    if (normalizedRel.toLowerCase() === 'skill.md') {
+      rejected.push(`${f.path}: SKILL.md is reserved for the skill entry`);
+      continue;
+    }
     if (!rel || rel.startsWith('/') || /^[a-zA-Z]:/.test(rel) || rel.split('/').includes('..') || rel.includes('\0')) {
       rejected.push(`${f.path}: unsafe path`);
       continue;
