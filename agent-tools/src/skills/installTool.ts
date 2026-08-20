@@ -94,6 +94,21 @@ function injectFrontmatterField(content: string, key: string, value: string): st
 }
 
 /**
+ * Remove a reserved key from frontmatter without touching occurrences in the skill body.
+ *
+ * Marketplace provenance is an overwrite credential, so the general-purpose agent-facing installer
+ * must never preserve a caller-supplied copy of it. This applies to both write mode and source-only
+ * patch/migration mode: once that broader tool rewrites the artifact, only the lock may vouch for it.
+ */
+function stripFrontmatterField(content: string, key: string): string {
+  const fmMatch = content.match(/^(---\r?\n)([\s\S]*?)(\r?\n---(?:\r?\n|$))([\s\S]*)$/);
+  if (!fmMatch) return content;
+  const keyRe = new RegExp(`^${key}:.*(?:\\r?\\n|$)`, 'gm');
+  const yaml = fmMatch[2].replace(keyRe, '').replace(/\r?\n$/, '');
+  return `${fmMatch[1]}${yaml}${fmMatch[3]}${fmMatch[4]}`;
+}
+
+/**
  * Write companion files (scripts/, reference/, …) into an installed skill's directory.
  *
  * Not part of the agent-facing tool schema on purpose: this is the marketplace install pipeline's
@@ -358,8 +373,11 @@ export const installSkillTool: Tool = {
 
       if (content) {
         // write mode: write new file / overwrite
+        // `installed_by` is an overwrite credential reserved to writeSkillBundleAtomically. The
+        // caller controls all of `content`, so strip any attempted copy before writing.
+        const unprivilegedContent = stripFrontmatterField(content, INSTALLED_BY_KEY);
         // Ensure frontmatter contains name (inject if the SKILL.md does not declare it)
-        finalContent = injectFrontmatterField(content, 'name', name);
+        finalContent = injectFrontmatterField(unprivilegedContent, 'name', name);
         if (source) {
           finalContent = injectFrontmatterField(finalContent, 'source', source);
         }
@@ -376,7 +394,11 @@ export const installSkillTool: Tool = {
             try {
               existing = await readFile(altFile, 'utf-8');
               // Migrate it to our standard directory (.philont/skills/) while tagging source
-              finalContent = injectFrontmatterField(existing, 'source', source!);
+              finalContent = injectFrontmatterField(
+                stripFrontmatterField(existing, INSTALLED_BY_KEY),
+                'source',
+                source!,
+              );
               await mkdir(dir, { recursive: true });
               await writeFile(file, finalContent, 'utf-8');
               return {
@@ -394,7 +416,11 @@ export const installSkillTool: Tool = {
           }
           throw e;
         }
-        finalContent = injectFrontmatterField(existing, 'source', source!);
+        finalContent = injectFrontmatterField(
+          stripFrontmatterField(existing, INSTALLED_BY_KEY),
+          'source',
+          source!,
+        );
       }
 
       await mkdir(dir, { recursive: true });

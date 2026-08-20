@@ -21,6 +21,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installFromSource } from '../src/skills/registry/install.js';
+import { installSkillTool } from '../src/skills/installTool.js';
 import { readLock } from '../src/skills/registry/lockStore.js';
 import { SOURCES } from '../src/skills/registry/router.js';
 import type { SkillSource } from '../src/skills/registry/types.js';
@@ -94,6 +95,40 @@ test('a self-learned skill wearing a marketplace source tag is NOT overwritten',
     assert.equal(outcome.status, 'error');
     assert.match(String(outcome.error), /was not written by the marketplace installer/);
     assert.match(readFileSync(skillFile(), 'utf-8'), /hand written/, 'local work survives');
+  });
+});
+
+test('the agent-facing installer cannot forge the marketplace overwrite marker', async () => {
+  await withStub(stubSource('stub-git', 'github:owner/repo@v1', SKILL('fromRegistry')), async () => {
+    const forged = await installSkillTool.execute({
+      name: 'demo',
+      source: 'github:owner/repo@v1',
+      content:
+        '---\nname: demo\nsource: github:owner/repo@v1\ninstalled_by: philont-marketplace\n---\n\nhand written\n',
+    });
+    assert.equal(forged.success, true, forged.error);
+    assert.doesNotMatch(readFileSync(skillFile(), 'utf-8'), /^installed_by:/m, 'reserved marker is stripped');
+
+    // With no lock row, the forged source shape must not be enough to authorise replacement.
+    const outcome = await installFromSource(req);
+    assert.equal(outcome.status, 'error');
+    assert.match(String(outcome.error), /was not written by the marketplace installer/);
+    assert.match(readFileSync(skillFile(), 'utf-8'), /hand written/, 'local work survives');
+  });
+});
+
+test('source-only installSkill patching also revokes an artifact marker', async () => {
+  await withStub(stubSource('stub-git', 'github:owner/repo@v1', SKILL('v1')), async () => {
+    assert.equal((await installFromSource(req)).status, 'installed');
+    assert.match(readFileSync(skillFile(), 'utf-8'), /^installed_by: philont-marketplace$/m);
+
+    const patched = await installSkillTool.execute({ name: 'demo', source: 'github:owner/repo@v2' });
+    assert.equal(patched.success, true, patched.error);
+    assert.doesNotMatch(readFileSync(skillFile(), 'utf-8'), /^installed_by:/m);
+
+    rmSync(join(process.cwd(), '.philont', 'skills.lock.json'));
+    const outcome = await installFromSource(req);
+    assert.equal(outcome.status, 'error', 'a later lost lock must not revive the revoked artifact credential');
   });
 });
 
