@@ -116,7 +116,15 @@ export function detectInTurnFailurePattern(
     }
   }
 
-  if (maxCount < threshold) return { triggered: false };
+  // Research turns routinely encounter multiple unrelated sites that reject scraping. The failure
+  // signature intentionally strips the URL, so two blocked sites otherwise look like one repeated
+  // mistake and halt all remaining webFetch calls. Give network fetches a wider window; auth/param/
+  // method failures and every other tool retain the sensitive default threshold.
+  const effectiveThreshold = /^webFetch:(?:other:.*(?:fetch failed|http_error|\bnet\b)|http-(?:403|429|5\d\d))/i.test(maxSig)
+    ? Math.max(threshold, 4)
+    : threshold;
+
+  if (maxCount < effectiveThreshold) return { triggered: false };
 
   return {
     triggered: true,

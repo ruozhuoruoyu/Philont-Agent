@@ -85,6 +85,19 @@ test('3 个同 signature 失败 → 仍触发,count=3', () => {
   assert.match(r.reminder ?? '', /store_note/);
 });
 
+test('webFetch network failures use a wider threshold so two blocked sites do not halt research', () => {
+  const failedFetch = (): InTurnToolRecord => ({
+    toolName: 'webFetch',
+    success: false,
+    resultText: 'fetch failed (http_error): net',
+  });
+  assert.equal(detectInTurnFailurePattern([failedFetch(), failedFetch()]).triggered, false);
+  assert.equal(detectInTurnFailurePattern([failedFetch(), failedFetch(), failedFetch()]).triggered, false);
+  const four = detectInTurnFailurePattern([failedFetch(), failedFetch(), failedFetch(), failedFetch()]);
+  assert.equal(four.triggered, true);
+  assert.equal(four.count, 4);
+});
+
 test('混合 - 3 个同根因失败 + 1 成功 + 1 不同 → 仍触发', () => {
   const r = detectInTurnFailurePattern([
     http401(),

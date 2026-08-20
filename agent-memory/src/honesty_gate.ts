@@ -57,7 +57,7 @@ const MEMORY_CLAIM_PATTERNS: ReadonlyArray<RegExp> = [
   // "我会/我能/以后/下次/今后 + 记住/记得"
   /(?:我会|我能|以后|下次|今后|从此)\s*(?:记住|记得|留意|遵守|执行|应用)/,
   // 英文(remember/remembered/noting/memorize 等都接受)
-  /\bI(?:'?ll| will| have|'?ve)?\s+(?:remember(?:ed)?|not(?:e|ed|ing)|memoriz(?:e|ed|ing)|keep|kept|stored?)\b/i,
+  /\bI(?:'?ll| will| have|'?ve)?\s+(?:remember(?:ed)?|not(?:e|ed|ing)|memoriz(?:e|ed|ing)|stored?)\b/i,
   // "I'll keep this in mind" / "keep that in mind" 习语
   /\b(?:I(?:'?ll| will)?\s+)?keep\s+(?:that|this|it)\s+in\s+mind\b/i,
   /\bnoted\b(?!\s+down)/i,  // "Noted." 单独成句也算

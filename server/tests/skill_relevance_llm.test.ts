@@ -105,6 +105,39 @@ test('an unreachable or unconfigured selector leaves the lexical ranking alone',
   );
 });
 
+test('every no-op path reports why lexical fallback was kept', async () => {
+  const reasons: string[] = [];
+  const observe = { onOutcome: (o: { result: string; reason?: string }) => o.reason && reasons.push(o.reason) };
+  const previous = process.env.PHILONT_SKILL_RECALL_LLM;
+  process.env.PHILONT_SKILL_RECALL_LLM = '0';
+  await selectSkillsByAux('long enough', CANDIDATES, 6, { configured: true, ...observe });
+  if (previous === undefined) delete process.env.PHILONT_SKILL_RECALL_LLM;
+  else process.env.PHILONT_SKILL_RECALL_LLM = previous;
+
+  await selectSkillsByAux('ok', CANDIDATES, 6, { configured: true, ...observe });
+  await selectSkillsByAux('long enough', [], 6, { configured: true, ...observe });
+  await selectSkillsByAux('long enough', CANDIDATES, 6, { configured: false, ...observe });
+  await selectSkillsByAux('long enough', CANDIDATES, 6, {
+    configured: true,
+    ask: async () => 'NONE',
+    ...observe,
+  });
+  await selectSkillsByAux('long enough', CANDIDATES, 6, {
+    configured: true,
+    ask: async () => { throw new Error('aux down'); },
+    ...observe,
+  });
+
+  assert.deepEqual(reasons, [
+    'disabled',
+    'query-too-short',
+    'no-candidates',
+    'aux-unconfigured',
+    'model-picked-nothing',
+    'selector-failed',
+  ]);
+});
+
 test('a message too short to carry a topic costs no aux call', async () => {
   let called = false;
   const r = await selectSkillsByAux('ok', CANDIDATES, 6, {

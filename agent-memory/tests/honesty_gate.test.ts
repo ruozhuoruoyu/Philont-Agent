@@ -432,6 +432,13 @@ test('findMemoryClaim: 中文典型陈述 → 命中', async () => {
   assert.ok(findMemoryClaim('以后记得调 recall_sessions'));
 });
 
+test('findMemoryClaim: ordinary keep/kept statements are not memory-write claims', async () => {
+  const { findMemoryClaim } = await import('../src/honesty_gate.js');
+  assert.equal(findMemoryClaim("I'll keep the file at that path."), null);
+  assert.equal(findMemoryClaim('I kept the original formatting.'), null);
+  assert.ok(findMemoryClaim("I'll keep this in mind."));
+});
+
 test('findMemoryClaim: 英文典型陈述 → 命中', async () => {
   const { findMemoryClaim } = await import('../src/honesty_gate.js');
   assert.ok(findMemoryClaim("I'll remember this."));

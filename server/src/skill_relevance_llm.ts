@@ -45,6 +45,20 @@ export interface SkillCandidate {
   whenToUse?: string;
 }
 
+export type SkillSelectionOutcome =
+  | { result: 'picked'; names: string[] }
+  | {
+      result: 'fallback';
+      reason:
+        | 'disabled'
+        | 'query-too-short'
+        | 'no-candidates'
+        | 'aux-unconfigured'
+        | 'model-picked-nothing'
+        | 'selector-failed';
+      error?: string;
+    };
+
 export function skillRecallLlmEnabled(): boolean {
   return process.env.PHILONT_SKILL_RECALL_LLM !== '0';
 }
@@ -110,18 +124,26 @@ export async function selectSkillsByAux(
   deps: {
     ask?: (req: { system: string; user: string; maxTokens: number }) => Promise<string | null>;
     configured?: boolean;
+    onOutcome?: (outcome: SkillSelectionOutcome) => void;
   } = {},
 ): Promise<string[] | null> {
-  if (!skillRecallLlmEnabled()) return null;
-  if (!query || query.trim().length < MIN_QUERY_CHARS) return null;
-  if (candidates.length === 0) return null;
-  if (!(deps.configured ?? isAuxLLMConfigured())) return null;
+  const fallback = (reason: Extract<SkillSelectionOutcome, { result: 'fallback' }>['reason'], error?: string) => {
+    deps.onOutcome?.({ result: 'fallback', reason, ...(error ? { error } : {}) });
+    return null;
+  };
+  if (!skillRecallLlmEnabled()) return fallback('disabled');
+  if (!query || query.trim().length < MIN_QUERY_CHARS) return fallback('query-too-short');
+  if (candidates.length === 0) return fallback('no-candidates');
+  if (!(deps.configured ?? isAuxLLMConfigured())) return fallback('aux-unconfigured');
   try {
     const { system, user } = buildSkillSelectionPrompt(query, candidates, k);
     const raw = await (deps.ask ?? callAuxLLM)({ system, user, maxTokens: 200 });
     const names = parseSelectedSkillNames(raw, candidates.map((c) => c.name));
-    return names.length > 0 ? names.slice(0, k) : null;
-  } catch {
-    return null; // a selector we could not reach has no opinion
+    if (names.length === 0) return fallback('model-picked-nothing');
+    const picked = names.slice(0, k);
+    deps.onOutcome?.({ result: 'picked', names: picked });
+    return picked;
+  } catch (e) {
+    return fallback('selector-failed', e instanceof Error ? e.message : String(e));
   }
 }

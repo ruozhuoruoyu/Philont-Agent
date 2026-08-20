@@ -8066,6 +8066,16 @@ export async function handleChatSend(
       userMessage,
       pool.map((s) => ({ name: s.name, description: s.description, whenToUse: s.whenToUse })),
       6,
+      {
+        onOutcome: (outcome) => {
+          if (outcome.result === 'fallback') {
+            console.log(
+              `[skill-relevance] result=fallback reason=${outcome.reason} candidates=${pool.length}` +
+                (outcome.error ? ` error=${JSON.stringify(outcome.error)}` : ''),
+            );
+          }
+        },
+      },
     );
     if (picked && picked.length > 0) {
       signalBus.skillRelevanceNames = picked;
