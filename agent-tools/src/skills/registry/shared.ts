@@ -32,6 +32,26 @@ export function normalizeName(raw: string): string {
   return n || 'skill';
 }
 
+/**
+ * Source tags this marketplace writes into a skill's frontmatter (`source: github:owner/repo@sha`).
+ *
+ * This is the ONLY durable record that philont installed a skill, and it lives in the file itself.
+ * The lock file is advisory: `readLock()` returns {} for a missing OR malformed file by design, so
+ * anything that treats "no lock row" as "not ours" declares every installed skill foreign the moment
+ * that file is lost — which is how a corrupt lock turned every subsequent update into
+ * "already exists but is not marketplace-managed", with no way back short of deleting the directory
+ * by hand. Ask the artifact, not the index.
+ *
+ * The web-ui keeps its own copy of this rule (marketplace_model.ts) because it cannot import this
+ * package; server/tests/marketplace_source_fallback.test.ts pins the two together.
+ */
+export const MARKETPLACE_SOURCE_PREFIX_RE = /^(github:|clawhub:|url:)/;
+
+/** Was this skill installed from the marketplace, judged by the source tag on disk? */
+export function isMarketplaceSourceTag(source: string | null | undefined): boolean {
+  return typeof source === 'string' && MARKETPLACE_SOURCE_PREFIX_RE.test(source.trim());
+}
+
 /** A lightweight User-Agent so GitHub/raw hosts don't reject the request. */
 export const UA = 'philont-skill-marketplace';
 

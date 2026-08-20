@@ -138,6 +138,30 @@ export async function writeSkillCompanions(
 }
 
 /**
+ * The `source:` tag written into an installed skill's own SKILL.md, or null when there is no such file.
+ *
+ * Deliberately a minimal frontmatter read rather than `parseSkillFile`: that parser throws on a body
+ * over the size cap, and "this skill is too big to load" must not be reported as "this directory is
+ * not ours" — the two have opposite remedies.
+ */
+export async function readInstalledSourceTag(name: string): Promise<string | null> {
+  if (validateSkillName(name)) return null;
+  for (const root of uninstallCandidates()) {
+    let text: string;
+    try {
+      text = await readFile(join(root, name, 'SKILL.md'), 'utf-8');
+    } catch {
+      continue;
+    }
+    const fm = text.match(/^---\n([\s\S]*?)\n---/);
+    const line = (fm?.[1] ?? '').match(/^source:\s*(.+)$/m);
+    if (line) return line[1].trim();
+    return null; // the file exists but declares no source: it was not installed by us
+  }
+  return null;
+}
+
+/**
  * Replace a marketplace-managed skill as one directory transaction.
  *
  * Updates used to overwrite the files present in the new bundle and leave everything else behind.
@@ -178,7 +202,18 @@ export async function writeSkillBundleAtomically(
       throw e;
     });
     if (exists && !replaceExisting) {
-      return { written: [], rejected: [], error: `skill directory already exists but is not marketplace-managed: ${destination}` };
+      // Say which of the two possible situations this is. The old wording ("not marketplace-managed")
+      // was also emitted when the lock file was merely missing, sending the reader to look for a
+      // provenance problem that did not exist. The caller now resolves that ambiguity before we get
+      // here, so reaching this branch means the directory really is someone else's.
+      return {
+        written: [],
+        rejected: [],
+        error:
+          `"${name}" already exists at ${destination} and carries no marketplace source tag, so it was ` +
+          `not installed from a registry (a self-learned or hand-written skill with the same name). ` +
+          `Refusing to overwrite it — uninstall it first if you meant to replace it.`,
+      };
     }
     if (exists) {
       await rename(destination, backup);

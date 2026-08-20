@@ -11,11 +11,12 @@
  * reloadSkillsFromDisk; agent-tools stays free of an agent-memory dependency.
  */
 
-import { writeSkillBundleAtomically } from '../installTool.js';
+import { writeSkillBundleAtomically, readInstalledSourceTag } from '../installTool.js';
 import { fetchFrom } from './router.js';
 import { scanSkillBundle } from './scanner.js';
 import { gateDecision } from './gate.js';
 import { upsertLock, appendAudit, readLock } from './lockStore.js';
+import { isMarketplaceSourceTag } from './shared.js';
 import type { InstallActor, InstallOutcome, ProvenanceRecord, ScanReport, SkillBundle } from './types.js';
 
 export interface InstallRequest {
@@ -128,13 +129,22 @@ export async function installFromSource(req: InstallRequest): Promise<InstallOut
   // Build the complete bundle outside the watched skills directory and swap it in as one operation.
   // This also removes companions deleted upstream; overwriting only files present in the new version
   // left obsolete scripts executable indefinitely.
+  // May we overwrite what is already there? The lock file is the fast answer but not the only one:
+  // readLock() returns {} for a missing OR malformed file by design, so a lost lock used to make every
+  // installed skill look like a stranger's directory and turned each update into a hard error advising
+  // nothing. The durable record is the `source:` tag we wrote into the skill's own SKILL.md, so fall
+  // back to that — an install we can prove we made stays replaceable, and the lock is rewritten below,
+  // which repairs it. A directory with no lock row AND no marketplace tag (a self-learned or
+  // hand-made skill that happens to share the name) is still refused.
   const previous = readLock()[name];
+  const onDiskSource = previous ? null : await readInstalledSourceTag(name);
+  const replaceExisting = Boolean(previous) || isMarketplaceSourceTag(onDiskSource);
   const bundleWrite = await writeSkillBundleAtomically(
     name,
     bundle.content,
     bundle.meta.sourceTag,
     bundle.files ?? [],
-    Boolean(previous),
+    replaceExisting,
   );
   if (bundleWrite.error) return { status: 'error', name, error: `installSkill failed: ${bundleWrite.error}` };
 

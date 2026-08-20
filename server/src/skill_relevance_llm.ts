@@ -55,6 +55,7 @@ export type SkillSelectionOutcome =
         | 'no-candidates'
         | 'aux-unconfigured'
         | 'model-picked-nothing'
+        | 'model-named-unknown'
         | 'selector-failed';
       error?: string;
     };
@@ -139,7 +140,18 @@ export async function selectSkillsByAux(
     const { system, user } = buildSkillSelectionPrompt(query, candidates, k);
     const raw = await (deps.ask ?? callAuxLLM)({ system, user, maxTokens: 200 });
     const names = parseSelectedSkillNames(raw, candidates.map((c) => c.name));
-    if (names.length === 0) return fallback('model-picked-nothing');
+    if (names.length === 0) {
+      // "there is nothing relevant" and "it answered with names we do not recognise" both end up as
+      // zero picks, and they call for opposite fixes: the first is about the corpus, the second about
+      // the prompt or the exact-match rule. Reporting them as one reason would leave the next reader
+      // exactly where this whole module started — a fallback with no cause. A reply that is neither
+      // empty nor an explicit NONE, yet matched nothing we offered, is the second case.
+      const answered = (raw ?? '').trim();
+      if (answered && !/^NONE\b/i.test(answered)) {
+        return fallback('model-named-unknown', answered.slice(0, 120));
+      }
+      return fallback('model-picked-nothing');
+    }
     const picked = names.slice(0, k);
     deps.onOutcome?.({ result: 'picked', names: picked });
     return picked;

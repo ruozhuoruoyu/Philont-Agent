@@ -185,3 +185,28 @@ test('the switch restores the previous behaviour wholesale', async () => {
     else process.env.PHILONT_SKILL_RECALL_LLM = prev;
   }
 });
+
+test('a reply naming skills we never offered is reported apart from an honest NONE', async () => {
+  // Zero picks has two causes with opposite remedies: nothing in the corpus fits (a corpus problem)
+  // versus the model answered with names we do not recognise (a prompt / exact-match problem).
+  // Collapsing them leaves the reader with a fallback and no cause — the state this module was
+  // written to end.
+  const outcomes: unknown[] = [];
+  const candidates = [{ name: 'export-long-answer-to-word-windows', description: 'export to docx' }];
+
+  await selectSkillsByAux('调研技术路线并整理成文档', candidates, 6, {
+    configured: true,
+    ask: async () => 'NONE',
+    onOutcome: (o) => outcomes.push(o),
+  });
+  await selectSkillsByAux('调研技术路线并整理成文档', candidates, 6, {
+    configured: true,
+    ask: async () => 'write-a-word-document\nexport-docx',
+    onOutcome: (o) => outcomes.push(o),
+  });
+
+  assert.deepEqual(outcomes[0], { result: 'fallback', reason: 'model-picked-nothing' });
+  const unknown = outcomes[1] as { result: string; reason: string; error?: string };
+  assert.equal(unknown.reason, 'model-named-unknown');
+  assert.match(String(unknown.error), /write-a-word-document/, 'the reply is sampled so the cause is diagnosable');
+});

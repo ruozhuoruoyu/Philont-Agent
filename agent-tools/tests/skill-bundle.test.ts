@@ -20,7 +20,8 @@ import {
 } from '../src/skills/registry/bundle.js';
 import { scanSkillBundle } from '../src/skills/registry/scanner.js';
 import { bundleHash } from '../src/skills/registry/shared.js';
-import { writeSkillBundleAtomically, writeSkillCompanions } from '../src/skills/installTool.js';
+import { writeSkillBundleAtomically, writeSkillCompanions, readInstalledSourceTag } from '../src/skills/installTool.js';
+import { isMarketplaceSourceTag } from '../src/skills/registry/shared.js';
 
 function withTmpCwd<T>(fn: () => T | Promise<T>): Promise<T> {
   const prev = process.cwd();
@@ -146,5 +147,44 @@ test('atomic bundle update removes companion files deleted by the new version', 
     assert.equal(second.error, undefined);
     assert.equal(existsSync(join(root, 'scripts', 'removed.py')), false, 'removed upstream means removed locally');
     assert.equal(readFileSync(join(root, 'keep.md'), 'utf-8'), 'v2');
+  });
+});
+
+test('a lost or corrupt lock file does not make an installed skill unupdatable', async () => {
+  // readLock() returns {} for a malformed file BY DESIGN, so "no lock row" cannot mean "not ours".
+  // The durable record is the source tag inside the skill's own SKILL.md. Before this, one corrupt
+  // lock turned every later update into "already exists but is not marketplace-managed", with no
+  // remedy short of deleting the directory by hand.
+  await withTmpCwd(async () => {
+    const entry = '---\nname: demo\nsource: github:owner/repo@abc1234\n---\nv1\n';
+    const first = await writeSkillBundleAtomically('demo', entry, 'github:owner/repo@abc1234', [], false);
+    assert.equal(first.error, undefined);
+
+    assert.equal(await readInstalledSourceTag('demo'), 'github:owner/repo@abc1234');
+    assert.equal(isMarketplaceSourceTag(await readInstalledSourceTag('demo')), true);
+
+    // The install pipeline's decision with an unusable lock: replace, because the artifact says so.
+    const second = await writeSkillBundleAtomically(
+      'demo', '---\nname: demo\n---\nv2\n', 'github:owner/repo@def5678', [], true,
+    );
+    assert.equal(second.error, undefined);
+    assert.match(readFileSync(join(process.cwd(), '.philont', 'skills', 'demo', 'SKILL.md'), 'utf-8'), /v2/);
+  });
+});
+
+test('a skill we did not install is still refused, and the refusal says which case it is', async () => {
+  await withTmpCwd(async () => {
+    const selfMade = '---\nname: mine\ndescription: written by the agent itself\n---\nbody\n';
+    const first = await writeSkillBundleAtomically('mine', selfMade, '', [], false);
+    assert.equal(first.error, undefined);
+
+    // No marketplace tag on disk → the fallback must NOT claim it.
+    assert.equal(isMarketplaceSourceTag(await readInstalledSourceTag('mine')), false);
+
+    const overwrite = await writeSkillBundleAtomically('mine', 'x', 'github:o/r@1', [], false);
+    assert.match(String(overwrite.error), /no marketplace source tag/);
+    assert.match(String(overwrite.error), /uninstall it first/i);
+    // and the original survived
+    assert.match(readFileSync(join(process.cwd(), '.philont', 'skills', 'mine', 'SKILL.md'), 'utf-8'), /body/);
   });
 });

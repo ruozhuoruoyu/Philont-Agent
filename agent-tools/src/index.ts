@@ -48,7 +48,7 @@ export type { ParsedSkill } from './skills/index.js';
 export {
   searchAll, inspectFrom, fetchFrom, resolveSource, SOURCES,
   inspectBundle, installFromSource, checkForUpdates, updateSkill,
-  scanSkillContent, gateDecision,
+  scanSkillContent, gateDecision, isMarketplaceSourceTag,
   readLock, getProvenance, upsertLock, removeLock, appendAudit,
 } from './skills/index.js';
 export type {
