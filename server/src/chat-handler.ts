@@ -4236,6 +4236,27 @@ export function pendingAuthInboundDisposition(
   return 'resume';
 }
 
+/** Both bypass causes leave the same suspended card pending, so both must restore it to channel tail. */
+export function authRequestToReissue(
+  disposition: PendingAuthInboundDisposition,
+  pending: {
+    toolCallId: string;
+    toolName: string;
+    capability: string;
+    domain: string;
+    input: unknown;
+  },
+): AuthRequest | undefined {
+  if (disposition === 'resume') return undefined;
+  return {
+    requestId: pending.toolCallId,
+    toolName: pending.toolName,
+    capability: pending.capability,
+    domain: pending.domain,
+    input: pending.input,
+  };
+}
+
 /**
  * Phase 18 WS2: chat sessions where the ViabilityGate recommended stop_and_report last turn, awaiting the
  * user's decision. Keyed by chat sessionId → the reasoning session id to abandon if (and only if) the user
@@ -8673,6 +8694,10 @@ async function handleChatSendInner(
           `(sent=${signalBus.inboundSentAtMs}, delivered=${pending.deliveredAt}, deltaMs=${skewMs}, tool=${pending.toolName}); ` +
           `handling inbound as a normal request`,
       );
+      // The ordinary response would otherwise bury the still-pending card it just bypassed. Re-emit
+      // the same request (the map entry is unchanged) so channel flush ordering restores it as the
+      // final, prominent message.
+      onAuthRequest(authRequestToReissue(signalBus.authInboundDisposition, pending)!);
       break pendingAuthBlock;
     }
     if (signalBus.authInboundDisposition === 'bypass_undelivered') {
@@ -8681,13 +8706,7 @@ async function handleChatSendInner(
         `[auth] session=${safeSessionId(sessionId)} bypassed auth because the ${pending.toolName} card was not delivered; ` +
           `handling inbound as a normal request and re-sending the card`,
       );
-      onAuthRequest({
-        requestId: pending.toolCallId,
-        toolName: pending.toolName,
-        capability: pending.capability,
-        domain: pending.domain,
-        input: pending.input,
-      });
+      onAuthRequest(authRequestToReissue(signalBus.authInboundDisposition, pending)!);
       break pendingAuthBlock;
     }
     // Captured before the block below flips it back to `awaiting_auth` on an explicit retry.

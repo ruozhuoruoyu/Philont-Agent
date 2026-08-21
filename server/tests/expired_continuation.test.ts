@@ -110,20 +110,26 @@ test('a delayed inbound cannot approve an authorization card delivered after it 
 });
 
 test('failed delivery or a pre-card inbound bypasses auth without dropping the pending card', async () => {
-  const { pendingAuthInboundDisposition, selectTurnContextSource } = await import('../src/chat-handler.js');
+  const { authRequestToReissue, pendingAuthInboundDisposition, selectTurnContextSource } = await import('../src/chat-handler.js');
   const auth = { ts: NOW - MIN, executionState: 'awaiting_auth' as const };
+  const card = {
+    toolCallId: 'call-7', toolName: 'shell', capability: 'execute', domain: 'local', input: { command: 'pwd' },
+  };
 
   const failed = pendingAuthInboundDisposition({ deliveryState: 'failed' }, NOW);
   assert.equal(failed, 'bypass_undelivered');
   assert.deepEqual(selectTurnContextSource(auth, undefined, NOW, failed !== 'resume'), {
     source: 'fresh', dropAuth: false,
   });
+  assert.equal(authRequestToReissue(failed, card)?.requestId, 'call-7');
 
   const delayed = pendingAuthInboundDisposition({ deliveryState: 'delivered', deliveredAt: NOW }, NOW - 1);
   assert.equal(delayed, 'bypass_predelivery');
   assert.deepEqual(selectTurnContextSource(auth, undefined, NOW, delayed !== 'resume'), {
     source: 'fresh', dropAuth: false,
   });
+  assert.equal(authRequestToReissue(delayed, card)?.requestId, 'call-7');
+  assert.equal(authRequestToReissue('resume', card), undefined);
 });
 
 test('when auth and askUserQuestion are both bypassed, neither half-open chain becomes turn context', async () => {
