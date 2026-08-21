@@ -4197,11 +4197,16 @@ interface PendingAuth {
 
 const pendingAuth = new Map<string, PendingAuth>();
 
+/** Re-sending the same card must not move the point after which owner replies are eligible to approve it. */
+export function firstAuthDeliveryAt(existing: number | undefined, deliveredAt: number): number {
+  return existing ?? deliveredAt;
+}
+
 /** Record channel delivery, so a reply sent before this card existed cannot authorize it after polling delay. */
 export function markPendingAuthDelivered(sessionId: string, requestId: string | undefined, deliveredAt: number): boolean {
   const pending = pendingAuth.get(sessionId);
   if (!pending || (requestId && pending.toolCallId !== requestId)) return false;
-  pending.deliveredAt = deliveredAt;
+  pending.deliveredAt = firstAuthDeliveryAt(pending.deliveredAt, deliveredAt);
   pending.deliveryState = 'delivered';
   persistContinuation(sessionId);
   return true;

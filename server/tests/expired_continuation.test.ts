@@ -132,6 +132,23 @@ test('failed delivery or a pre-card inbound bypasses auth without dropping the p
   assert.equal(authRequestToReissue('resume', card), undefined);
 });
 
+test('re-sending a bypassed auth card preserves first delivery as the approval reference point', async () => {
+  const { firstAuthDeliveryAt, pendingAuthInboundDisposition } = await import('../src/chat-handler.js');
+  const firstDelivery = NOW;
+  const ownerApprovalSentAt = NOW + 10_000;
+  const repeatedDelivery = NOW + 20_000;
+
+  const referenceAfterRepeat = firstAuthDeliveryAt(firstDelivery, repeatedDelivery);
+  assert.equal(referenceAfterRepeat, firstDelivery);
+  assert.equal(
+    pendingAuthInboundDisposition(
+      { deliveryState: 'delivered', deliveredAt: referenceAfterRepeat },
+      ownerApprovalSentAt,
+    ),
+    'resume',
+  );
+});
+
 test('when auth and askUserQuestion are both bypassed, neither half-open chain becomes turn context', async () => {
   const { selectTurnContextSource } = await import('../src/chat-handler.js');
   const auth = { ts: NOW - MIN, executionState: 'awaiting_auth' as const };
