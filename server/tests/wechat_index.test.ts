@@ -24,8 +24,10 @@ import { join } from 'node:path';
 
 import {
   startWeChatGateway,
+  makeDispatcher,
   type ChatSendFn,
 } from '../src/channels/wechat/index.js';
+import { OutboundQueue } from '../src/channels/wechat/outbound.js';
 import { writeCredentials } from '../src/channels/wechat/state.js';
 
 let tmpRoot: string;
@@ -112,4 +114,33 @@ test('契约: 同一 DM 用户多轮消息 → 同一 sessionId(让 pendingAuth 
   const sid1 = `wechat:a1:alice`;
   const sid2 = `wechat:a1:alice`; // 第二条 inbound 用同样规则计算
   assert.equal(sid1, sid2);
+});
+
+test('dispatcher forwards wire send time and records auth delivery only after outbound success', async () => {
+  const sent: string[] = [];
+  const delivered: Array<{ sessionId: string; requestId?: string; at: number }> = [];
+  let inboundSeen: { sentAtMs?: number } | undefined;
+  const outbound = new OutboundQueue(async (_to, text) => {
+    sent.push(text);
+    return { ok: true, messageId: `m${sent.length}` };
+  }, { chunkDelayMs: 0 });
+  const chatSend: ChatSendFn = async (_sid, _msg, _onDelta, onAuth, _onStatus, _onTrace, inbound) => {
+    inboundSeen = inbound;
+    onAuth({ requestId: 'tool-call-7', toolName: 'shell', capability: 'execute', domain: 'local', input: {} });
+  };
+  const dispatch = makeDispatcher({
+    accountId: 'acct', chatSend, outbound,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    onAuthDelivered: (sessionId, requestId, at) => delivered.push({ sessionId, requestId, at }),
+  });
+
+  await dispatch({
+    messageId: 'in-1', fromUserId: 'alice', groupId: '', text: '继续',
+    sentAtMs: 1_787_268_800_000, raw: {},
+  });
+  assert.equal(inboundSeen?.sentAtMs, 1_787_268_800_000);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(delivered.map(({ sessionId, requestId }) => ({ sessionId, requestId })), [
+    { sessionId: 'wechat:acct:alice', requestId: 'tool-call-7' },
+  ]);
 });

@@ -73,7 +73,13 @@ function makeQueuedFetch(responses: Array<any>): FetchLike & { calls: any[] } {
   const calls: any[] = [];
   const fn: FetchLike = (url, init) => {
     calls.push({ url, body: init.body });
-    const next = queue.shift();
+    const isSend = url.endsWith('/ilink/bot/sendmessage');
+    const matchingIndex = queue.findIndex((candidate) =>
+      isSend
+        ? candidate && 'message_id' in candidate && !('msgs' in candidate) && !('get_updates_buf' in candidate)
+        : !(candidate && 'message_id' in candidate && !('msgs' in candidate) && !('get_updates_buf' in candidate)),
+    );
+    const next = matchingIndex >= 0 ? queue.splice(matchingIndex, 1)[0] : undefined;
     if (next) {
       return Promise.resolve(
         new Response(JSON.stringify(next), {
@@ -115,6 +121,7 @@ test('gateway: 收到一条 DM → dispatch 被调,reply 自动回发', async ()
           from_user_id: 'alice',
           item_list: [{ type: 1, text_item: { text: 'hi bot' } }],
           context_token: 'ctx-1',
+          send_time: 1_787_268_800,
         },
       ],
     },
@@ -139,7 +146,7 @@ test('gateway: 收到一条 DM → dispatch 被调,reply 自动回发', async ()
 
   const startPromise = gw.start().catch(() => {});
   // 给 microtask 跑两次 fetch + dispatch
-  await waitUntil(() => captured.length >= 1 && (fetch as any).calls.length >= 2);
+  await waitUntil(() => captured.length >= 1 && (fetch as any).calls.some((c: any) => c.url.endsWith('/ilink/bot/sendmessage')));
   await gw.stop();
   await startPromise;
 
@@ -147,14 +154,66 @@ test('gateway: 收到一条 DM → dispatch 被调,reply 自动回发', async ()
   assert.equal(captured[0].fromUserId, 'alice');
   assert.equal(captured[0].text, 'hi bot');
   assert.equal(captured[0].contextToken, 'ctx-1');
+  assert.equal(captured[0].sentAtMs, 1_787_268_800_000);
 
   // 检查回发请求:第二个 call 应该是 sendmessage
-  const sendCall = (fetch as any).calls[1];
+  const sendCall = (fetch as any).calls.find((c: any) => c.url.endsWith('/ilink/bot/sendmessage'));
   const sendBody = JSON.parse(sendCall.body);
   assert.ok(sendCall.url.endsWith('/ilink/bot/sendmessage'));
   assert.equal(sendBody.msg.to_user_id, 'alice');
   assert.equal(sendBody.msg.item_list[0].text_item.text, 'echo: hi bot');
   assert.equal(sendBody.msg.context_token, 'ctx-1');
+});
+
+test('gateway: a long dispatch does not block polling; one peer still dispatches in order', async () => {
+  let pollCount = 0;
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const seen: string[] = [];
+  const fetch: FetchLike = async (url, init) => {
+    if (!url.endsWith('/ilink/bot/getupdates')) throw new Error(`unexpected ${url}`);
+    pollCount++;
+    if (pollCount === 1) {
+      return new Response(JSON.stringify({
+        ret: 0, get_updates_buf: 'c1', msgs: [{
+          message_id: 'm1', from_user_id: 'alice', send_time: 100,
+          item_list: [{ type: 1, text_item: { text: 'first' } }],
+        }],
+      }));
+    }
+    if (pollCount === 2) {
+      return new Response(JSON.stringify({
+        ret: 0, get_updates_buf: 'c2', msgs: [{
+          message_id: 'm2', from_user_id: 'alice', send_time: 101,
+          item_list: [{ type: 1, text_item: { text: 'second' } }],
+        }],
+      }));
+    }
+    return new Promise<Response>((_, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    });
+  };
+  const gw = new ILinkGateway({
+    credentials: makeCreds(),
+    client: new ILinkClient({ token: 'tok', fetch }),
+    policy: { ...DEFAULT_POLICY, dmPolicy: 'open' },
+    logger: silentLogger,
+    skipLock: true,
+    dispatch: async (event) => {
+      seen.push(`start:${event.text}`);
+      if (event.text === 'first') await firstBlocked;
+      seen.push(`done:${event.text}`);
+    },
+  });
+
+  const running = gw.start().catch(() => {});
+  await waitUntil(() => pollCount >= 3);
+  assert.deepEqual(seen, ['start:first'], 'second poll arrived, but same-peer dispatch stayed serial');
+  releaseFirst();
+  await waitUntil(() => seen.includes('done:second'));
+  await gw.stop();
+  await running;
+  assert.deepEqual(seen, ['start:first', 'done:first', 'start:second', 'done:second']);
 });
 
 test('gateway: 群消息 + DEFAULT_POLICY(group disabled)→ 静默丢弃,不回发', async () => {
@@ -224,11 +283,12 @@ test('gateway: DM 拒绝 → 自动回 blockedReplyTemplate', async () => {
   });
 
   const sp = gw.start().catch(() => {});
-  await waitUntil(() => (fetch as any).calls.length >= 2);
+  await waitUntil(() => (fetch as any).calls.some((c: any) => c.url.endsWith('/ilink/bot/sendmessage')));
   await gw.stop();
   await sp;
 
-  const sendBody = JSON.parse((fetch as any).calls[1].body);
+  const sendCall = (fetch as any).calls.find((c: any) => c.url.endsWith('/ilink/bot/sendmessage'));
+  const sendBody = JSON.parse(sendCall.body);
   assert.equal(sendBody.msg.item_list[0].text_item.text, '🚫 你不在白名单');
   assert.equal(sendBody.msg.to_user_id, 'mallory');
 });

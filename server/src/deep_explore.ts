@@ -1641,6 +1641,18 @@ function renderProgressText(s: ProgressSummary, hitCap: boolean, status: Reasoni
   return `${head}\nThis round: ${parts.join('; ')}`;
 }
 
+/** User-facing milestone. Keep model directives in the tool result, never in a channel push. */
+export function renderProgressMilestone(
+  s: ProgressSummary,
+  hitCap: boolean,
+  status: ReasoningSessionStatus,
+  settledVerb = 'proved',
+): string {
+  if (!committedNothing(s)) return renderProgressText(s, hitCap, status, settledVerb);
+  if (status === 'solved' || status === 'stuck') return renderProgressText(s, hitCap, status, settledVerb);
+  return `This round made no progress in the reasoning tree; ${s.stillOpen} open nodes remain. The tree was saved.`;
+}
+
 /**
  * Build a human-facing wrap-up report from the current tree, regardless of whether the root is
  * proved. Deterministic (no LLM call → no timeout risk): lists established lemmas, refuted/
@@ -3193,7 +3205,7 @@ export function createDeepExploreTool(
     // is deferred until a signal that does not misfire on those cases. The pure gate keeps the branch.
 
     const text = renderProgressText(summary, result.hitCap, status, profile.settledVerb);
-    deps.onMilestone?.(text);
+    deps.onMilestone?.(renderProgressMilestone(summary, result.hitCap, status, profile.settledVerb));
     const tail =
       result.error === 'aborted'
         ? stalled.value

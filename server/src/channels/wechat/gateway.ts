@@ -110,6 +110,8 @@ export interface InboundEvent {
   groupId: string;
   /** Extracted text (images/files/etc. converted to placeholder strings) */
   text: string;
+  /** Server-recorded user send time. Used to keep a delayed reply from approving a newer auth card. */
+  sentAtMs?: number;
   /** iLink incremental context token; including it in the reply can continue LLM context */
   contextToken?: string;
   /** Raw message (retained for advanced consumers that need to inspect item_list) */
@@ -258,6 +260,12 @@ export class ILinkGateway {
   private getUpdatesBuf = '';
   private consecutiveFailures = 0;
   private rateLimitWaitMs = RATE_LIMIT_BASE_MS;
+  /**
+   * Dispatch is serial per conversation, but never blocks getUpdates. A single global await here used
+   * to stop the long-poll for the full 6–12 minute agent turn, so replies accumulated server-side and
+   * could later be mistaken for answers to authorization cards created after they were sent.
+   */
+  private readonly dispatchTails = new Map<string, Promise<void>>();
   /** AbortController for the in-flight long-poll; stop() aborts it immediately so fetch throws AbortError */
   private abortController: AbortController | null = null;
 
@@ -311,6 +319,9 @@ export class ILinkGateway {
     try {
       await this.loop();
     } finally {
+      // Preserve the old shutdown guarantee: do not release the single-instance lock while queued
+      // dispatch work is still mutating the same chat session.
+      await Promise.allSettled([...this.dispatchTails.values()]);
       this.running = false;
       if (!this.skipLock) releaseLock(this.accountId);
       this.logger.info('gateway stopped', { accountId: this.accountId });
@@ -359,7 +370,7 @@ export class ILinkGateway {
         const msgs = res.msgs ?? [];
         for (const msg of msgs) {
           if (this.stopRequested) break;
-          await this.handleInbound(msg);
+          this.enqueueInbound(msg);
         }
         // Even if no messages, immediately continue long-polling (server will hold for 35s)
         continue;
@@ -394,6 +405,26 @@ export class ILinkGateway {
     }
   }
 
+  /** Keep each DM/group ordered while allowing the long-poll to receive other messages immediately. */
+  private enqueueInbound(msg: InboundMessage): void {
+    const fromUserId = msg.from_user_id ?? '';
+    const groupId = inboundGroupId(msg);
+    const key = groupId || fromUserId || msg.message_id || 'unknown';
+    const previous = this.dispatchTails.get(key) ?? Promise.resolve();
+    const current = previous
+      .catch(() => { /* handleInbound logs its own errors; keep the queue alive */ })
+      .then(() => this.handleInbound(msg))
+      .catch((e) => {
+        this.logger.error(`inbound queue failed: ${String(e)}`, {
+          messageId: pseudonymizeWeChatId(msg.message_id),
+        });
+      })
+      .finally(() => {
+        if (this.dispatchTails.get(key) === current) this.dispatchTails.delete(key);
+      });
+    this.dispatchTails.set(key, current);
+  }
+
   /** Handle a single inbound message: policy + text/media extraction + dispatch + auto-reply */
   private async handleInbound(msg: InboundMessage): Promise<void> {
     const fromUserId = msg.from_user_id ?? '';
@@ -425,6 +456,7 @@ export class ILinkGateway {
       fromUserId,
       groupId,
       text,
+      sentAtMs: typeof msg.send_time === 'number' ? msg.send_time * 1000 : undefined,
       contextToken: msg.context_token,
       raw: msg,
     };

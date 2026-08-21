@@ -4189,9 +4189,27 @@ interface PendingAuth {
   priorInTurnRecords: InTurnToolRecord[];
   /** Suspend timestamp; used to expire a stale pending so a later natural-language message is not trapped in the auth flow. */
   ts: number;
+  /** When the channel confirmed that the authorization card reached the owner. */
+  deliveredAt?: number;
 }
 
 const pendingAuth = new Map<string, PendingAuth>();
+
+/** Record channel delivery, so a reply sent before this card existed cannot authorize it after polling delay. */
+export function markPendingAuthDelivered(sessionId: string, requestId: string | undefined, deliveredAt: number): boolean {
+  const pending = pendingAuth.get(sessionId);
+  if (!pending || (requestId && pending.toolCallId !== requestId)) return false;
+  pending.deliveredAt = deliveredAt;
+  persistContinuation(sessionId);
+  return true;
+}
+
+export function inboundPredatesAuthDelivery(
+  pending: { deliveredAt?: number },
+  inboundSentAtMs: number | undefined,
+): boolean {
+  return pending.deliveredAt !== undefined && inboundSentAtMs !== undefined && inboundSentAtMs < pending.deliveredAt;
+}
 
 /**
  * Phase 18 WS2: chat sessions where the ViabilityGate recommended stop_and_report last turn, awaiting the
@@ -6985,6 +7003,8 @@ function buildFreshMessages(
  *   - clarification non-empty = "previous response was not understood, ask again" (original line 3887 path)
  */
 export type AuthRequest = {
+  /** Stable id of the suspended tool call; channels echo it when the auth card is delivered. */
+  requestId?: string;
   toolName: string;
   capability: string;
   domain: string;
@@ -7190,6 +7210,8 @@ export async function handleChatSend(
    * Not passed for WeChat (naturally shielded); passed for web-ui → debug panel.
    */
   onTrace?: TraceFn,
+  /** Channel metadata about when the user actually sent this message (not when polling delivered it). */
+  inbound?: { sentAtMs?: number },
 ) {
   // ALS wraps the entire turn body — lets channel-aware tools (e.g. replyWithMedia)
   // retrieve the current sid from currentSessionId(); the registry routes to the corresponding
@@ -7423,7 +7445,7 @@ export async function handleChatSend(
   // 2026-05-06 D.2: turn-local signal container created in the outer layer; the drain path
   // inside buildFreshMessages / buildMemoryPrefix writes interruptDrainedCount into it,
   // and the inner honesty / K7-bridge paths also write to it. Inner finally block consumes all at once.
-  const signalBus: TurnSignalBus = {};
+  const signalBus: TurnSignalBus = { inboundSentAtMs: inbound?.sentAtMs };
 
   // v19 (2026-05-13): plan_close close-time strict validation needs to read the current turn's
   // signalBus (honesty fired? sameRootCause?) at the instant the LLM calls the plan_close tool.
@@ -8573,6 +8595,21 @@ async function handleChatSendInner(
   // without the guard a reply the owner clearly aimed at a research card is spent here instead.
   const pending = pendingAuth.get(sessionId);
   pendingAuthBlock: if (pending && !claimedByAnotherDecision(signalBus)) {
+    // WeChat used to stop polling for the whole agent turn. A reply sent during that turn could arrive
+    // only after a NEW authorization card had been delivered and accidentally approve a request the
+    // owner had never seen. Fail closed: keep the card pending and ask for a fresh response. Comparing
+    // with delivery (not creation) also covers outbound queue delay.
+    if (inboundPredatesAuthDelivery(pending, signalBus.inboundSentAtMs)) {
+      console.warn(
+        `[auth] session=${safeSessionId(sessionId)} ignored delayed inbound sent before auth delivery ` +
+          `(sent=${signalBus.inboundSentAtMs}, delivered=${pending.deliveredAt}, tool=${pending.toolName})`,
+      );
+      onDelta(
+        `你这条消息发送于当前 ${pending.toolName} 授权卡送达之前，因此没有被用来批准它。` +
+          `请查看最新授权卡后重新回复“同意”或“拒绝”。`,
+      );
+      return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+    }
     // Captured before the block below flips it back to `awaiting_auth` on an explicit retry.
     const wasUncertain = pending.executionState === 'uncertain';
 
@@ -10333,6 +10370,8 @@ async function decideForcedDeepExploreCall(
 }
 
 interface TurnSignalBus {
+  /** Wire send time supplied by the channel; may precede receipt by an entire long agent turn. */
+  inboundSentAtMs?: number;
   honesty?: {
     evaluation: HonestyEvaluation;
     toolResults: Array<{ toolName: string; content: string; toolInput?: Record<string, unknown> }>;
@@ -11117,7 +11156,7 @@ async function runToolLoop(
       });
       persistContinuation(sessionId);
 
-      onAuthRequest({ toolName: call.name, capability, domain, input: call.input });
+      onAuthRequest({ requestId: call.id, toolName: call.name, capability, domain, input: call.input });
       return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
     }
 
@@ -11362,6 +11401,7 @@ async function runToolLoop(
           `raising a card for ${blocked.tool} (${blocked.capability}/${blocked.domain}) — approval resumes the plan`,
       );
       onAuthRequest({
+        requestId: call.id,
         toolName: blocked.tool,
         capability: blocked.capability,
         domain: blocked.domain,
@@ -12936,7 +12976,7 @@ async function runToolLoop(
         });
         persistContinuation(sessionId);
 
-        onAuthRequest({ toolName: call.name, capability, domain, input: call.input });
+        onAuthRequest({ requestId: call.id, toolName: call.name, capability, domain, input: call.input });
         return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
       }
 

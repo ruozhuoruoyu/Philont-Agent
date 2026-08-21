@@ -100,6 +100,15 @@ test('pendingAuthIsStale: an in-flight or unresolved call is never aged out', as
   assert.equal(pendingAuthIsStale(undefined, NOW), false);
 });
 
+test('a delayed inbound cannot approve an authorization card delivered after it was sent', async () => {
+  const { inboundPredatesAuthDelivery } = await import('../src/chat-handler.js');
+  const deliveredAt = Date.UTC(2026, 7, 21, 7, 4, 36);
+  assert.equal(inboundPredatesAuthDelivery({ deliveredAt }, deliveredAt - 10 * 60_000), true);
+  assert.equal(inboundPredatesAuthDelivery({ deliveredAt }, deliveredAt), false);
+  assert.equal(inboundPredatesAuthDelivery({ deliveredAt }, deliveredAt + 1), false);
+  assert.equal(inboundPredatesAuthDelivery({}, deliveredAt - 1), false, 'no delivery receipt means no timestamp claim');
+});
+
 // ── the ORDERING, not just the predicate ────────────────────────────────────────────────────────
 // The earlier version of this file proved pendingAuthIsStale() computed the right answer and stopped
 // there — which would stay green if someone moved the drop back below the message build, i.e. if the

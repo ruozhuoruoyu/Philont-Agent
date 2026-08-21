@@ -52,6 +52,7 @@ import {
   DELIBERATE_LIT_TYPE_LABEL,
   shouldDeliberateAutoAnswer,
   withSessionWebDedup,
+  renderProgressMilestone,
 } from '../src/deep_explore.js';
 
 function node(over: Partial<ReasoningNode>): ReasoningNode {
@@ -63,6 +64,14 @@ function node(over: Partial<ReasoningNode>): ReasoningNode {
 }
 
 // ── 纯函数 ────────────────────────────────────────────────────────────────────
+
+test('user milestone never leaks the model-facing no-progress directive', () => {
+  const text = renderProgressMilestone({
+    newlyProved: [], newlyRefuted: [], newDeadEnds: [], decomposedInto: 0, stillOpen: 21,
+  }, false, 'active');
+  assert.match(text, /21 open nodes remain/);
+  assert.doesNotMatch(text, /pick ONE open node|Do not report this as progress|committed NOTHING/);
+});
 
 test('computeFrontier = open 叶节点(有子节点的不算 frontier)', () => {
   const root = node({ id: 'r', parentId: null, status: 'open' });

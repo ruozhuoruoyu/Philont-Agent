@@ -90,6 +90,7 @@ import {
   markWebuiUserActivity,
   runStartupIntegrityCheck,
   runDailyHealthCheck,
+  markPendingAuthDelivered,
 } from './chat-handler.js';
 import { currentPhraseLang } from './response_language.js';
 import { maintainDeferredPushes } from './deferred_push_maintenance.js';
@@ -1002,6 +1003,7 @@ if (process.env.WECHAT_ENABLED === '1') {
       startWeChatGateway({
         chatSend: handleChatSend,
         deferredPushes: memory.deferredPushes,
+        onAuthDelivered: markPendingAuthDelivered,
       }),
     )
     .then((gw) => {

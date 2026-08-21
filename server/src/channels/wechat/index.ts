@@ -59,6 +59,7 @@ import { currentPhraseLang } from '../../response_language.js';
 
 /** AuthRequest structure from chat-handler (provided by handleChatSend) */
 export type AuthRequestPayload = {
+  requestId?: string;
   toolName: string;
   capability: string;
   domain: string;
@@ -79,6 +80,7 @@ export type ChatSendFn = (
    * Only web-ui consumes it.
    */
   onTrace?: (ev: unknown) => void,
+  inbound?: { sentAtMs?: number },
 ) => Promise<unknown>;
 
 export interface MountOptions {
@@ -93,6 +95,8 @@ export interface MountOptions {
     listPending(channel: string, peer: string, limit?: number, now?: number): Array<{ id: string; kind: string; text: string }>;
     markManyDelivered(ids: readonly string[]): number;
   };
+  /** Called only after the complete authorization card was accepted by WeChat. */
+  onAuthDelivered?: (sessionId: string, requestId: string | undefined, deliveredAt: number) => void;
 }
 
 /**
@@ -181,6 +185,7 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
     outbound,
     logger,
     deferredPushes: opts.deferredPushes,
+    onAuthDelivered: opts.onAuthDelivered,
   });
 
   const gw = new ILinkGateway({
@@ -307,8 +312,9 @@ export function makeDispatcher(opts: {
   outbound: OutboundQueue;
   logger: GatewayLogger;
   deferredPushes?: MountOptions['deferredPushes'];
+  onAuthDelivered?: MountOptions['onAuthDelivered'];
 }): (e: InboundEvent) => Promise<void> {
-  const { accountId, chatSend, outbound, logger, deferredPushes } = opts;
+  const { accountId, chatSend, outbound, logger, deferredPushes, onAuthDelivered } = opts;
 
   // Quota-suspended reply tails, keyed by replyTo. WeChat caps bot messages per inbound message
   // (sendText ret=-2); when a reply's tail is rejected, it is parked here and delivered at the
@@ -402,8 +408,10 @@ export function makeDispatcher(opts: {
     //   1. Send fullText first (LLM reasoning, as context/preamble)
     //   2. Send pendingAuthPrompt last (auth request as the visually final message, prominent and not buried)
     let pendingAuthPrompt: string | null = null;
+    let pendingAuthRequestId: string | undefined;
     const onAuthRequest = (req: AuthRequestPayload) => {
       pendingAuthPrompt = renderAuthPromptForWeChat(req);
+      pendingAuthRequestId = req.requestId;
     };
 
     // 2026-05-07 #5: intermediate status push (reduce "waiting anxiety" caused by WeChat's lack of streaming)
@@ -440,7 +448,9 @@ export function makeDispatcher(opts: {
 
     const turnStartedAt = Date.now();
     try {
-      await chatSend(sessionId, event.text, onDelta, onAuthRequest, onStatus);
+      await chatSend(sessionId, event.text, onDelta, onAuthRequest, onStatus, undefined, {
+        sentAtMs: event.sentAtMs,
+      });
     } catch (e) {
       logger.error(`chatSend threw: ${String(e)}`, {
         sessionId: pseudonymizeWeChatId(sessionId),
@@ -551,6 +561,9 @@ export function makeDispatcher(opts: {
           logger.warn('auth prompt was not fully delivered; deferred notices were preserved', {
             replyTo, failed: r.chunksFailed,
           });
+        }
+        if (r.chunksFailed === 0 && r.remainder === null) {
+          onAuthDelivered?.(sessionId, pendingAuthRequestId, Date.now());
         }
       } catch (e) {
         logger.error(`auth prompt sendText failed: ${String(e)}`, { replyTo });
