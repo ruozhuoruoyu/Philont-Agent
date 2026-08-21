@@ -91,6 +91,7 @@ import {
   runStartupIntegrityCheck,
   runDailyHealthCheck,
   markPendingAuthDelivered,
+  markPendingAuthDeliveryFailed,
 } from './chat-handler.js';
 import { currentPhraseLang } from './response_language.js';
 import { maintainDeferredPushes } from './deferred_push_maintenance.js';
@@ -1004,6 +1005,7 @@ if (process.env.WECHAT_ENABLED === '1') {
         chatSend: handleChatSend,
         deferredPushes: memory.deferredPushes,
         onAuthDelivered: markPendingAuthDelivered,
+        onAuthDeliveryFailed: markPendingAuthDeliveryFailed,
       }),
     )
     .then((gw) => {
@@ -1048,7 +1050,13 @@ import('./channels/telegram/config.js')
     const cfg = readTelegramConfig();
     if (!cfg) return; // not enabled / missing token → silently skip
     return import('./channels/telegram/index.js').then(({ startTelegramGateway }) =>
-      startTelegramGateway({ chatSend: handleChatSend, token: cfg.token, policy: cfg.policy }).then((gw) => {
+      startTelegramGateway({
+        chatSend: handleChatSend,
+        token: cfg.token,
+        policy: cfg.policy,
+        onAuthDelivered: markPendingAuthDelivered,
+        onAuthDeliveryFailed: markPendingAuthDeliveryFailed,
+      }).then((gw) => {
         console.log('  Telegram:  ✅ gateway scheduled (long-poll)');
         const stopGw = () => gw.stop();
         process.once('SIGTERM', stopGw);

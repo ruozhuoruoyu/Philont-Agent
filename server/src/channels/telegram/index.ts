@@ -36,6 +36,7 @@ const safeTelegramId = (value: string | number): string =>
 
 /** AuthRequest structure from chat-handler. */
 export type AuthRequestPayload = {
+  requestId?: string;
   toolName: string;
   capability: string;
   domain: string;
@@ -51,6 +52,7 @@ export type ChatSendFn = (
   onAuthRequest: (req: AuthRequestPayload) => void,
   onStatus?: (text: string) => void,
   onTrace?: (ev: unknown) => void,
+  inbound?: { sentAtMs?: number },
 ) => Promise<unknown>;
 
 export interface MountOptions {
@@ -58,6 +60,8 @@ export interface MountOptions {
   token: string;
   policy: PolicyConfig;
   logger?: GatewayLogger;
+  onAuthDelivered?: (sessionId: string, requestId: string | undefined, deliveredAt: number) => void;
+  onAuthDeliveryFailed?: (sessionId: string, requestId: string | undefined) => void;
 }
 
 export async function startTelegramGateway(opts: MountOptions): Promise<TelegramGateway> {
@@ -75,7 +79,11 @@ export async function startTelegramGateway(opts: MountOptions): Promise<Telegram
   };
   const outbound = new OutboundQueue(rawSender, { chunkLimit: 4000 }); // Telegram single-message limit is 4096
 
-  const dispatch = makeDispatcher({ botId, client, chatSend: opts.chatSend, outbound, policy: opts.policy, logger });
+  const dispatch = makeDispatcher({
+    botId, client, chatSend: opts.chatSend, outbound, policy: opts.policy, logger,
+    onAuthDelivered: opts.onAuthDelivered,
+    onAuthDeliveryFailed: opts.onAuthDeliveryFailed,
+  });
 
   const gw = new TelegramGateway({ client, dispatch, botId, logger });
 
@@ -121,15 +129,17 @@ export async function startTelegramGateway(opts: MountOptions): Promise<Telegram
   return gw;
 }
 
-function makeDispatcher(opts: {
+export function makeDispatcher(opts: {
   botId: string;
   client: TelegramClient;
   chatSend: ChatSendFn;
   outbound: OutboundQueue;
   policy: PolicyConfig;
   logger: GatewayLogger;
+  onAuthDelivered?: MountOptions['onAuthDelivered'];
+  onAuthDeliveryFailed?: MountOptions['onAuthDeliveryFailed'];
 }): (e: InboundEvent) => Promise<void> {
-  const { botId, client, chatSend, outbound, policy, logger } = opts;
+  const { botId, client, chatSend, outbound, policy, logger, onAuthDelivered, onAuthDeliveryFailed } = opts;
 
   const STATUS_MIN_INTERVAL_MS = 4_000;
   const STATUS_DEDUP_WINDOW_MS = 30_000;
@@ -156,8 +166,10 @@ function makeDispatcher(opts: {
     };
 
     let pendingAuthPrompt: string | null = null;
+    let pendingAuthRequestId: string | undefined;
     const onAuthRequest = (req: AuthRequestPayload) => {
       pendingAuthPrompt = renderAuthPrompt(req);
+      pendingAuthRequestId = req.requestId;
     };
 
     const recentStatus = new Map<string, number>();
@@ -175,7 +187,9 @@ function makeDispatcher(opts: {
     };
 
     try {
-      await chatSend(sessionId, event.text, onDelta, onAuthRequest, onStatus);
+      await chatSend(sessionId, event.text, onDelta, onAuthRequest, onStatus, undefined, {
+        sentAtMs: event.sentAtMs,
+      });
     } catch (e) {
       logger.error(`chatSend threw: ${String(e)}`, {
         sessionId: safeTelegramId(sessionId),
@@ -218,9 +232,15 @@ function makeDispatcher(opts: {
 
     if (pendingAuthPrompt) {
       try {
-        await outbound.sendText(replyTo, pendingAuthPrompt);
+        const r = await outbound.sendText(replyTo, pendingAuthPrompt);
+        if (r.chunksFailed === 0 && r.remainder === null) {
+          onAuthDelivered?.(sessionId, pendingAuthRequestId, Date.now());
+        } else {
+          onAuthDeliveryFailed?.(sessionId, pendingAuthRequestId);
+        }
       } catch (e) {
         logger.error(`auth prompt sendText failed: ${String(e)}`, { replyTo });
+        onAuthDeliveryFailed?.(sessionId, pendingAuthRequestId);
       }
     }
   };

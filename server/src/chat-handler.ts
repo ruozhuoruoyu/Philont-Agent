@@ -4191,6 +4191,8 @@ interface PendingAuth {
   ts: number;
   /** When the channel confirmed that the authorization card reached the owner. */
   deliveredAt?: number;
+  /** Delivery-capable channels set this after attempting to send the authorization card. */
+  deliveryState?: 'delivered' | 'failed';
 }
 
 const pendingAuth = new Map<string, PendingAuth>();
@@ -4200,6 +4202,17 @@ export function markPendingAuthDelivered(sessionId: string, requestId: string | 
   const pending = pendingAuth.get(sessionId);
   if (!pending || (requestId && pending.toolCallId !== requestId)) return false;
   pending.deliveredAt = deliveredAt;
+  pending.deliveryState = 'delivered';
+  persistContinuation(sessionId);
+  return true;
+}
+
+/** Record a failed card delivery. The next inbound must not be interpreted as approval. */
+export function markPendingAuthDeliveryFailed(sessionId: string, requestId: string | undefined): boolean {
+  const pending = pendingAuth.get(sessionId);
+  if (!pending || (requestId && pending.toolCallId !== requestId)) return false;
+  pending.deliveryState = 'failed';
+  pending.deliveredAt = undefined;
   persistContinuation(sessionId);
   return true;
 }
@@ -4209,6 +4222,18 @@ export function inboundPredatesAuthDelivery(
   inboundSentAtMs: number | undefined,
 ): boolean {
   return pending.deliveredAt !== undefined && inboundSentAtMs !== undefined && inboundSentAtMs < pending.deliveredAt;
+}
+
+export type PendingAuthInboundDisposition = 'resume' | 'bypass_predelivery' | 'bypass_undelivered';
+
+/** Decide whether this inbound is eligible to answer the pending authorization card. */
+export function pendingAuthInboundDisposition(
+  pending: { deliveredAt?: number; deliveryState?: 'delivered' | 'failed' } | undefined,
+  inboundSentAtMs: number | undefined,
+): PendingAuthInboundDisposition {
+  if (pending?.deliveryState === 'failed') return 'bypass_undelivered';
+  if (pending && inboundPredatesAuthDelivery(pending, inboundSentAtMs)) return 'bypass_predelivery';
+  return 'resume';
 }
 
 /**
@@ -4416,11 +4441,15 @@ export function selectTurnContextSource(
   auth: { ts: number; executionState?: 'awaiting_auth' | 'running' | 'uncertain' } | undefined,
   question: { createdAt: number } | undefined,
   now: number,
+  bypassAuth = false,
+  bypassQuestion = false,
 ): { source: TurnContextSource; dropAuth: boolean } {
   if (auth && pendingAuthIsStale(auth, now)) {
     return { source: question ? 'question-inflight' : 'fresh', dropAuth: true };
   }
+  if (auth && bypassAuth) return { source: question ? 'question-inflight' : 'fresh', dropAuth: false };
   if (auth) return { source: 'auth-inflight', dropAuth: false };
+  if (question && bypassQuestion) return { source: 'fresh', dropAuth: false };
   if (question) return { source: 'question-inflight', dropAuth: false };
   return { source: 'fresh', dropAuth: false };
 }
@@ -7467,6 +7496,18 @@ export async function handleChatSend(
   // consumed at all: the cards stay up and the owner is asked which they meant. Guessing here does
   // not mislabel — it spends the answer on the wrong authorization and strands the other request.
   const outstandingDecisions = pendingDecisions.list(sessionId);
+  // A server-queued message cannot answer a decision card created after the owner sent it. Keep the
+  // newer card outstanding, but exclude it from routing this inbound as an answer.
+  const addressableDecisions = signalBus.inboundSentAtMs === undefined
+    ? outstandingDecisions
+    : outstandingDecisions.filter((d) => d.createdAt <= signalBus.inboundSentAtMs!);
+  if (addressableDecisions.length !== outstandingDecisions.length) {
+    memory.metrics.increment('pending.decision_predates_card');
+    console.warn(
+      `[pending] session=${safeSessionId(sessionId)} inbound predates ` +
+        `${outstandingDecisions.length - addressableDecisions.length} decision card(s); treating it as a normal request`,
+    );
+  }
   // "待办" — the owner asking to see what is waiting. Rendering the list also snapshots it, which is
   // what makes the numbers in the next reply mean these items and not whatever arrives meanwhile.
   if (/^\s*(待办|待办事项|pending|todo)\s*$/i.test(userMessage)) {
@@ -7490,9 +7531,9 @@ export async function handleChatSend(
   const decisionLang: 'zh' | 'en' =
     resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en' ? 'en' : 'zh';
   let resolvedDecision: { decision: PendingDecision; verdictText: string } | null = null;
-  if (outstandingDecisions.length > 0) {
+  if (addressableDecisions.length > 0) {
     const { quoted, reply } = splitQuotedReply(userMessage);
-    const routed = routeReply(reply || userMessage, outstandingDecisions, {
+    const routed = routeReply(reply || userMessage, addressableDecisions, {
       now: Date.now(),
       quotedText: quoted,
       snapshot: pendingDecisions.lastSnapshot(sessionId),
@@ -7617,10 +7658,19 @@ export async function handleChatSend(
   // The choice of message source is made by selectTurnContextSource, which re-derives staleness
   // itself, so the guarantee does not rest on this block running before the build below. If the two
   // are ever separated again, the selector still refuses a stale pending's inflight.
+  const authAtTurnStart = pendingAuth.get(sessionId);
+  const authInboundDisposition = pendingAuthInboundDisposition(authAtTurnStart, signalBus.inboundSentAtMs);
+  signalBus.authInboundDisposition = authInboundDisposition;
+  const questionAtTurnStart = pendingQuestion.get(sessionId);
+  const bypassQuestion = questionAtTurnStart !== undefined &&
+    signalBus.inboundSentAtMs !== undefined && signalBus.inboundSentAtMs < questionAtTurnStart.createdAt;
+  signalBus.bypassPendingQuestion = bypassQuestion;
   const turnContext = selectTurnContextSource(
-    pendingAuth.get(sessionId),
-    pendingQuestion.get(sessionId),
+    authAtTurnStart,
+    questionAtTurnStart,
     Date.now(),
+    authInboundDisposition !== 'resume',
+    bypassQuestion,
   );
   {
     const stale = pendingAuth.get(sessionId);
@@ -8597,18 +8647,39 @@ async function handleChatSendInner(
   pendingAuthBlock: if (pending && !claimedByAnotherDecision(signalBus)) {
     // WeChat used to stop polling for the whole agent turn. A reply sent during that turn could arrive
     // only after a NEW authorization card had been delivered and accidentally approve a request the
-    // owner had never seen. Fail closed: keep the card pending and ask for a fresh response. Comparing
-    // with delivery (not creation) also covers outbound queue delay.
-    if (inboundPredatesAuthDelivery(pending, signalBus.inboundSentAtMs)) {
+    // owner had never seen. Do not spend that message on authorization: keep the card pending, but
+    // handle what the owner actually said as a normal request. Comparing with delivery (not creation)
+    // also covers outbound queue delay. A known failed delivery follows the same bypass and retries the
+    // card after the ordinary response.
+    if (pending.deliveredAt !== undefined && signalBus.inboundSentAtMs === undefined) {
+      memory.metrics.increment('auth.delivery_timestamp_missing');
       console.warn(
-        `[auth] session=${safeSessionId(sessionId)} ignored delayed inbound sent before auth delivery ` +
-          `(sent=${signalBus.inboundSentAtMs}, delivered=${pending.deliveredAt}, tool=${pending.toolName})`,
+        `[auth] session=${safeSessionId(sessionId)} cannot compare inbound with auth delivery: ` +
+          `wire sentAt missing (delivered=${pending.deliveredAt}, tool=${pending.toolName})`,
       );
-      onDelta(
-        `你这条消息发送于当前 ${pending.toolName} 授权卡送达之前，因此没有被用来批准它。` +
-          `请查看最新授权卡后重新回复“同意”或“拒绝”。`,
+    }
+    if (signalBus.authInboundDisposition === 'bypass_predelivery') {
+      const skewMs = signalBus.inboundSentAtMs! - pending.deliveredAt!;
+      console.warn(
+        `[auth] session=${safeSessionId(sessionId)} bypassed auth for delayed inbound sent before delivery ` +
+          `(sent=${signalBus.inboundSentAtMs}, delivered=${pending.deliveredAt}, deltaMs=${skewMs}, tool=${pending.toolName}); ` +
+          `handling inbound as a normal request`,
       );
-      return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+      break pendingAuthBlock;
+    }
+    if (signalBus.authInboundDisposition === 'bypass_undelivered') {
+      console.warn(
+        `[auth] session=${safeSessionId(sessionId)} bypassed auth because the ${pending.toolName} card was not delivered; ` +
+          `handling inbound as a normal request and re-sending the card`,
+      );
+      onAuthRequest({
+        requestId: pending.toolCallId,
+        toolName: pending.toolName,
+        capability: pending.capability,
+        domain: pending.domain,
+        input: pending.input,
+      });
+      break pendingAuthBlock;
     }
     // Captured before the block below flips it back to `awaiting_auth` on an explicit retry.
     const wasUncertain = pending.executionState === 'uncertain';
@@ -8982,7 +9053,15 @@ async function handleChatSendInner(
   // Design mirrors pendingAuth: stores inflightMessages + remainingCalls; on resume,
   // wraps the user reply as a tool_result and injects it, then continues runToolLoop.
   const pendingQ = pendingQuestion.get(sessionId);
-  if (pendingQ && !claimedByAnotherDecision(signalBus)) {
+  pendingQuestionBlock: if (pendingQ && !claimedByAnotherDecision(signalBus)) {
+    if (signalBus.bypassPendingQuestion) {
+      memory.metrics.increment('pending.question_predates_card');
+      console.warn(
+        `[pending-question] session=${safeSessionId(sessionId)} inbound predates askUserQuestion card; ` +
+          `keeping the question open and handling inbound as a normal request`,
+      );
+      break pendingQuestionBlock;
+    }
 
     // Timeout: treat as "give up" — return a cancelled placeholder for the current tool_call + skip
     // remaining calls; let the LLM decide how to proceed based on history.
@@ -10372,6 +10451,8 @@ async function decideForcedDeepExploreCall(
 interface TurnSignalBus {
   /** Wire send time supplied by the channel; may precede receipt by an entire long agent turn. */
   inboundSentAtMs?: number;
+  authInboundDisposition?: PendingAuthInboundDisposition;
+  bypassPendingQuestion?: boolean;
   honesty?: {
     evaluation: HonestyEvaluation;
     toolResults: Array<{ toolName: string; content: string; toolInput?: Record<string, unknown> }>;

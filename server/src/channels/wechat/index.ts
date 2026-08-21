@@ -97,6 +97,7 @@ export interface MountOptions {
   };
   /** Called only after the complete authorization card was accepted by WeChat. */
   onAuthDelivered?: (sessionId: string, requestId: string | undefined, deliveredAt: number) => void;
+  onAuthDeliveryFailed?: (sessionId: string, requestId: string | undefined) => void;
 }
 
 /**
@@ -186,6 +187,7 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
     logger,
     deferredPushes: opts.deferredPushes,
     onAuthDelivered: opts.onAuthDelivered,
+    onAuthDeliveryFailed: opts.onAuthDeliveryFailed,
   });
 
   const gw = new ILinkGateway({
@@ -313,8 +315,9 @@ export function makeDispatcher(opts: {
   logger: GatewayLogger;
   deferredPushes?: MountOptions['deferredPushes'];
   onAuthDelivered?: MountOptions['onAuthDelivered'];
+  onAuthDeliveryFailed?: MountOptions['onAuthDeliveryFailed'];
 }): (e: InboundEvent) => Promise<void> {
-  const { accountId, chatSend, outbound, logger, deferredPushes, onAuthDelivered } = opts;
+  const { accountId, chatSend, outbound, logger, deferredPushes, onAuthDelivered, onAuthDeliveryFailed } = opts;
 
   // Quota-suspended reply tails, keyed by replyTo. WeChat caps bot messages per inbound message
   // (sendText ret=-2); when a reply's tail is rejected, it is parked here and delivered at the
@@ -561,12 +564,14 @@ export function makeDispatcher(opts: {
           logger.warn('auth prompt was not fully delivered; deferred notices were preserved', {
             replyTo, failed: r.chunksFailed,
           });
+          onAuthDeliveryFailed?.(sessionId, pendingAuthRequestId);
         }
         if (r.chunksFailed === 0 && r.remainder === null) {
           onAuthDelivered?.(sessionId, pendingAuthRequestId, Date.now());
         }
       } catch (e) {
         logger.error(`auth prompt sendText failed: ${String(e)}`, { replyTo });
+        onAuthDeliveryFailed?.(sessionId, pendingAuthRequestId);
       }
     }
   };

@@ -28,6 +28,8 @@ export interface InboundEvent {
   /** Reply-to chat id (DM = user, group = group). Telegram always replies via chat.id. */
   chatId: string;
   text: string;
+  /** Telegram server send time (epoch seconds on wire), normalized to milliseconds. */
+  sentAtMs?: number;
   fromUsername?: string;
 }
 
@@ -46,6 +48,8 @@ export interface TelegramGatewayOptions {
   logger?: GatewayLogger;
   /** Long-poll server hold duration in seconds, default 30. */
   pollTimeoutSec?: number;
+  /** Test/embedding override for durable offset storage. */
+  offsetPath?: string;
 }
 
 const CONSOLE_LOGGER: GatewayLogger = {
@@ -65,6 +69,8 @@ export class TelegramGateway {
   private running = false;
   private abort: AbortController | null = null;
   private consecutiveErrors = 0;
+  private readonly dispatchTails = new Map<string, Promise<void>>();
+  private offsetCommitTail: Promise<void> = Promise.resolve();
 
   constructor(opts: TelegramGatewayOptions) {
     this.client = opts.client;
@@ -77,7 +83,7 @@ export class TelegramGateway {
     } catch {
       /* ignore */
     }
-    this.offsetPath = join(dir, `${opts.botId}.offset`);
+    this.offsetPath = opts.offsetPath ?? join(dir, `${opts.botId}.offset`);
     this.offset = this.loadOffset();
   }
 
@@ -117,26 +123,48 @@ export class TelegramGateway {
         continue;
       }
 
+      const batch: Promise<void>[] = [];
+      let nextOffset = this.offset;
       for (const u of updates) {
         // Advance cursor monotonically (ack even if this update has no text, otherwise we get stuck)
-        if (u.update_id >= this.offset) this.offset = u.update_id + 1;
+        if (u.update_id >= nextOffset) nextOffset = u.update_id + 1;
         const event = this.normalize(u);
         if (!event) continue;
-        try {
-          await this.dispatch(event);
-        } catch (e) {
-          this.logger.error(`dispatch threw: ${String(e)}`, { fromUserId: safeTelegramId(event.fromUserId) });
-        }
+        batch.push(this.enqueue(event));
       }
-      if (updates.length > 0) this.saveOffset();
+      this.offset = nextOffset;
+      if (updates.length > 0) {
+        const commitOffset = nextOffset;
+        this.offsetCommitTail = this.offsetCommitTail
+          .then(() => Promise.allSettled(batch))
+          .then(() => this.saveOffset(commitOffset))
+          .catch((e) => this.logger.warn(`offset persist after dispatch failed: ${String(e)}`, {}));
+      }
     }
+    await Promise.allSettled([...this.dispatchTails.values()]);
+    await this.offsetCommitTail;
     this.logger.info('gateway stopped', {});
   }
 
   stop(): void {
     this.running = false;
     this.abort?.abort();
-    this.saveOffset();
+  }
+
+  private enqueue(event: InboundEvent): Promise<void> {
+    const key = event.chatId;
+    const previous = this.dispatchTails.get(key) ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => this.dispatch(event))
+      .catch((e) => {
+        this.logger.error(`dispatch threw: ${String(e)}`, { fromUserId: safeTelegramId(event.fromUserId) });
+      })
+      .finally(() => {
+        if (this.dispatchTails.get(key) === current) this.dispatchTails.delete(key);
+      });
+    this.dispatchTails.set(key, current);
+    return current;
   }
 
   /** update → InboundEvent; returns null for non-text messages (skipped). */
@@ -158,6 +186,7 @@ export class TelegramGateway {
       groupId: isGroup ? chatId : '',
       chatId,
       text,
+      sentAtMs: typeof m.date === 'number' ? m.date * 1000 : undefined,
       fromUsername: m.from.username,
     };
   }
@@ -172,9 +201,9 @@ export class TelegramGateway {
     }
   }
 
-  private saveOffset(): void {
+  private saveOffset(offset = this.offset): void {
     try {
-      writeFileSync(this.offsetPath, String(this.offset), 'utf-8');
+      writeFileSync(this.offsetPath, String(offset), 'utf-8');
     } catch (e) {
       this.logger.warn(`offset persist failed: ${String(e)}`, {});
     }

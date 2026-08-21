@@ -209,11 +209,22 @@ test('gateway: a long dispatch does not block polling; one peer still dispatches
   const running = gw.start().catch(() => {});
   await waitUntil(() => pollCount >= 3);
   assert.deepEqual(seen, ['start:first'], 'second poll arrived, but same-peer dispatch stayed serial');
+  const { readContextTokens } = await import('../src/channels/wechat/state.js');
+  assert.equal(
+    (readContextTokens('gwtest') as { get_updates_buf?: string } | null)?.get_updates_buf,
+    undefined,
+    'queued messages are not durably acknowledged before dispatch finishes',
+  );
   releaseFirst();
   await waitUntil(() => seen.includes('done:second'));
   await gw.stop();
   await running;
   assert.deepEqual(seen, ['start:first', 'done:first', 'start:second', 'done:second']);
+  assert.equal(
+    (readContextTokens('gwtest') as { get_updates_buf?: string })?.get_updates_buf,
+    'c2',
+    'the low-water cursor advances after both ordered dispatches complete',
+  );
 });
 
 test('gateway: 群消息 + DEFAULT_POLICY(group disabled)→ 静默丢弃,不回发', async () => {

@@ -144,3 +144,24 @@ test('dispatcher forwards wire send time and records auth delivery only after ou
     { sessionId: 'wechat:acct:alice', requestId: 'tool-call-7' },
   ]);
 });
+
+test('dispatcher records a failed auth-card delivery instead of leaving receipt state ambiguous', async () => {
+  const failed: Array<{ sessionId: string; requestId?: string }> = [];
+  const delivered: string[] = [];
+  const outbound = new OutboundQueue(async () => ({ ok: false, code: -2, retry: 'next_inbound' }), {
+    chunkDelayMs: 0,
+  });
+  const chatSend: ChatSendFn = async (_sid, _msg, _onDelta, onAuth) => {
+    onAuth({ requestId: 'tool-call-failed', toolName: 'shell', capability: 'execute', domain: 'local', input: {} });
+  };
+  const dispatch = makeDispatcher({
+    accountId: 'acct', chatSend, outbound,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    onAuthDelivered: (sessionId) => delivered.push(sessionId),
+    onAuthDeliveryFailed: (sessionId, requestId) => failed.push({ sessionId, requestId }),
+  });
+
+  await dispatch({ messageId: 'in-f', fromUserId: 'alice', groupId: '', text: '继续', raw: {} });
+  assert.deepEqual(delivered, []);
+  assert.deepEqual(failed, [{ sessionId: 'wechat:acct:alice', requestId: 'tool-call-failed' }]);
+});

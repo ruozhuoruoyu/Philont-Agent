@@ -109,6 +109,42 @@ test('a delayed inbound cannot approve an authorization card delivered after it 
   assert.equal(inboundPredatesAuthDelivery({}, deliveredAt - 1), false, 'no delivery receipt means no timestamp claim');
 });
 
+test('failed delivery or a pre-card inbound bypasses auth without dropping the pending card', async () => {
+  const { pendingAuthInboundDisposition, selectTurnContextSource } = await import('../src/chat-handler.js');
+  const auth = { ts: NOW - MIN, executionState: 'awaiting_auth' as const };
+
+  const failed = pendingAuthInboundDisposition({ deliveryState: 'failed' }, NOW);
+  assert.equal(failed, 'bypass_undelivered');
+  assert.deepEqual(selectTurnContextSource(auth, undefined, NOW, failed !== 'resume'), {
+    source: 'fresh', dropAuth: false,
+  });
+
+  const delayed = pendingAuthInboundDisposition({ deliveryState: 'delivered', deliveredAt: NOW }, NOW - 1);
+  assert.equal(delayed, 'bypass_predelivery');
+  assert.deepEqual(selectTurnContextSource(auth, undefined, NOW, delayed !== 'resume'), {
+    source: 'fresh', dropAuth: false,
+  });
+});
+
+test('a message sent before askUserQuestion uses fresh context without deleting the question', async () => {
+  const { selectTurnContextSource } = await import('../src/chat-handler.js');
+  assert.deepEqual(
+    selectTurnContextSource(undefined, { createdAt: NOW }, NOW, false, true),
+    { source: 'fresh', dropAuth: false },
+  );
+});
+
+test('production orders delivery disposition before context selection and auth intent classification', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../src/chat-handler.ts', import.meta.url), 'utf8');
+  const dispositionAt = source.indexOf('const authInboundDisposition = pendingAuthInboundDisposition(');
+  const contextAt = source.indexOf('const turnContext = selectTurnContextSource(', dispositionAt);
+  const authBlockAt = source.indexOf('pendingAuthBlock:', contextAt);
+  const classifierAt = source.indexOf('await classifyAuthIntent(userMessage, context)', authBlockAt);
+  assert.ok(dispositionAt >= 0 && dispositionAt < contextAt, 'bypass is decided before message context is built');
+  assert.ok(contextAt < authBlockAt && authBlockAt < classifierAt, 'bypassed inbound cannot reach auth classifier first');
+});
+
 // ── the ORDERING, not just the predicate ────────────────────────────────────────────────────────
 // The earlier version of this file proved pendingAuthIsStale() computed the right answer and stopped
 // there — which would stay green if someone moved the drop back below the message build, i.e. if the

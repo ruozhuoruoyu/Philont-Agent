@@ -266,6 +266,8 @@ export class ILinkGateway {
    * could later be mistaken for answers to authorization cards created after they were sent.
    */
   private readonly dispatchTails = new Map<string, Promise<void>>();
+  /** Persisted cursor trails dispatch completion, so an external kill replays queued work instead of losing it. */
+  private cursorCommitTail: Promise<void> = Promise.resolve();
   /** AbortController for the in-flight long-poll; stop() aborts it immediately so fetch throws AbortError */
   private abortController: AbortController | null = null;
 
@@ -322,6 +324,7 @@ export class ILinkGateway {
       // Preserve the old shutdown guarantee: do not release the single-instance lock while queued
       // dispatch work is still mutating the same chat session.
       await Promise.allSettled([...this.dispatchTails.values()]);
+      await this.cursorCommitTail;
       this.running = false;
       if (!this.skipLock) releaseLock(this.accountId);
       this.logger.info('gateway stopped', { accountId: this.accountId });
@@ -362,15 +365,20 @@ export class ILinkGateway {
         this.consecutiveFailures = 0;
         this.rateLimitWaitMs = RATE_LIMIT_BASE_MS;
         const newBuf = (res.get_updates_buf as string | undefined) ?? '';
-        if (newBuf && newBuf !== this.getUpdatesBuf) {
-          this.getUpdatesBuf = newBuf;
-          // Persist cursor immediately — prevents re-consuming messages if dispatch crashes
-          writeContextTokens(this.accountId, { get_updates_buf: this.getUpdatesBuf });
-        }
+        if (newBuf && newBuf !== this.getUpdatesBuf) this.getUpdatesBuf = newBuf;
         const msgs = res.msgs ?? [];
+        const batch: Promise<void>[] = [];
         for (const msg of msgs) {
           if (this.stopRequested) break;
-          this.enqueueInbound(msg);
+          batch.push(this.enqueueInbound(msg));
+        }
+        if (newBuf) {
+          // Poll with the in-memory cursor immediately, but acknowledge durably only after this batch
+          // and every prior batch has finished dispatching. On a hard kill, uncommitted messages replay.
+          this.cursorCommitTail = this.cursorCommitTail
+            .then(() => Promise.allSettled(batch))
+            .then(() => writeContextTokens(this.accountId, { get_updates_buf: newBuf }))
+            .catch((e) => this.logger.warn(`cursor persist after dispatch failed: ${String(e)}`));
         }
         // Even if no messages, immediately continue long-polling (server will hold for 35s)
         continue;
@@ -406,7 +414,7 @@ export class ILinkGateway {
   }
 
   /** Keep each DM/group ordered while allowing the long-poll to receive other messages immediately. */
-  private enqueueInbound(msg: InboundMessage): void {
+  private enqueueInbound(msg: InboundMessage): Promise<void> {
     const fromUserId = msg.from_user_id ?? '';
     const groupId = inboundGroupId(msg);
     const key = groupId || fromUserId || msg.message_id || 'unknown';
@@ -423,6 +431,7 @@ export class ILinkGateway {
         if (this.dispatchTails.get(key) === current) this.dispatchTails.delete(key);
       });
     this.dispatchTails.set(key, current);
+    return current;
   }
 
   /** Handle a single inbound message: policy + text/media extraction + dispatch + auto-reply */

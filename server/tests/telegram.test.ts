@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { renderForTelegram } from '../src/channels/telegram/render.js';
 import { readTelegramConfig } from '../src/channels/telegram/config.js';
 import { parseTelegramChatId } from '../src/channels/telegram/media_channel.js';
+import { TelegramGateway, type InboundEvent } from '../src/channels/telegram/gateway.js';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 describe('renderForTelegram', () => {
   it('剥 **bold** / 标题 #', () => {
@@ -58,4 +61,44 @@ describe('parseTelegramChatId', () => {
     assert.equal(parseTelegramChatId('wechat:x:1', 'mybot'), null);
     assert.equal(parseTelegramChatId('telegram:otherbot:1', 'mybot'), null);
   });
+});
+
+it('Telegram keeps polling during a long turn, serializes one chat, and forwards message.date', async () => {
+  let polls = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const seen: string[] = [];
+  const client = {
+    async getUpdates(_offset: number, _timeout: number, signal: AbortSignal): Promise<any[]> {
+      polls++;
+      if (polls <= 2) return [{
+        update_id: polls,
+        message: {
+          message_id: polls, date: 100 + polls,
+          from: { id: 7 }, chat: { id: 7, type: 'private' },
+          text: polls === 1 ? 'first' : 'second',
+        },
+      }];
+      return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+    },
+  };
+  const gw = new TelegramGateway({
+    client: client as any,
+    botId: `test-${Date.now()}`,
+    offsetPath: join(tmpdir(), `philont-telegram-test-${process.pid}-${Date.now()}.offset`),
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    dispatch: async (event: InboundEvent) => {
+      seen.push(`start:${event.text}:${event.sentAtMs}`);
+      if (event.text === 'first') await blocked;
+      seen.push(`done:${event.text}`);
+    },
+  });
+  const running = gw.start();
+  while (polls < 3) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, ['start:first:101000']);
+  release();
+  while (!seen.includes('done:second')) await new Promise((resolve) => setImmediate(resolve));
+  gw.stop();
+  await running;
+  assert.deepEqual(seen, ['start:first:101000', 'done:first', 'start:second:102000', 'done:second']);
 });
