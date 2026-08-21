@@ -4422,12 +4422,14 @@ const QUESTION_TTL_MS = 10 * 60_000;
  * world, and only the owner can resolve that.
  */
 export function pendingAuthIsStale(
-  pending: { ts: number; executionState?: 'awaiting_auth' | 'running' | 'uncertain' } | undefined,
+  pending: { ts: number; deliveredAt?: number; executionState?: 'awaiting_auth' | 'running' | 'uncertain' } | undefined,
   now: number,
 ): boolean {
   if (!pending) return false;
   if (pending.executionState === 'running' || pending.executionState === 'uncertain') return false;
-  return isPendingAuthExpired(pending.ts, now);
+  // A delivery-capable channel may spend much of the TTL retrying a card the owner has not seen.
+  // Once delivery succeeds, the owner's response window starts there, not at internal creation.
+  return isPendingAuthExpired(pending.deliveredAt ?? pending.ts, now);
 }
 
 /**
@@ -4445,9 +4447,11 @@ export function selectTurnContextSource(
   bypassQuestion = false,
 ): { source: TurnContextSource; dropAuth: boolean } {
   if (auth && pendingAuthIsStale(auth, now)) {
-    return { source: question ? 'question-inflight' : 'fresh', dropAuth: true };
+    return { source: question && !bypassQuestion ? 'question-inflight' : 'fresh', dropAuth: true };
   }
-  if (auth && bypassAuth) return { source: question ? 'question-inflight' : 'fresh', dropAuth: false };
+  if (auth && bypassAuth) {
+    return { source: question && !bypassQuestion ? 'question-inflight' : 'fresh', dropAuth: false };
+  }
   if (auth) return { source: 'auth-inflight', dropAuth: false };
   if (question && bypassQuestion) return { source: 'fresh', dropAuth: false };
   if (question) return { source: 'question-inflight', dropAuth: false };
@@ -7497,7 +7501,10 @@ export async function handleChatSend(
   // not mislabel — it spends the answer on the wrong authorization and strands the other request.
   const outstandingDecisions = pendingDecisions.list(sessionId);
   // A server-queued message cannot answer a decision card created after the owner sent it. Keep the
-  // newer card outstanding, but exclude it from routing this inbound as an answer.
+  // newer card outstanding, but exclude it from routing this inbound as an answer. Generic decisions
+  // currently have no channel delivery receipt, so createdAt is intentionally a conservative lower
+  // bound rather than pretending it is deliveredAt. Effectful research tools additionally require an
+  // explicit quoted/card address, which an unseen card cannot supply.
   const addressableDecisions = signalBus.inboundSentAtMs === undefined
     ? outstandingDecisions
     : outstandingDecisions.filter((d) => d.createdAt <= signalBus.inboundSentAtMs!);
@@ -7679,7 +7686,7 @@ export async function handleChatSend(
       persistContinuation(sessionId);
       signalBus.droppedExpiredAuth = {
         toolName: stale.toolName,
-        ageMinutes: Math.round((Date.now() - stale.ts) / 60_000),
+        ageMinutes: Math.round((Date.now() - (stale.deliveredAt ?? stale.ts)) / 60_000),
       };
       console.log(
         `[continuation] session=${safeSessionId(sessionId)} dropped expired pending auth for ${stale.toolName} ` +
@@ -8659,6 +8666,7 @@ async function handleChatSendInner(
       );
     }
     if (signalBus.authInboundDisposition === 'bypass_predelivery') {
+      memory.metrics.increment('auth.bypass_predelivery');
       const skewMs = signalBus.inboundSentAtMs! - pending.deliveredAt!;
       console.warn(
         `[auth] session=${safeSessionId(sessionId)} bypassed auth for delayed inbound sent before delivery ` +
@@ -8668,6 +8676,7 @@ async function handleChatSendInner(
       break pendingAuthBlock;
     }
     if (signalBus.authInboundDisposition === 'bypass_undelivered') {
+      memory.metrics.increment('auth.bypass_undelivered');
       console.warn(
         `[auth] session=${safeSessionId(sessionId)} bypassed auth because the ${pending.toolName} card was not delivered; ` +
           `handling inbound as a normal request and re-sending the card`,

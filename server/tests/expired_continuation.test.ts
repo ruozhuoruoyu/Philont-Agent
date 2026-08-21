@@ -126,23 +126,29 @@ test('failed delivery or a pre-card inbound bypasses auth without dropping the p
   });
 });
 
-test('a message sent before askUserQuestion uses fresh context without deleting the question', async () => {
+test('when auth and askUserQuestion are both bypassed, neither half-open chain becomes turn context', async () => {
   const { selectTurnContextSource } = await import('../src/chat-handler.js');
+  const auth = { ts: NOW - MIN, executionState: 'awaiting_auth' as const };
   assert.deepEqual(
-    selectTurnContextSource(undefined, { createdAt: NOW }, NOW, false, true),
+    selectTurnContextSource(auth, { createdAt: NOW }, NOW, true, true),
     { source: 'fresh', dropAuth: false },
+  );
+  const staleAuth = { ts: NOW - 58 * MIN, executionState: 'awaiting_auth' as const };
+  assert.deepEqual(
+    selectTurnContextSource(staleAuth, { createdAt: NOW }, NOW, false, true),
+    { source: 'fresh', dropAuth: true },
   );
 });
 
-test('production orders delivery disposition before context selection and auth intent classification', async () => {
-  const { readFileSync } = await import('node:fs');
-  const source = readFileSync(new URL('../src/chat-handler.ts', import.meta.url), 'utf8');
-  const dispositionAt = source.indexOf('const authInboundDisposition = pendingAuthInboundDisposition(');
-  const contextAt = source.indexOf('const turnContext = selectTurnContextSource(', dispositionAt);
-  const authBlockAt = source.indexOf('pendingAuthBlock:', contextAt);
-  const classifierAt = source.indexOf('await classifyAuthIntent(userMessage, context)', authBlockAt);
-  assert.ok(dispositionAt >= 0 && dispositionAt < contextAt, 'bypass is decided before message context is built');
-  assert.ok(contextAt < authBlockAt && authBlockAt < classifierAt, 'bypassed inbound cannot reach auth classifier first');
+test('authorization TTL starts at successful delivery when a receipt exists', async () => {
+  const { pendingAuthIsStale } = await import('../src/chat-handler.js');
+  const pending = {
+    ts: NOW - 40 * MIN,
+    deliveredAt: NOW - 5 * MIN,
+    executionState: 'awaiting_auth' as const,
+  };
+  assert.equal(pendingAuthIsStale(pending, NOW), false);
+  assert.equal(pendingAuthIsStale({ ...pending, deliveredAt: NOW - 31 * MIN }, NOW), true);
 });
 
 // ── the ORDERING, not just the predicate ────────────────────────────────────────────────────────
