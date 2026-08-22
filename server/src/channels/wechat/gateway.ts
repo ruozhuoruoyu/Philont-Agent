@@ -99,6 +99,8 @@ export const SESSION_EXPIRED_PAUSE_MS = 10 * 60_000;
 export const MAX_CONSECUTIVE_FAILURES = 5;
 export const RATE_LIMIT_BACKOFF_MULT = 3;
 export const RATE_LIMIT_BASE_MS = 5_000;
+const CURSOR_WRITE_RETRY_MS = [50, 250, 1_000] as const;
+const PROCESSED_MESSAGE_ID_CAP = 512;
 
 /** Normalised inbound event passed to dispatch */
 export interface InboundEvent {
@@ -268,6 +270,10 @@ export class ILinkGateway {
   private readonly dispatchTails = new Map<string, Promise<void>>();
   /** Persisted cursor trails dispatch completion, so an external kill replays queued work instead of losing it. */
   private cursorCommitTail: Promise<void> = Promise.resolve();
+  /** Durable idempotency window: cursor acknowledgement can fail or lag a hard kill. */
+  private readonly processedMessageIds = new Set<string>();
+  /** Includes queued/in-flight ids so overlapping polls cannot dispatch the same message concurrently. */
+  private readonly seenMessageIds = new Set<string>();
   /** AbortController for the in-flight long-poll; stop() aborts it immediately so fetch throws AbortError */
   private abortController: AbortController | null = null;
 
@@ -311,8 +317,17 @@ export class ILinkGateway {
     }
 
     // Load cursor
-    const stored = readContextTokens(this.accountId) as { get_updates_buf?: string } | null;
+    const stored = readContextTokens(this.accountId) as {
+      get_updates_buf?: string;
+      processed_message_ids?: string[];
+    } | null;
     this.getUpdatesBuf = stored?.get_updates_buf ?? '';
+    this.processedMessageIds.clear();
+    for (const id of stored?.processed_message_ids ?? []) {
+      if (typeof id === 'string' && id) this.processedMessageIds.add(id);
+    }
+    this.seenMessageIds.clear();
+    for (const id of this.processedMessageIds) this.seenMessageIds.add(id);
 
     this.running = true;
     this.stopRequested = false;
@@ -366,10 +381,20 @@ export class ILinkGateway {
         this.rateLimitWaitMs = RATE_LIMIT_BASE_MS;
         const newBuf = (res.get_updates_buf as string | undefined) ?? '';
         if (newBuf && newBuf !== this.getUpdatesBuf) this.getUpdatesBuf = newBuf;
-        const msgs = res.msgs ?? [];
+        const msgs = (res.msgs ?? []).filter((msg) => {
+          const id = msg.message_id;
+          if (!id || !this.seenMessageIds.has(id)) return true;
+          this.logger.info('inbound duplicate skipped', { messageId: pseudonymizeWeChatId(id) });
+          return false;
+        });
         const batch: Promise<void>[] = [];
+        const batchMessageIds: string[] = [];
         for (const msg of msgs) {
           if (this.stopRequested) break;
+          if (msg.message_id) {
+            this.seenMessageIds.add(msg.message_id);
+            batchMessageIds.push(msg.message_id);
+          }
           batch.push(this.enqueueInbound(msg));
         }
         if (newBuf) {
@@ -377,7 +402,12 @@ export class ILinkGateway {
           // and every prior batch has finished dispatching. On a hard kill, uncommitted messages replay.
           this.cursorCommitTail = this.cursorCommitTail
             .then(() => Promise.allSettled(batch))
-            .then(() => writeContextTokens(this.accountId, { get_updates_buf: newBuf }))
+            .then(() => {
+              // Add only THIS cursor batch at its low-water commit point. A later peer may already
+              // have finished, but persisting its id beside an earlier cursor would skip it after a kill.
+              for (const id of batchMessageIds) this.processedMessageIds.add(id);
+              return this.persistCursor(newBuf);
+            })
             .catch((e) => this.logger.warn(`cursor persist after dispatch failed: ${String(e)}`));
         }
         // Even if no messages, immediately continue long-polling (server will hold for 35s)
@@ -411,6 +441,25 @@ export class ILinkGateway {
       });
       await this.sleepFn(wait);
     }
+  }
+
+  private async persistCursor(getUpdatesBuf: string): Promise<void> {
+    const ids = [...this.processedMessageIds].slice(-PROCESSED_MESSAGE_ID_CAP);
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= CURSOR_WRITE_RETRY_MS.length; attempt++) {
+      try {
+        writeContextTokens(this.accountId, {
+          get_updates_buf: getUpdatesBuf,
+          processed_message_ids: ids,
+        });
+        return;
+      } catch (e) {
+        lastError = e;
+        if (attempt === CURSOR_WRITE_RETRY_MS.length) break;
+        await this.sleepFn(CURSOR_WRITE_RETRY_MS[attempt]!);
+      }
+    }
+    throw lastError;
   }
 
   /** Keep each DM/group ordered while allowing the long-poll to receive other messages immediately. */
@@ -465,7 +514,12 @@ export class ILinkGateway {
       fromUserId,
       groupId,
       text,
-      sentAtMs: typeof msg.send_time === 'number' ? msg.send_time * 1000 : undefined,
+      sentAtMs:
+        typeof msg.create_time_ms === 'number'
+          ? msg.create_time_ms
+          : typeof msg.send_time === 'number'
+            ? msg.send_time * 1000
+            : undefined,
       contextToken: msg.context_token,
       raw: msg,
     };

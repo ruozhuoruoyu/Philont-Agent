@@ -27,17 +27,23 @@ function probe(cmd: string, args: string[]): Promise<ProbeResult> {
     const finish = (r: ProbeResult) => { if (!done) { done = true; resolve(r); } };
     let child;
     try {
-      // On Windows, shell:true is required to resolve PATH and run .cmd/.bat wrappers
-      // (npx.cmd, playwright.cmd, gp.cmd) — a bare spawn looks for an exact-name .exe and
-      // throws ENOENT. But shell:true also re-splits the joined command line on spaces, so
-      // both the executable AND any arg containing a space must be quoted to survive as one
-      // token (e.g. `-c "import z3"` would otherwise become `-c import z3`). POSIX keeps the
-      // direct, no-shell spawn where the args array is already preserved verbatim.
-      const useShell = process.platform === 'win32';
-      const q = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
-      const c = useShell ? q(cmd) : cmd;
-      const a = useShell ? args.map(q) : args;
-      child = spawn(c, a, { stdio: ['ignore', 'pipe', 'pipe'], shell: useShell });
+      // Windows needs cmd.exe to resolve PATH and run .cmd/.bat wrappers (npx.cmd,
+      // playwright.cmd, gp.cmd). Invoke it explicitly below; `shell:true` causes DEP0190 and
+      // obscures the concatenation boundary. POSIX keeps the direct args-array spawn.
+      const useCmd = process.platform === 'win32';
+      if (useCmd) {
+        // Invoke cmd.exe explicitly instead of `shell:true`. Besides removing DEP0190, this makes the
+        // shell boundary visible and keeps Node from silently concatenating an args array itself.
+        // Every token is quoted because overrides may contain spaces or cmd metacharacters.
+        const q = (s: string) => `"${s.replace(/%/g, '%%').replace(/"/g, '""')}"`;
+        const commandLine = [cmd, ...args].map(q).join(' ');
+        child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${commandLine}"`], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          shell: false,
+        });
+      } else {
+        child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+      }
     } catch (e) {
       return finish({ code: null, stdout: '', stderr: '', error: (e as Error).message });
     }

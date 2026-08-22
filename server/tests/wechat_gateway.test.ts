@@ -121,7 +121,9 @@ test('gateway: 收到一条 DM → dispatch 被调,reply 自动回发', async ()
           from_user_id: 'alice',
           item_list: [{ type: 1, text_item: { text: 'hi bot' } }],
           context_token: 'ctx-1',
-          send_time: 1_787_268_800,
+          // This is the field present in production inbound-raw logs. Keep the legacy
+          // send_time fallback covered by the ordering test below.
+          create_time_ms: 1_787_268_800_123,
         },
       ],
     },
@@ -154,7 +156,7 @@ test('gateway: 收到一条 DM → dispatch 被调,reply 自动回发', async ()
   assert.equal(captured[0].fromUserId, 'alice');
   assert.equal(captured[0].text, 'hi bot');
   assert.equal(captured[0].contextToken, 'ctx-1');
-  assert.equal(captured[0].sentAtMs, 1_787_268_800_000);
+  assert.equal(captured[0].sentAtMs, 1_787_268_800_123);
 
   // 检查回发请求:第二个 call 应该是 sendmessage
   const sendCall = (fetch as any).calls.find((c: any) => c.url.endsWith('/ilink/bot/sendmessage'));
@@ -225,6 +227,49 @@ test('gateway: a long dispatch does not block polling; one peer still dispatches
     'c2',
     'the low-water cursor advances after both ordered dispatches complete',
   );
+});
+
+test('gateway: a message completed before a cursor failure/restart is not dispatched twice', async () => {
+  let handled = 0;
+  const runOnce = async (cursor: string) => {
+    let polls = 0;
+    const fetch: FetchLike = async (url, init) => {
+      if (!url.endsWith('/ilink/bot/getupdates')) throw new Error(`unexpected ${url}`);
+      polls++;
+      if (polls === 1) {
+        return new Response(JSON.stringify({
+          ret: 0,
+          get_updates_buf: cursor,
+          msgs: [{
+            message_id: 'durable-m1', from_user_id: 'alice', create_time_ms: 1_787_268_800_123,
+            item_list: [{ type: 1, text_item: { text: 'do-once' } }],
+          }],
+        }));
+      }
+      return new Promise<Response>((_, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+    };
+    const gw = new ILinkGateway({
+      credentials: makeCreds(),
+      client: new ILinkClient({ token: 'tok', fetch }),
+      policy: { ...DEFAULT_POLICY, dmPolicy: 'open' },
+      logger: silentLogger,
+      skipLock: true,
+      dispatch: async () => { handled++; },
+    });
+    const running = gw.start().catch(() => {});
+    await waitUntil(() => polls >= 2);
+    await gw.stop();
+    await running;
+  };
+
+  await runOnce('dedup-c1');
+  await runOnce('dedup-c2');
+  assert.equal(handled, 1, 'the durable message-id window suppresses replay after restart');
+  const { readContextTokens } = await import('../src/channels/wechat/state.js');
+  const stored = readContextTokens('gwtest') as { processed_message_ids?: string[] };
+  assert.deepEqual(stored.processed_message_ids, ['durable-m1']);
 });
 
 test('gateway: 群消息 + DEFAULT_POLICY(group disabled)→ 静默丢弃,不回发', async () => {

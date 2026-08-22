@@ -271,7 +271,7 @@ import {
   buildResearchPendingGrantSection,
   buildReasoningProgressSection,
 } from './autonomous_progress_inject.js';
-import { createDeepExploreTool } from './deep_explore.js';
+import { computeFrontier, createDeepExploreTool } from './deep_explore.js';
 import { selectSkillsToForget } from './forget_skill.js';
 import {
   classifyGrantReply,
@@ -2761,6 +2761,17 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     // the round prompt (collectComputeLessons).
     actions: memory.actions,
     skills: memory.skills,
+    getExternalVerificationEvidence: (owner) => {
+      try {
+        const plan = memory.plans.listBySession(owner, { limit: 1 })[0];
+        if (!plan) return [];
+        return plan.steps
+          .filter((s) => s.status === 'done' && !!s.evidence?.trim())
+          .map((s) => `${s.description}: ${s.evidence!.trim()}`);
+      } catch {
+        return [];
+      }
+    },
     onStatus: (text) => console.log(`[deep-explore] ${text}`),
     // Surface each round's progress summary to the user. Without this the 12-min rounds are
     // silent — the user only saw the next auth prompt. web-ui gets a persistent chat bubble (its
@@ -5082,6 +5093,7 @@ function buildSkillUpdateMessage(): string {
 const MEMORY_PREFIX_TOTAL_CAP = Number(process.env.MEMORY_PREFIX_TOTAL_CAP) || 24_000;
 const SESSION_SUMMARY_INJECT_CAP = 3_000;
 const FACT_VALUE_INJECT_CAP = 1_000;
+const FACT_SECTION_INJECT_CAP = 6_000;
 /**
  * Phase 13 plan.md auto-inject cap (2026-05-23): scheduled session injects the full plan.md;
  * production mycox after N runs saw Lessons + Recent Runs grow to 25KB, which together with other sections
@@ -5716,7 +5728,17 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
     // task that writes one record per run owns a slot per run, and since every write also bumps
     // lastAccessedAt the series monopolises the whole top-N within a couple of hours.
     const { kept, collapsed } = collapseFactSeries(ranked);
-    const top = kept.slice(0, topN);
+    const candidates = kept.slice(0, topN);
+    const top: typeof candidates = [];
+    let sectionChars = 0;
+    for (const f of candidates) {
+      const rendered = `  ${ns}.${f.key} = ${truncateForInjection(
+        JSON.stringify(f.value), FACT_VALUE_INJECT_CAP, `${ns}.${f.key}`,
+      )}`;
+      if (top.length > 0 && sectionChars + rendered.length > FACT_SECTION_INJECT_CAP) break;
+      top.push(f);
+      sectionChars += rendered.length;
+    }
     lines.push(`## ${headingLabel}`);
     for (const f of top) {
       const valueStr = truncateForInjection(
@@ -7138,7 +7160,14 @@ export function resolveJudgeGoal(
   userMessage: string | undefined,
   resumedFromAuth: boolean,
   lastRoutedGoal?: string,
+  activeWorkGoal?: string,
 ): string | null {
+  // A concrete machine-facing step is a better judging target than an owner's directional
+  // instruction ("continue the proof"). Production 2026-08-22 had real Lean artifacts and
+  // verifier calls in every turn, yet 5/5 samples were labelled not_applicable because the
+  // judge only saw "继续做 lrc 证明". Prefer the active plan/tree leaf when one exists.
+  const activeWork = (activeWorkGoal ?? '').trim();
+  if (activeWork) return activeWork;
   const carried = (carriedGoal ?? '').trim();
   if (carried) return carried;
   const lastRouted = (lastRoutedGoal ?? '').trim();
@@ -7161,6 +7190,19 @@ export function resolveJudgeGoal(
     return lastRoutedGoal!.trim();
   }
   return msg;
+}
+
+/** Last-resort channel text when the model stays empty after the one regeneration attempt. */
+export function renderEmptyConclusionFallback(
+  records: ReadonlyArray<{ toolName: string; success: boolean }>,
+  lang: 'zh' | 'en' = 'zh',
+): string {
+  const ok = records.filter((r) => r.success).length;
+  const failed = records.length - ok;
+  if (lang === 'en') {
+    return `This turn ran ${records.length} tool call(s): ${ok} succeeded and ${failed} failed, but no usable conclusion was generated. Please continue and I will resume from the recorded results.`;
+  }
+  return `本轮执行了 ${records.length} 次工具调用：${ok} 次成功、${failed} 次失败，但未能生成可用结论。请回复“继续”，我会从已记录的结果接着处理。`;
 }
 
 function shadowLearningJudge(
@@ -7190,7 +7232,32 @@ function shadowLearningJudge(
     const lastRouted = carriedIntent.get(sessionId);
     const lastRoutedFresh =
       lastRouted && Date.now() - lastRouted.ts <= INTENT_CARRY_TTL_MS ? lastRouted.goal : undefined;
-    const resolved = resolveJudgeGoal(bus?.carriedExploreGoal, userMessage, resumedFromAuth, lastRoutedFresh);
+    let activeWorkGoal: string | undefined;
+    try {
+      const plan = memory.plans.listBySession(sessionId, { limit: 1 })[0];
+      if (plan && (plan.status === 'draft' || plan.status === 'executing')) {
+        const step = plan.steps.find((s) => s.status === 'doing')
+          ?? plan.steps.find((s) => s.status === 'pending' || s.status === 'blocked');
+        if (step?.description.trim()) activeWorkGoal = `Complete plan step: ${step.description.trim()}`;
+      }
+      if (!activeWorkGoal) {
+        const reasoningSession = memory.reasoning.getMostRecentActiveSession(sessionId);
+        if (reasoningSession) {
+          const frontier = computeFrontier(memory.reasoning.getNodes(reasoningSession.id));
+          const leaf = frontier[0]?.claim?.trim();
+          if (leaf) activeWorkGoal = `Prove or refute the active reasoning node: ${leaf}`;
+        }
+      }
+    } catch (e) {
+      console.warn(`[learning-judge] active work goal lookup failed (ignored):`, e);
+    }
+    const resolved = resolveJudgeGoal(
+      bus?.carriedExploreGoal,
+      userMessage,
+      resumedFromAuth,
+      lastRoutedFresh,
+      activeWorkGoal,
+    );
     if (!resolved) {
       // Nothing recoverable: emit no verdict rather than a meaningless one. A skipped sample is honest;
       // a could_not_verify about the word "ok" is noise that looks like data.
@@ -8134,6 +8201,36 @@ export async function handleChatSend(
   const recallInput = messageIsSelfContainedGoal(userMessage)
     ? userMessage
     : (signalBus.carriedExploreGoal ?? userMessage);
+
+  // Ask the aux model which stored skills this fresh turn is about BEFORE buildFreshMessages consumes
+  // signalBus.skillRelevanceNames. Resumed inflight contexts deliberately skip this: their prompt is a
+  // frozen tool-use chain and must not be rebuilt or augmented.
+  if (turnContext.source === 'fresh') {
+    try {
+      const pool = memory.skills.listAllForMaintenance(400);
+      const picked = await selectSkillsByAux(
+        userMessage,
+        pool.map((s) => ({ name: s.name, description: s.description, whenToUse: s.whenToUse })),
+        6,
+        {
+          onOutcome: (outcome) => {
+            if (outcome.result === 'fallback') {
+              console.log(
+                `[skill-relevance] result=fallback reason=${outcome.reason} candidates=${pool.length}` +
+                  (outcome.error ? ` error=${JSON.stringify(outcome.error)}` : ''),
+              );
+            }
+          },
+        },
+      );
+      if (picked && picked.length > 0) {
+        signalBus.skillRelevanceNames = picked;
+        console.log(`[skill-relevance] aux picked ${picked.length}: ${picked.join(', ')}`);
+      }
+    } catch (e) {
+      console.warn('[skill-relevance] selector failed, keeping lexical ranking:', (e as Error)?.message);
+    }
+  }
   // Driven by turnContext, not by re-reading the maps: an expired pending can never reach this line
   // as a message source, whatever else moves around it.
   const messages: NativeMessage[] =
@@ -8161,34 +8258,6 @@ export async function handleChatSend(
   const turnStartedAt = Date.now();
   turnDeadlines.set(sessionId, turnStartedAt + TURN_HARD_DEADLINE_MS);
 
-  // Ask the aux model which stored skills this turn is about, BEFORE the (synchronous) prefix build.
-  // The lexical ranker returns `matched 0 → global fallback` on nearly every turn here — the owner writes
-  // Chinese and the skill corpus is English, so token overlap is zero by construction. See
-  // skill_relevance_llm. Best-effort: no opinion → the existing ranking stands untouched.
-  try {
-    const pool = memory.skills.listAllForMaintenance(400);
-    const picked = await selectSkillsByAux(
-      userMessage,
-      pool.map((s) => ({ name: s.name, description: s.description, whenToUse: s.whenToUse })),
-      6,
-      {
-        onOutcome: (outcome) => {
-          if (outcome.result === 'fallback') {
-            console.log(
-              `[skill-relevance] result=fallback reason=${outcome.reason} candidates=${pool.length}` +
-                (outcome.error ? ` error=${JSON.stringify(outcome.error)}` : ''),
-            );
-          }
-        },
-      },
-    );
-    if (picked && picked.length > 0) {
-      signalBus.skillRelevanceNames = picked;
-      console.log(`[skill-relevance] aux picked ${picked.length}: ${picked.join(', ')}`);
-    }
-  } catch (e) {
-    console.warn('[skill-relevance] selector failed, keeping lexical ranking:', (e as Error)?.message);
-  }
   // plan_protocol_gate reads this to distinguish a terminal plan closed THIS turn (same-task follow-up →
   // auto-fast ok) from a STALE terminal plan left by a prior task (must not downgrade a new slow task).
   signalBus.turnStartedAt = turnStartedAt;
@@ -11628,6 +11697,10 @@ async function runToolLoop(
   // Trigger logic: reflection.signature looks like `<toolName>:<errorClass>` → extract toolName
   // as the block list for the remainder of this turn. Auto-cleared on the next user turn (variable is turn-local).
   let blockedToolAfterReflection: string | null = null;
+  // Mechanical syntax failures need one fix-and-retry, but not an unlimited loop. Production's top
+  // signature was pariGp brace syntax (38 occurrences); after the 2x reminder allow exactly one retry.
+  let mechanicalRetryTool: string | null = null;
+  let mechanicalRetriesRemaining = 0;
   // Phase 11 (2026-05-14): ResearchBeforeRetry — must do research before retrying business tools after failure.
   // in-turn-reflection triggered + no research calls this turn → set flag.
   // Any business tool (non-research / non-plan-gate-exempt) is blocked until the LLM makes one
@@ -11743,6 +11816,13 @@ async function runToolLoop(
         // tools → deadlock (prod 2026-06-17). For mechanical errors: give the fix-it reminder, skip the gates.
         const mechanicalFailure = isMechanicalFailure(reflection.signature);
         if (mechanicalFailure) memory.metrics.increment('inturn.mechanical');
+        if (mechanicalFailure && reflection.signature) {
+          const colonIdx = reflection.signature.indexOf(':');
+          if (colonIdx > 0) {
+            mechanicalRetryTool = reflection.signature.slice(0, colonIdx);
+            mechanicalRetriesRemaining = 1;
+          }
+        }
         pushGateDirective(
           messages,
           mechanicalFailure
@@ -12266,6 +12346,26 @@ async function runToolLoop(
             meta: { gateName: 'EmptyConclusion' },
           });
           continue;
+        }
+      }
+      // The regeneration itself can also come back empty (production 2026-08-22 10:46). Previously the
+      // turn was labelled response and WeChat logged `produced no text`; never let a completed tool turn
+      // disappear silently. This fallback contains only ledger counts, so it cannot fabricate a result.
+      if (emptyConclusionAttempts >= 1) {
+        const stillEmpty = evaluateEmptyConclusion({
+          toolCallsThisTurn: totalToolCallsThisTurn,
+          finalText: response.content,
+        });
+        if (stillEmpty.shouldRegenerate) {
+          const fallback = renderEmptyConclusionFallback(
+            signalBus.inTurnRecords ?? [],
+            statusLang === 'en' ? 'en' : 'zh',
+          );
+          response = { ...response, content: fallback };
+          memory.metrics.increment('empty_conclusion.fallback_emitted');
+          console.error(
+            `[empty-conclusion] session=${safeSessionId(sessionId)} regeneration stayed empty; emitted deterministic fallback`,
+          );
         }
       }
 
@@ -12849,6 +12949,21 @@ async function runToolLoop(
         });
         continue;
       }
+      if (mechanicalRetryTool !== null && call.name === mechanicalRetryTool) {
+        if (mechanicalRetriesRemaining > 0) {
+          mechanicalRetriesRemaining--;
+        } else {
+          const reason =
+            `[mechanical-retry-limit] ${call.name} already failed twice with the same mechanical error ` +
+            `and used its one repair retry this turn. Switch method or report the exact error; do not submit another variant.`;
+          console.warn(`[mechanical-retry-limit] session=${safeSessionId(sessionId)} rejected ${call.name}`);
+          memory.metrics.increment('inturn.mechanical_retry_blocked');
+          nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: reason });
+          totalToolCallsThisTurn++;
+          inTurnRecords.push({ toolName: call.name, success: false, resultText: reason });
+          continue;
+        }
+      }
 
       // Cleanup-turn scoping: a pure cleanup command must never perform external writes (prod:
       // clear turns fetched the guide and re-registered the service being cleared, burning invite
@@ -13151,6 +13266,12 @@ async function runToolLoop(
         resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
         toolInput: call.name === 'http' ? (call.input as Record<string, unknown>) : undefined,
       });
+      if (result.success && mechanicalRetryTool === call.name) {
+        // The repair worked: this is no longer the same mechanical wall, so normal multi-call
+        // compute workflows may continue. Only a failed repair exhausts the turn-local latch.
+        mechanicalRetryTool = null;
+        mechanicalRetriesRemaining = 0;
+      }
       // Layer 0.5: subsequent turn actions go into the global timeline
       memory.actions.log({
         sessionId: GLOBAL_TIMELINE_SESSION_ID,

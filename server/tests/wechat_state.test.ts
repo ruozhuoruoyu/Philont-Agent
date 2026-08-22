@@ -156,7 +156,7 @@ test('deleteAccount 删除全部本地文件', async () => {
   assert.equal(existsSync(s.getAccountDir('tmp')), false);
 });
 
-test('writeContextTokens + readContextTokens round-trip', async () => {
+test('writeContextTokens atomically preserves cursor and durable message-id window', async () => {
   const s = await loadState();
   s.writeCredentials({
     accountId: 'ctx',
@@ -165,8 +165,10 @@ test('writeContextTokens + readContextTokens round-trip', async () => {
     cdnBaseUrl: 'c',
     createdAt: 0,
   });
-  s.writeContextTokens('ctx', { cursor: 'sync_cursor_123', last: 42 });
-  assert.deepEqual(s.readContextTokens('ctx'), { cursor: 'sync_cursor_123', last: 42 });
+  s.writeContextTokens('ctx', { cursor: 'sync_cursor_123', processed_message_ids: ['m1', 'm2'] });
+  assert.deepEqual(s.readContextTokens('ctx'), {
+    cursor: 'sync_cursor_123', processed_message_ids: ['m1', 'm2'],
+  });
 });
 
 test('acquireLock 第一次成功 → null, 第二次返回 existing info', async () => {

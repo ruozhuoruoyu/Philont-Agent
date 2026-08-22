@@ -136,6 +136,8 @@ export interface InboundMessage {
   chat_room_id?: string;
   context_token?: string;
   item_list?: InboundItem[];
+  /** Production iLink currently emits this epoch-ms field (rather than send_time). */
+  create_time_ms?: number;
   /** epoch s */
   send_time?: number;
 }

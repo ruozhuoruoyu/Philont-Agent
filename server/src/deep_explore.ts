@@ -2836,6 +2836,10 @@ export interface DeepExploreDeps {
    *  carries the round's milestone summary (nodes expanded / lemmas proved) to the user-facing
    *  status stream so multi-minute rounds are not silent. */
   onMilestone?: (text: string) => void;
+  /** Completed plan/filesystem work that may settle a still-open tree node. The tree remains the
+   * source of proof status: this evidence is surfaced for an explicit reason_record, never used
+   * to auto-prove a node by fuzzy text matching. */
+  getExternalVerificationEvidence?: (owner: string) => string[];
 }
 
 export function createDeepExploreTool(
@@ -3072,9 +3076,16 @@ export function createDeepExploreTool(
     // record the starting frontier ids for UCB visit accounting.
     const before = reasoning.getNodes(session.id);
     const frontierStartIds = new Set(computeFrontier(before).map((n) => n.id));
+    const externalEvidence = deps.getExternalVerificationEvidence?.(session.ownerSessionId ?? '') ?? [];
+    const reconciliationPrompt = externalEvidence.length
+      ? `\n\n## External verification ledger (reconcile with the tree now)\n` +
+        externalEvidence.slice(0, 8).map((e) => `- ${e}`).join('\n') +
+        `\nIf one entry establishes the active node, call reason_record with that exact evidence. ` +
+        `Do not leave a completed filesystem/plan item open, and do not infer a proof from a filename alone.`
+      : '';
     const systemPrompt =
       AGENT_SELF_REFERENCE_NOTE + '\n\n' +
-      profile.buildConvergePrompt(session, before, collectComputeLessons(skills, session.goal));
+      profile.buildConvergePrompt(session, before, collectComputeLessons(skills, session.goal)) + reconciliationPrompt;
     const userMessage =
       profile.buildUserMessage(session, before.length <= 1) + buildStuckDirective(session.noProgressRounds ?? 0);
 
@@ -3707,11 +3718,15 @@ export function createDeepExploreTool(
         const frontier = computeFrontier(nodes);
         const proved = nodes.filter((n) => n.status === 'proved').length;
         const dead = nodes.filter((n) => n.status === 'dead_end').length;
+        const externalEvidence = deps.getExternalVerificationEvidence?.(owner ?? '') ?? [];
         return {
           success: true,
           output:
             `Reasoning session "${session.goal}" (${session.id}): proved ${proved} / open ${frontier.length} / dead ends ${dead}.` +
-            (frontier.length ? `\nCurrent frontier: ${frontier.slice(0, 5).map((n) => n.claim).join(' / ')}` : ''),
+            (frontier.length ? `\nCurrent frontier: ${frontier.slice(0, 5).map((n) => n.claim).join(' / ')}` : '') +
+            (externalEvidence.length
+              ? `\nExternal verified work awaiting explicit tree reconciliation: ${externalEvidence.slice(0, 5).join(' / ')}`
+              : ''),
         };
       }
 

@@ -97,3 +97,18 @@ test('P1 flag-ON wiring: a query-relevant positive skill is selected into the pr
     else process.env.PHILONT_SKILL_RECALL_RELEVANCE = prev;
   }
 });
+
+test('aux picks already present on the turn signal are rendered into that same fresh prefix', () => {
+  const uniq = 'aux-same-turn-cross-language-pick';
+  memory.skills.createSkill({
+    name: uniq,
+    description: 'A deliberately cross-language skill selected only by the auxiliary model.',
+    triggerKeywords: ['never-lexically-matches-this-query'],
+    actionTemplate: '',
+    whenToUse: 'Only when the auxiliary semantic selector explicitly chooses it.',
+    kind: 'positive',
+    maturity: 'confirmed',
+  });
+  const prefix = buildMemoryPrefix('继续数学证明', { skillRelevanceNames: [uniq] } as any);
+  assert.ok(prefix.includes(uniq), 'the aux decision must be consumed before fresh messages are built');
+});

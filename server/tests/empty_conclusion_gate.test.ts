@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateEmptyConclusion } from '@agent/memory';
+import { renderEmptyConclusionFallback } from '../src/chat-handler.js';
 
 test('empty_conclusion_gate: 0 tool call + 空 → 不触发', () => {
   const r = evaluateEmptyConclusion({ toolCallsThisTurn: 0, finalText: '' });
@@ -24,6 +25,15 @@ test('empty_conclusion_gate: 1 tool call + 仅空白 → empty_after_tools', () 
   const r = evaluateEmptyConclusion({ toolCallsThisTurn: 1, finalText: '   \n\t  ' });
   assert.equal(r.shouldRegenerate, true);
   assert.equal(r.reason, 'empty_after_tools');
+});
+
+test('second empty response has a deterministic nonempty channel fallback', () => {
+  const text = renderEmptyConclusionFallback([
+    { toolName: 'readFile', success: true },
+    { toolName: 'leanCheck', success: false },
+  ]);
+  assert.match(text, /2 次工具调用/);
+  assert.match(text, /1 次成功、1 次失败/);
 });
 
 test('empty_conclusion_gate: 3 tool call + "." → too_short_after_tools (PDF→Word case)', () => {

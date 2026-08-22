@@ -29,6 +29,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
   statSync,
@@ -99,6 +100,28 @@ function writeSecure(path: string, content: string): void {
   }
 }
 
+let atomicWriteSeq = 0;
+
+/** Write a complete replacement beside the target, then publish it in one filesystem operation. */
+function writeSecureAtomic(path: string, content: string): void {
+  const tmp = `${path}.tmp-${process.pid}-${++atomicWriteSeq}`;
+  try {
+    writeSecure(tmp, content);
+    try {
+      renameSync(tmp, path);
+    } catch (e) {
+      // Windows does not consistently replace an existing destination. The complete temp file
+      // remains available, so remove only the old target and retry the rename once.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (process.platform !== 'win32' || !['EEXIST', 'EPERM', 'EACCES'].includes(code ?? '')) throw e;
+      rmSync(path, { force: true });
+      renameSync(tmp, path);
+    }
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
 /** List configured accountIds (directory existence = configured; credentials.json need not exist yet). */
 export function listAccounts(): string[] {
   const accountsDir = join(getWeChatRoot(), 'accounts');
@@ -155,7 +178,7 @@ export function writeContextTokens(accountId: string, payload: unknown): void {
   const dir = getAccountDir(accountId);
   ensureDir(dir);
   const path = join(dir, '.context-tokens.json');
-  writeSecure(path, JSON.stringify(payload));
+  writeSecureAtomic(path, JSON.stringify(payload));
 }
 
 /** Read context-tokens; returns null if missing or corrupted — caller decides whether to poll from scratch. */

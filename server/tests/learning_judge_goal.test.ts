@@ -63,3 +63,10 @@ test('a substantive fresh message is never overridden by history', () => {
     '明天早上7点提醒我吃早饭',
   );
 });
+
+test('a concrete active plan/tree step wins over a directional continuation goal', () => {
+  assert.equal(
+    resolveJudgeGoal('继续做 lrc 证明', '继续', false, undefined, 'Prove region3_chain and compile Region3Chain.lean'),
+    'Prove region3_chain and compile Region3Chain.lean',
+  );
+});
