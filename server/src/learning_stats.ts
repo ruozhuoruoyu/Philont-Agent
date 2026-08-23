@@ -57,6 +57,24 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
     lines.push(
       `  auto-injected lessons: playbook turns=${get('playbook.inject.turns')} anti-pattern turns=${get('antipattern.inject.turns')}`,
     );
+    // THE ONLY LINES HERE THAT ARE EFFECT AND NOT ACTIVITY.
+    //
+    // Everything above counts what the learning layer PRODUCED — rules written, reminders fired,
+    // lessons injected. None of it can distinguish a system that learns from one that writes notes,
+    // which is how "reflect.fire=753 / routing_rule=800" sat next to the same tool failure recurring
+    // 38 times in the same week and read like health. These two count what CHANGED instead.
+    const recurNew = get('learning.recurrence_after_rule.cross_turn');
+    const recurSame = get('learning.recurrence_after_rule.intra_turn');
+    lines.push(
+      `  recurrence AFTER a rule was known: ${recurNew + recurSame} ` +
+        `(new turn=${recurNew} — the rule did not stick; same turn=${recurSame} — the error text was ignored)`,
+    );
+    const applied = get('learning.repair.applied');
+    lines.push(
+      `  mechanism-applied repairs: applied=${applied} verified=${get('learning.repair.verified')} ` +
+        `failed=${get('learning.repair.failed')} (verified ${pct(get('learning.repair.verified'), applied)}) — ` +
+        `a rule whose verified count never moves is a note, not a behaviour change`,
+    );
   } catch (e) {
     lines.push(`  [counters error: ${(e as Error)?.message}]`);
   }

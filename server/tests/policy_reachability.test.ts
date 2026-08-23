@@ -54,6 +54,13 @@ const BARE_EXECUTE_EXCEPTIONS: Array<{ contains: string; why: string }> = [
     contains: 'result = await tools.execute(call.name, sanitized2.input);',
     why: 'main tool loop second iteration, after checker() decided this call',
   },
+  {
+    contains: 'run: (input) => tools.execute(call.name, input),',
+    why:
+      'mechanism-initiated repair — a rewrite is a different call than the one that was approved, so ' +
+      'attemptMechanicalRepair puts the REWRITTEN arguments back through checker() (isSafeToRerun) and ' +
+      'runs this only when that returns allowed',
+  },
 ];
 
 function callSites(source: string, needle: RegExp): Array<{ line: number; text: string }> {

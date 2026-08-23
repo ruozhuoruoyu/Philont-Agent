@@ -259,8 +259,16 @@ import {
   detectInTurnFailurePattern,
   isMechanicalFailure,
   buildMechanicalFixReminder,
+  authoringCheatsheet,
   type InTurnToolRecord,
 } from './in_turn_reflection.js';
+import {
+  attemptMechanicalRepair,
+  classifyRecurrence,
+  mechanicalRepairEnabled,
+  recurrenceMetricKey,
+  renderRepairNotice,
+} from './mechanical_repair.js';
 import { scheduledTurnMadeProgress } from './schedule_progress.js';
 import { maybeRunReflection } from './reflection_runner.js';
 import { selectSkillsByAux } from './skill_relevance_llm.js';
@@ -11031,6 +11039,92 @@ async function runToolLoop(
   statusLang: PhraseLang = 'en',
 ): Promise<{ outcome: { outcomeType: string; text?: string; reason?: string }; auditEvents: number }> {
 
+  // A LEARNED RULE THAT ONLY REACHES THE PROMPT IS ADVICE, NOT LEARNING.
+  //
+  // The rule for the top failure signature was already stored, already printed in the tool's own error
+  // text, and already injected — and the same signature failed 38 times in the week of 2026-08-22. So
+  // once a rule exists for a mechanical failure, the mechanism applies it itself and re-runs the tool,
+  // instead of asking the model to remember. The tool is the verifier; nothing below knows what any
+  // tool's arguments mean. One attempt per signature per turn, and only signatures that already have a
+  // rule — a repairer that guesses is how a learning layer poisons itself.
+  const repairAttemptedSignatures = new Set<string>();
+  const failedSignaturesThisTurn = new Set<string>();
+  const maybeMechanicalRepair = async (
+    call: { name: string; input: Record<string, unknown> },
+    failed: ToolResult,
+  ): Promise<{ result: ToolResult; notice: string }> => {
+    if (failed.success) return { result: failed, notice: '' };
+    const errorText = failed.error ?? failed.output ?? '';
+    const signature = extractFailureSignature(call.name, errorText);
+    if (!signature || !isMechanicalFailure(signature)) return { result: failed, notice: '' };
+    const rules = [
+      ...authoringCheatsheet(signature).filter((l) => l.trim()),
+      ...learnedCheatsheet(signature, memory.facts),
+    ];
+    // The one honest effect metric: a signature recurring AFTER its rule was known. Counted whether or
+    // not a repair runs, so "we learned it and it kept happening" stays visible either way — and split,
+    // because the two halves have different culprits. Within one turn the model already has the error
+    // text in front of it and submitted another variant anyway; across turns the stored rule did not
+    // survive the trip into the next prompt. A single mixed bucket (the shape of `pariGp:gp-other ×38`)
+    // can prove neither.
+    const bucket = classifyRecurrence(rules.length > 0, failedSignaturesThisTurn.has(signature));
+    if (bucket) memory.metrics.increment(recurrenceMetricKey(bucket));
+    failedSignaturesThisTurn.add(signature);
+    // Measurement runs whether or not repair is armed — otherwise the flag-off period has no baseline
+    // to compare the flag-on period against, and "did this help?" stays unanswerable in exactly the way
+    // that produced the question.
+    if (!mechanicalRepairEnabled()) return { result: failed, notice: '' };
+    if (repairAttemptedSignatures.has(signature)) return { result: failed, notice: '' };
+    repairAttemptedSignatures.add(signature);
+    try {
+      const outcome = await attemptMechanicalRepair({
+        signature,
+        toolName: call.name,
+        toolInput: call.input,
+        errorText,
+        rules,
+        facts: memory.facts,
+        // A REWRITE IS A DIFFERENT CALL THAN THE ONE THAT WAS APPROVED.
+        //
+        // So the rewritten arguments go back through the same checker the model's own call passed —
+        // matrix, grants, validator chain, path ACL, command gate — rather than through a hand-picked
+        // predicate. Denied means no repair, not a repair that failed: the rule is not charged for it.
+        isSafeToRerun: async (input) =>
+          (await checker({ toolName: call.name, approval: 'never', params: JSON.stringify(input) })) === null,
+        // Re-authorized immediately above by checker() on these exact arguments (see isSafeToRerun).
+        run: (input) => tools.execute(call.name, input),
+      });
+      if (!outcome.attempted || !outcome.result) {
+        if (outcome.reason && outcome.reason !== 'disabled' && outcome.reason !== 'no-rule') {
+          console.log(`[auto-repair] session=${safeSessionId(sessionId)} ${signature} skipped (${outcome.reason})`);
+        }
+        return { result: failed, notice: '' };
+      }
+      memory.metrics.increment('learning.repair.applied');
+      memory.metrics.increment(outcome.verified ? 'learning.repair.verified' : 'learning.repair.failed');
+      console.log(
+        `[auto-repair] session=${safeSessionId(sessionId)} ${signature} ` +
+          `${outcome.verified ? 'verified' : 'still failing'} ` +
+          `(applied=${outcome.stats?.applied ?? 0} verified=${outcome.stats?.verified ?? 0})`,
+      );
+      // Built field by field, not spread over the failure: a spread leaves the old `error` string
+      // standing on a now-successful result, and every downstream reader of `error` would see a turn
+      // that both succeeded and failed.
+      return {
+        result: {
+          success: outcome.result.success,
+          output: outcome.result.output ?? '',
+          error: outcome.result.success ? undefined : outcome.result.error,
+          duration: failed.duration,
+        },
+        notice: renderRepairNotice(call.name, rules, outcome.verified === true),
+      };
+    } catch (e) {
+      console.warn(`[auto-repair] ${signature} threw (ignored):`, (e as Error)?.message);
+      return { result: failed, notice: '' };
+    }
+  };
+
   // THE INPUT IS PART OF THE AUTHORIZATION DECISION, SO THE DECIDER HAS TO SEE IT.
   //
   // This lambda dropped its second argument. createToolChecker passes the parsed params in — that is
@@ -11516,6 +11610,11 @@ async function runToolLoop(
         result = await tools.execute(call.name, sanitized.input);
       }
     }
+    const repair = await maybeMechanicalRepair(
+      { name: call.name, input: (sanitized.input ?? call.input) as Record<string, unknown> },
+      result,
+    );
+    result = repair.result;
     const outPreview = (result.success ? result.output : result.error) ?? '';
     console.log(
       `[tool] ${call.name} → ${result.success ? 'ok' : 'fail'}: ${String(outPreview).slice(0, 200)}`
@@ -11593,7 +11692,7 @@ async function runToolLoop(
       return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
     }
 
-    const rawResultText = formatToolResultContent(result);
+    const rawResultText = formatToolResultContent(result) + repair.notice;
     toolResults.push({
       type: 'tool_result',
       tool_use_id: call.id,
@@ -13243,6 +13342,11 @@ async function runToolLoop(
           result = await tools.execute(call.name, sanitized2.input);
         }
       }
+      const repair2 = await maybeMechanicalRepair(
+        { name: call.name, input: (sanitized2.input ?? call.input) as Record<string, unknown> },
+        result,
+      );
+      result = repair2.result;
       onTrace?.({
         kind: 'tool-result', tier: 3,
         text: summarizeToolResult(result),
@@ -13251,7 +13355,7 @@ async function runToolLoop(
       if (!result.success) {
         onStatus?.(semanticToolFailPhrase(call.name, statusLang));
       }
-      const rawResultText = formatToolResultContent(result);
+      const rawResultText = formatToolResultContent(result) + repair2.notice;
       nextResults.push({
         type: 'tool_result',
         tool_use_id: call.id,
