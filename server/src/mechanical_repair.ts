@@ -44,8 +44,9 @@
  * production counters, not evidence that anything changed. A rule whose `verified` never moves is a
  * note; a rule whose `verified` climbs is muscle memory, and the difference is now visible.
  *
- * Default OFF (`PHILONT_MECHANICAL_REPAIR=1` to arm): it spends an aux call and a tool re-run on a
- * path that already had a working, if slower, recovery.
+ * Default ON after the historical no-repair baseline was established. Set
+ * `PHILONT_MECHANICAL_REPAIR=0/off/false/no` to stop mechanism-initiated retries while leaving
+ * recurrence measurement active.
  */
 
 import { callAuxLLM, isAuxLLMConfigured } from '@agent/tools';
@@ -73,7 +74,7 @@ export const EMPTY_REPAIR_STATS: RepairStats = { applied: 0, verified: 0, failed
 
 export function mechanicalRepairEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const v = (env.PHILONT_MECHANICAL_REPAIR ?? '').trim().toLowerCase();
-  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
 /** Never throws: a missing or malformed counter must not stop a repair from being attempted. */

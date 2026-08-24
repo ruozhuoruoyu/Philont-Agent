@@ -131,18 +131,23 @@ function baseOpts(overrides: Record<string, unknown> = {}) {
   } as Parameters<typeof attemptMechanicalRepair>[0];
 }
 
-test('off by default: nothing is asked and nothing is re-run', async () => {
-  assert.equal(mechanicalRepairEnabled({} as NodeJS.ProcessEnv), false);
+test('kill switch off: nothing is asked and nothing is re-run', async () => {
+  assert.equal(mechanicalRepairEnabled({ PHILONT_MECHANICAL_REPAIR: '0' } as NodeJS.ProcessEnv), false);
   let asked = 0;
   let ran = 0;
   const out = await attemptMechanicalRepair(
     baseOpts({
-      env: {} as NodeJS.ProcessEnv,
+    env: { PHILONT_MECHANICAL_REPAIR: '0' } as NodeJS.ProcessEnv,
       ask: async () => { asked++; return '{"script":"good"}'; },
       run: async () => { ran++; return { success: true }; },
     }),
   );
   assert.deepEqual({ attempted: out.attempted, reason: out.reason, asked, ran }, { attempted: false, reason: 'disabled', asked: 0, ran: 0 });
+});
+
+test('mechanical repair is enabled by default for the production experiment', () => {
+  assert.equal(mechanicalRepairEnabled({} as NodeJS.ProcessEnv), true);
+  assert.equal(mechanicalRepairEnabled({ PHILONT_MECHANICAL_REPAIR: 'off' } as NodeJS.ProcessEnv), false);
 });
 
 test('with no rule for the signature it does not guess — no aux call, no re-run', async () => {

@@ -184,6 +184,8 @@ const FIELDS: Field[] = [
   // ══ 能力开关 ══
   { key: 'PHILONT_DEEP_EXPLORE', label: { zh: '深度推理', en: 'Deep Reasoning' }, type: 'bool', group: '能力开关', defaultOn: true,
     help: { zh: '复杂任务用 deep_explore 多步推理(扩展思考)。默认开,关掉可省配额。', en: 'deep_explore multi-step reasoning for hard tasks. On by default; turn off to save quota.' } },
+  { key: 'PHILONT_MECHANICAL_REPAIR', label: { zh: '已学机械修复自动重试', en: 'Learned Mechanical Repair' }, type: 'bool', group: '能力开关', defaultOn: true,
+    help: { zh: '工具遇到已学会的机械错误时,用辅助模型按已验证规则改写参数,重走权限检查后最多自动重试一次。默认开。', en: 'On a known mechanical tool failure, rewrites the arguments with the learned rule, re-runs the full authorization check, and retries at most once. On by default.' } },
   { key: 'PHILONT_MCP_BROWSER', label: { zh: '浏览器自动化', en: 'Browser Automation' }, type: 'bool', group: '能力开关',
     help: { zh: '启用 Playwright 浏览器工具(首次会拉起 MCP;需已装 Playwright)。默认关。', en: 'Enable the Playwright browser tool (spins up MCP on first use; needs Playwright installed). Off by default.' } },
 
