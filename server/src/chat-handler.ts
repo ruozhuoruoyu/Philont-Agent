@@ -20,7 +20,7 @@ import {
   type ToolCheckInput,
 } from '@agent/policy';
 import type { ToolDefinition, ToolResult } from '@agent/policy';
-import type { ReasoningSession, InitiativeStore } from '@agent/memory';
+import type { ReasoningNode, ReasoningSession, InitiativeStore } from '@agent/memory';
 import {
   createToolset,
   loadSkills,
@@ -157,6 +157,7 @@ import {
   findCompletionClaim,
   findRunPromise,
   findActionAnnouncement,
+  isStrictFormalVerificationCommand,
   turnDidExecute,
   renderSkillOffer,
 } from '@agent/memory';
@@ -2755,6 +2756,38 @@ let deepExploreAdvanceSession: ((session: ReasoningSession) => Promise<ToolResul
 export const DEEP_EXPLORE_VERIFY_TOOL_NAMES = new Set([
   'z3Verify', 'pariGp', 'leanCheck', 'magnitude', 'lemmaLookup',
 ]);
+
+const formalVerificationEvidenceBySession = new Map<string, string[]>();
+
+/** Strict enough that `lean --version` cannot masquerade as proof/build verification. */
+export function extractFormalVerificationEvidence(
+  toolName: string,
+  input: Record<string, unknown>,
+  result: Pick<ToolResult, 'success' | 'output'>,
+): string | null {
+  if (!result.success) return null;
+  const output = (result.output ?? '').replace(/\s+/g, ' ').trim();
+  if (toolName === 'leanCheck' || toolName === 'z3Verify') {
+    return `${toolName}: ${output.slice(0, 500) || 'verified successfully'}`;
+  }
+  if (toolName !== 'shell' && toolName !== 'process') return null;
+  const command = String(input.command ?? input.cmd ?? '').replace(/\s+/g, ' ').trim();
+  if (!isStrictFormalVerificationCommand(command)) return null;
+  return `${toolName}: ${command.slice(0, 240)} → ${output.slice(0, 500) || 'exit 0'}`;
+}
+
+function rememberFormalVerificationEvidence(
+  sessionId: string,
+  toolName: string,
+  input: Record<string, unknown>,
+  result: Pick<ToolResult, 'success' | 'output'>,
+): void {
+  const evidence = extractFormalVerificationEvidence(toolName, input, result);
+  if (!evidence) return;
+  const prior = formalVerificationEvidenceBySession.get(sessionId) ?? [];
+  formalVerificationEvidenceBySession.set(sessionId, [...prior.filter((e) => e !== evidence), evidence].slice(-12));
+}
+
 if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
   const readOnlyToolDefs: ToolDefinition[] = tools.list()
     .filter((t) => DEFAULT_TOOL_WHITELIST.has(t.name) || DEEP_EXPLORE_VERIFY_TOOL_NAMES.has(t.name))
@@ -2772,12 +2805,12 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     getExternalVerificationEvidence: (owner) => {
       try {
         const plan = memory.plans.listBySession(owner, { limit: 1 })[0];
-        if (!plan) return [];
-        return plan.steps
+        const planEvidence = plan ? plan.steps
           .filter((s) => s.status === 'done' && !!s.evidence?.trim())
-          .map((s) => `${s.description}: ${s.evidence!.trim()}`);
+          .map((s) => `${s.description}: ${s.evidence!.trim()}`) : [];
+        return [...planEvidence, ...(formalVerificationEvidenceBySession.get(owner) ?? [])].slice(-12);
       } catch {
-        return [];
+        return formalVerificationEvidenceBySession.get(owner) ?? [];
       }
     },
     onStatus: (text) => console.log(`[deep-explore] ${text}`),
@@ -5222,6 +5255,7 @@ export function collapseFactSeries<T extends { key: string }>(
 export function trimPrefixToCap(
   raw: string,
   cap: number,
+  opts: { query?: string } = {},
 ): { text: string; trimmed: Array<{ title: string; cut: number }> } {
   if (raw.length <= cap) return { text: raw, trimmed: [] };
 
@@ -5242,7 +5276,30 @@ export function trimPrefixToCap(
   const trimmed: Array<{ title: string; cut: number }> = [];
   let overflow = raw.length - cap;
 
-  for (const prefix of PREFIX_TRIM_ORDER) {
+  const relevanceTokens = (() => {
+    const q = (opts.query ?? '').toLowerCase();
+    const tokens: string[] = q.match(/[a-z0-9_+-]{2,}/g) ?? [];
+    const cjk = [...q.replace(/[^\p{Script=Han}]/gu, '')];
+    for (let i = 0; i + 1 < cjk.length; i++) tokens.push(cjk[i]! + cjk[i + 1]!);
+    return [...new Set(tokens)];
+  })();
+  const sectionRelevance = (prefix: string): number => {
+    if (relevanceTokens.length === 0) return 0;
+    const content = bounds
+      .map((b, i) => b.title.startsWith(prefix) ? pieces[i].toLowerCase() : '')
+      .join('\n');
+    return relevanceTokens.reduce((score, token) => score + (content.includes(token) ? 1 : 0), 0);
+  };
+  // With a task query, sacrifice unrelated bulky sections first. Stable tie-breaking preserves the
+  // historical safety order; without a query this is byte-for-byte the old behavior.
+  const trimOrder = relevanceTokens.length === 0
+    ? [...PREFIX_TRIM_ORDER]
+    : [...PREFIX_TRIM_ORDER].sort(
+        (a, b) => sectionRelevance(a) - sectionRelevance(b)
+          || PREFIX_TRIM_ORDER.indexOf(a) - PREFIX_TRIM_ORDER.indexOf(b),
+      );
+
+  for (const prefix of trimOrder) {
     if (overflow <= 0) break;
     for (let i = 0; i < bounds.length && overflow > 0; i++) {
       if (!bounds[i].title.startsWith(prefix)) continue;
@@ -6327,7 +6384,7 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
   // Total limit gate — even when each section was truncated, the sum can still exceed the limit.
   // Exceeding the total limit necessarily indicates a bug (too many facts? a section truncation not effective?); this is the last line of defense.
   if (raw.length > MEMORY_PREFIX_TOTAL_CAP) {
-    const { text, trimmed } = trimPrefixToCap(raw, MEMORY_PREFIX_TOTAL_CAP);
+    const { text, trimmed } = trimPrefixToCap(raw, MEMORY_PREFIX_TOTAL_CAP, { query: recallQuery });
     console.warn(
       `[memory-prefix] over cap ${raw.length} → ${text.length} chars, trimmed: ` +
         (trimmed.length > 0
@@ -7169,11 +7226,23 @@ export function resolveJudgeGoal(
   resumedFromAuth: boolean,
   lastRoutedGoal?: string,
   activeWorkGoal?: string,
+  turnAdvancedActiveWork = false,
 ): string | null {
   // A concrete machine-facing step is a better judging target than an owner's directional
   // instruction ("continue the proof"). Production 2026-08-22 had real Lean artifacts and
   // verifier calls in every turn, yet 5/5 samples were labelled not_applicable because the
   // judge only saw "继续做 lrc 证明". Prefer the active plan/tree leaf when one exists.
+  const msg = (userMessage ?? '').trim();
+  // A fresh, self-contained owner request is the goal of THIS turn. Neither a carried exploration
+  // goal nor a stale plan/tree leaf may confiscate a new instruction. Short status questions are
+  // treated as self-contained only when the turn remained observational; if the turn actually ran an
+  // execution/verifier, score the concrete plan/tree step it advanced instead.
+  const shortSelfContainedStatus =
+    /^(?:总结|概括|列出|解释|分析|检查|查看|告诉我)/.test(msg) ||
+    /(?:有进展|下一步|下面怎么做|怎么做|如何|为什么|是什么|吗)[？?]?$/.test(msg);
+  if (!resumedFromAuth && (messageIsSelfContainedGoal(msg) || (!turnAdvancedActiveWork && shortSelfContainedStatus))) {
+    return msg;
+  }
   const activeWork = (activeWorkGoal ?? '').trim();
   if (activeWork) return activeWork;
   const carried = (carriedGoal ?? '').trim();
@@ -7187,7 +7256,6 @@ export function resolveJudgeGoal(
   // IS the goal those turns are executing; judging against it is right, and it is nothing like judging
   // against the word "ok" that the 07-22 fix removed. With no such goal, still emit nothing.
   if (resumedFromAuth) return lastRouted.length >= 12 ? lastRouted : null;
-  const msg = (userMessage ?? '').trim();
   // A bare continuation word sent as a FRESH message — "ok", "继续" — is not a goal either; the auth-resume
   // fix did not cover it, and the judge duly burned an aux call concluding 'The goal "ok" is too vague to
   // determine what constitutes success' (2026-07-24 16:50, the second appearance of that exact sentence).
@@ -7198,6 +7266,56 @@ export function resolveJudgeGoal(
     return lastRoutedGoal!.trim();
   }
   return msg;
+}
+
+/** Nodes that require an owner/manual action are acceptance chores, not work the current agent turn can achieve. */
+export function isExternalAcceptanceNode(claim: string): boolean {
+  const text = claim.replace(/\s+/g, ' ').trim();
+  if (!text) return false;
+  return (
+    /^(?:验收|人工验收|用户验收)[：:]/i.test(text) ||
+    /(?:用户|你|owner|user)\s*(?:在本机)?\s*(?:执行|运行|run|execute)/i.test(text) ||
+    /(?:等待|请)\s*(?:用户|你).{0,12}(?:确认|执行|运行|验收)/i.test(text) ||
+    /\b(?:manual|owner|user)\s+(?:acceptance|verification|run|execution)\b/i.test(text)
+  );
+}
+
+/** Same value/depth ranking used by the deep-explore final report, excluding external chores. */
+export function selectJudgeFrontierGoal(nodes: ReasoningNode[]): string | undefined {
+  return [...computeFrontier(nodes)]
+    .filter((n) => !isExternalAcceptanceNode(n.claim))
+    .sort((a, b) => (b.value ?? 0.5) - (a.value ?? 0.5) || a.depth - b.depth)[0]
+    ?.claim.trim() || undefined;
+}
+
+/** Query used by memory/skill relevance: continuations inherit the concrete active step. */
+export function resolveRecallInput(
+  userMessage: string,
+  activeWorkGoal?: string,
+  carriedGoal?: string,
+): string {
+  return messageIsSelfContainedGoal(userMessage)
+    ? userMessage
+    : (activeWorkGoal?.trim() || carriedGoal?.trim() || userMessage);
+}
+
+/** Current concrete work target shared by skill recall and the learning judge. */
+function activeWorkGoalForSession(sessionId: string): string | undefined {
+  try {
+    const plan = memory.plans.listBySession(sessionId, { limit: 1 })[0];
+    if (plan && (plan.status === 'draft' || plan.status === 'executing')) {
+      const step = plan.steps.find((s) => s.status === 'doing')
+        ?? plan.steps.find((s) => s.status === 'pending' || s.status === 'blocked');
+      if (step?.description.trim()) return `Complete plan step: ${step.description.trim()}`;
+    }
+    const reasoningSession = memory.reasoning.getMostRecentActiveSession(sessionId);
+    if (!reasoningSession) return undefined;
+    const leaf = selectJudgeFrontierGoal(memory.reasoning.getNodes(reasoningSession.id));
+    return leaf ? `Prove or refute the active reasoning node: ${leaf}` : undefined;
+  } catch (e) {
+    console.warn(`[active-work] lookup failed (ignored):`, e);
+    return undefined;
+  }
 }
 
 /** Last-resort channel text when the model stays empty after the one regeneration attempt. */
@@ -7240,31 +7358,14 @@ function shadowLearningJudge(
     const lastRouted = carriedIntent.get(sessionId);
     const lastRoutedFresh =
       lastRouted && Date.now() - lastRouted.ts <= INTENT_CARRY_TTL_MS ? lastRouted.goal : undefined;
-    let activeWorkGoal: string | undefined;
-    try {
-      const plan = memory.plans.listBySession(sessionId, { limit: 1 })[0];
-      if (plan && (plan.status === 'draft' || plan.status === 'executing')) {
-        const step = plan.steps.find((s) => s.status === 'doing')
-          ?? plan.steps.find((s) => s.status === 'pending' || s.status === 'blocked');
-        if (step?.description.trim()) activeWorkGoal = `Complete plan step: ${step.description.trim()}`;
-      }
-      if (!activeWorkGoal) {
-        const reasoningSession = memory.reasoning.getMostRecentActiveSession(sessionId);
-        if (reasoningSession) {
-          const frontier = computeFrontier(memory.reasoning.getNodes(reasoningSession.id));
-          const leaf = frontier[0]?.claim?.trim();
-          if (leaf) activeWorkGoal = `Prove or refute the active reasoning node: ${leaf}`;
-        }
-      }
-    } catch (e) {
-      console.warn(`[learning-judge] active work goal lookup failed (ignored):`, e);
-    }
+    const activeWorkGoal = activeWorkGoalForSession(sessionId);
     const resolved = resolveJudgeGoal(
       bus?.carriedExploreGoal,
       userMessage,
       resumedFromAuth,
       lastRoutedFresh,
       activeWorkGoal,
+      turnDidExecute(records),
     );
     if (!resolved) {
       // Nothing recoverable: emit no verdict rather than a meaningless one. A skipped sample is honest;
@@ -8206,9 +8307,11 @@ export async function handleChatSend(
     }
   }
 
-  const recallInput = messageIsSelfContainedGoal(userMessage)
-    ? userMessage
-    : (signalBus.carriedExploreGoal ?? userMessage);
+  const recallInput = resolveRecallInput(
+    userMessage,
+    activeWorkGoalForSession(sessionId),
+    signalBus.carriedExploreGoal,
+  );
 
   // Ask the aux model which stored skills this fresh turn is about BEFORE buildFreshMessages consumes
   // signalBus.skillRelevanceNames. Resumed inflight contexts deliberately skip this: their prompt is a
@@ -8217,7 +8320,7 @@ export async function handleChatSend(
     try {
       const pool = memory.skills.listAllForMaintenance(400);
       const picked = await selectSkillsByAux(
-        userMessage,
+        recallInput,
         pool.map((s) => ({ name: s.name, description: s.description, whenToUse: s.whenToUse })),
         6,
         {
@@ -11709,6 +11812,7 @@ async function runToolLoop(
       resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
       toolInput: call.name === 'http' ? (call.input as Record<string, unknown>) : undefined,
     });
+    rememberFormalVerificationEvidence(sessionId, call.name, call.input, result);
     // WS5: a successful use_skill makes that skill the turn's active linked skill, so the
     // actions that follow are attributed to it (reuse verification input for the reflector).
     if (call.name === 'use_skill' && result.success) {
@@ -13370,6 +13474,7 @@ async function runToolLoop(
         resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
         toolInput: call.name === 'http' ? (call.input as Record<string, unknown>) : undefined,
       });
+      rememberFormalVerificationEvidence(sessionId, call.name, call.input, result);
       if (result.success && mechanicalRetryTool === call.name) {
         // The repair worked: this is no longer the same mechanical wall, so normal multi-call
         // compute workflows may continue. Only a failed repair exhausts the turn-local latch.

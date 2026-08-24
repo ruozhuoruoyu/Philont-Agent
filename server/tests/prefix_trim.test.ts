@@ -69,6 +69,22 @@ test('learned lessons are the LAST thing sacrificed, not the first', () => {
   assert.ok(r.trimmed.some((t) => t.title.startsWith('Known project information')));
 });
 
+test('task-aware trimming preserves the project section that matches the current task', () => {
+  const raw =
+    'preamble\n' +
+    section('Known project information', 6_000, 'LRC region3 Lean proof ') +
+    section('Known user information', 6_000, 'generic preference ') +
+    section('Extended capabilities', 5_000, 'generic capability ') +
+    '[End of memory layer]';
+  const cap = raw.length - 3_000;
+  const r = trimPrefixToCap(raw, cap, { query: '继续 LRC region3 证明' });
+  assert.ok(r.text.length <= cap);
+  assert.ok(!r.trimmed.some((t) => t.title.startsWith('Known project information')));
+  assert.ok(
+    r.trimmed.some((t) => t.title.startsWith('Known user information') || t.title.startsWith('Extended capabilities')),
+  );
+});
+
 test('lessons ARE trimmed once everything else is at its floor (still a last resort, not immune)', () => {
   const raw =
     'preamble\n' +

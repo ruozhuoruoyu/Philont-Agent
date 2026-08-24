@@ -13,7 +13,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { buildChildEnv } from '../src/transport/stdio.js';
+import { buildChildEnv, buildStdioSpawnSpec } from '../src/transport/stdio.js';
 import { McpBridge } from '../src/bridge.js';
 
 const VERSION = '2025-06-18';
@@ -91,6 +91,34 @@ describe('child process environment', () => {
     assert.equal(env.SERVER_MODE, 'strict');
     assert.equal(env.WECHAT_TOKEN, 'wx-secret', 'an explicitly named variable is the operator\'s choice');
     assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  });
+});
+
+describe('stdio child spawn boundary', () => {
+  it('uses explicit cmd.exe argv on Windows and preserves spaces/percent signs', () => {
+    const spec = buildStdioSpawnSpec(
+      'npx.cmd',
+      ['-y', '@playwright/mcp', '--user-data-dir', 'C:\\Users\\A B\\profile', '100%'],
+      'win32',
+      'C:\\Windows\\System32\\cmd.exe',
+    );
+    assert.equal(spec.command, 'C:\\Windows\\System32\\cmd.exe');
+    assert.deepEqual(spec.args.slice(0, 4), ['/d', '/v:off', '/s', '/c']);
+    assert.match(spec.args[4], /"C:\\Users\\A B\\profile"/);
+    assert.match(spec.args[4], /100%%/);
+  });
+
+  it('keeps POSIX as a direct executable plus argv', () => {
+    assert.deepEqual(buildStdioSpawnSpec('node', ['server.js'], 'linux'), {
+      command: 'node', args: ['server.js'],
+    });
+  });
+
+  it('fails closed on quote breakout in a configured Windows argument', () => {
+    assert.throws(
+      () => buildStdioSpawnSpec('npx.cmd', ['safe" & calc.exe & "'], 'win32'),
+      /Unsafe quote\/newline/,
+    );
   });
 });
 

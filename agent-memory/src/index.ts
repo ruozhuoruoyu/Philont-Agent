@@ -288,6 +288,7 @@ export {
 export {
   assessEvidenceLevel,
   FORMAL_VERIFIER_TOOLS,
+  isStrictFormalVerificationCommand,
   evaluateHonesty,
   findCompletionClaim,
   findOrderClaim,

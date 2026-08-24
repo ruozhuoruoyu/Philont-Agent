@@ -55,6 +55,25 @@ export function buildChildEnv(
   return { ...env, ...(config.env ?? {}) };
 }
 
+function quoteWindowsCmdArg(value: string): string {
+  // cmd.exe has no trustworthy argv boundary for an embedded quote/newline. Fail closed instead
+  // of turning an operator-controlled MCP config into a command-injection boundary.
+  if (/["\r\n]/.test(value)) throw new Error('Unsafe quote/newline in Windows MCP command argument');
+  return `"${value.replace(/%/g, '%%')}"`;
+}
+
+/** Explicit executable/argv pair; avoids Node's deprecated and unsafe `shell:true` concatenation. */
+export function buildStdioSpawnSpec(
+  command: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  comspec = process.env.ComSpec || process.env.COMSPEC || 'cmd.exe',
+): { command: string; args: string[] } {
+  if (platform !== 'win32') return { command, args };
+  const commandLine = [command, ...args].map(quoteWindowsCmdArg).join(' ');
+  return { command: comspec, args: ['/d', '/v:off', '/s', '/c', `"${commandLine}"`] };
+}
+
 export class StdioTransport extends EventEmitter {
   private proc: ChildProcess | null = null;
   private buffer = '';
@@ -76,11 +95,11 @@ export class StdioTransport extends EventEmitter {
   /** Start the child process */
   async connect(): Promise<void> {
     const env = buildChildEnv(this.config);
-    const proc = spawn(this.config.command, this.config.args || [], {
+    const spec = buildStdioSpawnSpec(this.config.command, this.config.args || []);
+    const proc = spawn(spec.command, spec.args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
-      // Windows: npx/npm etc. are .cmd scripts; bare-name spawn causes ENOENT — must go through shell.
-      shell: process.platform === 'win32',
+      shell: false,
     });
     this.proc = proc;
 

@@ -9,10 +9,35 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveJudgeGoal } from '../src/chat-handler.js';
+import {
+  isExternalAcceptanceNode,
+  extractFormalVerificationEvidence,
+  resolveJudgeGoal,
+  resolveRecallInput,
+  selectJudgeFrontierGoal,
+} from '../src/chat-handler.js';
 
 test('a fresh turn is judged against the user message', () => {
   assert.equal(resolveJudgeGoal(undefined, 'extract page 6-20 of the paper', false), 'extract page 6-20 of the paper');
+});
+
+test('formal evidence accepts real Lean builds but rejects version probes and generic shell success', () => {
+  assert.match(
+    extractFormalVerificationEvidence(
+      'shell',
+      { command: 'lake build Lrc.K13.Region3Sum' },
+      { success: true, output: 'Built Lrc.K13.Region3Sum\nREGION3SUM-OK' },
+    ) ?? '',
+    /REGION3SUM-OK/,
+  );
+  assert.equal(
+    extractFormalVerificationEvidence('shell', { command: 'lean --version' }, { success: true, output: 'Lean 4' }),
+    null,
+  );
+  assert.equal(
+    extractFormalVerificationEvidence('shell', { command: 'echo ok' }, { success: true, output: 'ok' }),
+    null,
+  );
 });
 
 test('an auth resume is judged against the ORIGINAL message, not the approval word', () => {
@@ -69,4 +94,36 @@ test('a concrete active plan/tree step wins over a directional continuation goal
     resolveJudgeGoal('继续做 lrc 证明', '继续', false, undefined, 'Prove region3_chain and compile Region3Chain.lean'),
     'Prove region3_chain and compile Region3Chain.lean',
   );
+});
+
+test('a self-contained user request wins over stale active work', () => {
+  assert.equal(
+    resolveJudgeGoal('stale carried explore goal', '总结我们目前的证明状态', false, undefined, 'Prove stale frontier node'),
+    '总结我们目前的证明状态',
+  );
+});
+
+test('a short status question stays the judge goal only when the turn remained observational', () => {
+  const active = 'Prove region3_chain and compile Region3Chain.lean';
+  assert.equal(resolveJudgeGoal(undefined, '有进展吗？', false, undefined, active, false), '有进展吗？');
+  assert.equal(resolveJudgeGoal(undefined, '有进展吗？', false, undefined, active, true), active);
+});
+
+test('skill recall for a continuation uses active work before a carried directional goal', () => {
+  assert.equal(
+    resolveRecallInput('继续', 'Complete plan step: prove region3 bound', '继续做 LRC 证明'),
+    'Complete plan step: prove region3 bound',
+  );
+  assert.equal(resolveRecallInput('总结我们目前的 LRC 证明状态', 'stale work'), '总结我们目前的 LRC 证明状态');
+});
+
+test('judge frontier excludes owner acceptance chores and ranks actionable nodes like final report', () => {
+  const nodes = [
+    { id: 'root', parentId: null, status: 'open', claim: 'root', value: 0.1, depth: 0 },
+    { id: 'accept', parentId: 'root', status: 'open', claim: '验收：用户在本机执行 lake build', value: 0.99, depth: 1 },
+    { id: 'low', parentId: 'root', status: 'open', claim: 'prove low-value lemma', value: 0.2, depth: 1 },
+    { id: 'best', parentId: 'root', status: 'open', claim: 'prove region3 bound', value: 0.8, depth: 2 },
+  ] as any;
+  assert.equal(isExternalAcceptanceNode(nodes[1].claim), true);
+  assert.equal(selectJudgeFrontierGoal(nodes), 'prove region3 bound');
 });

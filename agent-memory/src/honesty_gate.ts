@@ -483,12 +483,25 @@ function evidenceShellCommand(input: ToolResultRecord['toolInput']): string | nu
   return typeof value === 'string' ? value : null;
 }
 
+/**
+ * Shell commands that actually run a formal checker/build. Deliberately excludes probes such as
+ * `lean --version`: a zero exit code is proof evidence only when the command names a Lean source or
+ * asks Lake to build a target.
+ */
+export function isStrictFormalVerificationCommand(command: string): boolean {
+  const normalized = command.replace(/\s+/g, ' ').trim();
+  return (
+    /(?:^|[;&|]\s*)lake\s+build(?:\s|$)/i.test(normalized) ||
+    /(?:^|[;&|]\s*)lake\s+env\s+lean\s+\S+\.lean(?:\s|$)/i.test(normalized) ||
+    /(?:^|[;&|]\s*)lean(?:\.exe)?\s+\S+\.lean(?:\s|$)/i.test(normalized)
+  );
+}
+
 function successfulFormalVerifier(record: ToolResultRecord): boolean {
   if (classifyToolResult(record.content) !== 'ok') return false;
-  // Only native verifier tools produce structured, policy-checked proof evidence.
-  // A successful shell command merely proves that a command exited zero: `lean
-  // --version`, `echo lean ok`, and even `git commit -m lean` are not proofs.
-  return FORMAL_VERIFIER_TOOLS.has(record.toolName);
+  if (FORMAL_VERIFIER_TOOLS.has(record.toolName)) return true;
+  if (record.toolName !== 'shell' && record.toolName !== 'process') return false;
+  return isStrictFormalVerificationCommand(evidenceShellCommand(record.toolInput) ?? '');
 }
 
 /** Highest evidence level actually reached by this turn's successful tools. */

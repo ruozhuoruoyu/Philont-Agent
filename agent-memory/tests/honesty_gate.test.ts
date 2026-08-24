@@ -66,7 +66,7 @@ test('formal proof gate does not rewrite honest negative reports', () => {
   }
 });
 
-test('shell mentions of Lean are execution, never formal proof evidence', () => {
+test('shell probes mentioning Lean are execution, never formal proof evidence', () => {
   for (const command of ['lean --version', 'echo lean ok', 'git commit -m lean']) {
     const tools = [{
       toolName: 'shell',
@@ -79,6 +79,22 @@ test('shell mentions of Lean are execution, never formal proof evidence', () => 
       'formal_claim_without_verifier',
       command,
     );
+  }
+});
+
+test('a real successful Lean/Lake build is formal proof evidence', () => {
+  for (const command of [
+    'lake build Lrc.K13.Region3Sum',
+    'cd project && lake env lean Lrc/K13/Region3Sum.lean',
+    'lean.exe Probe.lean',
+  ]) {
+    const tools = [{
+      toolName: 'shell',
+      toolInput: { command },
+      content: '✓ TOOL OK\nBuilt Lrc.K13.Region3Sum\nexit 0',
+    }];
+    assert.equal(assessEvidenceLevel(tools), 'formally_proved', command);
+    assert.equal(evaluateHonesty('形式化证明已完成。', { toolResults: tools }), null, command);
   }
 });
 
