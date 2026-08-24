@@ -7,6 +7,7 @@ import {
   hasMainLLMRegistered,
   isAuxLLMConfigured,
   auxLLMHealth,
+  probeAuxLLM,
   AuxLLMError,
   type AuxLLMCaller,
   type AuxLLMRequest,
@@ -222,6 +223,39 @@ describe('aux-llm', () => {
           () => callAuxLLM({ user: 'q' }),
           (e: unknown) => (e as AuxLLMError).kind === 'invalid_response',
         );
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('diagnoses reasoning-only responses instead of hiding why content is empty', async () => {
+      setAuxEnv();
+      const fakeFetch = mockFetch(
+        () => new Response(JSON.stringify({
+          choices: [{
+            message: { content: '', reasoning_content: 'thinking without a final answer' },
+            finish_reason: 'length',
+          }],
+        }), { status: 200 }),
+      );
+      try {
+        await assert.rejects(
+          () => callAuxLLM({ user: 'q', maxTokens: 200 }),
+          /finish_reason=length, reasoning_chars=31, max_tokens=200/,
+        );
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('health probe uses a representative budget and never permits main fallback', async () => {
+      setAuxEnv();
+      registerMainLLM(async () => 'main-must-not-mask-aux');
+      const fakeFetch = mockFetch(() => makeOpenAIResponse('ok'));
+      try {
+        assert.deepEqual(await probeAuxLLM(), { ok: true });
+        const body = fakeFetch.calls[0].body as { max_tokens?: number };
+        assert.equal(body.max_tokens, 256);
       } finally {
         fakeFetch.restore();
       }

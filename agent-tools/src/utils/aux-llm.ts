@@ -223,7 +223,9 @@ export async function probeAuxLLM(signal?: AbortSignal): Promise<{ ok: boolean; 
     const out = await callAuxLLM({
       system: 'Reply with the single word: ok',
       user: 'ping',
-      maxTokens: 4,
+      // Four tokens is not representative for a reasoning-capable endpoint: a gateway that ignores
+      // thinking=disabled can consume them before producing text and create a false "down" verdict.
+      maxTokens: 256,
       signal,
       fallbackToMain: false,
     });
@@ -295,7 +297,7 @@ export async function callAuxLLM(req: AuxLLMRequest): Promise<string> {
 
 interface OpenAIChatResponse {
   choices?: Array<{
-    message?: { role?: string; content?: string | null };
+    message?: { role?: string; content?: string | null; reasoning_content?: string | null };
     finish_reason?: string;
   }>;
   error?: { message?: string; type?: string };
@@ -401,10 +403,13 @@ async function callOpenAICompatible(
     );
   }
 
-  const content = json.choices?.[0]?.message?.content;
+  const choice = json.choices?.[0];
+  const content = choice?.message?.content;
   if (typeof content !== 'string' || content.length === 0) {
+    const reasoningChars = choice?.message?.reasoning_content?.length ?? 0;
     throw new AuxLLMError(
-      'Aux LLM returned empty content',
+      `Aux LLM returned empty content (finish_reason=${choice?.finish_reason ?? 'missing'}, ` +
+        `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
       'invalid_response',
     );
   }
@@ -412,7 +417,7 @@ async function callOpenAICompatible(
 }
 
 interface AnthropicMessagesResponse {
-  content?: Array<{ type?: string; text?: string }>;
+  content?: Array<{ type?: string; text?: string; thinking?: string }>;
   stop_reason?: string;
   error?: { message?: string; type?: string };
 }
@@ -518,8 +523,12 @@ async function callAnthropicCompatible(
 
   const text = json.content?.find((b) => b.type === 'text')?.text;
   if (typeof text !== 'string' || text.length === 0) {
+    const reasoningChars = (json.content ?? [])
+      .filter((block) => block.type === 'thinking')
+      .reduce((sum, block) => sum + (block.thinking?.length ?? block.text?.length ?? 0), 0);
     throw new AuxLLMError(
-      'Aux LLM (anthropic) returned empty content',
+      `Aux LLM (anthropic) returned empty content (stop_reason=${json.stop_reason ?? 'missing'}, ` +
+        `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
       'invalid_response',
     );
   }
