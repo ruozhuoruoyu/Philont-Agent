@@ -58,6 +58,7 @@ export class AuxLLMError extends Error {
       | 'http_error'
       | 'timeout'
       | 'invalid_response'
+      | 'output_truncated'
       | 'aborted',
     public readonly status?: number,
   ) {
@@ -191,6 +192,21 @@ let consecutiveAuxFailures = 0;
 let auxCircuitOpenUntil = 0;
 const AUX_CIRCUIT_FAILURE_THRESHOLD = 3;
 const AUX_CIRCUIT_OPEN_MS = 5 * 60_000;
+const AUX_TRUNCATION_RETRY_MIN_TOKENS = 512;
+const AUX_TRUNCATION_RETRY_MAX_TOKENS = 2048;
+
+function isOutputTruncation(error: unknown): error is AuxLLMError {
+  return error instanceof AuxLLMError && error.kind === 'output_truncated';
+}
+
+function expandedTokenBudget(requested: number | undefined): number | null {
+  const current = requested ?? DEFAULT_MAX_TOKENS;
+  if (current >= AUX_TRUNCATION_RETRY_MAX_TOKENS) return null;
+  return Math.min(
+    AUX_TRUNCATION_RETRY_MAX_TOKENS,
+    Math.max(AUX_TRUNCATION_RETRY_MIN_TOKENS, current * 2),
+  );
+}
 
 export function auxLLMHealth(): {
   configured: boolean;
@@ -253,9 +269,21 @@ export async function callAuxLLM(req: AuxLLMRequest): Promise<string> {
   const fallbackAllowed = req.fallbackToMain !== false && mainLLMCaller !== null;
   if (auxCircuitOpenUntil <= Date.now()) {
     try {
-      const result = envConfig.protocol === 'anthropic'
-        ? await callAnthropicCompatible(envConfig, req)
-        : await callOpenAICompatible(envConfig, req);
+      const callConfiguredAux = (request: AuxLLMRequest) => envConfig.protocol === 'anthropic'
+        ? callAnthropicCompatible(envConfig, request)
+        : callOpenAICompatible(envConfig, request);
+      let result: string;
+      try {
+        result = await callConfiguredAux(req);
+      } catch (e) {
+        const retryTokens = isOutputTruncation(e) ? expandedTokenBudget(req.maxTokens) : null;
+        if (retryTokens === null) throw e;
+        console.warn(
+          `[aux-llm] output truncated at max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS}; ` +
+            `retrying aux with max_tokens=${retryTokens}`,
+        );
+        result = await callConfiguredAux({ ...req, maxTokens: retryTokens });
+      }
       consecutiveAuxFailures = 0;
       auxCircuitOpenUntil = 0;
       return result;
@@ -264,13 +292,20 @@ export async function callAuxLLM(req: AuxLLMRequest): Promise<string> {
       lastAuxError = e instanceof Error ? e.message : String(e);
       // A caller cancellation is authoritative: do not start a second expensive request after it aborted.
       if (req.signal?.aborted) throw e;
-      consecutiveAuxFailures++;
-      if (consecutiveAuxFailures >= AUX_CIRCUIT_FAILURE_THRESHOLD) {
-        auxCircuitOpenUntil = Date.now() + AUX_CIRCUIT_OPEN_MS;
-        console.warn(
-          `[aux-llm] circuit opened for ${AUX_CIRCUIT_OPEN_MS / 60_000}min after ` +
-            `${consecutiveAuxFailures} consecutive failures: ${lastAuxError}`,
-        );
+      // A syntactically valid provider response that exhausted the caller's output budget proves the
+      // endpoint is alive. Fall back if necessary, but do not poison the endpoint-health circuit.
+      if (isOutputTruncation(e)) {
+        consecutiveAuxFailures = 0;
+        auxCircuitOpenUntil = 0;
+      } else {
+        consecutiveAuxFailures++;
+        if (consecutiveAuxFailures >= AUX_CIRCUIT_FAILURE_THRESHOLD) {
+          auxCircuitOpenUntil = Date.now() + AUX_CIRCUIT_OPEN_MS;
+          console.warn(
+            `[aux-llm] circuit opened for ${AUX_CIRCUIT_OPEN_MS / 60_000}min after ` +
+              `${consecutiveAuxFailures} consecutive failures: ${lastAuxError}`,
+          );
+        }
       }
       if (!fallbackAllowed) throw e;
       console.warn(`[aux-llm] primary failed; falling back to main LLM: ${lastAuxError}`);
@@ -407,10 +442,11 @@ async function callOpenAICompatible(
   const content = choice?.message?.content;
   if (typeof content !== 'string' || content.length === 0) {
     const reasoningChars = choice?.message?.reasoning_content?.length ?? 0;
+    const finishReason = choice?.finish_reason ?? 'missing';
     throw new AuxLLMError(
-      `Aux LLM returned empty content (finish_reason=${choice?.finish_reason ?? 'missing'}, ` +
+      `Aux LLM returned empty content (finish_reason=${finishReason}, ` +
         `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
-      'invalid_response',
+      finishReason === 'length' ? 'output_truncated' : 'invalid_response',
     );
   }
   return content;
@@ -526,10 +562,11 @@ async function callAnthropicCompatible(
     const reasoningChars = (json.content ?? [])
       .filter((block) => block.type === 'thinking')
       .reduce((sum, block) => sum + (block.thinking?.length ?? block.text?.length ?? 0), 0);
+    const stopReason = json.stop_reason ?? 'missing';
     throw new AuxLLMError(
-      `Aux LLM (anthropic) returned empty content (stop_reason=${json.stop_reason ?? 'missing'}, ` +
+      `Aux LLM (anthropic) returned empty content (stop_reason=${stopReason}, ` +
         `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
-      'invalid_response',
+      stopReason === 'max_tokens' ? 'output_truncated' : 'invalid_response',
     );
   }
   return text;

@@ -241,8 +241,43 @@ describe('aux-llm', () => {
       try {
         await assert.rejects(
           () => callAuxLLM({ user: 'q', maxTokens: 200 }),
-          /finish_reason=length, reasoning_chars=31, max_tokens=200/,
+          (e: unknown) => {
+            const err = e as AuxLLMError;
+            assert.equal(err.kind, 'output_truncated');
+            assert.match(err.message, /finish_reason=length, reasoning_chars=31, max_tokens=512/);
+            return true;
+          },
         );
+        assert.deepEqual(
+          fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
+          [200, 512],
+        );
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('retries a length-truncated response once with a larger token budget', async () => {
+      setAuxEnv();
+      const fakeFetch = mockFetch((call) => {
+        const maxTokens = (call.body as { max_tokens: number }).max_tokens;
+        if (maxTokens === 200) {
+          return new Response(JSON.stringify({
+            choices: [{
+              message: { content: '', reasoning_content: '' },
+              finish_reason: 'length',
+            }],
+          }), { status: 200 });
+        }
+        return makeOpenAIResponse('selected');
+      });
+      try {
+        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 200 }), 'selected');
+        assert.deepEqual(
+          fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
+          [200, 512],
+        );
+        assert.equal(auxLLMHealth().circuitOpen, false);
       } finally {
         fakeFetch.restore();
       }
@@ -511,6 +546,23 @@ describe('aux-llm', () => {
         assert.equal(await callAuxLLM({ user: 'four' }), 'main');
         assert.equal(fakeFetch.calls.length, 3);
         assert.equal(auxLLMHealth().circuitOpen, true);
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('does not open the endpoint circuit for repeated output-budget truncation', async () => {
+      setAuxEnv();
+      registerMainLLM(async () => 'main');
+      const fakeFetch = mockFetch(() => new Response(JSON.stringify({
+        choices: [{ message: { content: '' }, finish_reason: 'length' }],
+      }), { status: 200 }));
+      try {
+        assert.equal(await callAuxLLM({ user: 'one', maxTokens: 4 }), 'main');
+        assert.equal(await callAuxLLM({ user: 'two', maxTokens: 4 }), 'main');
+        assert.equal(await callAuxLLM({ user: 'three', maxTokens: 4 }), 'main');
+        assert.equal(auxLLMHealth().circuitOpen, false);
+        assert.equal(fakeFetch.calls.length, 6, 'each call should try 4 tokens then 512 tokens');
       } finally {
         fakeFetch.restore();
       }
