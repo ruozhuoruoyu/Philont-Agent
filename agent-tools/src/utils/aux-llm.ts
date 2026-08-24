@@ -193,7 +193,8 @@ let auxCircuitOpenUntil = 0;
 const AUX_CIRCUIT_FAILURE_THRESHOLD = 3;
 const AUX_CIRCUIT_OPEN_MS = 5 * 60_000;
 const AUX_TRUNCATION_RETRY_MIN_TOKENS = 512;
-const AUX_TRUNCATION_RETRY_MAX_TOKENS = 2048;
+const AUX_TRUNCATION_RETRY_MAX_TOKENS = 16_384;
+const AUX_TRUNCATION_MAX_RETRIES = 2;
 
 function isOutputTruncation(error: unknown): error is AuxLLMError {
   return error instanceof AuxLLMError && error.kind === 'output_truncated';
@@ -272,18 +273,23 @@ export async function callAuxLLM(req: AuxLLMRequest): Promise<string> {
       const callConfiguredAux = (request: AuxLLMRequest) => envConfig.protocol === 'anthropic'
         ? callAnthropicCompatible(envConfig, request)
         : callOpenAICompatible(envConfig, request);
-      let result: string;
-      try {
-        result = await callConfiguredAux(req);
-      } catch (e) {
-        const retryTokens = isOutputTruncation(e) ? expandedTokenBudget(req.maxTokens) : null;
-        if (retryTokens === null) throw e;
-        console.warn(
-          `[aux-llm] output truncated at max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS}; ` +
-            `retrying aux with max_tokens=${retryTokens}`,
-        );
-        result = await callConfiguredAux({ ...req, maxTokens: retryTokens });
+      let attempt = req;
+      let result: string | undefined;
+      for (let retry = 0; retry <= AUX_TRUNCATION_MAX_RETRIES; retry++) {
+        try {
+          result = await callConfiguredAux(attempt);
+          break;
+        } catch (e) {
+          const retryTokens = isOutputTruncation(e) ? expandedTokenBudget(attempt.maxTokens) : null;
+          if (retry === AUX_TRUNCATION_MAX_RETRIES || retryTokens === null) throw e;
+          console.warn(
+            `[aux-llm] output truncated at max_tokens=${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; ` +
+              `retrying aux with max_tokens=${retryTokens}`,
+          );
+          attempt = { ...attempt, maxTokens: retryTokens };
+        }
       }
+      if (result === undefined) throw new AuxLLMError('Aux LLM retry loop produced no result', 'invalid_response');
       consecutiveAuxFailures = 0;
       auxCircuitOpenUntil = 0;
       return result;
@@ -440,9 +446,17 @@ async function callOpenAICompatible(
 
   const choice = json.choices?.[0];
   const content = choice?.message?.content;
+  const finishReason = choice?.finish_reason ?? 'missing';
+  if (finishReason === 'length') {
+    const reasoningChars = choice?.message?.reasoning_content?.length ?? 0;
+    throw new AuxLLMError(
+      `Aux LLM output truncated (finish_reason=length, content_chars=${content?.length ?? 0}, ` +
+        `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
+      'output_truncated',
+    );
+  }
   if (typeof content !== 'string' || content.length === 0) {
     const reasoningChars = choice?.message?.reasoning_content?.length ?? 0;
-    const finishReason = choice?.finish_reason ?? 'missing';
     throw new AuxLLMError(
       `Aux LLM returned empty content (finish_reason=${finishReason}, ` +
         `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
@@ -558,11 +572,21 @@ async function callAnthropicCompatible(
   }
 
   const text = json.content?.find((b) => b.type === 'text')?.text;
+  const stopReason = json.stop_reason ?? 'missing';
+  if (stopReason === 'max_tokens') {
+    const reasoningChars = (json.content ?? [])
+      .filter((block) => block.type === 'thinking')
+      .reduce((sum, block) => sum + (block.thinking?.length ?? block.text?.length ?? 0), 0);
+    throw new AuxLLMError(
+      `Aux LLM (anthropic) output truncated (stop_reason=max_tokens, content_chars=${text?.length ?? 0}, ` +
+        `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
+      'output_truncated',
+    );
+  }
   if (typeof text !== 'string' || text.length === 0) {
     const reasoningChars = (json.content ?? [])
       .filter((block) => block.type === 'thinking')
       .reduce((sum, block) => sum + (block.thinking?.length ?? block.text?.length ?? 0), 0);
-    const stopReason = json.stop_reason ?? 'missing';
     throw new AuxLLMError(
       `Aux LLM (anthropic) returned empty content (stop_reason=${stopReason}, ` +
         `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,

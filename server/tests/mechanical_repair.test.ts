@@ -17,6 +17,7 @@ import {
   recurrenceMetricKey,
   mechanicalRepairEnabled,
   parseRepairedInput,
+  repairOutputTokenBudget,
   readRepairStats,
   recordRepairOutcome,
   renderRepairNotice,
@@ -148,6 +149,30 @@ test('kill switch off: nothing is asked and nothing is re-run', async () => {
 test('mechanical repair is enabled by default for the production experiment', () => {
   assert.equal(mechanicalRepairEnabled({} as NodeJS.ProcessEnv), true);
   assert.equal(mechanicalRepairEnabled({ PHILONT_MECHANICAL_REPAIR: 'off' } as NodeJS.ProcessEnv), false);
+});
+
+test('repair output budget scales with the argument object it must reproduce', () => {
+  assert.equal(repairOutputTokenBudget({ path: 'a' }), 2048);
+  const medium = repairOutputTokenBudget({ content: 'x'.repeat(12_000) });
+  assert.ok(medium > 4000 && medium < 5000, `unexpected medium budget ${medium}`);
+  assert.equal(
+    repairOutputTokenBudget({ content: 'x'.repeat(100_000) }),
+    16_384,
+    'large malformed inputs remain bounded',
+  );
+});
+
+test('the aux repair call receives the size-derived output budget', async () => {
+  let budget = 0;
+  const input = { content: 'x'.repeat(12_000) };
+  await attemptMechanicalRepair(baseOpts({
+    toolInput: input,
+    ask: async (req: { maxTokens: number }) => {
+      budget = req.maxTokens;
+      return JSON.stringify({ content: 'y'.repeat(12_000) });
+    },
+  }));
+  assert.equal(budget, repairOutputTokenBudget(input));
 });
 
 test('with no rule for the signature it does not guess — no aux call, no re-run', async () => {

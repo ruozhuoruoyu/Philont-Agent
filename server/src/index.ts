@@ -940,12 +940,23 @@ server.listen(PORT, () => {
   // seconds — but it must be PRINTED either way: a configured server that never connected is otherwise
   // invisible (its tools simply are not in the list, and nothing says why).
   if (getMcpStatus().configured > 0) {
-    setTimeout(() => {
+    const reportMcpBoot = (final: boolean) => {
       const s = getMcpStatus();
-      const down = s.servers.filter((x) => x.state !== 'connected');
-      console[down.length ? 'warn' : 'log'](`[boot] ${s.summary}`);
-      for (const d of down) console.warn(`[boot] MCP server "${d.name}" not connected: ${d.lastError ?? d.state}`);
-    }, 10_000).unref?.();
+      const connecting = s.servers.filter((x) => x.state === 'connecting');
+      const down = s.servers.filter((x) => x.state !== 'connected' && x.state !== 'connecting');
+      if (!final && connecting.length > 0) {
+        console.log(
+          `[boot] MCP still connecting: ${connecting.map((x) => x.name).join(', ')}; ` +
+            `waiting before declaring it unavailable`,
+        );
+        setTimeout(() => reportMcpBoot(true), 20_000).unref?.();
+        return;
+      }
+      const unresolved = final ? [...down, ...connecting] : down;
+      console[unresolved.length ? 'warn' : 'log'](`[boot] ${s.summary}`);
+      for (const d of unresolved) console.warn(`[boot] MCP server "${d.name}" not connected: ${d.lastError ?? d.state}`);
+    };
+    setTimeout(() => reportMcpBoot(false), 10_000).unref?.();
   }
 
   // Referential integrity. Deferred to here rather than run at module load: the push channels and the

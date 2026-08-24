@@ -44,7 +44,8 @@
  * production counters, not evidence that anything changed. A rule whose `verified` never moves is a
  * note; a rule whose `verified` climbs is muscle memory, and the difference is now visible.
  *
- * Default ON after the historical no-repair baseline was established. Set
+ * Default ON because applied/verified records measure the causal effect of each mechanism-initiated
+ * retry directly; the older mixed failure bucket is not a valid intra/cross-turn baseline. Set
  * `PHILONT_MECHANICAL_REPAIR=0/off/false/no` to stop mechanism-initiated retries while leaving
  * recurrence measurement active.
  */
@@ -71,6 +72,23 @@ export interface RepairStats {
 }
 
 export const EMPTY_REPAIR_STATS: RepairStats = { applied: 0, verified: 0, failed: 0 };
+
+const REPAIR_OUTPUT_MIN_TOKENS = 2048;
+const REPAIR_OUTPUT_MAX_TOKENS = 16_384;
+
+/**
+ * The repair response must reproduce the complete argument object. Size the output budget from that
+ * object rather than using a flat ceiling: a 50-byte path correction and a 40KB source rewrite are not
+ * the same job. Three chars/token is deliberately conservative for JSON containing source code, plus
+ * headroom for formatting. The hard cap keeps a malformed giant input from creating an unbounded call.
+ */
+export function repairOutputTokenBudget(toolInput: Record<string, unknown>): number {
+  const chars = JSON.stringify(toolInput).length;
+  return Math.min(
+    REPAIR_OUTPUT_MAX_TOKENS,
+    Math.max(REPAIR_OUTPUT_MIN_TOKENS, Math.ceil(chars / 3) + 512),
+  );
+}
 
 export function mechanicalRepairEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const v = (env.PHILONT_MECHANICAL_REPAIR ?? '').trim().toLowerCase();
@@ -286,7 +304,10 @@ export async function attemptMechanicalRepair(opts: AttemptRepairOptions): Promi
       errorText: opts.errorText,
       rules: opts.rules,
     });
-    repaired = parseRepairedInput(await ask({ system, user, maxTokens: 2000 }), opts.toolInput);
+    repaired = parseRepairedInput(
+      await ask({ system, user, maxTokens: repairOutputTokenBudget(opts.toolInput) }),
+      opts.toolInput,
+    );
   } catch {
     return { attempted: false, reason: 'ask-failed' };
   }

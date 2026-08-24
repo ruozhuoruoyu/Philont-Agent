@@ -244,13 +244,13 @@ describe('aux-llm', () => {
           (e: unknown) => {
             const err = e as AuxLLMError;
             assert.equal(err.kind, 'output_truncated');
-            assert.match(err.message, /finish_reason=length, reasoning_chars=31, max_tokens=512/);
+            assert.match(err.message, /finish_reason=length, content_chars=0, reasoning_chars=31, max_tokens=1024/);
             return true;
           },
         );
         assert.deepEqual(
           fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
-          [200, 512],
+          [200, 512, 1024],
         );
       } finally {
         fakeFetch.restore();
@@ -278,6 +278,28 @@ describe('aux-llm', () => {
           [200, 512],
         );
         assert.equal(auxLLMHealth().circuitOpen, false);
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('rejects partial content when finish_reason says it was truncated', async () => {
+      setAuxEnv();
+      const fakeFetch = mockFetch((call) => {
+        const maxTokens = (call.body as { max_tokens: number }).max_tokens;
+        if (maxTokens < 1024) {
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: '{"partial":' }, finish_reason: 'length' }],
+          }), { status: 200 });
+        }
+        return makeOpenAIResponse('{"complete":true}');
+      });
+      try {
+        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 96 }), '{"complete":true}');
+        assert.deepEqual(
+          fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
+          [96, 512, 1024],
+        );
       } finally {
         fakeFetch.restore();
       }
@@ -460,6 +482,30 @@ describe('aux-llm', () => {
         fakeFetch.restore();
       }
     });
+
+    it('does not accept partial Anthropic text stopped by max_tokens', async () => {
+      setAuxEnv('https://api.anthropic.com/v1', 'k', 'm');
+      process.env.AUX_LLM_PROTOCOL = 'anthropic';
+      const fakeFetch = mockFetch((call) => {
+        const maxTokens = (call.body as { max_tokens: number }).max_tokens;
+        if (maxTokens < 1024) {
+          return new Response(JSON.stringify({
+            content: [{ type: 'text', text: '{"partial":' }],
+            stop_reason: 'max_tokens',
+          }), { status: 200 });
+        }
+        return makeAnthropicResponse('{"complete":true}');
+      });
+      try {
+        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 96 }), '{"complete":true}');
+        assert.deepEqual(
+          fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
+          [96, 512, 1024],
+        );
+      } finally {
+        fakeFetch.restore();
+      }
+    });
   });
 
   describe('callAuxLLM — fallback to main LLM', () => {
@@ -562,7 +608,7 @@ describe('aux-llm', () => {
         assert.equal(await callAuxLLM({ user: 'two', maxTokens: 4 }), 'main');
         assert.equal(await callAuxLLM({ user: 'three', maxTokens: 4 }), 'main');
         assert.equal(auxLLMHealth().circuitOpen, false);
-        assert.equal(fakeFetch.calls.length, 6, 'each call should try 4 tokens then 512 tokens');
+        assert.equal(fakeFetch.calls.length, 9, 'each call should try 4, 512, then 1024 tokens');
       } finally {
         fakeFetch.restore();
       }

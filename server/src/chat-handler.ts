@@ -4680,6 +4680,29 @@ function persistContinuation(sessionId: string): void {
   }
 }
 
+/**
+ * Settle an authorization continuation as soon as its tool returns, not when the whole LLM turn later
+ * finishes. A turn may spend minutes compiling/reasoning after the side effect already committed. If the
+ * process restarts in that interval, leaving the snapshot as `running` turns a known-successful call into
+ * `uncertain` and invites the owner to execute it twice (production: the same append patch was replayed
+ * after restart). The remaining tool chain may be abandoned safely; a later call that needs approval will
+ * create its own fresh continuation.
+ */
+function settleRunningPendingAuth(sessionId: string, toolCallId: string): boolean {
+  const pending = pendingAuth.get(sessionId);
+  if (!pending || pending.toolCallId !== toolCallId || pending.executionState !== 'running') return false;
+  pending.callLedger = (pending.callLedger ?? []).map((entry) =>
+    entry.id === toolCallId ? { ...entry, state: 'completed' as const } : entry,
+  );
+  pendingAuth.delete(sessionId);
+  persistContinuation(sessionId);
+  console.log(
+    `[continuation-store] session=${safeSessionId(sessionId)} settled completed auth call ${pending.toolName} ` +
+      `before continuing the turn`,
+  );
+  return true;
+}
+
 // Track active sessions for extraction at session end
 const activeSessions = new Set<string>();
 
@@ -11155,7 +11178,12 @@ async function runToolLoop(
   const maybeMechanicalRepair = async (
     call: { name: string; input: Record<string, unknown> },
     failed: ToolResult,
-  ): Promise<{ result: ToolResult; notice: string }> => {
+  ): Promise<{
+    result: ToolResult;
+    notice: string;
+    originalFailure?: ToolResult;
+    repairedInput?: Record<string, unknown>;
+  }> => {
     if (failed.success) return { result: failed, notice: '' };
     const errorText = failed.error ?? failed.output ?? '';
     const signature = extractFailureSignature(call.name, errorText);
@@ -11178,6 +11206,12 @@ async function runToolLoop(
     // that produced the question.
     if (!mechanicalRepairEnabled()) return { result: failed, notice: '' };
     if (repairAttemptedSignatures.has(signature)) return { result: failed, notice: '' };
+    // The failed model call itself is about to consume one slot below. A mechanism-initiated retry is
+    // a second real tool execution and may run only when another slot remains.
+    if (totalToolCallsThisTurn + 1 >= effectiveMax) {
+      console.log(`[auto-repair] session=${safeSessionId(sessionId)} ${signature} skipped (tool-budget-exhausted)`);
+      return { result: failed, notice: '' };
+    }
     repairAttemptedSignatures.add(signature);
     try {
       const outcome = await attemptMechanicalRepair({
@@ -11195,7 +11229,10 @@ async function runToolLoop(
         isSafeToRerun: async (input) =>
           (await checker({ toolName: call.name, approval: 'never', params: JSON.stringify(input) })) === null,
         // Re-authorized immediately above by checker() on these exact arguments (see isSafeToRerun).
-        run: (input) => tools.execute(call.name, input),
+        run: (input) => {
+          totalToolCallsThisTurn++;
+          return tools.execute(call.name, input);
+        },
       });
       if (!outcome.attempted || !outcome.result) {
         if (outcome.reason && outcome.reason !== 'disabled' && outcome.reason !== 'no-rule') {
@@ -11221,6 +11258,8 @@ async function runToolLoop(
           duration: failed.duration,
         },
         notice: renderRepairNotice(call.name, rules, outcome.verified === true),
+        originalFailure: failed,
+        repairedInput: outcome.repairedInput,
       };
     } catch (e) {
       console.warn(`[auto-repair] ${signature} threw (ignored):`, (e as Error)?.message);
@@ -11713,11 +11752,13 @@ async function runToolLoop(
         result = await tools.execute(call.name, sanitized.input);
       }
     }
-    const repair = await maybeMechanicalRepair(
-      { name: call.name, input: (sanitized.input ?? call.input) as Record<string, unknown> },
-      result,
-    );
+    // The approved call has returned. Persist that fact immediately; do not leave it `running` while
+    // the rest of this potentially long turn continues.
+    settleRunningPendingAuth(sessionId, call.id);
+    const originalInput = (sanitized.input ?? call.input) as Record<string, unknown>;
+    const repair = await maybeMechanicalRepair({ name: call.name, input: originalInput }, result);
     result = repair.result;
+    const actualInput = repair.repairedInput ?? originalInput;
     const outPreview = (result.success ? result.output : result.error) ?? '';
     console.log(
       `[tool] ${call.name} → ${result.success ? 'ok' : 'fail'}: ${String(outPreview).slice(0, 200)}`
@@ -11738,7 +11779,7 @@ async function runToolLoop(
       fetchedStore,
       {
         toolName: call.name,
-        params: call.input,
+        params: actualInput,
         success: result.success,
         output: result.output ?? '',
         error: result.error,
@@ -11802,6 +11843,18 @@ async function runToolLoop(
       content: truncateToolResultContent(rawResultText),
     });
     totalToolCallsThisTurn++;
+    if (repair.originalFailure && repair.repairedInput) {
+      const originalError = repair.originalFailure.error ?? repair.originalFailure.output ?? '';
+      inTurnRecords.push({ toolName: call.name, success: false, resultText: originalError });
+      memory.actions.log({
+        sessionId: GLOBAL_TIMELINE_SESSION_ID,
+        toolName: call.name,
+        params: originalInput,
+        result: originalError.slice(0, 500) || null,
+        success: false,
+        linkedSkill: signalBus.activeSkillName,
+      });
+    }
     // 2026-05-10: trace used by the in-turn failure pattern detector. Signature extraction needs raw
     // error / output text (extractFailureSignature normalizes it), so raw is passed.
     // 2026-05-17: http tool additionally stores toolInput (method/url) for
@@ -11810,9 +11863,9 @@ async function runToolLoop(
       toolName: call.name,
       success: result.success,
       resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
-      toolInput: call.name === 'http' ? (call.input as Record<string, unknown>) : undefined,
+      toolInput: call.name === 'http' ? actualInput : undefined,
     });
-    rememberFormalVerificationEvidence(sessionId, call.name, call.input, result);
+    rememberFormalVerificationEvidence(sessionId, call.name, actualInput, result);
     // WS5: a successful use_skill makes that skill the turn's active linked skill, so the
     // actions that follow are attributed to it (reuse verification input for the reflector).
     if (call.name === 'use_skill' && result.success) {
@@ -11829,7 +11882,7 @@ async function runToolLoop(
     memory.actions.log({
       sessionId: GLOBAL_TIMELINE_SESSION_ID,
       toolName: call.name,
-      params: call.input,
+      params: actualInput,
       result: (result.success ? result.output : result.error)?.slice(0, 500) ?? null,
       success: result.success,
       // Attribute post-use_skill actions to the active recipe (never use_skill itself).
@@ -13446,11 +13499,11 @@ async function runToolLoop(
           result = await tools.execute(call.name, sanitized2.input);
         }
       }
-      const repair2 = await maybeMechanicalRepair(
-        { name: call.name, input: (sanitized2.input ?? call.input) as Record<string, unknown> },
-        result,
-      );
+      settleRunningPendingAuth(sessionId, call.id);
+      const originalInput2 = (sanitized2.input ?? call.input) as Record<string, unknown>;
+      const repair2 = await maybeMechanicalRepair({ name: call.name, input: originalInput2 }, result);
       result = repair2.result;
+      const actualInput2 = repair2.repairedInput ?? originalInput2;
       onTrace?.({
         kind: 'tool-result', tier: 3,
         text: summarizeToolResult(result),
@@ -13466,15 +13519,27 @@ async function runToolLoop(
         content: truncateToolResultContent(rawResultText),
       });
       totalToolCallsThisTurn++;
+      if (repair2.originalFailure && repair2.repairedInput) {
+        const originalError = repair2.originalFailure.error ?? repair2.originalFailure.output ?? '';
+        inTurnRecords.push({ toolName: call.name, success: false, resultText: originalError });
+        memory.actions.log({
+          sessionId: GLOBAL_TIMELINE_SESSION_ID,
+          toolName: call.name,
+          params: originalInput2,
+          result: originalError.slice(0, 500) || null,
+          success: false,
+          linkedSkill: signalBus.activeSkillName,
+        });
+      }
       // 2026-05-10: trace for in-turn failure pattern detector (subsequent turns within the main loop also tracked)
       // 2026-05-17: http tool stores toolInput for ScheduleOutcome aggregation at scheduled turn close
       inTurnRecords.push({
         toolName: call.name,
         success: result.success,
         resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
-        toolInput: call.name === 'http' ? (call.input as Record<string, unknown>) : undefined,
+        toolInput: call.name === 'http' ? actualInput2 : undefined,
       });
-      rememberFormalVerificationEvidence(sessionId, call.name, call.input, result);
+      rememberFormalVerificationEvidence(sessionId, call.name, actualInput2, result);
       if (result.success && mechanicalRetryTool === call.name) {
         // The repair worked: this is no longer the same mechanical wall, so normal multi-call
         // compute workflows may continue. Only a failed repair exhausts the turn-local latch.
@@ -13485,7 +13550,7 @@ async function runToolLoop(
       memory.actions.log({
         sessionId: GLOBAL_TIMELINE_SESSION_ID,
         toolName: call.name,
-        params: call.input,
+        params: actualInput2,
         result: (result.success ? result.output : result.error)?.slice(0, 500) ?? null,
         success: result.success,
       });
