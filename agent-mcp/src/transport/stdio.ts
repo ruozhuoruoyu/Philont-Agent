@@ -59,6 +59,10 @@ function quoteWindowsCmdArg(value: string): string {
   // cmd.exe has no trustworthy argv boundary for an embedded quote/newline. Fail closed instead
   // of turning an operator-controlled MCP config into a command-injection boundary.
   if (/["\r\n]/.test(value)) throw new Error('Unsafe quote/newline in Windows MCP command argument');
+  // Keep ordinary flags/package names bare. When the whole `/c` payload is itself passed as one argv,
+  // Node's Windows quoting can otherwise turn `"-y"` into a literal quote-bearing npm argument
+  // (prod 2026-08-24: npm EINVALIDTAGNAME for tag `"-y"`).
+  if (/^[A-Za-z0-9_@.+:\\/-]+$/.test(value) && !value.includes('%')) return value;
   return `"${value.replace(/%/g, '%%')}"`;
 }
 
@@ -110,6 +114,8 @@ export class StdioTransport extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
       shell: false,
+      // The final /c payload is already cmd-escaped above. Do not let Node quote it a second time.
+      windowsVerbatimArguments: process.platform === 'win32',
     });
     this.proc = proc;
     let stderrTail = '';

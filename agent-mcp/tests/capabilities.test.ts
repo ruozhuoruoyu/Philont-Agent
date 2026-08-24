@@ -110,6 +110,8 @@ describe('stdio child spawn boundary', () => {
     assert.deepEqual(spec.args.slice(0, 4), ['/d', '/v:off', '/s', '/c']);
     assert.match(spec.args[4], /^npx\.cmd /);
     assert.doesNotMatch(spec.args[4], /call "npx\.cmd"/);
+    assert.match(spec.args[4], /npx\.cmd -y @playwright\/mcp /);
+    assert.doesNotMatch(spec.args[4], /"-y"|"@playwright\/mcp"/);
     assert.match(spec.args[4], /"C:\\Users\\A B\\profile"/);
     assert.match(spec.args[4], /100%%/);
     assert.doesNotMatch(spec.args[4], /^""/);
