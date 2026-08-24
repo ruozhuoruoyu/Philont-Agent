@@ -73,9 +73,12 @@ export function buildStdioSpawnSpec(
   // `cmd /s /c ""command" "arg""` has a special first/last-quote grammar. Passing that nested form
   // through Node's CreateProcess quoting caused the command to start and immediately exit on Windows
   // (prod 2026-08-24: Playwright MCP became `MCP server not connected` right after this wrapper landed).
-  // Start with the CALL builtin instead, so /c receives an unquoted command token and every untrusted
-  // value remains separately quoted. CALL also resolves bare .cmd shims such as npx/npm from PATH.
-  const commandLine = ['call', command, ...args].map((part, i) => i === 0 ? part : quoteWindowsCmdArg(part)).join(' ');
+  // A bare PATH command must stay bare: `call "npx"` is parsed by some cmd.exe versions as a literal
+  // command named `"npx"` (prod 2026-08-24). cmd resolves npx.cmd itself. Only a command path that needs
+  // quoting uses CALL; CALL is required there so a quoted .cmd path is not mistaken for /c's wrapper quote.
+  const safeBareCommand = /^[A-Za-z0-9_@.+:\\/-]+$/.test(command) && !command.includes('%');
+  const commandHead = safeBareCommand ? command : `call ${quoteWindowsCmdArg(command)}`;
+  const commandLine = [commandHead, ...args.map(quoteWindowsCmdArg)].join(' ');
   return { command: comspec, args: ['/d', '/v:off', '/s', '/c', commandLine] };
 }
 

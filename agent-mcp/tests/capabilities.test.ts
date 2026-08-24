@@ -108,7 +108,8 @@ describe('stdio child spawn boundary', () => {
     );
     assert.equal(spec.command, 'C:\\Windows\\System32\\cmd.exe');
     assert.deepEqual(spec.args.slice(0, 4), ['/d', '/v:off', '/s', '/c']);
-    assert.match(spec.args[4], /^call "npx\.cmd"/);
+    assert.match(spec.args[4], /^npx\.cmd /);
+    assert.doesNotMatch(spec.args[4], /call "npx\.cmd"/);
     assert.match(spec.args[4], /"C:\\Users\\A B\\profile"/);
     assert.match(spec.args[4], /100%%/);
     assert.doesNotMatch(spec.args[4], /^""/);
@@ -147,6 +148,21 @@ describe('stdio child spawn boundary', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('actually resolves the bare npx.cmd shim from PATH on Windows', { skip: process.platform !== 'win32' }, async () => {
+    const spec = buildStdioSpawnSpec('npx', ['--version']);
+    const output = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
+      const child = spawn(spec.command, spec.args, { shell: false });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (c) => { stdout += c.toString(); });
+      child.stderr.on('data', (c) => { stderr += c.toString(); });
+      child.once('error', reject);
+      child.once('exit', (code) => resolve({ stdout, stderr, code }));
+    });
+    assert.equal(output.code, 0, output.stderr);
+    assert.match(output.stdout.trim(), /^\d+\.\d+/);
   });
 
   it('reports an early child exit with its code and stderr instead of "not connected"', async () => {
