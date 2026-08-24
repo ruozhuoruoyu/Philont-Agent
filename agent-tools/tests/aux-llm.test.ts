@@ -6,6 +6,7 @@ import {
   clearMainLLMRegistration,
   hasMainLLMRegistered,
   isAuxLLMConfigured,
+  auxLLMHealth,
   AuxLLMError,
   type AuxLLMCaller,
   type AuxLLMRequest,
@@ -420,6 +421,62 @@ describe('aux-llm', () => {
         const out = await callAuxLLM({ user: 'q' });
         assert.equal(out, 'from-env');
         assert.equal(mainCalled, false);
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('falls back to the registered main caller when configured aux returns empty content', async () => {
+      setAuxEnv();
+      const mainCalls: AuxLLMRequest[] = [];
+      registerMainLLM(async (req) => {
+        mainCalls.push(req);
+        return 'recovered-by-main';
+      });
+      const fakeFetch = mockFetch(() => makeOpenAIResponse(''));
+      try {
+        const out = await callAuxLLM({ system: 'classify', user: 'q', maxTokens: 20 });
+        assert.equal(out, 'recovered-by-main');
+        assert.equal(fakeFetch.calls.length, 1);
+        assert.equal(mainCalls.length, 1);
+        assert.equal(mainCalls[0].user, 'q');
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('does not let a main fallback mask aux failure when fallbackToMain is false', async () => {
+      setAuxEnv();
+      let mainCalled = false;
+      registerMainLLM(async () => {
+        mainCalled = true;
+        return 'main';
+      });
+      const fakeFetch = mockFetch(() => makeOpenAIResponse(''));
+      try {
+        await assert.rejects(
+          () => callAuxLLM({ user: 'probe', fallbackToMain: false }),
+          /Aux LLM returned empty content/,
+        );
+        assert.equal(mainCalled, false);
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('opens a circuit after repeated aux failures and sends later calls straight to main', async () => {
+      setAuxEnv();
+      registerMainLLM(async () => 'main');
+      const fakeFetch = mockFetch(() => makeOpenAIResponse(''));
+      try {
+        assert.equal(await callAuxLLM({ user: 'one' }), 'main');
+        assert.equal(await callAuxLLM({ user: 'two' }), 'main');
+        assert.equal(await callAuxLLM({ user: 'three' }), 'main');
+        assert.equal(fakeFetch.calls.length, 3);
+
+        assert.equal(await callAuxLLM({ user: 'four' }), 'main');
+        assert.equal(fakeFetch.calls.length, 3);
+        assert.equal(auxLLMHealth().circuitOpen, true);
       } finally {
         fakeFetch.restore();
       }

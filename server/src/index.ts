@@ -984,9 +984,9 @@ server.listen(PORT, () => {
         console.error(
           [
             `[aux-llm] ⚠️  AUX LLM IS CONFIGURED BUT NOT ANSWERING: ${r.error}`,
-            '           → reflection (self-learning), the learning judge, auth-intent classification and the',
-            '             intent router are ALL DEGRADED (they fail safe, so the main agent still works and you',
-            "             won't otherwise see this). Check AUX_LLM_BASE_URL / AUX_LLM_MODEL / AUX_LLM_API_KEY.",
+            '           → auxiliary jobs will fall back to the main LLM; latency/cost may increase, but',
+            '             reflection, the learning judge, auth-intent and routing remain available.',
+            '             Check AUX_LLM_BASE_URL / AUX_LLM_MODEL / AUX_LLM_API_KEY.',
           ].join('\n'),
         );
       }

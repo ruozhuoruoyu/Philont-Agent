@@ -70,8 +70,13 @@ export function buildStdioSpawnSpec(
   comspec = process.env.ComSpec || process.env.COMSPEC || 'cmd.exe',
 ): { command: string; args: string[] } {
   if (platform !== 'win32') return { command, args };
-  const commandLine = [command, ...args].map(quoteWindowsCmdArg).join(' ');
-  return { command: comspec, args: ['/d', '/v:off', '/s', '/c', `"${commandLine}"`] };
+  // `cmd /s /c ""command" "arg""` has a special first/last-quote grammar. Passing that nested form
+  // through Node's CreateProcess quoting caused the command to start and immediately exit on Windows
+  // (prod 2026-08-24: Playwright MCP became `MCP server not connected` right after this wrapper landed).
+  // Start with the CALL builtin instead, so /c receives an unquoted command token and every untrusted
+  // value remains separately quoted. CALL also resolves bare .cmd shims such as npx/npm from PATH.
+  const commandLine = ['call', command, ...args].map((part, i) => i === 0 ? part : quoteWindowsCmdArg(part)).join(' ');
+  return { command: comspec, args: ['/d', '/v:off', '/s', '/c', commandLine] };
 }
 
 export class StdioTransport extends EventEmitter {
@@ -79,6 +84,7 @@ export class StdioTransport extends EventEmitter {
   private buffer = '';
   private nextId = 1;
   private protocolVersion: ProtocolVersion | null = null;
+  private lastProcessError: string | null = null;
   private pending = new Map<number, {
     resolve: (value: unknown) => void;
     reject: (reason: Error) => void;
@@ -94,6 +100,7 @@ export class StdioTransport extends EventEmitter {
 
   /** Start the child process */
   async connect(): Promise<void> {
+    this.lastProcessError = null;
     const env = buildChildEnv(this.config);
     const spec = buildStdioSpawnSpec(this.config.command, this.config.args || []);
     const proc = spawn(spec.command, spec.args, {
@@ -102,6 +109,7 @@ export class StdioTransport extends EventEmitter {
       shell: false,
     });
     this.proc = proc;
+    let stderrTail = '';
 
     proc.stdout!.on('data', (chunk: Buffer) => {
       this.buffer += chunk.toString();
@@ -110,10 +118,16 @@ export class StdioTransport extends EventEmitter {
 
     proc.stderr!.on('data', (chunk: Buffer) => {
       // MCP server's stderr is used for logging
-      this.emit('log', chunk.toString());
+      const text = chunk.toString();
+      stderrTail = (stderrTail + text).slice(-2000);
+      this.emit('log', text);
     });
 
-    proc.on('exit', (code) => {
+    proc.on('exit', (code, signal) => {
+      const detail = stderrTail.trim().replace(/\s+/g, ' ').slice(0, 800);
+      this.lastProcessError =
+        `MCP stdio child exited (code=${code ?? 'null'}, signal=${signal ?? 'none'})` +
+        (detail ? `: ${detail}` : '');
       this.emit('exit', code);
       // Reject all pending requests
       for (const [, p] of this.pending) {
@@ -133,8 +147,24 @@ export class StdioTransport extends EventEmitter {
     // failed → reject, caught by connectMcpServers' allSettled (gracefully degraded to
     // "this server failed to connect").
     await new Promise<void>((resolve, reject) => {
-      const onSpawnError = (err: Error) => reject(err);
+      let settled = false;
+      let readyTimer: ReturnType<typeof setTimeout> | undefined;
+      const finishReject = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        if (readyTimer) clearTimeout(readyTimer);
+        reject(err);
+      };
+      const onSpawnError = (err: Error) => finishReject(err);
+      const onEarlyExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        const detail = stderrTail.trim().replace(/\s+/g, ' ').slice(0, 800);
+        finishReject(new Error(
+          `MCP stdio child exited before initialization (code=${code ?? 'null'}, signal=${signal ?? 'none'})` +
+            (detail ? `: ${detail}` : ''),
+        ));
+      };
       proc.once('error', onSpawnError);
+      proc.once('exit', onEarlyExit);
       proc.once('spawn', () => {
         proc.removeListener('error', onSpawnError);
         // After startup, attach a persistent error handler: late runtime errors only reject pending requests, no longer crash.
@@ -145,8 +175,17 @@ export class StdioTransport extends EventEmitter {
           }
           this.pending.clear();
         });
-        // Give the server a moment to be ready (simple delay; ideally should await the initialize response).
-        setTimeout(resolve, 100);
+        // Give the server a moment to be ready, but never report connected if it exits during that window.
+        readyTimer = setTimeout(() => {
+          if (settled) return;
+          if (proc.exitCode !== null || !proc.stdin?.writable) {
+            onEarlyExit(proc.exitCode, proc.signalCode);
+            return;
+          }
+          settled = true;
+          proc.removeListener('exit', onEarlyExit);
+          resolve();
+        }, 100);
       });
     });
   }
@@ -159,7 +198,7 @@ export class StdioTransport extends EventEmitter {
   /** Send a JSON-RPC request and wait for its response */
   async request(method: string, params?: unknown): Promise<unknown> {
     if (!this.proc?.stdin?.writable) {
-      throw new Error('MCP server not connected');
+      throw new Error(this.lastProcessError ?? 'MCP server not connected');
     }
 
     const id = this.nextId++;

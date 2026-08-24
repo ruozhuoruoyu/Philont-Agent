@@ -13,7 +13,11 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { buildChildEnv, buildStdioSpawnSpec } from '../src/transport/stdio.js';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildChildEnv, buildStdioSpawnSpec, StdioTransport } from '../src/transport/stdio.js';
 import { McpBridge } from '../src/bridge.js';
 
 const VERSION = '2025-06-18';
@@ -104,8 +108,10 @@ describe('stdio child spawn boundary', () => {
     );
     assert.equal(spec.command, 'C:\\Windows\\System32\\cmd.exe');
     assert.deepEqual(spec.args.slice(0, 4), ['/d', '/v:off', '/s', '/c']);
+    assert.match(spec.args[4], /^call "npx\.cmd"/);
     assert.match(spec.args[4], /"C:\\Users\\A B\\profile"/);
     assert.match(spec.args[4], /100%%/);
+    assert.doesNotMatch(spec.args[4], /^""/);
   });
 
   it('keeps POSIX as a direct executable plus argv', () => {
@@ -118,6 +124,47 @@ describe('stdio child spawn boundary', () => {
     assert.throws(
       () => buildStdioSpawnSpec('npx.cmd', ['safe" & calc.exe & "'], 'win32'),
       /Unsafe quote\/newline/,
+    );
+  });
+
+  it('actually launches a .cmd shim with spaces on Windows', { skip: process.platform !== 'win32' }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'philont mcp cmd '));
+    const batch = join(dir, 'fake mcp.cmd');
+    writeFileSync(batch, '@echo off\r\necho MCP-CMD-OK:%~1\r\n', 'utf8');
+    try {
+      const spec = buildStdioSpawnSpec(batch, ['hello world']);
+      const output = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
+        const child = spawn(spec.command, spec.args, { shell: false });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (c) => { stdout += c.toString(); });
+        child.stderr.on('data', (c) => { stderr += c.toString(); });
+        child.once('error', reject);
+        child.once('exit', (code) => resolve({ stdout, stderr, code }));
+      });
+      assert.equal(output.code, 0, output.stderr);
+      assert.match(output.stdout, /MCP-CMD-OK:hello world/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an early child exit with its code and stderr instead of "not connected"', async () => {
+    const transport = new StdioTransport({
+      transport: 'stdio',
+      command: process.execPath,
+      args: ['-e', "console.error('PLAYWRIGHT-BOOT-FAILED'); process.exit(7)"],
+    });
+    await assert.rejects(
+      () => transport.connect(),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /exited before initialization/);
+        assert.match(message, /code=7/);
+        assert.match(message, /PLAYWRIGHT-BOOT-FAILED/);
+        assert.doesNotMatch(message, /^MCP server not connected$/);
+        return true;
+      },
     );
   });
 });

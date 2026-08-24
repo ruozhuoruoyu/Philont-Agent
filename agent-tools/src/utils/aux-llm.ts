@@ -13,8 +13,10 @@
  *        - 'anthropic'        → POST /v1/messages       (Anthropic Messages API)
  *      When AUX_LLM_PROTOCOL is not explicitly set, heuristically detect from baseUrl:
  *      contains 'anthropic' → anthropic; anything else → openai.
- *   2. Otherwise → call the main-model caller registered at server startup via registerMainLLM
- *   3. Neither available → throw AuxLLMError
+ *   2. If the configured aux endpoint fails (or its short circuit is open), fall back to the main-model
+ *      caller registered at server startup via registerMainLLM. Health probes explicitly disable this.
+ *   3. If aux is not configured, call that same registered main-model caller directly.
+ *   4. Neither available → throw AuxLLMError
  *
  * Compatible with most inexpensive small models: DeepSeek / Qwen / GLM / Moonshot / Groq / Together /
  * OpenRouter / self-hosted vLLM / Ollama (OpenAI protocol) + Anthropic official / gateways that speak
@@ -39,6 +41,11 @@ export interface AuxLLMRequest {
   timeoutMs?: number;
   /** Abort signal */
   signal?: AbortSignal;
+  /**
+   * Whether a configured-but-failing aux endpoint may fall back to the registered main model.
+   * Defaults to true. Health probes set this false so a working main model cannot mask a broken aux.
+   */
+  fallbackToMain?: boolean;
 }
 
 export type AuxLLMCaller = (req: AuxLLMRequest) => Promise<string>;
@@ -75,6 +82,8 @@ export function registerMainLLM(caller: AuxLLMCaller): void {
 /** For testing only: clear the registered main-model caller */
 export function clearMainLLMRegistration(): void {
   mainLLMCaller = null;
+  consecutiveAuxFailures = 0;
+  auxCircuitOpenUntil = 0;
 }
 
 /** Whether a main-model caller is currently registered */
@@ -176,9 +185,31 @@ function auxThinkingDisabled(model: string): boolean {
 let auxCallCount = 0;
 let auxErrorCount = 0;
 let lastAuxError: string | null = null;
+let auxFallbackCount = 0;
+let auxFallbackErrorCount = 0;
+let consecutiveAuxFailures = 0;
+let auxCircuitOpenUntil = 0;
+const AUX_CIRCUIT_FAILURE_THRESHOLD = 3;
+const AUX_CIRCUIT_OPEN_MS = 5 * 60_000;
 
-export function auxLLMHealth(): { configured: boolean; calls: number; errors: number; lastError: string | null } {
-  return { configured: isAuxLLMConfigured(), calls: auxCallCount, errors: auxErrorCount, lastError: lastAuxError };
+export function auxLLMHealth(): {
+  configured: boolean;
+  calls: number;
+  errors: number;
+  lastError: string | null;
+  fallbacks: number;
+  fallbackErrors: number;
+  circuitOpen: boolean;
+} {
+  return {
+    configured: isAuxLLMConfigured(),
+    calls: auxCallCount,
+    errors: auxErrorCount,
+    lastError: lastAuxError,
+    fallbacks: auxFallbackCount,
+    fallbackErrors: auxFallbackErrorCount,
+    circuitOpen: auxCircuitOpenUntil > Date.now(),
+  };
 }
 
 /**
@@ -189,7 +220,13 @@ export function auxLLMHealth(): { configured: boolean; calls: number; errors: nu
 export async function probeAuxLLM(signal?: AbortSignal): Promise<{ ok: boolean; error?: string }> {
   if (!isAuxLLMConfigured()) return { ok: false, error: 'not configured (AUX_LLM_* unset)' };
   try {
-    const out = await callAuxLLM({ system: 'Reply with the single word: ok', user: 'ping', maxTokens: 4, signal });
+    const out = await callAuxLLM({
+      system: 'Reply with the single word: ok',
+      user: 'ping',
+      maxTokens: 4,
+      signal,
+      fallbackToMain: false,
+    });
     return out && out.trim().length > 0 ? { ok: true } : { ok: false, error: 'empty response' };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -199,23 +236,59 @@ export async function probeAuxLLM(signal?: AbortSignal): Promise<{ ok: boolean; 
 export async function callAuxLLM(req: AuxLLMRequest): Promise<string> {
   const envConfig = readAuxLLMEnv();
   auxCallCount++;
-  try {
-    if (envConfig) {
-      return envConfig.protocol === 'anthropic'
-        ? await callAnthropicCompatible(envConfig, req)
-        : await callOpenAICompatible(envConfig, req);
-    }
-    if (mainLLMCaller) {
-      return await mainLLMCaller(req);
-    }
-    throw new AuxLLMError(
+  if (!envConfig) {
+    if (mainLLMCaller) return await mainLLMCaller(req);
+    const error = new AuxLLMError(
       'Aux LLM not configured: set AUX_LLM_BASE_URL/AUX_LLM_API_KEY/AUX_LLM_MODEL, ' +
         'or call registerMainLLM() at application startup.',
       'not_configured',
     );
-  } catch (e) {
     auxErrorCount++;
-    lastAuxError = e instanceof Error ? e.message : String(e);
+    lastAuxError = error.message;
+    throw error;
+  }
+
+  const fallbackAllowed = req.fallbackToMain !== false && mainLLMCaller !== null;
+  if (auxCircuitOpenUntil <= Date.now()) {
+    try {
+      const result = envConfig.protocol === 'anthropic'
+        ? await callAnthropicCompatible(envConfig, req)
+        : await callOpenAICompatible(envConfig, req);
+      consecutiveAuxFailures = 0;
+      auxCircuitOpenUntil = 0;
+      return result;
+    } catch (e) {
+      auxErrorCount++;
+      lastAuxError = e instanceof Error ? e.message : String(e);
+      // A caller cancellation is authoritative: do not start a second expensive request after it aborted.
+      if (req.signal?.aborted) throw e;
+      consecutiveAuxFailures++;
+      if (consecutiveAuxFailures >= AUX_CIRCUIT_FAILURE_THRESHOLD) {
+        auxCircuitOpenUntil = Date.now() + AUX_CIRCUIT_OPEN_MS;
+        console.warn(
+          `[aux-llm] circuit opened for ${AUX_CIRCUIT_OPEN_MS / 60_000}min after ` +
+            `${consecutiveAuxFailures} consecutive failures: ${lastAuxError}`,
+        );
+      }
+      if (!fallbackAllowed) throw e;
+      console.warn(`[aux-llm] primary failed; falling back to main LLM: ${lastAuxError}`);
+    }
+  } else if (!fallbackAllowed) {
+    throw new AuxLLMError(
+      `Aux LLM circuit is open until ${new Date(auxCircuitOpenUntil).toISOString()}`,
+      'http_error',
+    );
+  }
+
+  auxFallbackCount++;
+  try {
+    const result = await mainLLMCaller!(req);
+    if (!result || !result.trim()) {
+      throw new AuxLLMError('Main LLM fallback returned empty content', 'invalid_response');
+    }
+    return result;
+  } catch (e) {
+    auxFallbackErrorCount++;
     throw e;
   }
 }
