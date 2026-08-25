@@ -2773,7 +2773,12 @@ export function formalEvidenceAppliesToClaims(evidence: string, claims: readonly
   const scope = evidence.match(/^\[scope=([^\]]+)\]/)?.[1];
   if (!scope) return false;
   const haystack = claims.join('\n').toLowerCase();
-  if (scope === 'project-build-only') return /(?:project|whole|full|all|\u5168(?:\u90e8|\u5c40|\u9879\u76ee)|\u6574\u4f53).{0,12}(?:build|compile|\u7f16\u8bd1)|(?:build|compile|\u7f16\u8bd1).{0,12}(?:project|whole|full|all|\u5168(?:\u90e8|\u5c40|\u9879\u76ee)|\u6574\u4f53)/i.test(haystack);
+  // A bare `lake build` covers compilation of every module in the project, so it may support any
+  // explicit BUILD/COMPILE claim without requiring the prose to repeat "whole project". It still
+  // does not establish an arbitrary mathematical claim merely because that claim lives in Lean.
+  if (scope === 'project-build-only') {
+    return /\b(?:build|built|compile|compiled|compiles|compilation)\b|(?:\u7f16\u8bd1|\u6784\u5efa).{0,12}(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210|\u65e0\u8bef)|(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210).{0,12}(?:\u7f16\u8bd1|\u6784\u5efa)/i.test(haystack);
+  }
   const named = scope.replace(/^(?:target|file):/, '').toLowerCase();
   const basename = named.split(/[\\/]/).pop() ?? named;
   const leaf = scope.startsWith('target:') ? (basename.split('.').filter(Boolean).pop() ?? basename) : '';
@@ -2828,7 +2833,7 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     // the round prompt (collectComputeLessons).
     actions: memory.actions,
     skills: memory.skills,
-    getExternalVerificationEvidence: (owner, activeClaims = []) => {
+    getExternalVerificationEvidence: (owner, activeClaims) => {
       try {
         const plan = memory.plans.listBySession(owner, { limit: 1 })[0];
         const planEvidence = plan ? plan.steps

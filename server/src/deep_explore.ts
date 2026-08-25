@@ -2839,7 +2839,7 @@ export interface DeepExploreDeps {
   /** Completed plan/filesystem work that may settle a still-open tree node. The tree remains the
    * source of proof status: this evidence is surfaced for an explicit reason_record, never used
    * to auto-prove a node by fuzzy text matching. */
-  getExternalVerificationEvidence?: (owner: string, activeClaims?: readonly string[]) => string[];
+  getExternalVerificationEvidence?: (owner: string, activeClaims: readonly string[]) => string[];
 }
 
 export function createDeepExploreTool(

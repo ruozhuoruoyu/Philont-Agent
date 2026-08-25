@@ -36,6 +36,9 @@ test('formal evidence accepts real Lean builds but rejects version probes and ge
   ) ?? '';
   assert.equal(formalEvidenceAppliesToClaims(projectBuild, ['Prove theorem foo']), false);
   assert.equal(formalEvidenceAppliesToClaims(projectBuild, ['Compile the whole project']), true);
+  assert.equal(formalEvidenceAppliesToClaims(projectBuild, ['argmin_collapse \u7f16\u8bd1\u901a\u8fc7']), true);
+  assert.equal(formalEvidenceAppliesToClaims(projectBuild, ['Lrc \u7684\u8bc1\u660e\u7f16\u8bd1\u901a\u8fc7']), true);
+  assert.equal(formalEvidenceAppliesToClaims(projectBuild, ['region3_sum_bound_core \u5df2\u8bc1\u660e']), false);
   assert.equal(
     extractFormalVerificationEvidence('shell', { command: 'lean --version' }, { success: true, output: 'Lean 4' }),
     null,
