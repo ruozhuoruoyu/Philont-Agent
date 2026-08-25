@@ -318,6 +318,7 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
         system: '你正在做任务收口反思。仅按要求输出 JSON,不要任何 prose。',
         user: userPart,
         maxTokens: 2048,
+        requireComplete: true,
       });
     } catch (e) {
       console.warn(`[reflection] aux LLM call failed: ${String(e).slice(0, 200)}`);

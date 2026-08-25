@@ -9,7 +9,7 @@
  *   - http: the remote endpoint stops answering (only observable by pinging it).
  */
 
-import { describe, it, before, after } from 'node:test';
+import { describe, it, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -141,8 +141,9 @@ process.stdin.on('data', (c) => {
     }
   }
 });
+
 // die shortly after startup, the way a crashing MCP server would
-setTimeout(() => process.exit(3), 400);
+setTimeout(() => process.exit(3), 3000);
 `,
       'utf-8',
     );
@@ -173,4 +174,22 @@ setTimeout(() => process.exit(3), 400);
 
     await sup.stop();
   });
+});
+
+test('invalid MCP configuration is permanently failed instead of retried forever', async () => {
+  const logs: string[] = [];
+  const sup = new McpSupervisor(
+    [{ name: 'invalid', transport: { transport: 'http', url: 'not a URL' } }],
+    { healthIntervalMs: 0, baseBackoffMs: 10, log: (line) => logs.push(line) },
+  );
+  await sup.start();
+  const status = sup.status()[0];
+  assert.equal(status.state, 'failed');
+  assert.equal(status.retryInMs, undefined);
+  assert.equal(status.failures, 1);
+  assert.match(status.lastError ?? '', /Invalid MCP http URL/);
+  assert.ok(logs.some((line) => /disabled: invalid configuration/.test(line)));
+  await sleep(30);
+  assert.equal(sup.status()[0].failures, 1, 'a permanent configuration error must not schedule another attempt');
+  await sup.stop();
 });

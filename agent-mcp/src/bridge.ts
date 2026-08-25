@@ -17,7 +17,7 @@ import { StdioTransport } from './transport/stdio.js';
 import { SseTransport } from './transport/sse.js';
 import { HttpTransport } from './transport/http.js';
 import { wrapMcpTool, renderMcpContent, type McpToolDefinition } from './wrapper.js';
-import type { McpServerConfig } from './config.js';
+import { validateMcpServerConfig, type McpServerConfig } from './config.js';
 import {
   PREFERRED_INITIALIZE_VERSION,
   SUPPORTED_PROTOCOL_VERSIONS,
@@ -39,6 +39,7 @@ export class McpBridge {
   private negotiation: NegotiationResult | null = null;
 
   constructor(config: McpServerConfig) {
+    validateMcpServerConfig(config);
     this.config = config;
     this.serverName = config.name;
 

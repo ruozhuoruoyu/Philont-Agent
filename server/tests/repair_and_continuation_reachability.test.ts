@@ -1,38 +1,71 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { settleRunningAuthState } from '../src/chat-handler.js';
+import { repairLedgerRows } from '../src/mechanical_repair.js';
+import { classifyMcpBootStatus } from '../src/mcp_boot_status.js';
 
-const chat = readFileSync(new URL('../src/chat-handler.ts', import.meta.url), 'utf8');
-const indexSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+test('a returned authorized call is completed, removed, and persisted', () => {
+  const pending = {
+    toolCallId: 'call-1',
+    executionState: 'running',
+    callLedger: [
+      { id: 'done', state: 'completed' },
+      { id: 'call-1', state: 'running' },
+      { id: 'later', state: 'queued' },
+    ],
+  };
+  const entries = new Map([['session-1', pending]]);
+  let persisted = 0;
+  const settled = settleRunningAuthState(entries, 'session-1', 'call-1', () => { persisted++; });
+  assert.equal(settled, pending);
+  assert.equal(entries.has('session-1'), false);
+  assert.equal(persisted, 1);
+  assert.equal(settled?.callLedger?.find((entry) => entry.id === 'call-1')?.state, 'completed');
+  assert.equal(settled?.callLedger?.find((entry) => entry.id === 'later')?.state, 'queued');
+});
 
-test('a completed resumed authorization is settled at both tool execution sites', () => {
-  const calls = chat.match(/settleRunningPendingAuth\(sessionId, call\.id\);/g) ?? [];
-  assert.equal(calls.length, 2, 'initial and subsequent tool loops must both settle a returned auth call');
-  assert.match(
-    chat,
-    /function settleRunningPendingAuth[\s\S]*?pendingAuth\.delete\(sessionId\);[\s\S]*?persistContinuation\(sessionId\);/,
-    'settlement must be durable before the long turn continues',
+test('a non-running or different authorization is left untouched', () => {
+  const pending = { toolCallId: 'call-1', executionState: 'awaiting_auth', callLedger: [] };
+  const entries = new Map([['session-1', pending]]);
+  let persisted = 0;
+  assert.equal(settleRunningAuthState(entries, 'session-1', 'call-1', () => { persisted++; }), null);
+  assert.equal(settleRunningAuthState(entries, 'session-1', 'other', () => { persisted++; }), null);
+  assert.equal(entries.get('session-1'), pending);
+  assert.equal(persisted, 0);
+});
+
+test('repair accounting emits the original failure and corrected success as separate executions', () => {
+  const bad = { command: 'lake build Bad' };
+  const good = { command: 'lake build Good' };
+  assert.deepEqual(repairLedgerRows({
+    originalInput: bad,
+    originalFailure: { error: 'unknown target Bad' },
+    repairedInput: good,
+    finalResult: { success: true, output: 'Built Good' },
+  }), [
+    { params: bad, result: 'unknown target Bad', success: false },
+    { params: good, result: 'Built Good', success: true },
+  ]);
+});
+
+test('without automatic repair accounting emits exactly the execution that occurred', () => {
+  const input = { path: 'missing' };
+  assert.deepEqual(
+    repairLedgerRows({ originalInput: input, finalResult: { success: false, error: 'ENOENT' } }),
+    [{ params: input, result: 'ENOENT', success: false }],
   );
 });
 
-test('a mechanism-initiated repair is a second budgeted tool execution', () => {
-  assert.match(
-    chat,
-    /run: \(input\) => \{\s*totalToolCallsThisTurn\+\+;\s*return tools\.execute\(call\.name, input\);/,
-  );
-  assert.match(chat, /totalToolCallsThisTurn \+ 1 >= effectiveMax/);
-});
-
-test('action accounting keeps the failed input separate from the repaired input', () => {
-  assert.match(chat, /originalFailure: failed,[\s\S]*?repairedInput: outcome\.repairedInput/);
-  assert.match(chat, /params: originalInput,[\s\S]*?success: false/);
-  assert.match(chat, /params: originalInput2,[\s\S]*?success: false/);
-  assert.match(chat, /const actualInput = repair\.repairedInput \?\? originalInput/);
-  assert.match(chat, /const actualInput2 = repair2\.repairedInput \?\? originalInput2/);
-});
-
-test('MCP boot reporting gives a connecting server a grace period before declaring it down', () => {
-  assert.match(indexSource, /x\.state === 'connecting'/);
-  assert.match(indexSource, /MCP still connecting:[\s\S]*?setTimeout\(\(\) => reportMcpBoot\(true\), 20_000\)/);
-  assert.match(indexSource, /x\.state !== 'connected' && x\.state !== 'connecting'/);
+test('MCP boot policy waits for connecting servers, then reports unresolved ones', () => {
+  const servers = [
+    { name: 'ready', state: 'connected' },
+    { name: 'slow', state: 'connecting' },
+    { name: 'bad-config', state: 'failed', lastError: 'invalid configuration' },
+  ];
+  const early = classifyMcpBootStatus(servers, false);
+  assert.equal(early.shouldWait, true);
+  assert.deepEqual(early.unavailable.map((server) => server.name), ['bad-config']);
+  const final = classifyMcpBootStatus(servers, true);
+  assert.equal(final.shouldWait, false);
+  assert.deepEqual(final.unavailable.map((server) => server.name), ['bad-config', 'slow']);
 });

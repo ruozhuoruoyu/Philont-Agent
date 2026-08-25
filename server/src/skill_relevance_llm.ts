@@ -123,7 +123,7 @@ export async function selectSkillsByAux(
   candidates: SkillCandidate[],
   k: number,
   deps: {
-    ask?: (req: { system: string; user: string; maxTokens: number }) => Promise<string | null>;
+    ask?: (req: { system: string; user: string; maxTokens: number; requireComplete: boolean }) => Promise<string | null>;
     configured?: boolean;
     onOutcome?: (outcome: SkillSelectionOutcome) => void;
   } = {},
@@ -138,7 +138,7 @@ export async function selectSkillsByAux(
   if (!(deps.configured ?? isAuxLLMConfigured())) return fallback('aux-unconfigured');
   try {
     const { system, user } = buildSkillSelectionPrompt(query, candidates, k);
-    const raw = await (deps.ask ?? callAuxLLM)({ system, user, maxTokens: 200 });
+    const raw = await (deps.ask ?? callAuxLLM)({ system, user, maxTokens: 200, requireComplete: true });
     const names = parseSelectedSkillNames(raw, candidates.map((c) => c.name));
     if (names.length === 0) {
       // "there is nothing relevant" and "it answered with names we do not recognise" both end up as

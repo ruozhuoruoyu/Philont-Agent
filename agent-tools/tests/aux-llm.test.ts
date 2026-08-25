@@ -295,11 +295,24 @@ describe('aux-llm', () => {
         return makeOpenAIResponse('{"complete":true}');
       });
       try {
-        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 96 }), '{"complete":true}');
+        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 96, requireComplete: true }), '{"complete":true}');
         assert.deepEqual(
           fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
           [96, 512, 1024],
         );
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('accepts usable truncated text for a closed-set classifier without retrying', async () => {
+      setAuxEnv();
+      const fakeFetch = mockFetch(() => new Response(JSON.stringify({
+        choices: [{ message: { content: 'grant' }, finish_reason: 'length' }],
+      }), { status: 200 }));
+      try {
+        assert.equal(await callAuxLLM({ user: 'classify', maxTokens: 4 }), 'grant');
+        assert.equal(fakeFetch.calls.length, 1);
       } finally {
         fakeFetch.restore();
       }
@@ -497,11 +510,26 @@ describe('aux-llm', () => {
         return makeAnthropicResponse('{"complete":true}');
       });
       try {
-        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 96 }), '{"complete":true}');
+        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 96, requireComplete: true }), '{"complete":true}');
         assert.deepEqual(
           fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
           [96, 512, 1024],
         );
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('accepts usable max_tokens text for a closed-set Anthropic classifier', async () => {
+      setAuxEnv('https://api.anthropic.com/v1', 'k', 'm');
+      process.env.AUX_LLM_PROTOCOL = 'anthropic';
+      const fakeFetch = mockFetch(() => new Response(JSON.stringify({
+        content: [{ type: 'text', text: 'ACCEPT' }],
+        stop_reason: 'max_tokens',
+      }), { status: 200 }));
+      try {
+        assert.equal(await callAuxLLM({ user: 'classify', maxTokens: 8 }), 'ACCEPT');
+        assert.equal(fakeFetch.calls.length, 1);
       } finally {
         fakeFetch.restore();
       }

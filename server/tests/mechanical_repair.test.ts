@@ -164,15 +164,18 @@ test('repair output budget scales with the argument object it must reproduce', (
 
 test('the aux repair call receives the size-derived output budget', async () => {
   let budget = 0;
+  let requireComplete = false;
   const input = { content: 'x'.repeat(12_000) };
   await attemptMechanicalRepair(baseOpts({
     toolInput: input,
-    ask: async (req: { maxTokens: number }) => {
+    ask: async (req: { maxTokens: number; requireComplete: boolean }) => {
       budget = req.maxTokens;
+      requireComplete = req.requireComplete;
       return JSON.stringify({ content: 'y'.repeat(12_000) });
     },
   }));
   assert.equal(budget, repairOutputTokenBudget(input));
+  assert.equal(requireComplete, true, 'a JSON argument rewrite must never accept partial output');
 });
 
 test('with no rule for the signature it does not guess — no aux call, no re-run', async () => {

@@ -6,7 +6,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import type { McpStdioConfig } from '../config.js';
+import { McpConfigurationError, type McpStdioConfig } from '../config.js';
 import { withProtocolMeta, type ProtocolVersion } from '../protocol.js';
 
 export interface JsonRpcRequest {
@@ -58,7 +58,7 @@ export function buildChildEnv(
 function quoteWindowsCmdArg(value: string): string {
   // cmd.exe has no trustworthy argv boundary for an embedded quote/newline. Fail closed instead
   // of turning an operator-controlled MCP config into a command-injection boundary.
-  if (/["\r\n]/.test(value)) throw new Error('Unsafe quote/newline in Windows MCP command argument');
+  if (/["\r\n]/.test(value)) throw new McpConfigurationError('Unsafe quote/newline in Windows MCP command argument');
   // Keep ordinary flags/package names bare. When the whole `/c` payload is itself passed as one argv,
   // Node's Windows quoting can otherwise turn `"-y"` into a literal quote-bearing npm argument
   // (prod 2026-08-24: npm EINVALIDTAGNAME for tag `"-y"`).

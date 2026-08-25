@@ -95,6 +95,7 @@ import {
 } from './chat-handler.js';
 import { currentPhraseLang } from './response_language.js';
 import { maintainDeferredPushes } from './deferred_push_maintenance.js';
+import { classifyMcpBootStatus } from './mcp_boot_status.js';
 import { readdirSync } from 'node:fs';
 import { utcDateString, groupFailures } from '@agent/memory';
 import {
@@ -942,17 +943,16 @@ server.listen(PORT, () => {
   if (getMcpStatus().configured > 0) {
     const reportMcpBoot = (final: boolean) => {
       const s = getMcpStatus();
-      const connecting = s.servers.filter((x) => x.state === 'connecting');
-      const down = s.servers.filter((x) => x.state !== 'connected' && x.state !== 'connecting');
-      if (!final && connecting.length > 0) {
+      const classification = classifyMcpBootStatus(s.servers, final);
+      if (classification.shouldWait) {
         console.log(
-          `[boot] MCP still connecting: ${connecting.map((x) => x.name).join(', ')}; ` +
+          `[boot] MCP still connecting: ${classification.connecting.map((x) => x.name).join(', ')}; ` +
             `waiting before declaring it unavailable`,
         );
         setTimeout(() => reportMcpBoot(true), 20_000).unref?.();
         return;
       }
-      const unresolved = final ? [...down, ...connecting] : down;
+      const unresolved = classification.unavailable;
       console[unresolved.length ? 'warn' : 'log'](`[boot] ${s.summary}`);
       for (const d of unresolved) console.warn(`[boot] MCP server "${d.name}" not connected: ${d.lastError ?? d.state}`);
     };

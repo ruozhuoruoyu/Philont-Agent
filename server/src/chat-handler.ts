@@ -268,6 +268,7 @@ import {
   classifyRecurrence,
   mechanicalRepairEnabled,
   recurrenceMetricKey,
+  repairLedgerRows,
   renderRepairNotice,
 } from './mechanical_repair.js';
 import { scheduledTurnMadeProgress } from './schedule_progress.js';
@@ -2759,6 +2760,29 @@ export const DEEP_EXPLORE_VERIFY_TOOL_NAMES = new Set([
 
 const formalVerificationEvidenceBySession = new Map<string, string[]>();
 
+function shellVerificationScope(command: string): string | null {
+  const normalized = command.replace(/\s+/g, ' ').trim();
+  const lakeTarget = normalized.match(/(?:^|[;&|]\s*)lake\s+build\s+([^\s;&|]+)/i)?.[1];
+  if (lakeTarget) return `target:${lakeTarget}`;
+  if (/(?:^|[;&|]\s*)lake\s+build(?:\s|$)/i.test(normalized)) return 'project-build-only';
+  const leanFile = normalized.match(/(?:^|[;&|]\s*)(?:lake\s+env\s+)?lean(?:\.exe)?\s+([^\s;&|]+\.lean)(?:\s|$)/i)?.[1];
+  return leanFile ? `file:${leanFile}` : null;
+}
+
+export function formalEvidenceAppliesToClaims(evidence: string, claims: readonly string[]): boolean {
+  const scope = evidence.match(/^\[scope=([^\]]+)\]/)?.[1];
+  if (!scope) return false;
+  const haystack = claims.join('\n').toLowerCase();
+  if (scope === 'project-build-only') return /(?:project|whole|full|all|\u5168(?:\u90e8|\u5c40|\u9879\u76ee)|\u6574\u4f53).{0,12}(?:build|compile|\u7f16\u8bd1)|(?:build|compile|\u7f16\u8bd1).{0,12}(?:project|whole|full|all|\u5168(?:\u90e8|\u5c40|\u9879\u76ee)|\u6574\u4f53)/i.test(haystack);
+  const named = scope.replace(/^(?:target|file):/, '').toLowerCase();
+  const basename = named.split(/[\\/]/).pop() ?? named;
+  const leaf = scope.startsWith('target:') ? (basename.split('.').filter(Boolean).pop() ?? basename) : '';
+  return haystack.includes(named)
+    || haystack.includes(basename)
+    || haystack.includes(basename.replace(/\.lean$/i, ''))
+    || (!!leaf && haystack.includes(leaf));
+}
+
 /** Strict enough that `lean --version` cannot masquerade as proof/build verification. */
 export function extractFormalVerificationEvidence(
   toolName: string,
@@ -2773,7 +2797,9 @@ export function extractFormalVerificationEvidence(
   if (toolName !== 'shell' && toolName !== 'process') return null;
   const command = String(input.command ?? input.cmd ?? '').replace(/\s+/g, ' ').trim();
   if (!isStrictFormalVerificationCommand(command)) return null;
-  return `${toolName}: ${command.slice(0, 240)} → ${output.slice(0, 500) || 'exit 0'}`;
+  const scope = shellVerificationScope(command);
+  if (!scope) return null;
+  return `[scope=${scope}] ${toolName}: ${command.slice(0, 240)} → ${output.slice(0, 500) || 'exit 0'}`;
 }
 
 function rememberFormalVerificationEvidence(
@@ -2802,15 +2828,18 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     // the round prompt (collectComputeLessons).
     actions: memory.actions,
     skills: memory.skills,
-    getExternalVerificationEvidence: (owner) => {
+    getExternalVerificationEvidence: (owner, activeClaims = []) => {
       try {
         const plan = memory.plans.listBySession(owner, { limit: 1 })[0];
         const planEvidence = plan ? plan.steps
           .filter((s) => s.status === 'done' && !!s.evidence?.trim())
           .map((s) => `${s.description}: ${s.evidence!.trim()}`) : [];
-        return [...planEvidence, ...(formalVerificationEvidenceBySession.get(owner) ?? [])].slice(-12);
+        const formalEvidence = (formalVerificationEvidenceBySession.get(owner) ?? [])
+          .filter((evidence) => formalEvidenceAppliesToClaims(evidence, activeClaims));
+        return [...planEvidence, ...formalEvidence].slice(-12);
       } catch {
-        return formalVerificationEvidenceBySession.get(owner) ?? [];
+        return (formalVerificationEvidenceBySession.get(owner) ?? [])
+          .filter((evidence) => formalEvidenceAppliesToClaims(evidence, activeClaims));
       }
     },
     onStatus: (text) => console.log(`[deep-explore] ${text}`),
@@ -4688,14 +4717,24 @@ function persistContinuation(sessionId: string): void {
  * after restart). The remaining tool chain may be abandoned safely; a later call that needs approval will
  * create its own fresh continuation.
  */
-function settleRunningPendingAuth(sessionId: string, toolCallId: string): boolean {
-  const pending = pendingAuth.get(sessionId);
-  if (!pending || pending.toolCallId !== toolCallId || pending.executionState !== 'running') return false;
+export function settleRunningAuthState<T extends {
+  toolCallId: string;
+  executionState?: string;
+  callLedger?: Array<{ id: string; state: string; [key: string]: unknown }>;
+}>(entries: Map<string, T>, sessionId: string, toolCallId: string, persist: () => void): T | null {
+  const pending = entries.get(sessionId);
+  if (!pending || pending.toolCallId !== toolCallId || pending.executionState !== 'running') return null;
   pending.callLedger = (pending.callLedger ?? []).map((entry) =>
     entry.id === toolCallId ? { ...entry, state: 'completed' as const } : entry,
   );
-  pendingAuth.delete(sessionId);
-  persistContinuation(sessionId);
+  entries.delete(sessionId);
+  persist();
+  return pending;
+}
+
+function settleRunningPendingAuth(sessionId: string, toolCallId: string): boolean {
+  const pending = settleRunningAuthState(pendingAuth, sessionId, toolCallId, () => persistContinuation(sessionId));
+  if (!pending) return false;
   console.log(
     `[continuation-store] session=${safeSessionId(sessionId)} settled completed auth call ${pending.toolName} ` +
       `before continuing the turn`,
@@ -9866,6 +9905,7 @@ async function handleChatSendInner(
                       `# Guide\n${guideText.slice(0, 16_000)}\n\n# Deliverables\n` +
                       deliverables.map((d) => `- ${d.id}: ${d.description}`).join('\n'),
                     maxTokens: 500,
+                    requireComplete: true,
                   };
                   const out = await callAuxLLM(req);
                   const m = out.match(/\{[\s\S]*\}/);
@@ -11843,15 +11883,20 @@ async function runToolLoop(
       content: truncateToolResultContent(rawResultText),
     });
     totalToolCallsThisTurn++;
+    const ledgerRows = repairLedgerRows({
+      originalInput,
+      originalFailure: repair.originalFailure,
+      repairedInput: repair.repairedInput,
+      finalResult: result,
+    });
     if (repair.originalFailure && repair.repairedInput) {
       const originalError = repair.originalFailure.error ?? repair.originalFailure.output ?? '';
       inTurnRecords.push({ toolName: call.name, success: false, resultText: originalError });
+      const failedRow = ledgerRows[0];
       memory.actions.log({
         sessionId: GLOBAL_TIMELINE_SESSION_ID,
         toolName: call.name,
-        params: originalInput,
-        result: originalError.slice(0, 500) || null,
-        success: false,
+        ...failedRow,
         linkedSkill: signalBus.activeSkillName,
       });
     }
@@ -11879,12 +11924,11 @@ async function runToolLoop(
       }
     }
     // Layer 0.5: action persisted to global timeline; selected by time window during reflection
+    const finalLedgerRow = ledgerRows[ledgerRows.length - 1];
     memory.actions.log({
       sessionId: GLOBAL_TIMELINE_SESSION_ID,
       toolName: call.name,
-      params: actualInput,
-      result: (result.success ? result.output : result.error)?.slice(0, 500) ?? null,
-      success: result.success,
+      ...finalLedgerRow,
       // Attribute post-use_skill actions to the active recipe (never use_skill itself).
       linkedSkill:
         call.name !== 'use_skill' && signalBus.activeSkillName
@@ -13519,15 +13563,20 @@ async function runToolLoop(
         content: truncateToolResultContent(rawResultText),
       });
       totalToolCallsThisTurn++;
+      const ledgerRows2 = repairLedgerRows({
+        originalInput: originalInput2,
+        originalFailure: repair2.originalFailure,
+        repairedInput: repair2.repairedInput,
+        finalResult: result,
+      });
       if (repair2.originalFailure && repair2.repairedInput) {
         const originalError = repair2.originalFailure.error ?? repair2.originalFailure.output ?? '';
         inTurnRecords.push({ toolName: call.name, success: false, resultText: originalError });
+        const failedRow = ledgerRows2[0];
         memory.actions.log({
           sessionId: GLOBAL_TIMELINE_SESSION_ID,
           toolName: call.name,
-          params: originalInput2,
-          result: originalError.slice(0, 500) || null,
-          success: false,
+          ...failedRow,
           linkedSkill: signalBus.activeSkillName,
         });
       }
@@ -13547,12 +13596,11 @@ async function runToolLoop(
         mechanicalRetriesRemaining = 0;
       }
       // Layer 0.5: subsequent turn actions go into the global timeline
+      const finalLedgerRow = ledgerRows2[ledgerRows2.length - 1];
       memory.actions.log({
         sessionId: GLOBAL_TIMELINE_SESSION_ID,
         toolName: call.name,
-        params: actualInput2,
-        result: (result.success ? result.output : result.error)?.slice(0, 500) ?? null,
-        success: result.success,
+        ...finalLedgerRow,
       });
     }
 

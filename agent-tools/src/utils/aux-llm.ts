@@ -46,6 +46,12 @@ export interface AuxLLMRequest {
    * Defaults to true. Health probes set this false so a working main model cannot mask a broken aux.
    */
   fallbackToMain?: boolean;
+  /**
+   * Require a complete response. Enable for JSON or other structured output that cannot be used when
+   * cut off. Short closed-set classifiers may leave this false: if the provider returns usable text
+   * together with a length stop, that text is still a valid answer and should not trigger retries.
+   */
+  requireComplete?: boolean;
 }
 
 export type AuxLLMCaller = (req: AuxLLMRequest) => Promise<string>;
@@ -447,7 +453,7 @@ async function callOpenAICompatible(
   const choice = json.choices?.[0];
   const content = choice?.message?.content;
   const finishReason = choice?.finish_reason ?? 'missing';
-  if (finishReason === 'length') {
+  if (finishReason === 'length' && (req.requireComplete || typeof content !== 'string' || content.length === 0)) {
     const reasoningChars = choice?.message?.reasoning_content?.length ?? 0;
     throw new AuxLLMError(
       `Aux LLM output truncated (finish_reason=length, content_chars=${content?.length ?? 0}, ` +
@@ -573,7 +579,7 @@ async function callAnthropicCompatible(
 
   const text = json.content?.find((b) => b.type === 'text')?.text;
   const stopReason = json.stop_reason ?? 'missing';
-  if (stopReason === 'max_tokens') {
+  if (stopReason === 'max_tokens' && (req.requireComplete || typeof text !== 'string' || text.length === 0)) {
     const reasoningChars = (json.content ?? [])
       .filter((block) => block.type === 'thinking')
       .reduce((sum, block) => sum + (block.thinking?.length ?? block.text?.length ?? 0), 0);

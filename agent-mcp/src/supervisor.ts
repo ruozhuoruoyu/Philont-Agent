@@ -18,10 +18,10 @@
  */
 
 import { McpBridge } from './bridge.js';
-import type { McpServerConfig } from './config.js';
+import { McpConfigurationError, type McpServerConfig } from './config.js';
 import type { Tool } from '@agent/policy';
 
-export type McpConnectionState = 'connecting' | 'connected' | 'retrying';
+export type McpConnectionState = 'connecting' | 'connected' | 'retrying' | 'failed';
 
 export interface McpServerStatus {
   name: string;
@@ -105,9 +105,10 @@ export class McpSupervisor {
   private async connectEntry(entry: Entry): Promise<void> {
     if (this.stopped) return;
     entry.state = 'connecting';
-    const bridge = new McpBridge(entry.config);
+    let bridge: McpBridge | null = null;
 
     try {
+      bridge = new McpBridge(entry.config);
       const tools = await bridge.connectAndDiscover();
       if (this.stopped) { await bridge.close().catch(() => {}); return; }
 
@@ -131,7 +132,14 @@ export class McpSupervisor {
       );
     } catch (e) {
       entry.lastError = (e as Error)?.message ?? String(e);
-      await bridge.close().catch(() => {});
+      await bridge?.close().catch(() => {});
+      if (e instanceof McpConfigurationError) {
+        entry.failures += 1;
+        entry.state = 'failed';
+        entry.nextAttemptAt = undefined;
+        this.log(`"${entry.config.name}" disabled: invalid configuration (${entry.lastError})`);
+        return;
+      }
       this.scheduleRetry(entry);
     }
   }

@@ -280,7 +280,7 @@ export interface AttemptRepairOptions {
    * runs. A rewrite is a different call than the one that was approved, so it is decided again.
    */
   isSafeToRerun?: (input: Record<string, unknown>) => boolean | Promise<boolean>;
-  ask?: (req: { system: string; user: string; maxTokens: number }) => Promise<string | null>;
+  ask?: (req: { system: string; user: string; maxTokens: number; requireComplete: boolean }) => Promise<string | null>;
   configured?: boolean;
   nowIso?: string;
   env?: NodeJS.ProcessEnv;
@@ -305,7 +305,7 @@ export async function attemptMechanicalRepair(opts: AttemptRepairOptions): Promi
       rules: opts.rules,
     });
     repaired = parseRepairedInput(
-      await ask({ system, user, maxTokens: repairOutputTokenBudget(opts.toolInput) }),
+      await ask({ system, user, maxTokens: repairOutputTokenBudget(opts.toolInput), requireComplete: true }),
       opts.toolInput,
     );
   } catch {
@@ -324,6 +324,37 @@ export async function attemptMechanicalRepair(opts: AttemptRepairOptions): Promi
     opts.nowIso ?? new Date().toISOString(),
   );
   return { attempted: true, verified: result.success, repairedInput: repaired, result, stats };
+}
+
+export interface RepairLedgerRow {
+  params: Record<string, unknown>;
+  result: string | null;
+  success: boolean;
+}
+
+/**
+ * Build the action rows for one logical tool call. A successful automatic repair is two executions,
+ * not a bad input that mysteriously succeeded. Keeping this pure makes the accounting invariant
+ * directly testable (including by mutation), instead of searching the source for nearby strings.
+ */
+export function repairLedgerRows(input: {
+  originalInput: Record<string, unknown>;
+  originalFailure?: { output?: string; error?: string };
+  repairedInput?: Record<string, unknown>;
+  finalResult: { success: boolean; output?: string; error?: string };
+}): RepairLedgerRow[] {
+  const rows: RepairLedgerRow[] = [];
+  if (input.originalFailure && input.repairedInput) {
+    const failure = input.originalFailure.error ?? input.originalFailure.output ?? '';
+    rows.push({ params: input.originalInput, result: failure.slice(0, 500) || null, success: false });
+  }
+  const finalText = input.finalResult.success ? input.finalResult.output : input.finalResult.error;
+  rows.push({
+    params: input.repairedInput ?? input.originalInput,
+    result: finalText?.slice(0, 500) ?? null,
+    success: input.finalResult.success,
+  });
+  return rows;
 }
 
 /**

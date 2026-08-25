@@ -2839,7 +2839,7 @@ export interface DeepExploreDeps {
   /** Completed plan/filesystem work that may settle a still-open tree node. The tree remains the
    * source of proof status: this evidence is surfaced for an explicit reason_record, never used
    * to auto-prove a node by fuzzy text matching. */
-  getExternalVerificationEvidence?: (owner: string) => string[];
+  getExternalVerificationEvidence?: (owner: string, activeClaims?: readonly string[]) => string[];
 }
 
 export function createDeepExploreTool(
@@ -3076,7 +3076,8 @@ export function createDeepExploreTool(
     // record the starting frontier ids for UCB visit accounting.
     const before = reasoning.getNodes(session.id);
     const frontierStartIds = new Set(computeFrontier(before).map((n) => n.id));
-    const externalEvidence = deps.getExternalVerificationEvidence?.(session.ownerSessionId ?? '') ?? [];
+    const activeClaims = computeFrontier(before).map((node) => node.claim);
+    const externalEvidence = deps.getExternalVerificationEvidence?.(session.ownerSessionId ?? '', activeClaims) ?? [];
     const reconciliationPrompt = externalEvidence.length
       ? `\n\n## External verification ledger (reconcile with the tree now)\n` +
         externalEvidence.slice(0, 8).map((e) => `- ${e}`).join('\n') +
@@ -3718,7 +3719,10 @@ export function createDeepExploreTool(
         const frontier = computeFrontier(nodes);
         const proved = nodes.filter((n) => n.status === 'proved').length;
         const dead = nodes.filter((n) => n.status === 'dead_end').length;
-        const externalEvidence = deps.getExternalVerificationEvidence?.(owner ?? '') ?? [];
+        const externalEvidence = deps.getExternalVerificationEvidence?.(
+          owner ?? '',
+          frontier.map((node) => node.claim),
+        ) ?? [];
         return {
           success: true,
           output:

@@ -22,6 +22,32 @@ export interface McpStdioConfig {
   inheritEnv?: string[];
 }
 
+/** Invalid operator configuration cannot become healthy through reconnect backoff. */
+export class McpConfigurationError extends Error {
+  readonly code = 'MCP_CONFIG_INVALID';
+  constructor(message: string) {
+    super(message);
+    this.name = 'McpConfigurationError';
+  }
+}
+
+/** Validate fields whose failure is deterministic and cannot be repaired by reconnecting. */
+export function validateMcpServerConfig(config: McpServerConfig): void {
+  const transport = config.transport;
+  if (transport.transport === 'stdio') {
+    if (!transport.command.trim()) throw new McpConfigurationError('MCP stdio command must not be empty');
+    return;
+  }
+  try {
+    const url = new URL(transport.url);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error(`unsupported protocol ${url.protocol}`);
+    }
+  } catch (error) {
+    throw new McpConfigurationError(`Invalid MCP ${transport.transport} URL: ${(error as Error).message}`);
+  }
+}
+
 /**
  * SSE transport configuration.
  *

@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import {
   isExternalAcceptanceNode,
   extractFormalVerificationEvidence,
+  formalEvidenceAppliesToClaims,
   resolveJudgeGoal,
   resolveRecallInput,
   selectJudgeFrontierGoal,
@@ -22,14 +23,19 @@ test('a fresh turn is judged against the user message', () => {
 });
 
 test('formal evidence accepts real Lean builds but rejects version probes and generic shell success', () => {
-  assert.match(
-    extractFormalVerificationEvidence(
+  const scoped = extractFormalVerificationEvidence(
       'shell',
       { command: 'lake build Lrc.K13.Region3Sum' },
       { success: true, output: 'Built Lrc.K13.Region3Sum\nREGION3SUM-OK' },
-    ) ?? '',
-    /REGION3SUM-OK/,
-  );
+    ) ?? '';
+  assert.match(scoped, /^\[scope=target:Lrc\.K13\.Region3Sum\]/);
+  assert.equal(formalEvidenceAppliesToClaims(scoped, ['Compile and prove Region3Sum']), true);
+  assert.equal(formalEvidenceAppliesToClaims(scoped, ['Prove an unrelated Fourier bound']), false);
+  const projectBuild = extractFormalVerificationEvidence(
+    'shell', { command: 'lake build' }, { success: true, output: 'Build completed' },
+  ) ?? '';
+  assert.equal(formalEvidenceAppliesToClaims(projectBuild, ['Prove theorem foo']), false);
+  assert.equal(formalEvidenceAppliesToClaims(projectBuild, ['Compile the whole project']), true);
   assert.equal(
     extractFormalVerificationEvidence('shell', { command: 'lean --version' }, { success: true, output: 'Lean 4' }),
     null,
