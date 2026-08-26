@@ -98,9 +98,10 @@ test('the limit is honoured across distinct signatures', () => {
 
 // ── configuration ────────────────────────────────────────────────────────────────────────────────
 
-test('off by default, and the allow-list is configuration rather than code', () => {
-  assert.equal(repairReplayEnabled({} as NodeJS.ProcessEnv), false);
+test('on by default with an explicit kill switch, and the allow-list is configuration rather than code', () => {
+  assert.equal(repairReplayEnabled({} as NodeJS.ProcessEnv), true);
   assert.equal(repairReplayEnabled({ PHILONT_REPAIR_REPLAY: '1' } as NodeJS.ProcessEnv), true);
+  assert.equal(repairReplayEnabled({ PHILONT_REPAIR_REPLAY: '0' } as NodeJS.ProcessEnv), false);
   assert.deepEqual(
     [...replayEligibleTools({} as NodeJS.ProcessEnv)],
     DEFAULT_REPLAY_TOOLS.split(','),
@@ -138,10 +139,10 @@ function baseRun(over: Record<string, unknown> = {}) {
   } as Parameters<typeof runRepairReplay>[0];
 }
 
-test('disabled by default: no candidate is even selected', async () => {
+test('explicitly disabled: no candidate is even selected', async () => {
   let ran = 0;
   const out = await runRepairReplay(
-    baseRun({ env: {} as NodeJS.ProcessEnv, runTool: async () => { ran++; return { success: true }; } }),
+    baseRun({ env: { PHILONT_REPAIR_REPLAY: '0' } as NodeJS.ProcessEnv, runTool: async () => { ran++; return { success: true }; } }),
   );
   assert.deepEqual({ attempted: out.attempted, skipped: out.skipped, ran }, { attempted: 0, skipped: 'disabled', ran: 0 });
 });

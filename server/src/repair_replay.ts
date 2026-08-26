@@ -72,8 +72,7 @@ export function replayEligibleTools(env: NodeJS.ProcessEnv = process.env): Set<s
 }
 
 export function repairReplayEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const v = (env.PHILONT_REPAIR_REPLAY ?? '').trim().toLowerCase();
-  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+  return !/^(?:0|off|false|no)$/i.test((env.PHILONT_REPAIR_REPLAY ?? '').trim());
 }
 
 /** One past failure, as the action ledger stored it. */

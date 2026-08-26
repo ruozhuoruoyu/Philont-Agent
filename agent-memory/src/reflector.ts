@@ -285,7 +285,14 @@ export class SessionReflector {
       .map((m) => `[${m.role}] ${m.content}`)
       .join('\n');
 
-    const prompt = buildReflectPrompt(dialogue, actions);
+    const existingSkills = this.skills.listAll(80);
+    const existingCatalog = existingSkills.length > 0
+      ? `\n\n## Existing skill catalog (semantic deduplication)\n` +
+        `If a proposed rule is semantically equivalent to one below, return the EXISTING exact name ` +
+        `so it is updated instead of minting a synonym. Different wording is not a new skill.\n` +
+        existingSkills.map((s) => `- ${s.name}: ${s.description}`).join('\n')
+      : '';
+    const prompt = buildReflectPrompt(dialogue, actions) + existingCatalog;
     const { text, tokensUsed } = await this.llm.complete(prompt);
 
     const specs = parseSkills(text);

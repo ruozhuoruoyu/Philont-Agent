@@ -16,8 +16,10 @@ import type { ExtractorLlmClient } from '../src/index.js';
 // ── Mock LLM ────────────────────────────────────────────────────────────
 
 class MockLlm implements ExtractorLlmClient {
+  lastPrompt = '';
   constructor(private readonly response: string) {}
-  async complete(_prompt: string) {
+  async complete(prompt: string) {
+    this.lastPrompt = prompt;
     return { text: this.response, tokensUsed: 100 };
   }
 }
@@ -505,6 +507,9 @@ test('SessionReflector: update existing skill, preserve use_count', async () => 
   const updated = skills.getByName('existing-skill');
   assert.equal(updated?.description, 'improved desc');
   assert.equal(updated?.useCount, 2); // 保留使用次数
+  assert.match(mockLlm.lastPrompt, /Existing skill catalog/);
+  assert.match(mockLlm.lastPrompt, /existing-skill: original desc/);
+  assert.match(mockLlm.lastPrompt, /return the EXISTING exact name/);
 });
 
 test('SessionReflector: skip invalid skill specs', async () => {

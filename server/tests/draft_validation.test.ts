@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Skill } from '@agent/memory';
-import { DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, selectDraftFixture, validateDraftFixture } from '../src/draft_validation.js';
+import { DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, draftValidationEnabled, selectDraftFixture, validateDraftFixture } from '../src/draft_validation.js';
 
 function skill(over: Partial<Skill> = {}): Skill {
   return {
@@ -25,6 +25,11 @@ function facts() {
 
 const failure = { toolName: 'leanCheck', input: { code: 'bad' }, errorText: 'omega could not prove the goal', recordedAt: 10 };
 const signatureOf = () => 'leanCheck:lean-unsolved';
+
+test('draft validation is on by default and retains an explicit kill switch', () => {
+  assert.equal(draftValidationEnabled({} as NodeJS.ProcessEnv), true);
+  assert.equal(draftValidationEnabled({ PHILONT_DRAFT_VALIDATION: 'off' } as NodeJS.ProcessEnv), false);
+});
 
 test('draft fixture selection requires real lexical applicability and never-used draft state', () => {
   const picked = selectDraftFixture({

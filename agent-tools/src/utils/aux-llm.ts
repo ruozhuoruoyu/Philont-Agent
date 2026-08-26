@@ -262,10 +262,12 @@ export async function callAuxLLM(req: AuxLLMRequest): Promise<string> {
   const envConfig = readAuxLLMEnv();
   auxCallCount++;
   if (!envConfig) {
-    if (mainLLMCaller) return await mainLLMCaller(req);
+    if (req.fallbackToMain !== false && mainLLMCaller) return await mainLLMCaller(req);
     const error = new AuxLLMError(
       'Aux LLM not configured: set AUX_LLM_BASE_URL/AUX_LLM_API_KEY/AUX_LLM_MODEL, ' +
-        'or call registerMainLLM() at application startup.',
+        (req.fallbackToMain === false
+          ? 'and this background call explicitly forbids fallback to the main LLM.'
+          : 'or call registerMainLLM() at application startup.'),
       'not_configured',
     );
     auxErrorCount++;

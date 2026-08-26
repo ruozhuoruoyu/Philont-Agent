@@ -785,12 +785,19 @@ try {
   console.warn('[compass] pursuit reconcile failed, ignoring', e);
 }
 
-// Adapt LLM to the ExtractorLlmClient interface
+// Background semantic work belongs on aux and must never amplify load on the user-facing endpoint.
+// Fact extraction, skill distillation/merging and compaction all degrade independently when aux is down.
 const extractorLlm: ExtractorLlmClient = {
   async complete(prompt: string) {
-    const resp = await llm.send([{ role: 'user', content: prompt }]);
+    const text = await callAuxLLM({
+      system: 'Extract or consolidate durable memory faithfully. Return only the format requested by the user prompt.',
+      user: prompt,
+      maxTokens: 4096,
+      requireComplete: true,
+      fallbackToMain: false,
+    });
     return {
-      text: resp.type === 'text' ? resp.content : '',
+      text: text ?? '',
       tokensUsed: 0, // LLM adapter does not expose token counts; estimation can be added later
     };
   },
@@ -1397,11 +1404,16 @@ const idleConsolidator = startIdleConsolidator({
     // So on idle, take one rule that has never been applied and run it against the failure it was
     // learned from. Fixtures are FAILED ledger rows only: a success row from the window when a
     // repaired call was logged under its broken input cannot be trusted, a failure row can, and a
-    // failing input is the only thing a replay wants. Default off; see repair_replay.
+    // failing input is the only thing a replay wants. Default on with an explicit kill switch.
     if (repairReplayEnabled()) try {
-      const eligible = replayEligibleTools();
-      if (eligible.size > 0) {
-        const rows = memory.db
+      const budgetCheck = autonomousLoop.budget.checkCanRun('default');
+      if (!budgetCheck.allowed) {
+        memory.metrics.increment('learning.maintenance.budget_blocked');
+        console.log(`[repair-replay] skipped: autonomous budget ${budgetCheck.reason}`);
+      } else {
+        const eligible = replayEligibleTools();
+        if (eligible.size > 0) {
+          const rows = memory.db
           .prepare(
             `SELECT tool_name AS toolName, params_json AS paramsJson, result, timestamp
                FROM memory_actions
@@ -1412,20 +1424,20 @@ const idleConsolidator = startIdleConsolidator({
           .all(Date.now() - 14 * 24 * 60 * 60_000) as Array<{
             toolName: string; paramsJson: string; result: string | null; timestamp: number;
           }>;
-        const failures: LedgerFailure[] = [];
-        for (const r of rows) {
-          if (!eligible.has(r.toolName)) continue;
-          let parsed: unknown;
-          try { parsed = JSON.parse(r.paramsJson); } catch { continue; }
-          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
-          failures.push({
-            toolName: r.toolName,
-            input: parsed as Record<string, unknown>,
-            errorText: r.result ?? '',
-            recordedAt: r.timestamp,
-          });
-        }
-        const replay = await runRepairReplay({
+          const failures: LedgerFailure[] = [];
+          for (const r of rows) {
+            if (!eligible.has(r.toolName)) continue;
+            let parsed: unknown;
+            try { parsed = JSON.parse(r.paramsJson); } catch { continue; }
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+            failures.push({
+              toolName: r.toolName,
+              input: parsed as Record<string, unknown>,
+              errorText: r.result ?? '',
+              recordedAt: r.timestamp,
+            });
+          }
+          const replay = await runRepairReplay({
           failures,
           signatureOf: (tool, err) => extractFailureSignature(tool, err),
           rulesFor: (sig) => [
@@ -1458,9 +1470,15 @@ const idleConsolidator = startIdleConsolidator({
               `[repair-replay] ${o.signature} → ${o.transition}${o.reason ? ` (${o.reason})` : ''}`,
             );
           },
-        });
-        if (replay.attempted > 0) {
-          console.log(`[repair-replay] ran ${replay.attempted} untried rule(s) against past failures`);
+          });
+          if (replay.attempted > 0) {
+            autonomousLoop.budget.commit('default', {
+              llmTokens: 0,
+              toolCalls: replay.outcomes.filter((o) => o.transition !== 'not-attempted').length,
+            });
+            memory.metrics.increment('learning.maintenance.initiatives');
+            console.log(`[repair-replay] ran ${replay.attempted} untried rule(s) against past failures`);
+          }
         }
       }
     } catch (e) {
@@ -1470,37 +1488,48 @@ const idleConsolidator = startIdleConsolidator({
     // and every rewritten call must pass the no-approval policy checker. Unlike an offer, this is a
     // real use: success/failure advances maturity; a changed error/timeout is recorded as neutral use.
     if (draftValidationEnabled()) try {
-      const eligible = replayEligibleTools();
-      const rows = memory.actions.listRecentFailures({ sinceTs: Date.now() - 14 * 24 * 60 * 60_000, limit: 400 });
-      const failures: LedgerFailure[] = rows
-        .filter((r) => eligible.has(r.toolName) && !!r.result && !!r.params && typeof r.params === 'object' && !Array.isArray(r.params))
-        .map((r) => ({ toolName: r.toolName, input: r.params as Record<string, unknown>, errorText: r.result ?? '', recordedAt: r.timestamp }));
-      const fixture = selectDraftFixture({
-        drafts: memory.skills.listByMaturity('draft', 200),
-        failures,
-        eligibleTools: eligible,
-        signatureOf: (tool, err) => extractFailureSignature(tool, err),
-        attemptFor: (key) => {
-          const value = memory.facts.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, key)?.value;
-          return value && typeof value === 'object' ? value as ReplayAttemptState : null;
-        },
-      });
-      if (fixture) {
-        const outcome = await validateDraftFixture({
-          fixture,
-          facts: memory.facts,
-          skills: memory.skills,
+      const budgetCheck = autonomousLoop.budget.checkCanRun('default');
+      if (!budgetCheck.allowed) {
+        memory.metrics.increment('learning.maintenance.budget_blocked');
+        console.log(`[draft-validation] skipped: autonomous budget ${budgetCheck.reason}`);
+      } else {
+        const eligible = replayEligibleTools();
+        const rows = memory.actions.listRecentFailures({ sinceTs: Date.now() - 14 * 24 * 60 * 60_000, limit: 400 });
+        const failures: LedgerFailure[] = rows
+          .filter((r) => eligible.has(r.toolName) && !!r.result && !!r.params && typeof r.params === 'object' && !Array.isArray(r.params))
+          .map((r) => ({ toolName: r.toolName, input: r.params as Record<string, unknown>, errorText: r.result ?? '', recordedAt: r.timestamp }));
+        const fixture = selectDraftFixture({
+          drafts: memory.skills.listByMaturity('draft', 200),
+          failures,
+          eligibleTools: eligible,
           signatureOf: (tool, err) => extractFailureSignature(tool, err),
-          isSafeToRerun: async (toolName, rewritten) =>
-            (await getSubLoopChecker()({ toolName, approval: 'never', params: JSON.stringify(rewritten) })) === null,
-          ask: (req) => callAuxLLM({ ...req, fallbackToMain: false }),
-          runTool: async (toolName, rewritten) => {
-            const r = await subTurnToolRunner(toolName, rewritten);
-            return { success: r.ok, output: r.output, error: r.error };
+          attemptFor: (key) => {
+            const value = memory.facts.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, key)?.value;
+            return value && typeof value === 'object' ? value as ReplayAttemptState : null;
           },
         });
-        memory.metrics.increment(`learning.draft_validation.${outcome.transition}`);
-        console.log(`[draft-validation] ${fixture.skill.name} on ${fixture.signature} → ${outcome.transition}`);
+        if (fixture) {
+          const outcome = await validateDraftFixture({
+            fixture,
+            facts: memory.facts,
+            skills: memory.skills,
+            signatureOf: (tool, err) => extractFailureSignature(tool, err),
+            isSafeToRerun: async (toolName, rewritten) =>
+              (await getSubLoopChecker()({ toolName, approval: 'never', params: JSON.stringify(rewritten) })) === null,
+            ask: (req) => callAuxLLM({ ...req, fallbackToMain: false }),
+            runTool: async (toolName, rewritten) => {
+              const r = await subTurnToolRunner(toolName, rewritten);
+              return { success: r.ok, output: r.output, error: r.error };
+            },
+          });
+          memory.metrics.increment(`learning.draft_validation.${outcome.transition}`);
+          autonomousLoop.budget.commit('default', {
+            llmTokens: 0,
+            toolCalls: outcome.transition === 'not-attempted' ? 0 : 1,
+          });
+          memory.metrics.increment('learning.maintenance.initiatives');
+          console.log(`[draft-validation] ${fixture.skill.name} on ${fixture.signature} → ${outcome.transition}`);
+        }
       }
     } catch (e) {
       console.error('[draft-validation] failed', e);
@@ -2978,6 +3007,23 @@ export function formalEvidenceAppliesToClaims(evidence: string, claims: readonly
     || (!!leaf && haystack.includes(leaf));
 }
 
+/**
+ * A successful compiler run may close an explicit compile/build acceptance node without another
+ * model turn. It must never promote a mathematical claim: scoped evidence, compile wording, and a
+ * unique frontier match are all required. Ambiguity stays in the ledger for the next reasoner round.
+ */
+export function selectCompileAcceptanceNode(
+  nodes: readonly ReasoningNode[],
+  evidence: string,
+): ReasoningNode | null {
+  if (!/^\[scope=(?:project-build-only|target:|file:)/.test(evidence)) return null;
+  const compileClaim = /\b(?:build|built|compile|compiled|compiles|compilation)\b|(?:\u7f16\u8bd1|\u6784\u5efa).{0,12}(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210|\u65e0\u8bef)|(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210).{0,12}(?:\u7f16\u8bd1|\u6784\u5efa)/i;
+  const matches = computeFrontier([...nodes]).filter(
+    (node) => compileClaim.test(node.claim) && formalEvidenceAppliesToClaims(evidence, [node.claim]),
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
 /** Strict enough that `lean --version` cannot masquerade as proof/build verification. */
 export function extractFormalVerificationEvidence(
   toolName: string,
@@ -3007,6 +3053,17 @@ function rememberFormalVerificationEvidence(
   if (!evidence) return;
   const prior = formalVerificationEvidenceBySession.get(sessionId) ?? [];
   formalVerificationEvidenceBySession.set(sessionId, [...prior.filter((e) => e !== evidence), evidence].slice(-12));
+  const focused = focusedReasoningSession(sessionId);
+  if (!focused) return;
+  const node = selectCompileAcceptanceNode(memory.reasoning.getNodes(focused.id), evidence);
+  if (!node) return;
+  memory.reasoning.updateNode(focused.id, node.id, {
+    status: 'proved',
+    result: `Compiler/build acceptance verified outside deep_explore: ${evidence}`,
+    addEvidence: evidence,
+  });
+  memory.metrics.increment('deep_explore.reconciled.compile_acceptance');
+  console.log(`[deep-explore-reconcile] settled compile acceptance node=${node.id} session=${focused.id}`);
 }
 
 if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
@@ -3029,6 +3086,9 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
       const armed = takeArmedAutoAdvance(pendingAutoAdvanceOwners, owner, Date.now());
       if (armed) memory.metrics.increment('deep_explore.auto_advance.armed_from_ask');
       return armed;
+    },
+    onFrontierRankingShadow: ({ agreed }) => {
+      memory.metrics.increment(`deep_explore.frontier_shadow.${agreed ? 'agree' : 'disagree'}`);
     },
     onSessionSelected: (owner, session, source) => {
       if (!owner) return;

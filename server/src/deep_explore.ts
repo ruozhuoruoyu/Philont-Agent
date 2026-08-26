@@ -2853,6 +2853,8 @@ export interface DeepExploreDeps {
   /** Consume an owner-authorized unattended handoff for a newly created session. The handoff is
    * applied only after the initial foreground round finishes, so the background ticker cannot race it. */
   takeAutoAdvanceOnCreate?: (owner: string | null, session: ReasoningSession) => boolean;
+  /** Shadow-only comparison: does the existing aux value scorer change the deterministic frontier top? */
+  onFrontierRankingShadow?: (event: { sessionId: string; baselineTopId: string; scoredTopId: string; agreed: boolean }) => void;
   /** Clears a consumer's binding when the selected session is closed. */
   onSessionAbandoned?: (owner: string | null, session: ReasoningSession) => void;
 }
@@ -3120,6 +3122,17 @@ export function createDeepExploreTool(
             session.id,
             [...assessments].map(([id, a]) => ({ id, value: a.value, technique: a.technique })),
           );
+          const rescoredNodes = reasoning.getNodes(session.id);
+          const scoredTop = rankFrontier(computeFrontier(rescoredNodes), rescoredNodes, UCB_C, NOVELTY_W)[0];
+          const baselineTop = frontier0[0];
+          if (baselineTop && scoredTop) {
+            deps.onFrontierRankingShadow?.({
+              sessionId: session.id,
+              baselineTopId: baselineTop.id,
+              scoredTopId: scoredTop.id,
+              agreed: baselineTop.id === scoredTop.id,
+            });
+          }
         }
         if (tokensSpent) reasoning.addBudgetSpent(session.id, tokensSpent);
       }

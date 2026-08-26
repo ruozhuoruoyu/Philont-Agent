@@ -10,7 +10,7 @@ export const DRAFT_VALIDATION_ATTEMPTS_NAMESPACE = 'draft_validation_attempts';
 const COOLDOWN_MS = 7 * 24 * 60 * 60_000;
 
 export function draftValidationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return /^(?:1|on|true|yes)$/i.test((env.PHILONT_DRAFT_VALIDATION ?? '').trim());
+  return !/^(?:0|off|false|no)$/i.test((env.PHILONT_DRAFT_VALIDATION ?? '').trim());
 }
 
 export interface DraftFixture {

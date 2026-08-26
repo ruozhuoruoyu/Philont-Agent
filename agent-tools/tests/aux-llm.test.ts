@@ -552,6 +552,19 @@ describe('aux-llm', () => {
       assert.equal(calls[0].system, 's');
     });
 
+    it('honours fallbackToMain=false even when aux env is entirely absent', async () => {
+      let mainCalled = false;
+      registerMainLLM(async () => {
+        mainCalled = true;
+        return 'must-not-run';
+      });
+      await assert.rejects(
+        () => callAuxLLM({ user: 'background classification', fallbackToMain: false }),
+        (e: unknown) => e instanceof AuxLLMError && e.kind === 'not_configured',
+      );
+      assert.equal(mainCalled, false);
+    });
+
     it('prefers env config over main caller when both set', async () => {
       setAuxEnv();
       let mainCalled = false;
