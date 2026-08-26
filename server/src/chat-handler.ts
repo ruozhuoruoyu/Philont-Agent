@@ -2755,11 +2755,56 @@ tools.registerInternal(planAndExecuteTool);
 // Background auto-advance (Part 2) reaches the round runner through this handle; set when deep_explore
 // is enabled, read by the (default-off) auto-advance loop started further down.
 let deepExploreAdvanceSession: ((session: ReasoningSession) => Promise<ToolResult>) | null = null;
+/**
+ * One delivery path for anything deep-explore wants the OWNER to see. web-ui gets a persistent chat
+ * bubble (its onStatus is an ephemeral status line, cleared at turn end); other channels (WeChat) use
+ * onStatus, which they deliver as a real message. currentSessionId/onStatus come from the ALS.
+ */
+function deliverDeepExploreMilestone(text: string): void {
+  const sid = currentSessionId();
+  const webuiSend = sid ? webuiClients.get(sid) : undefined;
+  if (webuiSend) {
+    webuiSend({ type: 'milestone', text });
+    return;
+  }
+  const s = currentTurnStatus();
+  if (s) s(text);
+}
+
 export const DEEP_EXPLORE_VERIFY_TOOL_NAMES = new Set([
   'z3Verify', 'pariGp', 'leanCheck', 'magnitude', 'lemmaLookup',
 ]);
 
 const formalVerificationEvidenceBySession = new Map<string, string[]>();
+
+/**
+ * Owners who answered the ask tier with "自动持续", until a session is created for them.
+ *
+ * The choice cannot ride on the forced-start input alone: shouldForceDeepExploreStart only fires when
+ * the turn answered FLAT, and in the trace this feature was built from (prod 2026-08-25 21:57–21:58)
+ * the model took the nudge and issued `deep_explore(action=start)` itself — so the forced path never
+ * ran and the owner's choice would have been recorded and silently dropped. Whoever creates the
+ * session, creation is the event that honours it. Bounded by the ask card's own lifetime so a choice
+ * that never produced a session cannot arm an unrelated one later.
+ */
+const pendingAutoAdvanceOwners = new Map<string, number>();
+
+/**
+ * Read-and-clear: the choice arms exactly one session. Pure over the map so the once-only semantics
+ * and the expiry are testable without a turn.
+ */
+export function takeArmedAutoAdvance(
+  armed: Map<string, number>,
+  owner: string,
+  now: number,
+  ttlMs: number = EXPLORE_ASK_TTL_MS,
+): boolean {
+  const at = armed.get(owner);
+  if (at === undefined) return false;
+  armed.delete(owner);
+  return now - at <= ttlMs;
+}
+
 function focusedReasoningSession(owner: string): ReasoningSession | null {
   const focused = memory.reasoning.getFocusedSession(owner);
   if (focused) return focused;
@@ -2848,9 +2893,17 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     skills: memory.skills,
     getSelectedSessionId: (owner) => owner ? memory.reasoning.getFocusedSession(owner)?.id : undefined,
     onSessionSelected: (owner, session, source) => {
-      if (owner) {
-        memory.reasoning.setFocusedSession(owner, session.id);
-        memory.metrics.increment(`deep_explore.binding.${source}`);
+      if (!owner) return;
+      memory.reasoning.setFocusedSession(owner, session.id);
+      memory.metrics.increment(`deep_explore.binding.${source}`);
+      // The owner asked for unattended advance at the ask tier; this is the session it was meant for,
+      // regardless of whether the model or the forced-start path opened it.
+      if (source === 'created' && takeArmedAutoAdvance(pendingAutoAdvanceOwners, owner, Date.now()) && !session.autoAdvance) {
+        memory.reasoning.setAutoAdvance(session.id, true);
+        memory.metrics.increment('deep_explore.auto_advance.armed_from_ask');
+        deliverDeepExploreMilestone(
+          `▶ 已开启自动持续推进: ${session.id.slice(0, 8)}。我会自己续跑,在解决、连续卡住或达到轮次预算时停下并汇报。`,
+        );
       }
     },
     onSessionAbandoned: (owner, session) => {
@@ -2875,16 +2928,7 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     // silent — the user only saw the next auth prompt. web-ui gets a persistent chat bubble (its
     // onStatus is an ephemeral status line, cleared at turn end); other channels (WeChat) use
     // onStatus, which they deliver as a real message. currentSessionId/onStatus come from the ALS.
-    onMilestone: (text) => {
-      const sid = currentSessionId();
-      const webuiSend = sid ? webuiClients.get(sid) : undefined;
-      if (webuiSend) {
-        webuiSend({ type: 'milestone', text });
-      } else {
-        const s = currentTurnStatus();
-        if (s) s(text);
-      }
-    },
+    onMilestone: deliverDeepExploreMilestone,
   });
   tools.registerInternal(deepExploreTool);
   deepExploreAdvanceSession = deepExploreAdvance;
@@ -7898,6 +7942,7 @@ export async function handleChatSend(
           pendingDecisions.resolve(sessionId, exploreAsk.decisionId!);
           signalBus.exploreAskApproved = true;
           signalBus.exploreAskAuto = askIntent === 'auto';
+          if (askIntent === 'auto') pendingAutoAdvanceOwners.set(sessionId, Date.now());
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
           auditDecisionApplied(sessionId, exploreAsk.decisionId!, 'granted', 'deep_explore entry');

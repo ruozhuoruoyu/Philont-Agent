@@ -412,3 +412,22 @@ test('the ask tier has NO keyword bypass: a depth-ish NOUN cannot skip the owner
     true,
   );
 });
+
+test('the ask-tier auto choice arms exactly one session, and only within the card lifetime', async () => {
+  const { takeArmedAutoAdvance } = await import('../src/chat-handler.js');
+  const now = 1_787_700_000_000;
+  const armed = new Map<string, number>([['owner-a', now - 1_000]]);
+
+  assert.equal(takeArmedAutoAdvance(armed, 'owner-b', now), false, 'another owner is not armed');
+  assert.equal(takeArmedAutoAdvance(armed, 'owner-a', now), true);
+  assert.equal(
+    takeArmedAutoAdvance(armed, 'owner-a', now),
+    false,
+    'read-and-clear: one choice must not arm a second session',
+  );
+
+  // A choice that never produced a session must not arm an unrelated one hours later.
+  const stale = new Map<string, number>([['owner-a', now - 60 * 60_000]]);
+  assert.equal(takeArmedAutoAdvance(stale, 'owner-a', now), false);
+  assert.equal(stale.has('owner-a'), false, 'an expired arming is cleared, not left to accumulate');
+});
