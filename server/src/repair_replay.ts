@@ -30,7 +30,7 @@
  * trying to remove. Replaying answers "does this rule fix the thing it was learned from?" now, and
  * writes the answer into the same applied/verified counters the live path uses.
  *
- * Default OFF (`PHILONT_REPAIR_REPLAY=1` to arm). It spends an aux call and a tool run per candidate.
+ * On by default; `PHILONT_REPAIR_REPLAY=0` disarms it. It spends an aux call and a tool run per candidate.
  */
 
 import { classifyRepairTransition, type RepairTransition } from './in_turn_reflection.js';

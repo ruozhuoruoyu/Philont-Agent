@@ -287,7 +287,19 @@ export class SessionReflector {
 
     // Keep the semantic hint bounded. Creation is still guarded below by a mechanism-side similarity
     // check over the complete non-deprecated store; prompt size must not grow without bound.
-    const existingSkills = this.skills.listAll(200);
+    //
+    // The mechanism-side guard is word overlap, so it catches a rewording but NOT a synonym built
+    // from different vocabulary (`fix-omega-nat-sub` vs `check-lean-nat-subtraction` scores 0 there),
+    // and its tokenizer drops single CJK characters, so a Chinese-named skill is invisible to it.
+    // Those cases are caught only by the model SEEING the existing name — which is exactly what the
+    // tail past this limit loses. Say so when it starts happening instead of regressing silently.
+    const existingSkills = this.skills.listAll(CATALOG_HINT_LIMIT);
+    if (existingSkills.length >= CATALOG_HINT_LIMIT) {
+      console.warn(
+        `[reflector] skill catalog hint truncated at ${CATALOG_HINT_LIMIT} of ${this.skills.count()} — ` +
+          `skills past the cut can only be deduplicated by word overlap, which is how synonym minting started before`,
+      );
+    }
     const existingCatalog = existingSkills.length > 0
       ? `\n\n## Existing skill catalog (semantic deduplication)\n` +
         `If a proposed rule is semantically equivalent to one below, return the EXISTING exact name ` +
@@ -355,8 +367,12 @@ export class SessionReflector {
           // it minted near-duplicate skills every cycle (e.g. avoid-pari-syntax vs avoid-pari-gp-syntax)
           // → unbounded skill bloat. If a sufficiently-similar positive skill already exists, MERGE
           // into it instead (mirrors applyReflection's MECE check). pruneDraftsToCap caps the rest.
+          // The description is part of the target text (a rename keeps the meaning, not the name);
+          // the threshold stays at the store default. Measured at 0.35, `lean-linarith-needs-cast`
+          // merges into `lean-omega-needs-positivity` at j=0.42 — and a merge OVERWRITES the older
+          // skill's action template, so a false merge silently destroys a learned rule.
           const dup = kind === 'positive'
-            ? this.skills.findDuplicateCandidates(spec.name, spec.description, 0.35)[0]
+            ? this.skills.findDuplicateCandidates(spec.name, spec.description)[0]
             : undefined;
           if (dup) {
             const skill = this.skills.updateSkill(dup.skill.name, {
@@ -425,6 +441,9 @@ export class SessionReflector {
     };
   }
 }
+
+/** How many existing skills the dedup hint may name. Bounds the prompt; see the warning at its use. */
+const CATALOG_HINT_LIMIT = 200;
 
 /** Max retained `draft` skills (reflection churn cap). env PHILONT_MAX_DRAFT_SKILLS, default 40, min 5. */
 const MAX_DRAFT_SKILLS = (() => {

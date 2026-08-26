@@ -535,6 +535,29 @@ test('SessionReflector: mechanism merges a renamed duplicate using its semantic 
   assert.equal(skills.getByName('resume-formal-session')?.actionTemplate, 'new');
 });
 
+test('SessionReflector: two distinct skills sharing domain vocabulary are not merged', async () => {
+  // A merge overwrites the surviving skill's action template, so a false positive here destroys a
+  // learned rule rather than just adding noise. These two share `lean`/`fails`/`goal`/`first`.
+  const { skills, actions, raw } = openMemoryDb(':memory:');
+  skills.createSkill({
+    name: 'lean-omega-needs-positivity',
+    description: 'omega fails on a Lean goal with truncated Nat subtraction unless positivity is proved first',
+    triggerKeywords: ['omega'],
+    actionTemplate: 'keep-me',
+  });
+  const session = raw.startSession();
+  raw.appendMessage({ sessionId: session.id, role: 'user', content: 'linarith failed on a cast goal' });
+  const llm = new MockLlm(JSON.stringify([{
+    name: 'lean-linarith-needs-cast',
+    description: 'linarith fails on a Lean goal with mixed Nat and Int unless the cast is pushed first',
+    trigger_keywords: ['linarith'],
+    action_template: 'push_cast',
+  }]));
+  const result = await new SessionReflector(llm, skills, actions, raw).reflectFromSession(session.id);
+  assert.equal(result.skillsUpdated, 0, 'a merge here would overwrite an unrelated rule');
+  assert.equal(skills.getByName('lean-omega-needs-positivity')?.actionTemplate, 'keep-me');
+});
+
 test('SessionReflector: skip invalid skill specs', async () => {
   const { skills, actions, raw } = openMemoryDb(':memory:');
 

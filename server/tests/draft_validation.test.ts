@@ -57,6 +57,19 @@ test('draft matching splits kebab names and rejects a single generic token', () 
     failures: [failure], eligibleTools: new Set(['leanCheck']), signatureOf, attemptFor: () => null,
   });
   assert.equal(generic, null, 'one generic word is distribution evidence, not applicability evidence');
+  const toolNamed = selectDraftFixture({
+    drafts: [skill({ name: 'fix-lean-check', whenToUse: '', triggerKeywords: ['lean'] })],
+    failures: [{ ...failure, errorText: 'lean check failed on an unrelated goal' }],
+    eligibleTools: new Set(['leanCheck']), signatureOf, attemptFor: () => null,
+  });
+  assert.equal(toolNamed, null, 'terms the tool is named after match every failure it ever produced');
+  const oneSpecificWord = selectDraftFixture({
+    drafts: [skill({ name: 'declare-z3-sort-before-use', whenToUse: '', triggerKeywords: ['sort'] })],
+    failures: [{ ...failure, toolName: 'z3Verify', errorText: '(error "line 3 column 12: unknown sort Point")' }],
+    eligibleTools: new Set(['z3Verify']), signatureOf, attemptFor: () => null,
+  });
+  assert.equal(oneSpecificWord?.skill.name, 'declare-z3-sort-before-use',
+    'one term that is neither filler nor the tool name is applicability evidence');
   const cjkGeneric = selectDraftFixture({
     drafts: [skill({ name: 'generic-cjk', whenToUse: '证明文件错误', triggerKeywords: [] })],
     failures: [{ ...failure, errorText: '证据明晰，文档件数错位并有误差' }], eligibleTools: new Set(['leanCheck']),

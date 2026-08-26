@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isExternalAcceptanceNode,
-  isPureCompileAcceptanceNode,
+  isMachineSettleableAcceptanceNode,
   extractFormalVerificationEvidence,
   formalEvidenceAppliesToClaims,
   resolveJudgeGoal,
@@ -67,6 +67,15 @@ test('compile evidence auto-reconciles only one explicit matching acceptance nod
     { id: 'root', parentId: null, status: 'open', claim: 'root', depth: 0 },
     { id: 'mixed', parentId: 'root', status: 'open', claim: '验收：region3_strict 成立，且 Region3Sum.lean 编译通过', depth: 1 },
   ] as any, evidence), null, 'an acceptance prefix must not launder a mathematical assertion into proved');
+  for (const chore of [
+    '验收：在本机运行 lake build Lrc.K13.Region3Sum 通过',
+    'Acceptance: user runs `lake build Lrc.K13.Region3Sum` on their machine',
+  ]) {
+    assert.equal(selectCompileAcceptanceNode([
+      { id: 'root', parentId: null, status: 'open', claim: 'root', depth: 0 },
+      { id: 'chore', parentId: 'root', status: 'open', claim: chore, depth: 1 },
+    ] as any, evidence)?.id, 'chore', `a chore phrased as "${chore}" must still reconcile`);
+  }
   assert.equal(selectCompileAcceptanceNode(nodes, 'leanCheck: verified successfully'), null, 'unscoped proof evidence needs the reasoner');
   assert.equal(selectCompileAcceptanceNode([
     ...nodes,
@@ -74,11 +83,22 @@ test('compile evidence auto-reconciles only one explicit matching acceptance nod
   ] as any, evidence), null, 'ambiguous matches stay open for explicit reconciliation');
 });
 
-test('pure compile acceptance is narrower than a general external chore', () => {
-  assert.equal(isPureCompileAcceptanceNode('验收：用户在本机执行 lake build Lrc.K13.Region3Sum'), true);
-  assert.equal(isPureCompileAcceptanceNode('验收：region3_strict 成立，且 Region3Sum.lean 编译通过'), false);
+test('a machine-settleable chore is one with no mathematics in it, not one with a fixed opening', () => {
+  // What disqualifies a node is the theorem inside it.
   assert.equal(isExternalAcceptanceNode('请用户确认数学证明'), true);
-  assert.equal(isPureCompileAcceptanceNode('请用户确认数学证明'), false);
+  assert.equal(isMachineSettleableAcceptanceNode('请用户确认数学证明'), false);
+  assert.equal(isMachineSettleableAcceptanceNode('验收：region3_strict 成立，且 Region3Sum.lean 编译通过'), false);
+  // Not the sentence it opens with: these are the same chore, phrased as the reasoner actually
+  // phrases it. A positive template keyed on `用户…执行` rejected every one of them.
+  for (const chore of [
+    '验收：用户在本机执行 lake build Lrc.K13.Region3Sum',
+    '验收：在本机运行 lake build Lrc.K13.Region3Sum 通过',
+    '验收：Region3Sum.lean 在本机 lake build 通过',
+    '外部验收：owner runs `lake build` locally',
+    'Acceptance: user runs `lake build` on their machine',
+  ]) {
+    assert.equal(isMachineSettleableAcceptanceNode(chore), true, chore);
+  }
 });
 
 test('an auth resume is judged against the ORIGINAL message, not the approval word', () => {

@@ -22,9 +22,15 @@ export interface DraftFixture {
   key: string;
 }
 
+/**
+ * Words that carry no applicability evidence anywhere: they say a skill is about a failure, not
+ * about WHICH failure. Terms that are generic only relative to one tool (`lean` against leanCheck,
+ * `gp` against pariGp) are NOT listed here — they are derived from the tool name at match time, so
+ * this file stays free of tool knowledge and cannot rot as tools are added.
+ */
 const GENERIC_TERMS = new Set([
   'fix', 'repair', 'avoid', 'use', 'when', 'error', 'failed', 'failure', 'tool', 'code',
-  'lean', 'shell', 'python', 'parigp', 'could', 'prove', 'goal', 'helper',
+  'could', 'prove', 'goal', 'helper',
 ]);
 
 function terms(skill: Skill): string[] {
@@ -63,12 +69,24 @@ export function selectDraftFixture(input: {
       if (!input.eligibleTools.has(failure.toolName) || !failure.errorText.trim()) continue;
       const signature = input.signatureOf(failure.toolName, failure.errorText);
       const haystack = `${failure.toolName} ${signature} ${failure.errorText}`.toLowerCase();
-      const matched = needles.filter((term) => haystack.includes(term));
+      // A term the tool is named after matches every failure that tool ever produced: distribution
+      // evidence, not applicability evidence. Derived, so no tool name is written down here.
+      const toolName = failure.toolName.toLowerCase();
+      const applicable = needles.filter((term) => !toolName.includes(term));
+      if (applicable.length === 0) continue;
+      const matched = applicable.filter((term) => haystack.includes(term));
       const score = matched.length;
       const skillText = `${skill.whenToUse} ${skill.actionTemplate} ${skill.description}`.toLowerCase();
       const explicitlyNamesSignature = skillText.includes(signature.toLowerCase());
-      const coverage = score / needles.length;
-      if (!explicitlyNamesSignature && (score < 2 || coverage < 0.4)) continue;
+      // One match on a term that survived both filters is applicability evidence, and one is enough.
+      //
+      // This prefilter picks ONE fixture per idle tick and the repair model is still the judge — it
+      // must answer NONE when the prose rule does not apply. So a false positive costs a single aux
+      // call that says no, while a false negative costs the whole mechanism: `declare-z3-sort` vs
+      // `unknown sort Point` matches on exactly one word. Counting to two only worked while the tool
+      // name was quietly supplying the second point; with that gone, specificity is enforced by the
+      // two filters above, not by the count. Ranking still prefers the best-matching fixture.
+      if (!explicitlyNamesSignature && score < 1) continue;
       const key = draftFixtureKey(skill, failure, signature);
       const prior = input.attemptFor(key);
       if (prior?.permanent || (prior && now - prior.lastAttemptAt < COOLDOWN_MS)) continue;

@@ -3019,7 +3019,7 @@ export function selectCompileAcceptanceNode(
   if (!/^\[scope=(?:project-build-only|target:|file:)/.test(evidence)) return null;
   const compileClaim = /\b(?:build|built|compile|compiled|compiles|compilation)\b|(?:\u7f16\u8bd1|\u6784\u5efa).{0,12}(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210|\u65e0\u8bef)|(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210).{0,12}(?:\u7f16\u8bd1|\u6784\u5efa)/i;
   const matches = computeFrontier([...nodes]).filter(
-    (node) => isPureCompileAcceptanceNode(node.claim)
+    (node) => isMachineSettleableAcceptanceNode(node.claim)
       && compileClaim.test(node.claim)
       && formalEvidenceAppliesToClaims(evidence, [node.claim]),
   );
@@ -3027,19 +3027,25 @@ export function selectCompileAcceptanceNode(
 }
 
 /**
- * Auto-reconciliation is deliberately narrower than the general "external chore" classifier.
- * Only a node whose payload starts with an owner/user run instruction is machine-settleable.
- * In particular, an `验收：` prefix must never launder a mixed theorem assertion into `proved`.
+ * A mathematical assertion anywhere in a claim. Stated positively because it is the thing that must
+ * NOT be auto-settled: `region3_strict 成立` is a theorem no compiler run can close.
  */
-export function isPureCompileAcceptanceNode(claim: string): boolean {
-  const payload = claim.replace(/\s+/g, ' ').trim()
-    .replace(/^(?:验收|人工验收|用户验收)[：:]\s*/i, '');
-  if (!payload) return false;
-  if (/(?:成立|已证(?:明)?|定理|引理|猜想|下界|上界)|\b(?:prove[sd]?|theorem|lemma|conjecture|bound)\b|[⟹⇒⇔≥≤]/i.test(payload)) {
-    return false;
-  }
-  return /^(?:用户|你|owner|user)\s*(?:在本机)?\s*(?:执行|运行|run\b|execute\b)/i.test(payload)
-    && /\b(?:lake|lean|build|compile|test)\b|(?:编译|构建)/i.test(payload);
+const ASSERTS_MATHEMATICS =
+  /(?:成立|证明|已证|定理|引理|猜想|下界|上界)|\b(?:prove[sd]?|proof|theorem|lemma|conjecture|bound)\b|[⟹⇒⇔≥≤]/i;
+
+/**
+ * Auto-reconciliation is deliberately narrower than the general "external chore" classifier: a chore
+ * is machine-settleable only if nothing inside it is a mathematical assertion. The 2026-08 log shows
+ * the failure this guards — `验收：region3_strict 成立，且 Region3Sum.lean 编译通过` is one node
+ * carrying both a chore and a theorem, and a compiler run settles only the chore half.
+ *
+ * The guard is stated NEGATIVELY on purpose. A positive phrase template (payload must start with
+ * `用户…执行`) also rejects `验收：在本机运行 lake build …`, `外部验收：owner runs …` and every
+ * English phrasing of the same chore — i.e. most of this mechanism's true-positive population. What
+ * makes a node unsafe here is the theorem in it, not the sentence it opens with.
+ */
+export function isMachineSettleableAcceptanceNode(claim: string): boolean {
+  return isExternalAcceptanceNode(claim) && !ASSERTS_MATHEMATICS.test(claim);
 }
 
 /** Strict enough that `lean --version` cannot masquerade as proof/build verification. */
