@@ -364,17 +364,36 @@ test('the payload is fetched by the resolved id and by nothing else', () => {
 test('a card is consumed only by a terminal verdict', () => {
   // The ask-tier offer was deleted at the top of its branch, before the reply had been classified.
   // That made "d3 这是什么意思？" — addressed, non-empty, and not an answer — destroy it. The delete
-  // and the resolve must live inside grant, deny and expiry, and nowhere else.
+  // and the resolve must live inside the terminal arms and nowhere else.
+  //
+  // Derived from the arms rather than from their spelling: the first version of this test pinned the
+  // literal `if (askIntent === 'grant') {` plus a 400-character window, and went red the day an `auto`
+  // verdict was added to that same arm — a correct change, a failing test, and nothing wrong with the
+  // code. What must hold is the PROPERTY: an arm that records a verdict also consumes the card.
   const start = chatHandler.indexOf('if (exploreAsk && addressedToAsk) {');
   const branch = chatHandler.slice(start, chatHandler.indexOf('// Interrupt teeth:', start));
   assert.ok(branch.length > 200, 'ask-tier branch not found');
-  const deletes = branch.split('pendingExploreAsk.delete(sessionId);').length - 1;
-  assert.equal(deletes, 3, `grant, deny and expiry only — found ${deletes}`);
-  for (const terminal of ["if (askIntent === 'grant') {", "} else if (askIntent === 'deny') {"]) {
-    const body = branch.slice(branch.indexOf(terminal), branch.indexOf(terminal) + 400);
-    assert.match(body, /pendingExploreAsk\.delete\(sessionId\);/, `${terminal} must consume`);
-    assert.match(body, /pendingDecisions\.resolve\(sessionId, exploreAsk\.decisionId!\);/, `${terminal} must clear`);
+
+  // Split the if/else chain into arms at each `askIntent === '…'` test.
+  const armStarts = [...branch.matchAll(/(?:if|else if)\s*\(askIntent[^)]*\)\s*\{/g)].map((m) => m.index!);
+  assert.ok(armStarts.length >= 2, `expected at least the grant and deny arms, found ${armStarts.length}`);
+  const arms = armStarts.map((from, i) => branch.slice(from, armStarts[i + 1] ?? branch.length));
+
+  // A terminal arm is one that records a verdict. Every one of them must consume and clear the card.
+  const terminal = arms.filter((a) => /exploreAskApproved|exploreAskDeclined/.test(a));
+  assert.ok(terminal.length >= 2, `expected grant-like and deny-like arms, found ${terminal.length}`);
+  for (const arm of terminal) {
+    const head = arm.slice(0, arm.indexOf('\n', arm.indexOf('{')) + 1).trim();
+    assert.match(arm, /pendingExploreAsk\.delete\(sessionId\);/, `${head} must consume`);
+    assert.match(arm, /pendingDecisions\.resolve\(sessionId, exploreAsk\.decisionId!\);/, `${head} must clear`);
   }
+  // Non-terminal arms take nothing.
+  for (const arm of arms.filter((a) => !/exploreAskApproved|exploreAskDeclined/.test(a))) {
+    assert.doesNotMatch(arm, /pendingExploreAsk\.delete\(sessionId\);/, 'a non-verdict arm must not consume the card');
+  }
+  // Terminal arms + expiry, and nothing else, delete it.
+  const deletes = branch.split('pendingExploreAsk.delete(sessionId);').length - 1;
+  assert.equal(deletes, terminal.length + 1, `terminal arms + expiry only — found ${deletes}`);
   // The unclear arm exists and takes nothing.
   assert.match(branch, /ask-tier addressed without a verdict → offer stands/);
 });
