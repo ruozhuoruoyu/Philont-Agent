@@ -70,9 +70,14 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
         `(new turn=${recurNew} — the rule did not stick; same turn=${recurSame} — the error text was ignored)`,
     );
     const applied = get('learning.repair.applied');
+    const verified = get('learning.repair.verified');
+    const noEffect = get('learning.repair.no_effect');
+    const differentFailure = get('learning.repair.different_failure');
+    const inconclusive = get('learning.repair.inconclusive');
     lines.push(
-      `  mechanism-applied repairs: applied=${applied} verified=${get('learning.repair.verified')} ` +
-        `failed=${get('learning.repair.failed')} (verified ${pct(get('learning.repair.verified'), applied)}) — ` +
+      `  mechanism-applied repairs: applied=${applied} verified=${verified} no_effect=${noEffect} ` +
+        `different_failure=${differentFailure} inconclusive=${inconclusive} ` +
+        `(verified ${pct(verified, applied)}) — ` +
         `a rule whose verified count never moves is a note, not a behaviour change`,
     );
   } catch (e) {

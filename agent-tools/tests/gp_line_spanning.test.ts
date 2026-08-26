@@ -18,6 +18,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { pariGpTool } from '../src/index.js';
 import { checkGpLineSpanningParens, checkGpParenBalance } from '../src/runtime/gp.js';
 
 // verbatim shape of the 2026-08-04 failure
@@ -34,6 +35,12 @@ test('the exact script shape that failed in production is caught', () => {
   assert.ok(msg, 'gp cannot parse this');
   assert.match(msg, /unclosed at the end of line 1/);
   assert.match(msg, /one LINE at a time/);
+});
+
+test('runtime preserves the spanning class instead of reclassifying it as paren imbalance', async () => {
+  const result = await pariGpTool.execute({ script: SPANNING });
+  assert.equal(result.success, false);
+  assert.match(result.error ?? '', /pre-check \[class=gp-precheck-spanning\]/);
 });
 
 test('a one-line construct is fine', () => {

@@ -103,7 +103,7 @@ describe('pariGp 语法预检(括号配平,无需 gp)', () => {
   it('execute 在不启动 gp 的情况下拒绝畸形脚本', async () => {
     const r = await pariGpTool.execute({ script: 'for(i=1,nA, s=A[i]' });
     assert.equal(r.success, false);
-    assert.match(r.error ?? '', /pre-check/);
+    assert.match(r.error ?? '', /pre-check \[class=gp-precheck-paren\]/);
   });
 });
 

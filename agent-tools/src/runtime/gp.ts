@@ -56,6 +56,14 @@ interface GpRun {
   timedOut?: boolean;
 }
 
+type GpPrecheckClass = 'gp-precheck-paren' | 'gp-precheck-nested-braces' | 'gp-precheck-spanning';
+
+function renderGpPrecheck(kind: GpPrecheckClass, message: string): string {
+  // The runtime produced this diagnostic, so preserve its already-known class in-band. Downstream
+  // learning code must not reverse-engineer our own prose (or let "still unclosed" steal spanning).
+  return `PARI/GP pre-check [class=${kind}]: ${message}. Not executed — fix and resend.`;
+}
+
 /** Run a script with one gp candidate; ENOENT is flagged separately so the caller can try the next candidate. */
 /**
  * GP { } blocks cannot nest (parser limitation: "embedded braces"). Detect depth > 1 and explain
@@ -309,7 +317,7 @@ export const pariGpTool: Tool = {
     // Pre-flight: reject unbalanced parens/brackets before spawning gp (saves a failed iteration).
     const syntaxIssue = checkGpParenBalance(script);
     if (syntaxIssue) {
-      return { success: false, output: '', error: `PARI/GP pre-check: ${syntaxIssue}. Not executed — fix and resend.` };
+      return { success: false, output: '', error: renderGpPrecheck('gp-precheck-paren', syntaxIssue) };
     }
     // Pre-flight: NESTED brace blocks. GP's { } multiline blocks cannot nest — wrapping a whole
     // script (with brace-bodied helper functions inside) in one outer { } dies with the cryptic
@@ -317,13 +325,13 @@ export const pariGpTool: Tool = {
     // here with an instruction instead.
     const nested = checkGpNestedBraces(script);
     if (nested) {
-      return { success: false, output: '', error: `PARI/GP pre-check: ${nested}. Not executed — fix and resend.` };
+      return { success: false, output: '', error: renderGpPrecheck('gp-precheck-nested-braces', nested) };
     }
     // Pre-flight: a construct whose parens span LINES outside a brace block. Balanced overall, fatal to
     // gp, and the single most repeated failure signature in the logs. See checkGpLineSpanningParens.
     const spanning = checkGpLineSpanningParens(script);
     if (spanning) {
-      return { success: false, output: '', error: `PARI/GP pre-check: ${spanning}. Not executed — fix and resend.` };
+      return { success: false, output: '', error: renderGpPrecheck('gp-precheck-spanning', spanning) };
     }
     const rawTimeout =
       typeof params.timeoutMs === 'number' && Number.isFinite(params.timeoutMs)

@@ -161,6 +161,17 @@ test('sig: shell-run gp script error → pariGp family (not shell:other, not mec
 
 test('sig: deterministic PARI/GP pre-check diagnostics keep their known class', () => {
   assert.equal(
+    extractFailureSignature('pariGp', 'PARI/GP pre-check [class=gp-precheck-spanning]: line 37 opens a "(" that is still unclosed'),
+    'pariGp:gp-precheck-spanning',
+  );
+  for (const message of [
+    'PARI/GP pre-check: 2 unclosed "(" — count parentheses',
+    'PARI/GP pre-check: 1 unclosed "["',
+    'PARI/GP pre-check: 1 unclosed "{" — close the body',
+  ]) {
+    assert.equal(extractFailureSignature('pariGp', message), 'pariGp:gp-precheck-paren');
+  }
+  assert.equal(
     extractFailureSignature('pariGp', 'PARI/GP pre-check: a "}" has no matching "{" — check braces'),
     'pariGp:gp-precheck-paren',
   );
@@ -170,7 +181,7 @@ test('sig: deterministic PARI/GP pre-check diagnostics keep their known class', 
   );
   assert.equal(
     extractFailureSignature('pariGp', 'PARI/GP pre-check: line 37 opens a "(" that is still unclosed'),
-    'pariGp:gp-precheck-paren',
+    'pariGp:gp-precheck-spanning',
   );
   assert.equal(
     extractFailureSignature('pariGp', 'PARI/GP pre-check: control construct spans multiple lines'),

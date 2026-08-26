@@ -112,6 +112,9 @@ test('the stats reader and the counter producer use the same keys', async () => 
   for (const bucket of ['cross_turn', 'intra_turn'] as const) {
     assert.ok(stats.includes(recurrenceMetricKey(bucket)), `learning-stats must read ${bucket}`);
   }
+  for (const bucket of ['verified', 'no_effect', 'different_failure', 'inconclusive'] as const) {
+    assert.ok(stats.includes(`learning.repair.${bucket}`), `learning-stats must render repair transition ${bucket}`);
+  }
 });
 
 // ── the loop itself ──────────────────────────────────────────────────────────────────────────────
