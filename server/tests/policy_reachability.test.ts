@@ -441,3 +441,38 @@ test('an expiring card takes its payload with it', () => {
     'expired is not denied — withdrawing the request would decide something the owner did not',
   );
 });
+
+/**
+ * Recency is not a binding. `getMostRecentActiveSession` answers "which tree was touched last", which
+ * is only ever safe for "is there a tree at all". Every place that reads a session's GOAL, TREE or
+ * STALL state on behalf of this turn must use the owner's explicit focus, or a background round on an
+ * unrelated project silently supplies the goal (prod 2026-08-25 23:35: LRC work judged against the
+ * Riemann session's frontier). Three more sites were still on recency after that fix — the execution
+ * ledger going into the prompt, the explore-control focus, and the next-turn stop recommendation — so
+ * the rule is written down here rather than left to be re-found.
+ */
+const RECENCY_EXISTENCE_CHECKS: Array<{ contains: string; why: string }> = [
+  { contains: 'hasActiveSession: memory.reasoning.getMostRecentActiveSession(sessionId) != null', why: 'existence only — force-start asks whether ANY session is open' },
+  { contains: 'if (memory.reasoning.getMostRecentActiveSession(sessionId) == null) return text', why: 'existence only — no session means nothing to check the text against' },
+  { contains: 'ownerReasoningActive: !!memory.reasoning.getMostRecentActiveSession(sessionId)', why: 'existence only — a boolean for the claim-grounding chain' },
+];
+
+test('recency answers existence and nothing else', () => {
+  const sites = callSites(chatHandler, /getMostRecentActiveSession\(/);
+  const bindings = sites.filter(
+    (s) => !RECENCY_EXISTENCE_CHECKS.some((e) => s.text.includes(e.contains)),
+  );
+  assert.deepEqual(
+    bindings.map((s) => `chat-handler.ts:${s.line}: ${s.text}`),
+    [],
+    'This reads a session on behalf of the turn by RECENCY. Use focusedReasoningSession(owner) — the ' +
+      'owner\'s explicit binding — or, if the answer really is just "is one open", add it to ' +
+      'RECENCY_EXISTENCE_CHECKS with the reason.',
+  );
+});
+
+test('the recency allowlist stays honest: every entry still exists', () => {
+  for (const e of RECENCY_EXISTENCE_CHECKS) {
+    assert.ok(chatHandler.includes(e.contains), `stale entry — the call site is gone: ${e.contains}`);
+  }
+});

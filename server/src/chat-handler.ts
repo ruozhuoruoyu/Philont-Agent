@@ -2805,14 +2805,16 @@ export function takeArmedAutoAdvance(
   return now - at <= ttlMs;
 }
 
-function focusedReasoningSession(owner: string): ReasoningSession | null {
-  const focused = memory.reasoning.getFocusedSession(owner);
+function focusedReasoningSession(owner: string | null): ReasoningSession | null {
+  const focused = owner ? memory.reasoning.getFocusedSession(owner) : null;
   if (focused) return focused;
   // A sole session is unambiguous and preserves the convenient single-project path. With multiple
-  // sessions, returning null is safer than assigning another project's frontier to this turn.
+  // sessions, returning null is safer than assigning another project's frontier to this turn — and
+  // that holds with no owner too: outside a turn there is no focus to consult, so "the one that
+  // exists" is answerable and "the one touched last" is not.
   const active = memory.reasoning.listActiveSessions(owner);
   if (active.length === 1) {
-    memory.reasoning.setFocusedSession(owner, active[0].id);
+    if (owner) memory.reasoning.setFocusedSession(owner, active[0].id);
     return active[0];
   }
   return null;
@@ -5519,7 +5521,10 @@ function buildCapabilityState(toolCount: number): CapabilityState {
  */
 function buildExecutionLedger(): string[] {
   if (!executionLedgerEnabled()) return [];
-  const sess = memory.reasoning.getMostRecentActiveSession(currentSessionId() ?? null);
+  // The anchor that goes INTO the prompt: it must be the session the owner is on, not whichever tree
+  // a background round touched last. Binding by recency here is how one project's frontier ends up
+  // anchoring another project's turn.
+  const sess = focusedReasoningSession(currentSessionId() ?? null);
   if (!sess) return [];
   const snap = memory.reasoning.summarizeSession(sess.id);
   if (!snap) return [];
@@ -7694,7 +7699,7 @@ export async function handleChatSend(
     if (ec && applies) {
       const lang = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() });
       const en = lang === 'en';
-      const focus = memory.reasoning.getMostRecentActiveSession(sessionId) ?? openSessions[0];
+      const focus = focusedReasoningSession(sessionId) ?? openSessions[0];
       let reply: string;
 
       if (ec.kind === 'stop_auto') {
@@ -8656,7 +8661,9 @@ export async function handleChatSend(
       // into signalBus.recommendStop (+3 score) — closing the loop where reflection's same_root_cause insight, which
       // historically only wrote a future routing hint, now also actuates the stop decision.
       try {
-        const os = memory.reasoning.getMostRecentActiveSession(sessionId);
+        // Arms the NEXT turn's stop recommendation, so it has to be THIS owner's focused session:
+        // recommending a stop because an unrelated tree stalled is the same mis-binding one layer over.
+        const os = focusedReasoningSession(sessionId);
         if (os && os.status === 'active' && os.noProgressRounds >= 3 && sameRootCauseFailures >= 2) {
           viabilityRecommendStop.set(sessionId, Date.now());
           console.log(
