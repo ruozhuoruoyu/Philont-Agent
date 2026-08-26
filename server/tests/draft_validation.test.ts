@@ -29,6 +29,8 @@ const signatureOf = () => 'leanCheck:lean-unsolved';
 test('draft validation is on by default and retains an explicit kill switch', () => {
   assert.equal(draftValidationEnabled({} as NodeJS.ProcessEnv), true);
   assert.equal(draftValidationEnabled({ PHILONT_DRAFT_VALIDATION: 'off' } as NodeJS.ProcessEnv), false);
+  assert.equal(draftValidationEnabled({ PHILONT_MECHANICAL_REPAIR: '0' } as NodeJS.ProcessEnv), false,
+    'the parent repair kill switch must disable unattended draft repair too');
 });
 
 test('draft fixture selection requires real lexical applicability and never-used draft state', () => {
@@ -41,6 +43,20 @@ test('draft fixture selection requires real lexical applicability and never-used
     drafts: [skill({ useCount: 1 })], failures: [failure], eligibleTools: new Set(['leanCheck']),
     signatureOf, attemptFor: () => null,
   }), null, 'already-used drafts are not fixtures for the frozen pool');
+});
+
+test('draft matching splits kebab names and rejects a single generic token', () => {
+  const kebab = selectDraftFixture({
+    drafts: [skill({ name: 'fix-lean-nat-subtraction', whenToUse: '', triggerKeywords: [] })],
+    failures: [{ ...failure, errorText: 'lean subtraction failed' }], eligibleTools: new Set(['leanCheck']),
+    signatureOf, attemptFor: () => null,
+  });
+  assert.equal(kebab?.skill.name, 'fix-lean-nat-subtraction');
+  const generic = selectDraftFixture({
+    drafts: [skill({ name: 'generic-lean-helper', whenToUse: '', triggerKeywords: [] })],
+    failures: [failure], eligibleTools: new Set(['leanCheck']), signatureOf, attemptFor: () => null,
+  });
+  assert.equal(generic, null, 'one generic word is distribution evidence, not applicability evidence');
 });
 
 test('verified draft execution records success; changed failure records neutral use', async () => {
@@ -79,4 +95,19 @@ test('declined draft rewrite persists a cooldown without changing skill usage', 
   });
   assert.equal(out.transition, 'not-attempted');
   assert.ok(store.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, fixture.key));
+});
+
+test('mechanical repair kill switch prevents the unattended tool run and skill outcome', async () => {
+  const fixture = selectDraftFixture({ drafts: [skill()], failures: [failure], eligibleTools: new Set(['leanCheck']), signatureOf, attemptFor: () => null })!;
+  let runs = 0;
+  let outcomes = 0;
+  const out = await validateDraftFixture({
+    fixture, facts: facts(),
+    skills: { recordSkillOutcome: () => { outcomes++; return null; }, recordUsage: () => { outcomes++; return null; } } as never,
+    signatureOf, isSafeToRerun: () => true, ask: async () => '{"code":"good"}',
+    runTool: async () => { runs++; return { success: true }; },
+    env: { PHILONT_MECHANICAL_REPAIR: '0' } as NodeJS.ProcessEnv,
+  });
+  assert.deepEqual({ transition: out.transition, reason: out.reason, runs, outcomes },
+    { transition: 'not-attempted', reason: 'disabled', runs: 0, outcomes: 0 });
 });

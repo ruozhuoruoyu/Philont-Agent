@@ -285,7 +285,10 @@ export class SessionReflector {
       .map((m) => `[${m.role}] ${m.content}`)
       .join('\n');
 
-    const existingSkills = this.skills.listAll(80);
+    // This is a mechanism-side exhaustive catalog, not the normal prompt recommendation list. The
+    // model cannot reuse an exact existing name it was never shown; 80/130 caused the unseen tail to
+    // keep minting synonyms. Deprecated rows remain excluded by listAll.
+    const existingSkills = this.skills.listAll(10_000);
     const existingCatalog = existingSkills.length > 0
       ? `\n\n## Existing skill catalog (semantic deduplication)\n` +
         `If a proposed rule is semantically equivalent to one below, return the EXISTING exact name ` +

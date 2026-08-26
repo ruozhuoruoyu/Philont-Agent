@@ -1,7 +1,8 @@
 /** Safe validation of advisory draft skills against historical failed tool calls. */
 import type { Skill, SkillStore } from '@agent/memory';
+import { planTokenize as tokenize } from '@agent/memory';
 import type { MechanicalFixStore } from './mechanical_fix_learning.js';
-import { attemptMechanicalRepair } from './mechanical_repair.js';
+import { attemptMechanicalRepair, mechanicalRepairEnabled } from './mechanical_repair.js';
 import { classifyRepairTransition, type RepairTransition } from './in_turn_reflection.js';
 import { createHash } from 'node:crypto';
 import type { LedgerFailure, ReplayAttemptState } from './repair_replay.js';
@@ -10,7 +11,8 @@ export const DRAFT_VALIDATION_ATTEMPTS_NAMESPACE = 'draft_validation_attempts';
 const COOLDOWN_MS = 7 * 24 * 60 * 60_000;
 
 export function draftValidationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return !/^(?:0|off|false|no)$/i.test((env.PHILONT_DRAFT_VALIDATION ?? '').trim());
+  return mechanicalRepairEnabled(env)
+    && !/^(?:0|off|false|no)$/i.test((env.PHILONT_DRAFT_VALIDATION ?? '').trim());
 }
 
 export interface DraftFixture {
@@ -21,9 +23,7 @@ export interface DraftFixture {
 }
 
 function terms(skill: Skill): string[] {
-  return [skill.name, skill.whenToUse, ...skill.triggerKeywords]
-    .flatMap((s) => (s ?? '').toLowerCase().split(/[^\p{L}\p{N}_-]+/u))
-    .filter((s) => s.length >= 3);
+  return [...tokenize([skill.name, skill.whenToUse, ...skill.triggerKeywords].filter(Boolean).join(' '))];
 }
 
 export function draftFixtureKey(skill: Skill, failure: LedgerFailure, signature: string): string {
@@ -53,7 +53,9 @@ export function selectDraftFixture(input: {
       const signature = input.signatureOf(failure.toolName, failure.errorText);
       const haystack = `${failure.toolName} ${signature} ${failure.errorText}`.toLowerCase();
       const score = needles.reduce((n, term) => n + (haystack.includes(term) ? 1 : 0), 0);
-      if (score === 0) continue;
+      const skillText = `${skill.whenToUse} ${skill.actionTemplate} ${skill.description}`.toLowerCase();
+      const explicitlyNamesSignature = skillText.includes(signature.toLowerCase());
+      if (!explicitlyNamesSignature && score < 2) continue;
       const key = draftFixtureKey(skill, failure, signature);
       const prior = input.attemptFor(key);
       if (prior?.permanent || (prior && now - prior.lastAttemptAt < COOLDOWN_MS)) continue;
@@ -104,7 +106,7 @@ export async function validateDraftFixture(input: {
       run: (args) => input.runTool(fixture.failure.toolName, args),
       ask: input.ask,
       configured: true,
-      env: { ...input.env, PHILONT_MECHANICAL_REPAIR: '1' },
+      env: input.env,
       classifyResult: classify,
     });
     if (!result.attempted || !result.result) {

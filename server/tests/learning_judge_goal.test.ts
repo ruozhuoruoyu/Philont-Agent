@@ -53,15 +53,19 @@ test('formal evidence accepts real Lean builds but rejects version probes and ge
 test('compile evidence auto-reconciles only one explicit matching acceptance node', () => {
   const nodes = [
     { id: 'root', parentId: null, status: 'open', claim: 'prove the theorem', depth: 0 },
-    { id: 'compile', parentId: 'root', status: 'open', claim: 'Compile Region3Sum.lean successfully', depth: 1 },
+    { id: 'compile', parentId: 'root', status: 'open', claim: '验收：用户在本机执行 lake build Lrc.K13.Region3Sum', depth: 1 },
     { id: 'math', parentId: 'root', status: 'open', claim: 'Prove Region3Sum lower bound', depth: 1 },
   ] as any;
   const evidence = '[scope=file:Lrc/K13/Region3Sum.lean] shell: lake env lean Lrc/K13/Region3Sum.lean → exit 0';
   assert.equal(selectCompileAcceptanceNode(nodes, evidence)?.id, 'compile');
+  assert.equal(selectCompileAcceptanceNode([
+    { id: 'root', parentId: null, status: 'open', claim: 'root', depth: 0 },
+    { id: 'mixed', parentId: 'root', status: 'open', claim: 'region3_strict 成立，且 Region3Sum.lean 编译通过', depth: 1 },
+  ] as any, evidence), null, 'a compiler run must never auto-prove a mixed mathematical assertion');
   assert.equal(selectCompileAcceptanceNode(nodes, 'leanCheck: verified successfully'), null, 'unscoped proof evidence needs the reasoner');
   assert.equal(selectCompileAcceptanceNode([
     ...nodes,
-    { id: 'compile2', parentId: 'root', status: 'open', claim: 'Region3Sum compile passes', depth: 1 },
+    { id: 'compile2', parentId: 'root', status: 'open', claim: '验收：用户在本机执行 Region3Sum compile', depth: 1 },
   ] as any, evidence), null, 'ambiguous matches stay open for explicit reconciliation');
 });
 

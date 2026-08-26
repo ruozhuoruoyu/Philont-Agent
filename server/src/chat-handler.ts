@@ -3019,7 +3019,9 @@ export function selectCompileAcceptanceNode(
   if (!/^\[scope=(?:project-build-only|target:|file:)/.test(evidence)) return null;
   const compileClaim = /\b(?:build|built|compile|compiled|compiles|compilation)\b|(?:\u7f16\u8bd1|\u6784\u5efa).{0,12}(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210|\u65e0\u8bef)|(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210).{0,12}(?:\u7f16\u8bd1|\u6784\u5efa)/i;
   const matches = computeFrontier([...nodes]).filter(
-    (node) => compileClaim.test(node.claim) && formalEvidenceAppliesToClaims(evidence, [node.claim]),
+    (node) => isExternalAcceptanceNode(node.claim)
+      && compileClaim.test(node.claim)
+      && formalEvidenceAppliesToClaims(evidence, [node.claim]),
   );
   return matches.length === 1 ? matches[0] : null;
 }
