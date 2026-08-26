@@ -289,12 +289,18 @@ export function deepExploreRouteTier(
  * sentences and asked the owner to type 进 or 直接 — and in production (2026-07-24 16:33 and 17:34) the
  * owner typed 深度推理 instead, four characters, on a phone, twice. A question the recipient answers by
  * retyping its subject line is asking too much: this fires on every borderline task, so the cost is paid
- * over and over. The two digits are the primary answer; the words stay accepted (see
+ * over and over. The digits are the primary answer; the words stay accepted (see
  * classifyExploreAskReply) because someone who already learned them must not be punished for it.
+ *
+ * A THIRD option was added later, and it went on 3 — not into the middle. `2` had meant "just answer
+ * me" since the two-option version, and this owner replies to the card with a bare digit (prod
+ * 2026-08-25 21:57:50: `1`). Renumbering so that 2 means "hand the session to a background ticker"
+ * would turn the most conservative answer into the most autonomous one, silently, for anyone acting on
+ * muscle memory. These are OUR words handed to the owner; their meaning may be extended, never moved.
  */
 export function buildDeepExploreAskText(dec: IntentDecision | null): string {
   const mode = dec?.domain === 'formal' ? '形式化证明' : '循证推演';
-  return `🧭 进深度推理引擎?(${mode}:跨天续跑、逐节点验证,每轮约 10 分钟)\n回 1 = 进 · 2 = 直接答`;
+  return `🧭 进深度推理引擎?(${mode}:跨天续跑、逐节点验证,每轮约 10 分钟)\n回 1 = 进一轮 · 2 = 直接答 · 3 = 自动持续`;
 }
 
 /**
@@ -312,7 +318,7 @@ export function buildDeepExploreAskText(dec: IntentDecision | null): string {
  * terminal path, exploreAskApproved is authoritative and this would FORCE a reasoning session onto a
  * task the owner just declined. The words we hand out must be matched, not inferred.
  */
-export function classifyExploreAskReply(reply: string): 'grant' | 'deny' | null {
+export function classifyExploreAskReply(reply: string): 'grant' | 'auto' | 'deny' | null {
   const r = (reply ?? '').trim().toLowerCase().replace(/[。！？，,!?.\s]+/g, '');
   if (!r) return null;
   // The offered answers FIRST — 1 and 2 are what the question now hands out, so they must be matched
@@ -320,7 +326,10 @@ export function classifyExploreAskReply(reply: string): 'grant' | 'deny' | null 
   // user authorise this?"). Then the words the older question offered, plus the near-synonyms people
   // type instead: someone who learned 进/直接 must not be punished for still using them.
   if (/^[1１]$/.test(r)) return 'grant';
+  // 2 has meant "just answer me" since the two-option card. The auto option is additive, on 3.
   if (/^[2２]$/.test(r)) return 'deny';
+  if (/^[3３]$/.test(r)) return 'auto';
+  if (/^(自动|自己跑|持续|自动持续|不用问我)$/.test(r)) return 'auto';
   if (/^(进|进入|深度推理|深度|深入|深挖|推理|开始深度推理)$/.test(r)) return 'grant';
   if (/^(直接|平铺|快速|快答|直接答|不用|不深入|简单说)$/.test(r)) return 'deny';
   return null; // anything else → generic classifier

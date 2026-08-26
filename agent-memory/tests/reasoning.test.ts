@@ -145,6 +145,23 @@ test('owner scoping: pre-v28 NULL-owner session stays resumable by any channel (
   mem.close();
 });
 
+test('explicit reasoning focus persists, is owner-scoped, and clears when terminal', () => {
+  const mem = openMemoryDb(':memory:');
+  const owner = 'wechat:u:u';
+  const first = mem.reasoning.createSession({ goal: 'RH', ownerSessionId: owner }).session;
+  const second = mem.reasoning.createSession({ goal: 'LRC', ownerSessionId: owner }).session;
+  const foreign = mem.reasoning.createSession({ goal: 'other', ownerSessionId: 'web-ui' }).session;
+  assert.equal(mem.reasoning.setFocusedSession(owner, first.id), true);
+  assert.equal(mem.reasoning.getFocusedSession(owner)?.id, first.id);
+  assert.equal(mem.reasoning.setFocusedSession(owner, foreign.id), false, 'cannot focus another owner');
+  assert.equal(mem.reasoning.getFocusedSession(owner)?.id, first.id);
+  assert.equal(mem.reasoning.setFocusedSession(owner, second.id), true);
+  assert.equal(mem.reasoning.getFocusedSession(owner)?.id, second.id);
+  mem.reasoning.setSessionStatus(second.id, 'abandoned');
+  assert.equal(mem.reasoning.getFocusedSession(owner), null, 'terminal focus is lazily removed');
+  mem.close();
+});
+
 test('continue resolves to the most-recently-STARTED session, not a bumped-updated stale one (anti-ping-pong)', () => {
   const mem = openMemoryDb(':memory:');
   const owner = 'wechat:u:u';

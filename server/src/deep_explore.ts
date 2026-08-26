@@ -2842,7 +2842,11 @@ export interface DeepExploreDeps {
   getExternalVerificationEvidence?: (owner: string, activeClaims: readonly string[]) => string[];
   /** Records the session explicitly selected by a user-facing deep_explore action. Consumers such
    * as the learning judge must reuse this binding instead of independently guessing "most recent". */
-  onSessionSelected?: (owner: string | null, session: ReasoningSession) => void;
+  onSessionSelected?: (
+    owner: string | null,
+    session: ReasoningSession,
+    source: 'created' | 'explicit' | 'reused' | 'sole',
+  ) => void;
   /** Returns the session previously selected for this owner. This makes a later bare "continue"
    * reuse an explicit binding without falling back to recency. */
   getSelectedSessionId?: (owner: string | null) => string | undefined;
@@ -2885,13 +2889,13 @@ export function createDeepExploreTool(
   function resolveActiveSession(
     owner: string | null,
     rawSessionId: unknown,
-  ): { session: ReasoningSession | null; error?: string } {
+  ): { session: ReasoningSession | null; source?: 'explicit' | 'reused' | 'sole'; error?: string } {
     const sessions = reasoning.listActiveSessions(owner);
     const explicit = typeof rawSessionId === 'string' ? rawSessionId.trim() : '';
     const requested = explicit || deps.getSelectedSessionId?.(owner)?.trim() || '';
     if (requested) {
       const matches = sessions.filter((s) => s.id === requested || s.id.startsWith(requested));
-      if (matches.length === 1) return { session: matches[0] };
+      if (matches.length === 1) return { session: matches[0], source: explicit ? 'explicit' : 'reused' };
       if (matches.length > 1) {
         return { session: null, error: `Session id prefix "${requested}" is ambiguous. Pass a longer id from action=list.` };
       }
@@ -2901,7 +2905,7 @@ export function createDeepExploreTool(
         return { session: null, error: `No open session matches id "${requested}". Run action=list to see open sessions.` };
       }
     }
-    if (sessions.length === 1) return { session: sessions[0] };
+    if (sessions.length === 1) return { session: sessions[0], source: 'sole' };
     if (sessions.length > 1) {
       return {
         session: null,
@@ -2911,8 +2915,12 @@ export function createDeepExploreTool(
     return { session: null };
   }
 
-  function selectSession(owner: string | null, session: ReasoningSession): ReasoningSession {
-    deps.onSessionSelected?.(owner, session);
+  function selectSession(
+    owner: string | null,
+    session: ReasoningSession,
+    source: 'created' | 'explicit' | 'reused' | 'sole',
+  ): ReasoningSession {
+    deps.onSessionSelected?.(owner, session, source);
     return session;
   }
 
@@ -3531,6 +3539,10 @@ export function createDeepExploreTool(
           type: 'string',
           description: 'For continue/discover/status/finalize/abandon/auto_on/auto_off: the full id or unique prefix from action=list. Optional only when exactly one session is open.',
         },
+        autoAdvance: {
+          type: 'boolean',
+          description: 'action=start only: immediately opt this new session into background auto-advance.',
+        },
       },
       required: ['action'],
     },
@@ -3586,7 +3598,12 @@ export function createDeepExploreTool(
           reasoning.setPhase(session.id, 'diverge');
           session = reasoning.getSession(session.id) ?? session; // refetch so runRound dispatches the diverge round
         }
-        selectSession(owner, session);
+        selectSession(owner, session, 'created');
+        if (params.autoAdvance === true) {
+          reasoning.setAutoAdvance(session.id, true);
+          session = reasoning.getSession(session.id) ?? session;
+          deps.onMilestone?.(`▶ 已开启自动持续推进: ${session.id.slice(0, 8)}。我会自己续跑，在解决、连续卡住或达到轮次预算时停下并汇报。`);
+        }
         // Refutation pairing: a ∀-shaped goal gets one node that a machine can decide, seeded before the
         // first round. Proving needs an argument; DISPROVING needs a single witness — so this side is always
         // checkable, and the session can no longer spend its whole life on a tree where nothing is decidable
@@ -3674,7 +3691,7 @@ export function createDeepExploreTool(
             error: 'No in-progress deep-exploreing session. Start one with action=start first.',
           };
         }
-        selectSession(owner, session);
+        selectSession(owner, session, resolved.source ?? 'sole');
         // Feasibility gate on RESUME: a session started before the barrier library existed (or in
         // another process) never showed its ⛔ to the user — the start-only milestone misses it. Warn
         // once per process per session, so continuing a doomed old session names the wall too.
@@ -3709,7 +3726,7 @@ export function createDeepExploreTool(
             : [];
           session = reasoning.createSession({ goal, assumptions, ownerSessionId: owner }).session;
         }
-        selectSession(owner, session);
+        selectSession(owner, session, resolved.source ?? 'sole');
         // discover = the DIVERGE (generative) round. For formal it is the experimental-MATH loop
         // (pariGp-driven conjecture generation); for deliberate it is candidate option/hypothesis
         // generation — but only when the phase feature is enabled. With phases OFF, deliberate diverge
@@ -3765,7 +3782,7 @@ export function createDeepExploreTool(
         const session = resolved.session;
         if (resolved.error) return { success: false, output: '', error: resolved.error };
         if (!session) return { success: true, output: 'No deep-exploreing session is in progress right now.' };
-        selectSession(owner, session);
+        selectSession(owner, session, resolved.source ?? 'sole');
         const nodes = reasoning.getNodes(session.id);
         const frontier = computeFrontier(nodes);
         const proved = nodes.filter((n) => n.status === 'proved').length;
@@ -3790,7 +3807,7 @@ export function createDeepExploreTool(
         const session = resolved.session;
         if (resolved.error) return { success: false, output: '', error: resolved.error };
         if (!session) return { success: true, output: 'No deep-explore session to finalize.' };
-        selectSession(owner, session);
+        selectSession(owner, session, resolved.source ?? 'sole');
         const report = (PROFILES[session.mode] ?? FORMAL_PROFILE).renderReport(session, reasoning.getNodes(session.id));
         deps.onMilestone?.(report); // persist as a chat bubble so the conclusion is not lost
         return { success: true, output: report };
@@ -3824,7 +3841,7 @@ export function createDeepExploreTool(
         if (!session) {
           return { success: false, output: '', error: 'No in-progress reasoning session to toggle auto-advance on. Start one first.' };
         }
-        selectSession(owner, session);
+        selectSession(owner, session, resolved.source ?? 'sole');
         reasoning.setAutoAdvance(session.id, action === 'auto_on');
         return {
           success: true,

@@ -365,15 +365,18 @@ test('the ask is one line and its digits are matched — the owner should not re
 
   // Every answer the question hands out is matched deterministically — the 2026-07-13 lesson.
   assert.equal(classifyExploreAskReply('1'), 'grant');
-  assert.equal(classifyExploreAskReply('2'), 'deny');
+  assert.equal(classifyExploreAskReply('2'), 'deny', 'the meaning of an offered digit may be extended, never moved');
+  assert.equal(classifyExploreAskReply('3'), 'auto', 'the third option is additive');
   assert.equal(classifyExploreAskReply('１'), 'grant', 'full-width digits come from Chinese IMEs');
   assert.equal(classifyExploreAskReply('2.'), 'deny', 'trailing punctuation is stripped');
+  assert.equal(classifyExploreAskReply('３'), 'auto', 'full-width digits reach the new option too');
   // The older vocabulary keeps working: a habit we taught must not become an error.
   assert.equal(classifyExploreAskReply('进'), 'grant');
   assert.equal(classifyExploreAskReply('直接'), 'deny');
+  assert.equal(classifyExploreAskReply('自动'), 'auto');
   assert.equal(classifyExploreAskReply('开始深度推理'), 'grant', 'what the owner actually typed');
-  // A digit that is not one of the two offered answers is NOT an answer.
-  assert.equal(classifyExploreAskReply('3'), null);
+  // A digit that is not one of the offered answers is NOT an answer.
+  assert.equal(classifyExploreAskReply('4'), null);
 });
 
 test('buildIntentPrompt: carries the "debugging our own artifact is NOT deep_explore" boundary', () => {

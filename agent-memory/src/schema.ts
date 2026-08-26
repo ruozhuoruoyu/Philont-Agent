@@ -422,6 +422,17 @@ CREATE TABLE IF NOT EXISTS learning_metrics (
   updated_at INTEGER NOT NULL
 );
 
+-- Explicit owner→reasoning-session focus. Standalone/idempotent so deployments already at the
+-- current schema version receive it on their next open without a synthetic version bump.
+CREATE TABLE IF NOT EXISTS reasoning_session_focus (
+  owner_session_id     TEXT PRIMARY KEY,
+  reasoning_session_id TEXT NOT NULL,
+  updated_at           INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reasoning_session_focus_target
+  ON reasoning_session_focus(reasoning_session_id);
+
 -- ── Meta table (schema version management) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS memory_meta (
   key   TEXT PRIMARY KEY,

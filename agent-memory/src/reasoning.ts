@@ -257,6 +257,44 @@ export class ReasoningStore {
     return row ? rowToSession(row) : null;
   }
 
+  /** Persist the user's explicit reasoning focus. Recency is deliberately not involved. */
+  setFocusedSession(ownerSessionId: string, reasoningSessionId: string): boolean {
+    const session = this.getSession(reasoningSessionId);
+    if (!session || session.status !== 'active') return false;
+    if (session.ownerSessionId !== null && session.ownerSessionId !== ownerSessionId) return false;
+    this.db.prepare<[string, string, number]>(
+      `INSERT INTO reasoning_session_focus (owner_session_id, reasoning_session_id, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(owner_session_id) DO UPDATE SET
+         reasoning_session_id = excluded.reasoning_session_id,
+         updated_at = excluded.updated_at`,
+    ).run(ownerSessionId, reasoningSessionId, Date.now());
+    return true;
+  }
+
+  getFocusedSession(ownerSessionId: string): ReasoningSession | null {
+    const row = this.db.prepare<[string]>(
+      `SELECT reasoning_session_id FROM reasoning_session_focus WHERE owner_session_id = ?`,
+    ).get(ownerSessionId) as { reasoning_session_id: string } | undefined;
+    if (!row) return null;
+    const session = this.getSession(row.reasoning_session_id);
+    if (session?.status === 'active' && (session.ownerSessionId === ownerSessionId || session.ownerSessionId === null)) {
+      return session;
+    }
+    this.clearFocusedSession(ownerSessionId, row.reasoning_session_id);
+    return null;
+  }
+
+  clearFocusedSession(ownerSessionId: string, reasoningSessionId?: string): void {
+    if (reasoningSessionId) {
+      this.db.prepare<[string, string]>(
+        `DELETE FROM reasoning_session_focus WHERE owner_session_id = ? AND reasoning_session_id = ?`,
+      ).run(ownerSessionId, reasoningSessionId);
+      return;
+    }
+    this.db.prepare<[string]>(`DELETE FROM reasoning_session_focus WHERE owner_session_id = ?`).run(ownerSessionId);
+  }
+
   /** Active sessions, most recently updated first. */
   /**
    * Active sessions, most recently updated first. When `ownerSessionId` is provided, only sessions

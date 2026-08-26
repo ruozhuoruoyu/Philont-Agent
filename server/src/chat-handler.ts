@@ -2760,22 +2760,14 @@ export const DEEP_EXPLORE_VERIFY_TOOL_NAMES = new Set([
 ]);
 
 const formalVerificationEvidenceBySession = new Map<string, string[]>();
-/** Explicit deep-explore focus per chat owner. This is deliberately separate from updated_at:
- * background work and unrelated sessions must not steal the learning judge's goal. */
-const focusedReasoningSessionByOwner = new Map<string, string>();
-
 function focusedReasoningSession(owner: string): ReasoningSession | null {
-  const focusedId = focusedReasoningSessionByOwner.get(owner);
-  if (focusedId) {
-    const focused = memory.reasoning.getSession(focusedId);
-    if (focused?.status === 'active' && focused.ownerSessionId === owner) return focused;
-    focusedReasoningSessionByOwner.delete(owner);
-  }
+  const focused = memory.reasoning.getFocusedSession(owner);
+  if (focused) return focused;
   // A sole session is unambiguous and preserves the convenient single-project path. With multiple
   // sessions, returning null is safer than assigning another project's frontier to this turn.
   const active = memory.reasoning.listActiveSessions(owner);
   if (active.length === 1) {
-    focusedReasoningSessionByOwner.set(owner, active[0].id);
+    memory.reasoning.setFocusedSession(owner, active[0].id);
     return active[0];
   }
   return null;
@@ -2854,14 +2846,15 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     // the round prompt (collectComputeLessons).
     actions: memory.actions,
     skills: memory.skills,
-    getSelectedSessionId: (owner) => owner ? focusedReasoningSessionByOwner.get(owner) : undefined,
-    onSessionSelected: (owner, session) => {
-      if (owner) focusedReasoningSessionByOwner.set(owner, session.id);
+    getSelectedSessionId: (owner) => owner ? memory.reasoning.getFocusedSession(owner)?.id : undefined,
+    onSessionSelected: (owner, session, source) => {
+      if (owner) {
+        memory.reasoning.setFocusedSession(owner, session.id);
+        memory.metrics.increment(`deep_explore.binding.${source}`);
+      }
     },
     onSessionAbandoned: (owner, session) => {
-      if (owner && focusedReasoningSessionByOwner.get(owner) === session.id) {
-        focusedReasoningSessionByOwner.delete(owner);
-      }
+      if (owner) memory.reasoning.clearFocusedSession(owner, session.id);
     },
     getExternalVerificationEvidence: (owner, activeClaims) => {
       try {
@@ -7900,10 +7893,11 @@ export async function handleChatSend(
             askVerdictText,
             'Enter the deep reasoning engine (deep_explore) for the research goal just proposed',
           ));
-        if (askIntent === 'grant') {
+        if (askIntent === 'grant' || askIntent === 'auto') {
           pendingExploreAsk.delete(sessionId);
           pendingDecisions.resolve(sessionId, exploreAsk.decisionId!);
           signalBus.exploreAskApproved = true;
+          signalBus.exploreAskAuto = askIntent === 'auto';
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
           auditDecisionApplied(sessionId, exploreAsk.decisionId!, 'granted', 'deep_explore entry');
@@ -10753,7 +10747,8 @@ async function decideForcedDeepExploreCall(
     })
   ) {
     signalBus.forcedDeepExploreStart = true;
-    const forcedInput = buildForceStartInput(signalBus.intentDecision ?? null, forceGoal ?? forceMessage);
+    const forcedInput: Record<string, unknown> = buildForceStartInput(signalBus.intentDecision ?? null, forceGoal ?? forceMessage);
+    if (signalBus.exploreAskAuto) forcedInput.autoAdvance = true;
     console.warn(
       `[force-start] session=${safeSessionId(sessionId)} deep_explore route + depth wanted but the turn answered flat — forcing deep_explore(action=start, mode=${forcedInput.mode ?? 'auto'})`,
     );
@@ -10793,6 +10788,8 @@ interface TurnSignalBus {
   blockedTools?: Set<string>;
   /** Ask-tier deep_explore: the owner approved entering the engine for the restored goal this turn. */
   exploreAskApproved?: boolean;
+  /** The owner selected the visible "自动持续" ask-tier choice. */
+  exploreAskAuto?: boolean;
   /** Ask-tier deep_explore: the owner declined — run flat, do not re-ask or force this turn. */
   exploreAskDeclined?: boolean;
   /**
