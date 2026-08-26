@@ -261,6 +261,7 @@ import {
   isMechanicalFailure,
   buildMechanicalFixReminder,
   authoringCheatsheet,
+  classifyRepairTransition,
   type InTurnToolRecord,
 } from './in_turn_reflection.js';
 import {
@@ -6009,10 +6010,8 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
     // eventually pruned for the low score of a race it never ran. Nobody could see which half of that was
     // failing, because the offer (this index) was never logged — only the (rare) acceptance was.
     // Log what we OFFER, so the next production log can answer "does it not see them, or not want them?"
-    // Persist the offer (v36). Without it, "shown and declined" and "never shown" both look like zero.
-    // Only a showing the ranker CHOSE counts as evidence against the skill. A global-fallback rotation
-    // says something about the turn, not about the skill — see isDeclinedDraft. The aux selector's picks
-    // are matches: it was shown the task and named this skill.
+    // Persist the offer for distribution diagnostics only. Offered/matched counts must never be treated
+    // as efficacy evidence; only linked execution outcomes can promote or prune a skill.
     const matchedNames = new Set<string>(auxSkills.map((s) => s.name));
     if (rankedSel && rankedSel.matchedByRelevance > 0) {
       for (const s of ranked.slice(0, rankedSel.matchedByRelevance)) matchedNames.add(s.name);
@@ -8385,7 +8384,10 @@ export async function handleChatSend(
   // frozen tool-use chain and must not be rebuilt or augmented.
   if (turnContext.source === 'fresh') {
     try {
-      const pool = memory.skills.listAllForMaintenance(400);
+      // listAllForMaintenance deliberately includes deprecated rows for audit/delete workflows. This
+      // path surfaces candidates to an LLM, so terminal skills must be removed before they enter the
+      // prompt (and before offered-count attribution can touch them).
+      const pool = memory.skills.listForRecommendation(400);
       const picked = await selectSkillsByAux(
         recallInput,
         pool.map((s) => ({ name: s.name, description: s.description, whenToUse: s.whenToUse })),
@@ -9912,7 +9914,7 @@ async function handleChatSendInner(
                     maxTokens: 500,
                     requireComplete: true,
                   };
-                  const out = await callAuxLLM(req);
+                  const out = await callAuxLLM({ ...req, fallbackToMain: false });
                   const m = out.match(/\{[\s\S]*\}/);
                   if (!m) return null;
                   const parsed = JSON.parse(m[0]) as { gaps?: unknown };
@@ -9926,7 +9928,9 @@ async function handleChatSendInner(
             : undefined,
           // Spec compiler (spec_regime.md increment 1): guide → validated SpecDoc via the aux LLM,
           // regex anchor as floor/fallback. Absent aux config → pure regex path, unchanged.
-          specCall: isAuxLLMConfigured() ? (req) => callAuxLLM(req) : undefined,
+          specCall: isAuxLLMConfigured()
+            ? (req) => callAuxLLM({ ...req, fallbackToMain: false })
+            : undefined,
           // Reuse a spec this service already compiled and installed, instead of recompiling every run.
           installedSpecFor: (hosts) => {
             const root = join(process.cwd(), '.philont', 'skills');
@@ -11286,10 +11290,21 @@ async function runToolLoop(
         return { result: failed, notice: '' };
       }
       memory.metrics.increment('learning.repair.applied');
-      memory.metrics.increment(outcome.verified ? 'learning.repair.verified' : 'learning.repair.failed');
+      const repairedError = outcome.result.error ?? outcome.result.output ?? '';
+      const transition = classifyRepairTransition({
+        beforeSignature: signature,
+        afterSuccess: outcome.result.success,
+        afterSignature: outcome.result.success
+          ? undefined
+          : extractFailureSignature(call.name, repairedError),
+      });
+      memory.metrics.increment(`learning.repair.${transition}`);
+      // Preserve the old aggregate only for a demonstrated no-op. A changed failure is progress;
+      // timeout/cancellation is unscorable rather than negative evidence.
+      if (transition === 'no_effect') memory.metrics.increment('learning.repair.failed');
       console.log(
         `[auto-repair] session=${safeSessionId(sessionId)} ${signature} ` +
-          `${outcome.verified ? 'verified' : 'still failing'} ` +
+          `${transition} ` +
           `(applied=${outcome.stats?.applied ?? 0} verified=${outcome.stats?.verified ?? 0})`,
       );
       // Built field by field, not spread over the failure: a spread leaves the old `error` string

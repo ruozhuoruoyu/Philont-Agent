@@ -121,16 +121,18 @@ test('SkillStore: pruneDraftsToCap 只淘汰有证据不利的 draft,保护未�
   assert.equal(skills.pruneDraftsToCap(2), 0, 'an untried hypothesis is not evicted to make room');
   assert.equal(skills.count(), 7);
 
-  // ONE offer is not evidence — the day the exploration slot went live, a draft shown once on an
-  // unrelated turn was evicted 17 minutes later. Declined = DECLINED_MIN_OFFERS distinct showings.
-  // v41: an offer is evidence only when the ranker MATCHED the skill. These three were chosen for the
-  // turn and passed over — a real verdict. See isDeclinedDraft.
+  // Offers are distribution observations, never efficacy evidence.
   const shown = ['draft-skill-0', 'draft-skill-1', 'draft-skill-2'];
   skills.recordSkillsOffered(shown, shown);
   assert.equal(skills.pruneDraftsToCap(2), 0, 'a single showing must not make a draft evictable');
   for (let i = 0; i < 2; i++) skills.recordSkillsOffered(shown, shown);
+  assert.equal(skills.pruneDraftsToCap(2), 0, 'repeated relevant offers still do not prove failure');
+  for (const name of shown) {
+    skills.recordSkillOutcome(name, false);
+    skills.recordSkillOutcome(name, false);
+  }
   const deleted = skills.pruneDraftsToCap(2);
-  assert.equal(deleted, 3, 'three showings, never chosen — that is a real verdict');
+  assert.equal(deleted, 3, 'two executed failures are real negative evidence');
   assert.equal(skills.count(), 4); // 3 never-offered drafts + 1 playbook
   assert.ok(skills.getByName('curated-playbook'), 'promoted playbook must NOT be pruned');
   for (const n of ['draft-skill-3', 'draft-skill-4', 'draft-skill-5']) {
@@ -253,6 +255,16 @@ test('SkillStore: listAll 过滤 deprecated', () => {
   for (const s of all) {
     assert.notEqual(s.maturity, 'deprecated');
   }
+});
+
+test('SkillStore: recommendation pool excludes deprecated while maintenance still sees it', () => {
+  const { skills } = openMemoryDb(':memory:');
+  skills.createSkill({ name: 'live', description: 'd', triggerKeywords: [], actionTemplate: 'x' });
+  skills.createSkill({ name: 'dead', description: 'd', triggerKeywords: [], actionTemplate: 'x' });
+  skills.setMaturity('dead', 'deprecated');
+
+  assert.deepEqual(skills.listForRecommendation().map((s) => s.name), ['live']);
+  assert.deepEqual(new Set(skills.listAllForMaintenance().map((s) => s.name)), new Set(['live', 'dead']));
 });
 
 test('SkillStore: listNegative 过滤 deprecated', () => {
@@ -1309,7 +1321,7 @@ test('reviseRecipe: emits changed event like other mutators', () => {
 // pinned at EXACTLY the prune cap (40) the whole week. Every draft had useCount 0, so scoreSkill
 // degenerated to age and the cap became a FIFO conveyor: mint, never try, delete when old. The loop
 // could not tell "the model saw this and passed on it" from "the model never saw this at all".
-test('pruneDraftsToCap evicts declined drafts before never-offered ones', () => {
+test('pruneDraftsToCap evicts repeatedly failed drafts before unexecuted ones', () => {
   const { skills } = openMemoryDb(':memory:');
 
   const mk = (name: string) =>
@@ -1319,8 +1331,10 @@ test('pruneDraftsToCap evicts declined drafts before never-offered ones', () => 
   const untried = mk('never-offered');
   const shownOnce = mk('shown-once');
 
-  // Shown DECLINED_MIN_OFFERS+ times and never picked — real negative evidence.
+  // Showings alone are neutral; two actual failed uses are negative evidence.
   for (let i = 0; i < 5; i++) skills.recordSkillsOffered([declined.name], [declined.name]);
+  skills.recordSkillOutcome(declined.name, false);
+  skills.recordSkillOutcome(declined.name, false);
   // Shown once, on one arbitrary turn — that measures the turn's relevance, not the skill's worth.
   skills.recordSkillsOffered([shownOnce.name]);
   // `untried` was never offered: no evidence for OR against it.

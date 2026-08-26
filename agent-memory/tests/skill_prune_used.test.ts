@@ -36,6 +36,8 @@ function seedDeclined(skills: any, n: number, offers = 5) {
   for (let i = 0; i < n; i++) {
     skills.createSkill(draft(`declined-${i}`));
     offer(skills, `declined-${i}`, offers);
+    skills.recordSkillOutcome(`declined-${i}`, false);
+    skills.recordSkillOutcome(`declined-${i}`, false);
   }
 }
 
@@ -54,10 +56,12 @@ test('a draft the agent actually used is never evicted by the cap', () => {
   );
 });
 
-test('declined drafts are still evicted, most-declined first', () => {
+test('repeatedly failed drafts are evicted; offer count does not decide efficacy', () => {
   const { skills } = openMemoryDb(':memory:');
   skills.createSkill(draft('shown-a-lot'));
   offer(skills, 'shown-a-lot', 20);
+  skills.recordSkillOutcome('shown-a-lot', false);
+  skills.recordSkillOutcome('shown-a-lot', false);
   skills.createSkill(draft('shown-a-little'));
   offer(skills, 'shown-a-little', 3);
 
@@ -116,7 +120,7 @@ test('three showings the ranker never chose do not condemn a draft', () => {
   );
 });
 
-test('three showings the ranker DID choose do', () => {
+test('three relevant showings without execution do not condemn a draft', () => {
   const { skills } = openMemoryDb(':memory:');
   skills.createSkill(draft('matched-and-passed-over'));
   for (let i = 0; i < 3; i++) {
@@ -124,22 +128,22 @@ test('three showings the ranker DID choose do', () => {
   }
   skills.createSkill(draft('never-shown-at-all'));
 
-  assert.equal(skills.pruneDraftsToCap(1), 1);
-  assert.equal(skills.getByName('matched-and-passed-over'), null);
+  assert.equal(skills.pruneDraftsToCap(1), 0);
+  assert.ok(skills.getByName('matched-and-passed-over'));
   assert.ok(skills.getByName('never-shown-at-all'));
 });
 
 // Not zero, or nothing ever drains: a draft leaves the untested pool by being used or evicted, and while
 // it sits there the creation-side bound stops the reflector minting.
-test('enough arbitrary showings still add up to a verdict', () => {
+test('arbitrarily many showings never add up to an efficacy verdict', () => {
   const { skills } = openMemoryDb(':memory:');
   skills.createSkill(draft('shown-forever-never-picked'));
   offer(skills, 'shown-forever-never-picked', 12);
   skills.createSkill(draft('shown-thrice'));
   offer(skills, 'shown-thrice', 3);
 
-  assert.equal(skills.pruneDraftsToCap(1), 1);
-  assert.equal(skills.getByName('shown-forever-never-picked'), null);
+  assert.equal(skills.pruneDraftsToCap(1), 0);
+  assert.ok(skills.getByName('shown-forever-never-picked'));
   assert.ok(skills.getByName('shown-thrice'));
 });
 
@@ -158,14 +162,9 @@ test('the prune log says how many showings were real matches', () => {
   assert.equal(f.matchedCount, 0, 'a fallback rotation is a showing but not a match');
 });
 
-// ── force-evict: breaking the minting deadlock (2026-08-05) ──────────────────────────────────────
-//
-// pruneDraftsToCap only evicts drafts that meet the isDeclinedDraft bar (3 matched or 12 fallback
-// offers). When the declined pool is empty but the cap is full, minting freezes for days until
-// drafts slowly accumulate enough offers. forceEvictOldestDraft breaks the deadlock by evicting the
-// most-offered untested draft — the strongest negative evidence short of the declined bar.
+// ── force-evict compatibility API: capacity pressure never becomes evidence ─────────────────────
 
-test('forceEvictOldestDraft: evicts the most-offered untested draft', () => {
+test('forceEvictOldestDraft: capacity pressure never deletes an untested draft', () => {
   const { skills } = openMemoryDb(':memory:');
   skills.createSkill(draft('offered-5x'));
   offer(skills, 'offered-5x', 5);
@@ -174,8 +173,8 @@ test('forceEvictOldestDraft: evicts the most-offered untested draft', () => {
   skills.createSkill(draft('never-offered'));
 
   const evicted = skills.forceEvictOldestDraft();
-  assert.equal(evicted, 'offered-5x');
-  assert.equal(skills.getByName('offered-5x'), null);
+  assert.equal(evicted, null);
+  assert.ok(skills.getByName('offered-5x'));
   assert.ok(skills.getByName('offered-2x'));
   assert.ok(skills.getByName('never-offered'));
 });

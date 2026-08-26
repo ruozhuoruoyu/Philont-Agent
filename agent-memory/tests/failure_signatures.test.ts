@@ -159,6 +159,25 @@ test('sig: shell-run gp script error → pariGp family (not shell:other, not mec
   );
 });
 
+test('sig: deterministic PARI/GP pre-check diagnostics keep their known class', () => {
+  assert.equal(
+    extractFailureSignature('pariGp', 'PARI/GP pre-check: a "}" has no matching "{" — check braces'),
+    'pariGp:gp-precheck-paren',
+  );
+  assert.equal(
+    extractFailureSignature('pariGp', 'PARI/GP pre-check: nested { } blocks — GP braces cannot nest'),
+    'pariGp:gp-precheck-nested-braces',
+  );
+  assert.equal(
+    extractFailureSignature('pariGp', 'PARI/GP pre-check: line 37 opens a "(" that is still unclosed'),
+    'pariGp:gp-precheck-paren',
+  );
+  assert.equal(
+    extractFailureSignature('pariGp', 'PARI/GP pre-check: control construct spans multiple lines'),
+    'pariGp:gp-precheck-spanning',
+  );
+});
+
 test('sig: shell-run lean with sorry/error → leanCheck family', () => {
   assert.equal(
     extractFailureSignature('shell', "lean: declaration uses 'sorry'"),

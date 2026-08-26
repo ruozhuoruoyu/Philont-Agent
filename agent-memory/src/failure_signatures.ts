@@ -52,6 +52,18 @@ export function extractFailureSignature(
   //    mislabelled (observed: `pariGp:http-500`). Classify by the compute tool first so its errors
   //    stay in the `pariGp:gp-*` / `z3Verify:z3-error` families.
   if (tool === 'pariGp') {
+    // These diagnostics are emitted by our own deterministic pre-checker, so their class is known at
+    // the point of origin. Keep them out of gp-other instead of asking a later model to reconstruct
+    // information the runtime already had.
+    if (/pari\/gp pre-check:[^\n]*(?:has no matching|still unclosed)/.test(lower)) {
+      return `${tool}:gp-precheck-paren`;
+    }
+    if (/pari\/gp pre-check:[^\n]*nested \{ \} blocks/.test(lower)) {
+      return `${tool}:gp-precheck-nested-braces`;
+    }
+    if (/pari\/gp pre-check:[^\n]*(?:spans multiple lines|spanning construct)/.test(lower)) {
+      return `${tool}:gp-precheck-spanning`;
+    }
     if (/syntax error/.test(lower)) return `${tool}:gp-syntax`;
     if (/incorrect type/.test(lower)) return `${tool}:gp-type`;
     if (/variable name expected/.test(lower)) return `${tool}:gp-varname`;
@@ -80,6 +92,15 @@ export function extractFailureSignature(
   //     Normalize to the native family so a compute run is handled identically either way.
   if (tool === 'shell' || tool === 'process') {
     if (/\bpari\/?gp\b|\bgp exited\b/.test(lower) || /\bgp\b[^]*script error/.test(lower)) {
+      if (/pari\/gp pre-check:[^\n]*(?:has no matching|still unclosed)/.test(lower)) {
+        return `pariGp:gp-precheck-paren`;
+      }
+      if (/pari\/gp pre-check:[^\n]*nested \{ \} blocks/.test(lower)) {
+        return `pariGp:gp-precheck-nested-braces`;
+      }
+      if (/pari\/gp pre-check:[^\n]*(?:spans multiple lines|spanning construct)/.test(lower)) {
+        return `pariGp:gp-precheck-spanning`;
+      }
       if (/syntax error/.test(lower)) return `pariGp:gp-syntax`;
       if (/incorrect type/.test(lower)) return `pariGp:gp-type`;
       if (/variable name expected/.test(lower)) return `pariGp:gp-varname`;

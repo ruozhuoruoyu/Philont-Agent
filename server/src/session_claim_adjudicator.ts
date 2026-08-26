@@ -79,7 +79,12 @@ export function parseSessionClaimVerdict(raw: string): SessionClaimVerdict {
 export async function adjudicateSessionClaim(text: string): Promise<SessionClaimVerdict> {
   if (!isAuxLLMConfigured()) return 'unknown';
   try {
-    const out = await callAuxLLM({ system: SYSTEM, user: buildSessionClaimPrompt(text), maxTokens: 8 });
+    const out = await callAuxLLM({
+      system: SYSTEM,
+      user: buildSessionClaimPrompt(text),
+      maxTokens: 8,
+      fallbackToMain: false,
+    });
     return parseSessionClaimVerdict(out);
   } catch {
     return 'unknown';

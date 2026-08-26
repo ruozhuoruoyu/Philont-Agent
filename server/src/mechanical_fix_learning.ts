@@ -264,7 +264,9 @@ export async function distillMechanicalFix(
   if (!recovery) return null;
   if (!(deps.configured ?? isAuxLLMConfigured())) return null;
 
-  const ask = deps.ask ?? callAuxLLM;
+  // This is background learning after the user-visible turn. If aux is unavailable, learn nothing;
+  // never amplify an endpoint incident by falling back to the main model.
+  const ask = deps.ask ?? ((req) => callAuxLLM({ ...req, fallbackToMain: false }));
   let line: string | null;
   try {
     const { system, user } = buildMechanicalFixPrompt(recovery);

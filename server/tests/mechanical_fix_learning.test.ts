@@ -23,7 +23,11 @@ import {
   MECHANICAL_FIX_NAMESPACE,
 } from '../src/mechanical_fix_learning.js';
 
-import { buildMechanicalFixReminder } from '../src/in_turn_reflection.js';
+import {
+  authoringCheatsheet,
+  buildMechanicalFixReminder,
+  classifyRepairTransition,
+} from '../src/in_turn_reflection.js';
 
 /** ask() for the two-call flow: the first call distils the line, every later call is the verifier. */
 function asks(line: string, verdict = 'ACCEPT') {
@@ -188,6 +192,22 @@ test('no learned lines leaves the reminder exactly as it was', () => {
   const before = buildMechanicalFixReminder('pariGp:gp-syntax', 3);
   assert.equal(buildMechanicalFixReminder('pariGp:gp-syntax', 3, []), before);
   assert.doesNotMatch(before, /Learned from your own past repairs/);
+});
+
+test('authoring cheatsheets are exact by error class, not broad tool prefixes', () => {
+  assert.ok(authoringCheatsheet('pariGp:gp-precheck-paren').length > 0);
+  assert.deepEqual(authoringCheatsheet('pariGp:gp-timeout'), []);
+  assert.deepEqual(authoringCheatsheet('pariGp:gp-args'), []);
+  assert.deepEqual(authoringCheatsheet('pariGp:gp-type'), []);
+  assert.deepEqual(authoringCheatsheet('leanCheck:lean-sorry'), []);
+  assert.deepEqual(authoringCheatsheet('leanCheck:lean-unsolved'), []);
+});
+
+test('repair transitions are classified by verifier result and signature diff', () => {
+  assert.equal(classifyRepairTransition({ beforeSignature: 'x:a', afterSuccess: true }), 'verified');
+  assert.equal(classifyRepairTransition({ beforeSignature: 'x:a', afterSuccess: false, afterSignature: 'x:a' }), 'no_effect');
+  assert.equal(classifyRepairTransition({ beforeSignature: 'x:a', afterSuccess: false, afterSignature: 'x:b' }), 'different_failure');
+  assert.equal(classifyRepairTransition({ beforeSignature: 'x:a', afterSuccess: false, afterSignature: 'x:timeout' }), 'inconclusive');
 });
 
 // ── the verify pass ──────────────────────────────────────────────────────────────────────────────

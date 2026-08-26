@@ -3,6 +3,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { rmSync } from 'node:fs';
 import { openMemoryDb } from '../src/index.js';
 
 test('increment creates then accumulates', () => {
@@ -41,11 +43,15 @@ test('get of unknown key is 0; never throws', () => {
 });
 
 test('counters persist across reopen of the same file', () => {
-  const tmp = `/tmp/philont_metrics_test_${process.pid}.sqlite`;
-  const h1 = openMemoryDb(tmp);
-  h1.metrics.increment('reflect.fire', 4);
-  h1.close();
-  const h2 = openMemoryDb(tmp);
-  assert.equal(h2.metrics.get('reflect.fire'), 4);
-  h2.close();
+  const tmp = `/tmp/philont_metrics_test_${randomUUID()}.sqlite`;
+  try {
+    const h1 = openMemoryDb(tmp);
+    h1.metrics.increment('reflect.fire', 4);
+    h1.close();
+    const h2 = openMemoryDb(tmp);
+    assert.equal(h2.metrics.get('reflect.fire'), 4);
+    h2.close();
+  } finally {
+    rmSync(tmp, { force: true });
+  }
 });

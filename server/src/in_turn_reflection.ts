@@ -219,7 +219,7 @@ export function isMechanicalFailure(signature: string | undefined): boolean {
  * the agent guessing again.
  */
 export function authoringCheatsheet(signature: string): string[] {
-  if (/^pariGp:/i.test(signature)) {
+  if (/^pariGp:(?:gp-syntax|gp-precheck-paren|gp-precheck-nested-braces|gp-precheck-spanning)$/i.test(signature)) {
     return [
       '',
       'PARI/GP authoring rules (this is the recurring one — apply them, do not guess again):',
@@ -230,7 +230,7 @@ export function authoringCheatsheet(signature: string): string[] {
       '  • A "*** Warning: increasing stack size" line is NOT an error — the script ran. Read the printed result; do not treat it as failure.',
     ];
   }
-  if (/^leanCheck:/i.test(signature)) {
+  if (/^leanCheck:(?:lean-unknown|lean-error)$/i.test(signature)) {
     return [
       '',
       'Lean authoring rules:',
@@ -240,6 +240,20 @@ export function authoringCheatsheet(signature: string): string[] {
     ];
   }
   return [];
+}
+
+export type RepairTransition = 'verified' | 'no_effect' | 'different_failure' | 'inconclusive';
+
+/** Deterministic comparison of the verifier result before and after a mechanical rewrite. */
+export function classifyRepairTransition(input: {
+  beforeSignature: string;
+  afterSuccess: boolean;
+  afterSignature?: string;
+}): RepairTransition {
+  if (input.afterSuccess) return 'verified';
+  const after = input.afterSignature ?? '';
+  if (/(?:timeout|cancelled|canceled|resource|endpoint-down)/i.test(after)) return 'inconclusive';
+  return after === input.beforeSignature ? 'no_effect' : 'different_failure';
 }
 
 /**

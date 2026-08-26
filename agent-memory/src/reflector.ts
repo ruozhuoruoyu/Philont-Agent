@@ -307,20 +307,8 @@ export class SessionReflector {
         untested = this.skills.untestedDraftCount();
         mintingBlocked = untested >= MAX_DRAFT_SKILLS;
       }
-      // If declined pool was empty (nothing met the isDeclinedDraft bar), force-evict the most-offered
-      // untested draft — it has the strongest negative evidence short of the declined threshold. Better
-      // than freezing minting for days while drafts slowly accumulate the 12 fallback offers the
-      // declined bar requires.
-      if (mintingBlocked) {
-        const forced = this.skills.forceEvictOldestDraft();
-        if (forced) {
-          console.log(
-            `[reflector] force-evicted draft '${forced}' to unblock minting (most offered, never chosen)`,
-          );
-          untested = this.skills.untestedDraftCount();
-          mintingBlocked = untested >= MAX_DRAFT_SKILLS;
-        }
-      }
+      // Capacity pressure is not negative evidence. If the failed pool is empty, keep the existing
+      // untested hypotheses and pause minting instead of rotating one untried draft into another.
     }
     if (mintingBlocked && specs.length > 0) {
       console.log(

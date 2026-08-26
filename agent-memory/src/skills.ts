@@ -134,34 +134,15 @@ function parseRecipeJson<T>(raw: string | null | undefined): T | null {
 }
 
 /**
- * How many distinct showings an unchosen draft gets before it counts as declined. See pruneDraftsToCap.
- */
-export const DECLINED_MIN_OFFERS = 3;
-
-/**
- * How many arbitrary (global-fallback) showings stand in for one relevance match.
- *
- * Not zero, or nothing ever drains: a draft leaves the untested pool by being USED or by being evicted,
- * and while it sits there the creation-side bound stops the reflector minting. Not three either, which is
- * what 2026-08-04 did — `exact-rational-lrc-tightness-verification` and three siblings, the skills most
- * obviously about the week's work, deleted at "offered 3x, never chosen" when all three showings were
- * `relevance=on(matched 0 → global fallback)` on unrelated turns.
- */
-export const DECLINED_MIN_FALLBACK_OFFERS = 12;
-
-/**
  * Has this skill earned its deletion?
  *
- * Being CHOSEN is not being declined (the sort key knew that; the eviction filter did not, and deleted
- * the one skill the agent used all day on 2026-07-31). Being shown BECAUSE it matched, and passed over,
- * is real evidence. Being shown because the ranker matched nothing and the top-N filled the slot is
- * evidence about the turn, not about the skill — so it takes many more of those to add up to the same
- * verdict.
+ * A showing is distribution evidence, not efficacy evidence. A draft earns deletion only after it was
+ * actually used and failed repeatedly; "offered but not chosen" says nothing about whether the recipe
+ * would have worked. This distinction became production-critical once aux relevance increased the offer
+ * rate and accelerated deletion of the skills matching the night's real failures.
  */
 export function isDeclinedDraft(s: Skill): boolean {
-  if (s.useCount > 0) return false;
-  if (s.matchedCount >= DECLINED_MIN_OFFERS) return true;
-  return s.offeredCount >= DECLINED_MIN_FALLBACK_OFFERS;
+  return s.failureCount >= 2 && s.successCount === 0;
 }
 
 export class SkillStore extends EventEmitter {
@@ -379,6 +360,19 @@ export class SkillStore extends EventEmitter {
     const rows = this.db
       .prepare<[number]>(
         `SELECT * FROM memory_skills ORDER BY use_count ASC, created_at DESC LIMIT ?`
+      )
+      .all(limit) as SkillRow[];
+    return rows.map(rowToSkill);
+  }
+
+  /** Skills eligible to be surfaced to an agent/LLM. Terminal deprecated rows are maintenance-only. */
+  listForRecommendation(limit = 400): Skill[] {
+    const rows = this.db
+      .prepare<[number]>(
+        `SELECT * FROM memory_skills
+         WHERE maturity != 'deprecated'
+         ORDER BY use_count ASC, created_at DESC
+         LIMIT ?`,
       )
       .all(limit) as SkillRow[];
     return rows.map(rowToSkill);
@@ -671,17 +665,14 @@ export class SkillStore extends EventEmitter {
     // became a FIFO conveyor — mint a draft, never try it, delete it when it gets old, forever. draft sat
     // pinned at exactly the cap (40) for a week with validated=0.
     //
-    // A skill that was OFFERED many times and never chosen has earned its deletion — that is real negative
-    // evidence. A skill that was NEVER OFFERED has no evidence against it at all; deleting it is discarding
-    // an untested hypothesis for losing a race it was never entered in. So: evict the declined ones FIRST,
-    // and only fall back to the score once the declined pool is exhausted.
+    // Only executed failures are negative evidence. Offers and relevance matches measure distribution,
+    // not whether the skill works.
     const sorted = drafts.slice().sort((a, b) => {
       const aDeclined = isDeclinedDraft(a);
       const bDeclined = isDeclinedDraft(b);
       if (aDeclined !== bDeclined) return aDeclined ? -1 : 1;
-      // Within the declined pool, the most-declined goes first (strongest evidence of uselessness).
-      if (aDeclined && bDeclined && a.offeredCount !== b.offeredCount) {
-        return b.offeredCount - a.offeredCount;
+      if (aDeclined && bDeclined && a.failureCount !== b.failureCount) {
+        return b.failureCount - a.failureCount;
       }
       return scoreSkill(a, now) - scoreSkill(b, now);
     });
@@ -714,14 +705,12 @@ export class SkillStore extends EventEmitter {
     if (toDelete.length < wanted) {
       console.log(
         `[skill-funnel] cap ${maxDrafts}: ${wanted} over, only ${toDelete.length} have evidence against them — ` +
-        `${wanted - toDelete.length} never-offered draft(s) kept (an untried hypothesis is not evicted for losing a race it never entered)`,
+        `${wanted - toDelete.length} draft(s) without repeated execution failures kept`,
       );
     }
     let deleted = 0;
     for (const s of toDelete) {
-      const why = s.useCount === 0
-        ? `offered ${s.offeredCount}x (${s.matchedCount} by relevance), never chosen`
-        : `score ${scoreSkill(s, now).toFixed(3)}`;
+      const why = `executed with ${s.failureCount} failure(s), ${s.successCount} success(es)`;
       if (this.deleteSkill(s.name)) {
         deleted++;
         console.log(`[skill-funnel] pruned draft '${s.name}' (${why})`);
@@ -730,33 +719,10 @@ export class SkillStore extends EventEmitter {
     return deleted;
   }
 
-  /**
-   * Last-resort eviction when pruneDraftsToCap cannot evict (declined pool empty) but the creation-side
-   * cap is blocking minting. Force-evicts the untested draft with the HIGHEST offered_count — it has been
-   * shown the most times and never chosen, which is the strongest negative evidence short of the
-   * isDeclinedDraft bar. A never-offered draft is never force-evicted: it has zero evidence against it.
-   *
-   * Rationale (prod 2026-08-05): with DECLINED_MIN_FALLBACK_OFFERS at 12 and one exploration slot per turn,
-   * 40 drafts each need 12 fallback showings (≈480 turns ≈ 3.7 days) before pruneDraftsToCap can touch
-   * them — during which minting is frozen and reflect.new_skill stays 0. Force-evicting the most-offered
-   * draft breaks the deadlock without lowering the declined bar (which risks false-positive deletion of
-   * useful skills on irrelevant-turn offers, as seen at DECLINED_MIN_FALLBACK_OFFERS=3 on 2026-08-04).
-   *
-   * Returns the evicted skill name, or null if there is nothing to force-evict (every draft has
-   * offered_count 0 — genuinely never tested, the original design's "refuse to mint" applies).
-   */
+  /** @deprecated Capacity pressure is not efficacy evidence; retained as a compatibility no-op. */
   forceEvictOldestDraft(): string | null {
-    const row = this.db
-      .prepare(
-        `SELECT name FROM memory_skills
-         WHERE maturity = 'draft' AND COALESCE(use_count, 0) = 0 AND COALESCE(from_disk, 0) = 0
-           AND COALESCE(offered_count, 0) > 0
-         ORDER BY COALESCE(offered_count, 0) DESC, created_at ASC
-         LIMIT 1`,
-      )
-      .get() as { name: string } | undefined;
-    if (!row) return null;
-    if (this.deleteSkill(row.name)) return row.name;
+    // Kept as a compatibility no-op for callers outside this package. Capacity pressure is not evidence:
+    // if no repeatedly-failed draft is prunable, creation must pause rather than destroy an untested one.
     return null;
   }
 
@@ -777,8 +743,7 @@ export class SkillStore extends EventEmitter {
     //     With the offered=0 filter, every draft the exploration slot rotated through left this pool,
     //     minting unblocked, cap pressure returned, and the just-explored drafts were the ones evicted —
     //     an explore→evict→mint churn in which no hypothesis ever survived to a second showing. A draft
-    //     leaves this pool by being USED (the maturity ladder takes over) or by being evicted after
-    //     DECLINED_MIN_OFFERS showings.
+    //     leaves this pool by being USED (the maturity ladder takes over), not merely by being shown.
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM memory_skills

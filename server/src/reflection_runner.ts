@@ -319,6 +319,7 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
         user: userPart,
         maxTokens: 2048,
         requireComplete: true,
+        fallbackToMain: false,
       });
     } catch (e) {
       console.warn(`[reflection] aux LLM call failed: ${String(e).slice(0, 200)}`);
