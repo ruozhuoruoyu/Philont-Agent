@@ -92,6 +92,17 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
           `this is the count that no longer waits for the failure to recur`,
       );
     }
+    const draftsTested = get('learning.draft_validation.verified') + get('learning.draft_validation.no_effect')
+      + get('learning.draft_validation.different_failure') + get('learning.draft_validation.inconclusive');
+    if (draftsTested > 0 || get('learning.draft_validation.not-attempted') > 0) {
+      lines.push(
+        `  draft skills exercised on historical verifier failures: ${draftsTested} ` +
+          `(verified=${get('learning.draft_validation.verified')} no_effect=${get('learning.draft_validation.no_effect')} ` +
+          `different_failure=${get('learning.draft_validation.different_failure')} ` +
+          `inconclusive=${get('learning.draft_validation.inconclusive')} ` +
+          `not-attempted=${get('learning.draft_validation.not-attempted')})`,
+      );
+    }
   } catch (e) {
     lines.push(`  [counters error: ${(e as Error)?.message}]`);
   }

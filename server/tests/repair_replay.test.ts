@@ -12,6 +12,8 @@ import {
   DEFAULT_REPLAY_TOOLS,
   repairReplayEnabled,
   replayEligibleTools,
+  replayFixtureKey,
+  REPAIR_REPLAY_ATTEMPTS_NAMESPACE,
   runRepairReplay,
   selectReplayCandidates,
   type LedgerFailure,
@@ -186,4 +188,15 @@ test('a thrown tool leaves the idle path standing', async () => {
   );
   assert.equal(out.outcomes[0]?.transition, 'not-attempted');
   assert.match(String(out.outcomes[0]?.reason), /boom/);
+});
+
+test('a declined rewrite is persisted and cooled down instead of spending aux every idle tick', async () => {
+  const facts = fakeFacts();
+  const now = 1_000_000;
+  const attemptFor = (candidate: Parameters<typeof replayFixtureKey>[0]) =>
+    facts.getFact(REPAIR_REPLAY_ATTEMPTS_NAMESPACE, replayFixtureKey(candidate))?.value as never ?? null;
+  const first = await runRepairReplay(baseRun({ facts, now, attemptFor, ask: async () => 'NONE' }));
+  assert.equal(first.outcomes[0]?.reason, 'model-declined');
+  const second = await runRepairReplay(baseRun({ facts, now: now + 1_000, attemptFor, ask: async () => '{"script":"good"}' }));
+  assert.equal(second.skipped, 'no-candidates');
 });

@@ -1379,6 +1379,37 @@ test('control actions require explicit sessionId when multiple sessions are open
   mem.close();
 });
 
+test('authorized auto-advance is enabled only after the initial foreground round completes', async () => {
+  const mem = openMemoryDb(':memory:');
+  let createdId = '';
+  let autoDuringInitialRound: boolean | undefined;
+  const milestones: string[] = [];
+  const llm: MiniLoopLLMClient = {
+    async send() {
+      autoDuringInitialRound = mem.reasoning.getSession(createdId)?.autoAdvance;
+      return { type: 'text' as const, content: 'initial round complete' };
+    },
+  };
+  const { tool } = createDeepExploreTool({
+    reasoning: mem.reasoning,
+    miniLoopLLM: llm,
+    subTurnToolRunner: async () => ({ ok: true, output: '' }),
+    readOnlyToolDefs: [],
+    takeAutoAdvanceOnCreate: (_owner, session) => {
+      createdId = session.id;
+      return true;
+    },
+    onMilestone: (message) => milestones.push(message),
+  });
+
+  const result = await tool.execute({ action: 'start', goal: 'analyze a difficult open question', mode: 'deliberate' });
+  assert.equal(result.success, true);
+  assert.equal(autoDuringInitialRound, false, 'the ticker must not see the session before its foreground round settles');
+  assert.equal(mem.reasoning.getSession(createdId)?.autoAdvance, true);
+  assert.equal(milestones.filter((message) => message.includes('自动持续推进')).length, 1);
+  mem.close();
+});
+
 test('action=list: no open sessions → says so (does not invent a count)', async () => {
   const mem = openMemoryDb(':memory:');
   const llm: MiniLoopLLMClient = { async send() { return { type: 'text' as const, content: 'x' }; } };

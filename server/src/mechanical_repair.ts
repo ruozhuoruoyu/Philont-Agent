@@ -67,6 +67,10 @@ export interface RepairStats {
   verified: number;
   /** Of those, times the tool failed again. */
   failed: number;
+  /** The rewrite removed the original failure but exposed another one. */
+  differentFailure?: number;
+  /** Timeout/cancellation/resource failure: the repair's effect could not be scored. */
+  inconclusive?: number;
   lastAppliedAt?: string;
   lastVerifiedAt?: string;
 }
@@ -104,13 +108,18 @@ export function readRepairStats(signature: string, facts: MechanicalFixStore): R
       | undefined;
     if (!v || typeof v !== 'object') return { ...EMPTY_REPAIR_STATS };
     const n = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0);
-    return {
+    const parsed: RepairStats = {
       applied: n(v.applied),
       verified: n(v.verified),
       failed: n(v.failed),
       lastAppliedAt: typeof v.lastAppliedAt === 'string' ? v.lastAppliedAt : undefined,
       lastVerifiedAt: typeof v.lastVerifiedAt === 'string' ? v.lastVerifiedAt : undefined,
     };
+    const differentFailure = n(v.differentFailure);
+    const inconclusive = n(v.inconclusive);
+    if (differentFailure > 0) parsed.differentFailure = differentFailure;
+    if (inconclusive > 0) parsed.inconclusive = inconclusive;
+    return parsed;
   } catch {
     return { ...EMPTY_REPAIR_STATS };
   }
@@ -123,13 +132,27 @@ export function recordRepairOutcome(
   facts: MechanicalFixStore,
   nowIso: string,
 ): RepairStats {
+  return recordRepairTransitionOutcome(signature, verified ? 'verified' : 'no_effect', facts, nowIso);
+}
+
+export type MechanicalRepairTransition = 'verified' | 'no_effect' | 'different_failure' | 'inconclusive';
+
+/** Book the deterministic before/after comparison without collapsing migration or timeout into failure. */
+export function recordRepairTransitionOutcome(
+  signature: string,
+  transition: MechanicalRepairTransition,
+  facts: MechanicalFixStore,
+  nowIso: string,
+): RepairStats {
   const prior = readRepairStats(signature, facts);
   const next: RepairStats = {
     applied: prior.applied + 1,
-    verified: prior.verified + (verified ? 1 : 0),
-    failed: prior.failed + (verified ? 0 : 1),
+    verified: prior.verified + (transition === 'verified' ? 1 : 0),
+    failed: prior.failed + (transition === 'no_effect' ? 1 : 0),
+    differentFailure: (prior.differentFailure ?? 0) + (transition === 'different_failure' ? 1 : 0),
+    inconclusive: (prior.inconclusive ?? 0) + (transition === 'inconclusive' ? 1 : 0),
     lastAppliedAt: nowIso,
-    lastVerifiedAt: verified ? nowIso : prior.lastVerifiedAt,
+    lastVerifiedAt: transition === 'verified' ? nowIso : prior.lastVerifiedAt,
   };
   try {
     facts.storeFact({ namespace: MECHANICAL_REPAIR_STATS_NAMESPACE, key: signature, value: next });
@@ -284,6 +307,8 @@ export interface AttemptRepairOptions {
   configured?: boolean;
   nowIso?: string;
   env?: NodeJS.ProcessEnv;
+  /** Deterministic before/after classifier supplied by the caller that owns failure signatures. */
+  classifyResult?: (result: { success: boolean; output?: string; error?: string }) => MechanicalRepairTransition;
 }
 
 /**
@@ -317,12 +342,8 @@ export async function attemptMechanicalRepair(opts: AttemptRepairOptions): Promi
   }
 
   const result = await opts.run(repaired);
-  const stats = recordRepairOutcome(
-    opts.signature,
-    result.success,
-    opts.facts,
-    opts.nowIso ?? new Date().toISOString(),
-  );
+  const transition = opts.classifyResult?.(result) ?? (result.success ? 'verified' : 'no_effect');
+  const stats = recordRepairTransitionOutcome(opts.signature, transition, opts.facts, opts.nowIso ?? new Date().toISOString());
   return { attempted: true, verified: result.success, repairedInput: repaired, result, stats };
 }
 

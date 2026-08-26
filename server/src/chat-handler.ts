@@ -247,7 +247,21 @@ import {
 } from './short_answer_binding.js';
 import { buildRoutingInjection } from './routing_inject.js';
 import { renderLearningStats } from './learning_stats.js';
-import { replayEligibleTools, runRepairReplay, type LedgerFailure } from './repair_replay.js';
+import {
+  REPAIR_REPLAY_ATTEMPTS_NAMESPACE,
+  repairReplayEnabled,
+  replayEligibleTools,
+  replayFixtureKey,
+  runRepairReplay,
+  type LedgerFailure,
+  type ReplayAttemptState,
+} from './repair_replay.js';
+import {
+  DRAFT_VALIDATION_ATTEMPTS_NAMESPACE,
+  draftValidationEnabled,
+  selectDraftFixture,
+  validateDraftFixture,
+} from './draft_validation.js';
 import {
   buildFailureRecoveryInjection,
   detectUserDissatisfaction,
@@ -1384,7 +1398,7 @@ const idleConsolidator = startIdleConsolidator({
     // learned from. Fixtures are FAILED ledger rows only: a success row from the window when a
     // repaired call was logged under its broken input cannot be trusted, a failure row can, and a
     // failing input is the only thing a replay wants. Default off; see repair_replay.
-    try {
+    if (repairReplayEnabled()) try {
       const eligible = replayEligibleTools();
       if (eligible.size > 0) {
         const rows = memory.db
@@ -1419,6 +1433,10 @@ const idleConsolidator = startIdleConsolidator({
             ...learnedCheatsheet(sig, memory.facts),
           ],
           statsFor: (sig) => readRepairStats(sig, memory.facts),
+          attemptFor: (candidate) => {
+            const value = memory.facts.getFact(REPAIR_REPLAY_ATTEMPTS_NAMESPACE, replayFixtureKey(candidate))?.value;
+            return value && typeof value === 'object' ? value as ReplayAttemptState : null;
+          },
           eligibleTools: eligible,
           facts: memory.facts,
           isSafeToRerun: async (toolName, rewritten) =>
@@ -1447,6 +1465,45 @@ const idleConsolidator = startIdleConsolidator({
       }
     } catch (e) {
       console.error('[repair-replay] failed', e);
+    }
+    // Validation throughput for the frozen draft pool. One fixture per idle cycle, verifier-only,
+    // and every rewritten call must pass the no-approval policy checker. Unlike an offer, this is a
+    // real use: success/failure advances maturity; a changed error/timeout is recorded as neutral use.
+    if (draftValidationEnabled()) try {
+      const eligible = replayEligibleTools();
+      const rows = memory.actions.listRecentFailures({ sinceTs: Date.now() - 14 * 24 * 60 * 60_000, limit: 400 });
+      const failures: LedgerFailure[] = rows
+        .filter((r) => eligible.has(r.toolName) && !!r.result && !!r.params && typeof r.params === 'object' && !Array.isArray(r.params))
+        .map((r) => ({ toolName: r.toolName, input: r.params as Record<string, unknown>, errorText: r.result ?? '', recordedAt: r.timestamp }));
+      const fixture = selectDraftFixture({
+        drafts: memory.skills.listByMaturity('draft', 200),
+        failures,
+        eligibleTools: eligible,
+        signatureOf: (tool, err) => extractFailureSignature(tool, err),
+        attemptFor: (key) => {
+          const value = memory.facts.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, key)?.value;
+          return value && typeof value === 'object' ? value as ReplayAttemptState : null;
+        },
+      });
+      if (fixture) {
+        const outcome = await validateDraftFixture({
+          fixture,
+          facts: memory.facts,
+          skills: memory.skills,
+          signatureOf: (tool, err) => extractFailureSignature(tool, err),
+          isSafeToRerun: async (toolName, rewritten) =>
+            (await getSubLoopChecker()({ toolName, approval: 'never', params: JSON.stringify(rewritten) })) === null,
+          ask: (req) => callAuxLLM({ ...req, fallbackToMain: false }),
+          runTool: async (toolName, rewritten) => {
+            const r = await subTurnToolRunner(toolName, rewritten);
+            return { success: r.ok, output: r.output, error: r.error };
+          },
+        });
+        memory.metrics.increment(`learning.draft_validation.${outcome.transition}`);
+        console.log(`[draft-validation] ${fixture.skill.name} on ${fixture.signature} → ${outcome.transition}`);
+      }
+    } catch (e) {
+      console.error('[draft-validation] failed', e);
     }
     // 2026-06-22 instrumentation: log the self-learning report once per UTC day (data to decide
     // keep-vs-simplify). Day-gated via a metric stamp so idle ticks don't spam it. Read-only.
@@ -2967,19 +3024,16 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     actions: memory.actions,
     skills: memory.skills,
     getSelectedSessionId: (owner) => owner ? memory.reasoning.getFocusedSession(owner)?.id : undefined,
+    takeAutoAdvanceOnCreate: (owner) => {
+      if (!owner) return false;
+      const armed = takeArmedAutoAdvance(pendingAutoAdvanceOwners, owner, Date.now());
+      if (armed) memory.metrics.increment('deep_explore.auto_advance.armed_from_ask');
+      return armed;
+    },
     onSessionSelected: (owner, session, source) => {
       if (!owner) return;
       memory.reasoning.setFocusedSession(owner, session.id);
       memory.metrics.increment(`deep_explore.binding.${source}`);
-      // The owner asked for unattended advance at the ask tier; this is the session it was meant for,
-      // regardless of whether the model or the forced-start path opened it.
-      if (source === 'created' && takeArmedAutoAdvance(pendingAutoAdvanceOwners, owner, Date.now()) && !session.autoAdvance) {
-        memory.reasoning.setAutoAdvance(session.id, true);
-        memory.metrics.increment('deep_explore.auto_advance.armed_from_ask');
-        deliverDeepExploreMilestone(
-          `▶ 已开启自动持续推进: ${session.id.slice(0, 8)}。我会自己续跑,在解决、连续卡住或达到轮次预算时停下并汇报。`,
-        );
-      }
     },
     onSessionAbandoned: (owner, session) => {
       if (owner) memory.reasoning.clearFocusedSession(owner, session.id);
@@ -7772,7 +7826,7 @@ export async function handleChatSend(
     if (ec && applies) {
       const lang = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() });
       const en = lang === 'en';
-      const focus = focusedReasoningSession(sessionId) ?? openSessions[0];
+      const focus = focusedReasoningSession(sessionId);
       let reply: string;
 
       if (ec.kind === 'stop_auto') {
@@ -7786,11 +7840,18 @@ export async function handleChatSend(
           ? `Paused. I won't advance ${openSessions.length > 1 ? 'them' : 'it'} on my own — reply "continue" to resume, or "abandon" to archive.`
           : `好的,已暂停。我不会自己往下推了——想继续回"继续",想归档回"放弃"。`;
       } else if (ec.kind === 'auto_advance') {
-        deepExploreAutoAdvance.rearm(focus.id);
-        console.log(`[explore-control] owner granted another batch to ${focus.id}`);
-        reply = en
-          ? `Another batch granted — I will keep advancing "${focus.goal.slice(0, 40)}" in the background. Reply "stop" to pause.`
-          : `好的,再给「${focus.goal.slice(0, 40)}」加一批,我在后台接着推进。想停回"停"。`;
+        if (!focus) {
+          const list = openSessions.map((x) => `「${x.goal.slice(0, 40)}」`).join(' / ');
+          reply = en
+            ? `More than one exploration is open and none is selected. Name one first: ${list}`
+            : `当前有多个探索,但没有选中的主线。请先指定一个:${list}`;
+        } else {
+          deepExploreAutoAdvance.rearm(focus.id);
+          console.log(`[explore-control] owner granted another batch to ${focus.id}`);
+          reply = en
+            ? `Another batch granted — I will keep advancing "${focus.goal.slice(0, 40)}" in the background. Reply "stop" to pause.`
+            : `好的,再给「${focus.goal.slice(0, 40)}」加一批,我在后台接着推进。想停回"停"。`;
+        }
       } else if (ec.kind === 'abandon_all') {
         for (const x of openSessions) memory.reasoning.setSessionStatus(x.id, 'abandoned');
         console.log(`[explore-control] owner abandoned ALL ${openSessions.length} session(s)`);
@@ -8019,7 +8080,6 @@ export async function handleChatSend(
           pendingExploreAsk.delete(sessionId);
           pendingDecisions.resolve(sessionId, exploreAsk.decisionId!);
           signalBus.exploreAskApproved = true;
-          signalBus.exploreAskAuto = askIntent === 'auto';
           if (askIntent === 'auto') pendingAutoAdvanceOwners.set(sessionId, Date.now());
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
@@ -10873,7 +10933,6 @@ async function decideForcedDeepExploreCall(
   ) {
     signalBus.forcedDeepExploreStart = true;
     const forcedInput: Record<string, unknown> = buildForceStartInput(signalBus.intentDecision ?? null, forceGoal ?? forceMessage);
-    if (signalBus.exploreAskAuto) forcedInput.autoAdvance = true;
     console.warn(
       `[force-start] session=${safeSessionId(sessionId)} deep_explore route + depth wanted but the turn answered flat — forcing deep_explore(action=start, mode=${forcedInput.mode ?? 'auto'})`,
     );
@@ -10913,8 +10972,6 @@ interface TurnSignalBus {
   blockedTools?: Set<string>;
   /** Ask-tier deep_explore: the owner approved entering the engine for the restored goal this turn. */
   exploreAskApproved?: boolean;
-  /** The owner selected the visible "自动持续" ask-tier choice. */
-  exploreAskAuto?: boolean;
   /** Ask-tier deep_explore: the owner declined — run flat, do not re-ask or force this turn. */
   exploreAskDeclined?: boolean;
   /**
@@ -11433,6 +11490,13 @@ async function runToolLoop(
           totalToolCallsThisTurn++;
           return tools.execute(call.name, input);
         },
+        classifyResult: (repaired) => classifyRepairTransition({
+          beforeSignature: signature,
+          afterSuccess: repaired.success,
+          afterSignature: repaired.success
+            ? undefined
+            : extractFailureSignature(call.name, repaired.error ?? repaired.output ?? ''),
+        }),
       });
       if (!outcome.attempted || !outcome.result) {
         if (outcome.reason && outcome.reason !== 'disabled' && outcome.reason !== 'no-rule') {

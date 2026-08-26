@@ -167,6 +167,7 @@ Everything is configured via environment variables (`.env`, or the launcher's se
 | `PHILONT_COMMAND_GATE` | `full` | `full` gates destructive local commands and externally consequential commands; `publish` retains hard denies plus publish/remote/credential/network-pipe gates; `off` retains hard denies only. Lower settings weaken application-level protection. |
 | `PHILONT_LEARNING_JUDGE` | on (shadow) | The learning judge scores each turn's success; today it logs and drives nothing. |
 | `PHILONT_REPAIR_REPLAY` | **off** | On idle, replays one never-applied repair rule against the past failure it was learned from, so `applied`/`verified` stop waiting for the failure to recur. `PHILONT_REPAIR_REPLAY_TOOLS` sets which tools may be replayed unattended (default `pariGp,z3Verify,leanCheck`). |
+| `PHILONT_DRAFT_VALIDATION` | **off** | On idle, tests one never-used draft skill against a matching historical verifier failure. Only an actual tool run changes usage/maturity; declined or unsafe rewrites enter a persistent cooldown. |
 | `PHILONT_MECHANICAL_REPAIR` | on | Applies a known mechanical-failure rule through the aux model, rechecks authorization, and retries the same tool once. Set `0`/`off` to keep measuring recurrence without auto-repair. |
 | `PHILONT_MCP_BROWSER` | off | Browser automation via Playwright MCP. |
 | `PHILONT_INTENT_ROUTER` | on | Turn-entry router (think / build / direct). Reasoning tasks: conf ≥ `PHILONT_DEEP_EXPLORE_FORCE_CONF` (0.9) enters `deep_explore` guaranteed; ≥ `…_ASK_CONF` (0.7) asks you first; below runs flat. |

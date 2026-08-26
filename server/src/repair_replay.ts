@@ -36,6 +36,24 @@
 import { classifyRepairTransition, type RepairTransition } from './in_turn_reflection.js';
 import { attemptMechanicalRepair, type RepairStats } from './mechanical_repair.js';
 import type { MechanicalFixStore } from './mechanical_fix_learning.js';
+import { createHash } from 'node:crypto';
+
+export const REPAIR_REPLAY_ATTEMPTS_NAMESPACE = 'repair_replay_attempts';
+const RETRY_COOLDOWN_MS = 24 * 60 * 60_000;
+
+export interface ReplayAttemptState {
+  attempts: number;
+  lastAttemptAt: number;
+  lastReason?: string;
+  permanent?: boolean;
+}
+
+export function replayFixtureKey(candidate: Pick<ReplayCandidate, 'signature' | 'toolName' | 'input'>): string {
+  return createHash('sha256')
+    .update(candidate.signature).update('\0').update(candidate.toolName).update('\0')
+    .update(JSON.stringify(candidate.input))
+    .digest('hex');
+}
 
 /**
  * Tools whose failures may be replayed unattended.
@@ -81,6 +99,9 @@ export interface SelectReplayInput {
   /** Repair counters for a signature. A rule with evidence is not the one worth spending a run on. */
   statsFor: (signature: string) => Pick<RepairStats, 'applied'>;
   eligibleTools: ReadonlySet<string>;
+  attemptFor?: (candidate: ReplayCandidate) => ReplayAttemptState | null;
+  now?: number;
+  retryCooldownMs?: number;
   limit: number;
 }
 
@@ -106,8 +127,12 @@ export function selectReplayCandidates(input: SelectReplayInput): ReplayCandidat
     if (!signature || seen.has(signature)) continue;
     if (input.rulesFor(signature).length === 0) continue;
     if (input.statsFor(signature).applied > 0) continue;
+    const candidate = { ...f, signature };
+    const prior = input.attemptFor?.(candidate);
+    if (prior?.permanent) continue;
+    if (prior && (input.now ?? Date.now()) - prior.lastAttemptAt < (input.retryCooldownMs ?? RETRY_COOLDOWN_MS)) continue;
     seen.add(signature);
-    out.push({ ...f, signature });
+    out.push(candidate);
   }
   return out;
 }
@@ -135,6 +160,27 @@ export interface RunReplayInput extends Omit<SelectReplayInput, 'limit'> {
   nowIso?: string;
 }
 
+function recordReplayAttempt(
+  facts: MechanicalFixStore,
+  candidate: ReplayCandidate,
+  reason: string | undefined,
+  now: number,
+): void {
+  const key = replayFixtureKey(candidate);
+  const prior = facts.getFact(REPAIR_REPLAY_ATTEMPTS_NAMESPACE, key)?.value as Partial<ReplayAttemptState> | undefined;
+  const permanent = reason === 'unsafe-to-rerun';
+  facts.storeFact({
+    namespace: REPAIR_REPLAY_ATTEMPTS_NAMESPACE,
+    key,
+    value: {
+      attempts: Math.max(0, Number(prior?.attempts) || 0) + 1,
+      lastAttemptAt: now,
+      lastReason: reason,
+      permanent,
+    } satisfies ReplayAttemptState,
+  });
+}
+
 /**
  * Replay up to `limit` untried rules. Total: any failure is reported through `onOutcome` and never
  * thrown, because this runs on an idle maintenance path that must not take the process with it.
@@ -145,7 +191,8 @@ export async function runRepairReplay(
   if (!repairReplayEnabled(input.env ?? process.env)) {
     return { attempted: 0, outcomes: [], skipped: 'disabled' };
   }
-  const candidates = selectReplayCandidates({ ...input, limit: input.limit ?? 1 });
+  const now = input.now ?? Date.now();
+  const candidates = selectReplayCandidates({ ...input, now, limit: input.limit ?? 1 });
   if (candidates.length === 0) return { attempted: 0, outcomes: [], skipped: 'no-candidates' };
 
   const outcomes: ReplayOutcome[] = [];
@@ -162,12 +209,20 @@ export async function runRepairReplay(
           ? (rewritten) => input.isSafeToRerun!(c.toolName, rewritten)
           : undefined,
         run: (rewritten) => input.runTool(c.toolName, rewritten),
+        classifyResult: (repaired) => classifyRepairTransition({
+          beforeSignature: c.signature,
+          afterSuccess: repaired.success,
+          afterSignature: repaired.success
+            ? undefined
+            : input.signatureOf(c.toolName, repaired.error ?? repaired.output ?? ''),
+        }),
         ask: input.ask,
         configured: input.configured,
         nowIso: input.nowIso,
         env: input.env,
       });
       if (!result.attempted || !result.result) {
+        recordReplayAttempt(input.facts, c, result.reason, now);
         const outcome: ReplayOutcome = { signature: c.signature, transition: 'not-attempted', reason: result.reason };
         outcomes.push(outcome);
         input.onOutcome?.(outcome);
@@ -184,6 +239,7 @@ export async function runRepairReplay(
       outcomes.push(outcome);
       input.onOutcome?.(outcome);
     } catch (e) {
+      recordReplayAttempt(input.facts, c, (e as Error)?.message ?? String(e), now);
       const outcome: ReplayOutcome = {
         signature: c.signature,
         transition: 'not-attempted',

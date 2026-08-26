@@ -2850,6 +2850,9 @@ export interface DeepExploreDeps {
   /** Returns the session previously selected for this owner. This makes a later bare "continue"
    * reuse an explicit binding without falling back to recency. */
   getSelectedSessionId?: (owner: string | null) => string | undefined;
+  /** Consume an owner-authorized unattended handoff for a newly created session. The handoff is
+   * applied only after the initial foreground round finishes, so the background ticker cannot race it. */
+  takeAutoAdvanceOnCreate?: (owner: string | null, session: ReasoningSession) => boolean;
   /** Clears a consumer's binding when the selected session is closed. */
   onSessionAbandoned?: (owner: string | null, session: ReasoningSession) => void;
 }
@@ -3539,10 +3542,6 @@ export function createDeepExploreTool(
           type: 'string',
           description: 'For continue/discover/status/finalize/abandon/auto_on/auto_off: the full id or unique prefix from action=list. Optional only when exactly one session is open.',
         },
-        autoAdvance: {
-          type: 'boolean',
-          description: 'action=start only: immediately opt this new session into background auto-advance.',
-        },
       },
       required: ['action'],
     },
@@ -3598,12 +3597,8 @@ export function createDeepExploreTool(
           reasoning.setPhase(session.id, 'diverge');
           session = reasoning.getSession(session.id) ?? session; // refetch so runRound dispatches the diverge round
         }
+        const autoAdvanceAfterInitialRound = deps.takeAutoAdvanceOnCreate?.(owner, session) === true;
         selectSession(owner, session, 'created');
-        if (params.autoAdvance === true) {
-          reasoning.setAutoAdvance(session.id, true);
-          session = reasoning.getSession(session.id) ?? session;
-          deps.onMilestone?.(`▶ 已开启自动持续推进: ${session.id.slice(0, 8)}。我会自己续跑，在解决、连续卡住或达到轮次预算时停下并汇报。`);
-        }
         // Refutation pairing: a ∀-shaped goal gets one node that a machine can decide, seeded before the
         // first round. Proving needs an argument; DISPROVING needs a single witness — so this side is always
         // checkable, and the session can no longer spend its whole life on a tree where nothing is decidable
@@ -3664,7 +3659,15 @@ export function createDeepExploreTool(
               `\n\nAdvisory — I'll still explore, but build on what's known and route around any barrier above.`,
           );
         }
-        return runRound(session);
+        const initialResult = await runRound(session);
+        if (autoAdvanceAfterInitialRound) {
+          const fresh = reasoning.getSession(session.id);
+          if (fresh?.status === 'active') {
+            reasoning.setAutoAdvance(session.id, true);
+            deps.onMilestone?.(`▶ 已开启自动持续推进: ${session.id.slice(0, 8)}。我会自己续跑，在解决、连续卡住或达到轮次预算时停下并汇报。`);
+          }
+        }
+        return initialResult;
       }
 
       if (action === 'continue') {

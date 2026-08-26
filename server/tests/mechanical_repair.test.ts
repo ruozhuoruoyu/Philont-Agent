@@ -20,6 +20,7 @@ import {
   repairOutputTokenBudget,
   readRepairStats,
   recordRepairOutcome,
+  recordRepairTransitionOutcome,
   renderRepairNotice,
   MAX_REPAIRED_INPUT_BYTES,
   MECHANICAL_REPAIR_STATS_NAMESPACE,
@@ -95,6 +96,17 @@ test('counters accumulate per signature and survive a malformed stored value', (
 
   facts.store.set(`${MECHANICAL_REPAIR_STATS_NAMESPACE}/t:sig`, 'corrupt');
   assert.deepEqual(readRepairStats('t:sig', facts).applied, 0, 'a corrupt counter must not stop a repair');
+});
+
+test('changed failures and inconclusive runs do not become demonstrated repair failures', () => {
+  const facts = fakeFacts();
+  recordRepairTransitionOutcome('t:sig', 'different_failure', facts, '2026-08-23T00:00:00.000Z');
+  recordRepairTransitionOutcome('t:sig', 'inconclusive', facts, '2026-08-23T00:01:00.000Z');
+  const s = readRepairStats('t:sig', facts);
+  assert.equal(s.applied, 2);
+  assert.equal(s.failed, 0);
+  assert.equal(s.differentFailure, 1);
+  assert.equal(s.inconclusive, 1);
 });
 
 test('recurrence is only counted against a rule that existed, and the two culprits stay apart', () => {
