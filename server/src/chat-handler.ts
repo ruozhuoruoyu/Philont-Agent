@@ -247,6 +247,7 @@ import {
 } from './short_answer_binding.js';
 import { buildRoutingInjection } from './routing_inject.js';
 import { renderLearningStats } from './learning_stats.js';
+import { replayEligibleTools, runRepairReplay, type LedgerFailure } from './repair_replay.js';
 import {
   buildFailureRecoveryInjection,
   detectUserDissatisfaction,
@@ -267,6 +268,7 @@ import {
 import {
   attemptMechanicalRepair,
   classifyRecurrence,
+  readRepairStats,
   mechanicalRepairEnabled,
   recurrenceMetricKey,
   repairLedgerRows,
@@ -1374,6 +1376,77 @@ const idleConsolidator = startIdleConsolidator({
       }
     } catch (e) {
       console.error('[routing-decay] failed', e);
+    }
+    // A RULE LEARNED ONCE AND NEVER APPLIED IS INDISTINGUISHABLE FROM ONE THAT DOES NOT WORK.
+    //
+    // Waiting for the signature to recur naturally is waiting for the cost we are trying to remove.
+    // So on idle, take one rule that has never been applied and run it against the failure it was
+    // learned from. Fixtures are FAILED ledger rows only: a success row from the window when a
+    // repaired call was logged under its broken input cannot be trusted, a failure row can, and a
+    // failing input is the only thing a replay wants. Default off; see repair_replay.
+    try {
+      const eligible = replayEligibleTools();
+      if (eligible.size > 0) {
+        const rows = memory.db
+          .prepare(
+            `SELECT tool_name AS toolName, params_json AS paramsJson, result, timestamp
+               FROM memory_actions
+              WHERE success = 0 AND timestamp >= ?
+              ORDER BY timestamp DESC
+              LIMIT 400`,
+          )
+          .all(Date.now() - 14 * 24 * 60 * 60_000) as Array<{
+            toolName: string; paramsJson: string; result: string | null; timestamp: number;
+          }>;
+        const failures: LedgerFailure[] = [];
+        for (const r of rows) {
+          if (!eligible.has(r.toolName)) continue;
+          let parsed: unknown;
+          try { parsed = JSON.parse(r.paramsJson); } catch { continue; }
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+          failures.push({
+            toolName: r.toolName,
+            input: parsed as Record<string, unknown>,
+            errorText: r.result ?? '',
+            recordedAt: r.timestamp,
+          });
+        }
+        const replay = await runRepairReplay({
+          failures,
+          signatureOf: (tool, err) => extractFailureSignature(tool, err),
+          rulesFor: (sig) => [
+            ...authoringCheatsheet(sig).filter((l) => l.trim()),
+            ...learnedCheatsheet(sig, memory.facts),
+          ],
+          statsFor: (sig) => readRepairStats(sig, memory.facts),
+          eligibleTools: eligible,
+          facts: memory.facts,
+          isSafeToRerun: async (toolName, rewritten) =>
+            (await getSubLoopChecker()({
+              toolName,
+              approval: 'never',
+              params: JSON.stringify(rewritten),
+            })) === null,
+          // Background judgment: never fall back to the MAIN model. A broken aux endpoint must not
+          // turn idle maintenance into extra load on the endpoint the owner's turn depends on.
+          ask: (req) => callAuxLLM({ ...req, fallbackToMain: false }),
+          runTool: async (toolName, rewritten) => {
+            const r = await subTurnToolRunner(toolName, rewritten);
+            return { success: r.ok, output: r.output, error: r.error };
+          },
+          onOutcome: (o) => {
+            memory.metrics.increment(`learning.replay.${o.transition}`);
+            console.log(
+              `[repair-replay] ${o.signature} → ${o.transition}${o.reason ? ` (${o.reason})` : ''}`,
+            );
+          },
+        });
+        if (replay.attempted > 0) {
+          console.log(`[repair-replay] ran ${replay.attempted} untried rule(s) against past failures`);
+        }
+      }
+    } catch (e) {
+      console.error('[repair-replay] failed', e);
     }
     // 2026-06-22 instrumentation: log the self-learning report once per UTC day (data to decide
     // keep-vs-simplify). Day-gated via a metric stamp so idle ticks don't spam it. Read-only.
