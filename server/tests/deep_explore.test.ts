@@ -1336,9 +1336,46 @@ test('action=list enumerates all open sessions; abandon by id closes a specific 
 
   // a non-matching id → friendly message, nothing closed
   const miss = await tool.execute({ action: 'abandon', sessionId: 'zzzzzzzz' });
-  assert.match(miss.output, /No open session matches/);
+  assert.equal(miss.success, false);
+  assert.match(miss.error ?? '', /No open session matches/);
   assert.match((await tool.execute({ action: 'list' })).output, /2 open deep-explore session/);
 
+  mem.close();
+});
+
+test('control actions require explicit sessionId when multiple sessions are open and bind the selected session', async () => {
+  const mem = openMemoryDb(':memory:');
+  const selected: string[] = [];
+  let focusedId: string | undefined;
+  const llm: MiniLoopLLMClient = { async send() { return { type: 'text' as const, content: 'x' }; } };
+  const { tool } = createDeepExploreTool({
+    reasoning: mem.reasoning, miniLoopLLM: llm,
+    subTurnToolRunner: async () => ({ ok: true, output: '' }), readOnlyToolDefs: [],
+    getSelectedSessionId: () => focusedId,
+    onSessionSelected: (_owner, session) => { focusedId = session.id; selected.push(session.id); },
+  });
+  const { session: first } = mem.reasoning.createSession({ goal: 'first project' });
+  const { session: second } = mem.reasoning.createSession({ goal: 'second project' });
+
+  const ambiguous = await tool.execute({ action: 'status' });
+  assert.equal(ambiguous.success, false);
+  assert.match(ambiguous.error ?? '', /2 open deep-explore sessions/);
+  assert.equal(selected.length, 0, 'an ambiguous request must not create a hidden focus');
+
+  const explicit = await tool.execute({ action: 'status', sessionId: first.id.slice(0, 8) });
+  assert.equal(explicit.success, true);
+  assert.match(explicit.output, /first project/);
+  assert.deepEqual(selected, [first.id]);
+
+  const auto = await tool.execute({ action: 'auto_on', sessionId: second.id });
+  assert.equal(auto.success, true);
+  assert.equal(mem.reasoning.getSession(second.id)?.autoAdvance, true);
+  assert.equal(mem.reasoning.getSession(first.id)?.autoAdvance, false);
+  assert.deepEqual(selected, [first.id, second.id]);
+
+  const resumed = await tool.execute({ action: 'status' });
+  assert.equal(resumed.success, true);
+  assert.match(resumed.output, /second project/, 'bare follow-up must reuse the explicit focus, not recency');
   mem.close();
 });
 

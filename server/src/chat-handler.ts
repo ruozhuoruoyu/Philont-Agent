@@ -2760,6 +2760,26 @@ export const DEEP_EXPLORE_VERIFY_TOOL_NAMES = new Set([
 ]);
 
 const formalVerificationEvidenceBySession = new Map<string, string[]>();
+/** Explicit deep-explore focus per chat owner. This is deliberately separate from updated_at:
+ * background work and unrelated sessions must not steal the learning judge's goal. */
+const focusedReasoningSessionByOwner = new Map<string, string>();
+
+function focusedReasoningSession(owner: string): ReasoningSession | null {
+  const focusedId = focusedReasoningSessionByOwner.get(owner);
+  if (focusedId) {
+    const focused = memory.reasoning.getSession(focusedId);
+    if (focused?.status === 'active' && focused.ownerSessionId === owner) return focused;
+    focusedReasoningSessionByOwner.delete(owner);
+  }
+  // A sole session is unambiguous and preserves the convenient single-project path. With multiple
+  // sessions, returning null is safer than assigning another project's frontier to this turn.
+  const active = memory.reasoning.listActiveSessions(owner);
+  if (active.length === 1) {
+    focusedReasoningSessionByOwner.set(owner, active[0].id);
+    return active[0];
+  }
+  return null;
+}
 
 function shellVerificationScope(command: string): string | null {
   const normalized = command.replace(/\s+/g, ' ').trim();
@@ -2834,6 +2854,15 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     // the round prompt (collectComputeLessons).
     actions: memory.actions,
     skills: memory.skills,
+    getSelectedSessionId: (owner) => owner ? focusedReasoningSessionByOwner.get(owner) : undefined,
+    onSessionSelected: (owner, session) => {
+      if (owner) focusedReasoningSessionByOwner.set(owner, session.id);
+    },
+    onSessionAbandoned: (owner, session) => {
+      if (owner && focusedReasoningSessionByOwner.get(owner) === session.id) {
+        focusedReasoningSessionByOwner.delete(owner);
+      }
+    },
     getExternalVerificationEvidence: (owner, activeClaims) => {
       try {
         const plan = memory.plans.listBySession(owner, { limit: 1 })[0];
@@ -7374,7 +7403,7 @@ function activeWorkGoalForSession(sessionId: string): string | undefined {
         ?? plan.steps.find((s) => s.status === 'pending' || s.status === 'blocked');
       if (step?.description.trim()) return `Complete plan step: ${step.description.trim()}`;
     }
-    const reasoningSession = memory.reasoning.getMostRecentActiveSession(sessionId);
+    const reasoningSession = focusedReasoningSession(sessionId);
     if (!reasoningSession) return undefined;
     const leaf = selectJudgeFrontierGoal(memory.reasoning.getNodes(reasoningSession.id));
     return leaf ? `Prove or refute the active reasoning node: ${leaf}` : undefined;
@@ -10002,7 +10031,7 @@ async function handleChatSendInner(
         const skillDeleteSucceededThisTurn = (signalBus.inTurnRecords ?? []).some(
           (r) => r.success && (r.toolName === 'forget_skill' || r.toolName === 'uninstallSkill'),
         );
-        const ownerReasoning = memory.reasoning.getMostRecentActiveSession(sessionId);
+        const ownerReasoning = focusedReasoningSession(sessionId);
         const announceStallRaw = (process.env.PHILONT_HONESTY_ANNOUNCE ?? '').trim().toLowerCase();
         const announceStallEnabled = !(
           announceStallRaw === '0' || announceStallRaw === 'off' ||
@@ -12410,7 +12439,7 @@ async function runToolLoop(
         // Ground truth for the deep_explore honesty checks: the owner-scoped active reasoning session's
         // tree state (null if none). Lets the gate catch "全部闭合 / proved / 最终判决" claims the tree
         // doesn't support, and round-result narration with no actual round this turn.
-        const ownerReasoning = memory.reasoning.getMostRecentActiveSession(sessionId);
+        const ownerReasoning = focusedReasoningSession(sessionId);
         // Session-aware say-do-gap latch (PHILONT_HONESTY_SESSION=0 disables). Carries "promised a run but
         // didn't" / fabrication count across turns so a REPEATED unkept run-promise escalates to high.
         const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
@@ -12913,7 +12942,7 @@ async function runToolLoop(
           // The doomed goal may live in a deep_explore reasoning session (read its barrier/stall sensors) OR
           // the loop may have moved into raw shell/patch/writeFile grinding with NO session — in which case the
           // gate runs session-less on the global same_root_cause signal (which counts that grinding's failures).
-          const ownerSession = memory.reasoning.getMostRecentActiveSession(sessionId);
+          const ownerSession = focusedReasoningSession(sessionId);
           const vSummary = ownerSession ? memory.reasoning.summarizeSession(ownerSession.id) : null;
           const allMatches: BarrierMatch[] = ownerSession
             ? matchBarriers([ownerSession.goal, ...ownerSession.assumptions].join('\n'))
