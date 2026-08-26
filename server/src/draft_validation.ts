@@ -22,8 +22,19 @@ export interface DraftFixture {
   key: string;
 }
 
+const GENERIC_TERMS = new Set([
+  'fix', 'repair', 'avoid', 'use', 'when', 'error', 'failed', 'failure', 'tool', 'code',
+  'lean', 'shell', 'python', 'parigp', 'could', 'prove', 'goal', 'helper',
+]);
+
 function terms(skill: Skill): string[] {
-  return [...tokenize([skill.name, skill.whenToUse, ...skill.triggerKeywords].filter(Boolean).join(' '))];
+  const text = [skill.name, skill.whenToUse, ...skill.triggerKeywords].filter(Boolean).join(' ');
+  const base = [...tokenize(text)].filter((term) => term.length >= 2 && !GENERIC_TERMS.has(term));
+  // planTokenize intentionally exposes CJK characters for recall. Applicability needs phrases instead:
+  // individual common characters are dangerously easy to match in an unrelated failure.
+  const cjkBigrams = [...text.matchAll(/[\p{Script=Han}]{2,}/gu)]
+    .flatMap(([run]) => Array.from({ length: run.length - 1 }, (_, i) => run.slice(i, i + 2)));
+  return [...new Set([...base, ...cjkBigrams])];
 }
 
 export function draftFixtureKey(skill: Skill, failure: LedgerFailure, signature: string): string {
@@ -52,10 +63,12 @@ export function selectDraftFixture(input: {
       if (!input.eligibleTools.has(failure.toolName) || !failure.errorText.trim()) continue;
       const signature = input.signatureOf(failure.toolName, failure.errorText);
       const haystack = `${failure.toolName} ${signature} ${failure.errorText}`.toLowerCase();
-      const score = needles.reduce((n, term) => n + (haystack.includes(term) ? 1 : 0), 0);
+      const matched = needles.filter((term) => haystack.includes(term));
+      const score = matched.length;
       const skillText = `${skill.whenToUse} ${skill.actionTemplate} ${skill.description}`.toLowerCase();
       const explicitlyNamesSignature = skillText.includes(signature.toLowerCase());
-      if (!explicitlyNamesSignature && score < 2) continue;
+      const coverage = score / needles.length;
+      if (!explicitlyNamesSignature && (score < 2 || coverage < 0.4)) continue;
       const key = draftFixtureKey(skill, failure, signature);
       const prior = input.attemptFor(key);
       if (prior?.permanent || (prior && now - prior.lastAttemptAt < COOLDOWN_MS)) continue;

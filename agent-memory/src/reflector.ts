@@ -285,10 +285,9 @@ export class SessionReflector {
       .map((m) => `[${m.role}] ${m.content}`)
       .join('\n');
 
-    // This is a mechanism-side exhaustive catalog, not the normal prompt recommendation list. The
-    // model cannot reuse an exact existing name it was never shown; 80/130 caused the unseen tail to
-    // keep minting synonyms. Deprecated rows remain excluded by listAll.
-    const existingSkills = this.skills.listAll(10_000);
+    // Keep the semantic hint bounded. Creation is still guarded below by a mechanism-side similarity
+    // check over the complete non-deprecated store; prompt size must not grow without bound.
+    const existingSkills = this.skills.listAll(200);
     const existingCatalog = existingSkills.length > 0
       ? `\n\n## Existing skill catalog (semantic deduplication)\n` +
         `If a proposed rule is semantically equivalent to one below, return the EXISTING exact name ` +
@@ -356,7 +355,9 @@ export class SessionReflector {
           // it minted near-duplicate skills every cycle (e.g. avoid-pari-syntax vs avoid-pari-gp-syntax)
           // → unbounded skill bloat. If a sufficiently-similar positive skill already exists, MERGE
           // into it instead (mirrors applyReflection's MECE check). pruneDraftsToCap caps the rest.
-          const dup = kind === 'positive' ? this.skills.findDuplicateCandidates(spec.name)[0] : undefined;
+          const dup = kind === 'positive'
+            ? this.skills.findDuplicateCandidates(spec.name, spec.description, 0.35)[0]
+            : undefined;
           if (dup) {
             const skill = this.skills.updateSkill(dup.skill.name, {
               description: spec.description,

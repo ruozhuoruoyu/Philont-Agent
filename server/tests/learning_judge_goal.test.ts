@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isExternalAcceptanceNode,
+  isPureCompileAcceptanceNode,
   extractFormalVerificationEvidence,
   formalEvidenceAppliesToClaims,
   resolveJudgeGoal,
@@ -62,11 +63,22 @@ test('compile evidence auto-reconciles only one explicit matching acceptance nod
     { id: 'root', parentId: null, status: 'open', claim: 'root', depth: 0 },
     { id: 'mixed', parentId: 'root', status: 'open', claim: 'region3_strict 成立，且 Region3Sum.lean 编译通过', depth: 1 },
   ] as any, evidence), null, 'a compiler run must never auto-prove a mixed mathematical assertion');
+  assert.equal(selectCompileAcceptanceNode([
+    { id: 'root', parentId: null, status: 'open', claim: 'root', depth: 0 },
+    { id: 'mixed', parentId: 'root', status: 'open', claim: '验收：region3_strict 成立，且 Region3Sum.lean 编译通过', depth: 1 },
+  ] as any, evidence), null, 'an acceptance prefix must not launder a mathematical assertion into proved');
   assert.equal(selectCompileAcceptanceNode(nodes, 'leanCheck: verified successfully'), null, 'unscoped proof evidence needs the reasoner');
   assert.equal(selectCompileAcceptanceNode([
     ...nodes,
     { id: 'compile2', parentId: 'root', status: 'open', claim: '验收：用户在本机执行 Region3Sum compile', depth: 1 },
   ] as any, evidence), null, 'ambiguous matches stay open for explicit reconciliation');
+});
+
+test('pure compile acceptance is narrower than a general external chore', () => {
+  assert.equal(isPureCompileAcceptanceNode('验收：用户在本机执行 lake build Lrc.K13.Region3Sum'), true);
+  assert.equal(isPureCompileAcceptanceNode('验收：region3_strict 成立，且 Region3Sum.lean 编译通过'), false);
+  assert.equal(isExternalAcceptanceNode('请用户确认数学证明'), true);
+  assert.equal(isPureCompileAcceptanceNode('请用户确认数学证明'), false);
 });
 
 test('an auth resume is judged against the ORIGINAL message, not the approval word', () => {

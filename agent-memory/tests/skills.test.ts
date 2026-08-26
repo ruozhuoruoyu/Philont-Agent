@@ -512,6 +512,29 @@ test('SessionReflector: update existing skill, preserve use_count', async () => 
   assert.match(mockLlm.lastPrompt, /return the EXISTING exact name/);
 });
 
+test('SessionReflector: mechanism merges a renamed duplicate using its semantic description', async () => {
+  const { skills, actions, raw } = openMemoryDb(':memory:');
+  skills.createSkill({
+    name: 'resume-formal-session',
+    description: 'resume an interrupted formal verification session from its saved frontier',
+    triggerKeywords: ['resume'],
+    actionTemplate: 'old',
+  });
+  const session = raw.startSession();
+  raw.appendMessage({ sessionId: session.id, role: 'user', content: 'continue the saved proof work' });
+  const llm = new MockLlm(JSON.stringify([{
+    name: 'continue-proof-work',
+    description: 'resume an interrupted formal verification session from the saved frontier',
+    trigger_keywords: ['continue'],
+    action_template: 'new',
+  }]));
+  const result = await new SessionReflector(llm, skills, actions, raw).reflectFromSession(session.id);
+  assert.equal(result.skillsCreated, 0);
+  assert.equal(result.skillsUpdated, 1);
+  assert.equal(skills.getByName('continue-proof-work'), null);
+  assert.equal(skills.getByName('resume-formal-session')?.actionTemplate, 'new');
+});
+
 test('SessionReflector: skip invalid skill specs', async () => {
   const { skills, actions, raw } = openMemoryDb(':memory:');
 

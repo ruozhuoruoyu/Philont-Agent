@@ -48,7 +48,7 @@ test('draft fixture selection requires real lexical applicability and never-used
 test('draft matching splits kebab names and rejects a single generic token', () => {
   const kebab = selectDraftFixture({
     drafts: [skill({ name: 'fix-lean-nat-subtraction', whenToUse: '', triggerKeywords: [] })],
-    failures: [{ ...failure, errorText: 'lean subtraction failed' }], eligibleTools: new Set(['leanCheck']),
+    failures: [{ ...failure, errorText: 'lean nat subtraction failed' }], eligibleTools: new Set(['leanCheck']),
     signatureOf, attemptFor: () => null,
   });
   assert.equal(kebab?.skill.name, 'fix-lean-nat-subtraction');
@@ -57,6 +57,12 @@ test('draft matching splits kebab names and rejects a single generic token', () 
     failures: [failure], eligibleTools: new Set(['leanCheck']), signatureOf, attemptFor: () => null,
   });
   assert.equal(generic, null, 'one generic word is distribution evidence, not applicability evidence');
+  const cjkGeneric = selectDraftFixture({
+    drafts: [skill({ name: 'generic-cjk', whenToUse: '证明文件错误', triggerKeywords: [] })],
+    failures: [{ ...failure, errorText: '证据明晰，文档件数错位并有误差' }], eligibleTools: new Set(['leanCheck']),
+    signatureOf, attemptFor: () => null,
+  });
+  assert.equal(cjkGeneric, null, 'shared common CJK characters are not applicability evidence');
 });
 
 test('verified draft execution records success; changed failure records neutral use', async () => {

@@ -3019,11 +3019,27 @@ export function selectCompileAcceptanceNode(
   if (!/^\[scope=(?:project-build-only|target:|file:)/.test(evidence)) return null;
   const compileClaim = /\b(?:build|built|compile|compiled|compiles|compilation)\b|(?:\u7f16\u8bd1|\u6784\u5efa).{0,12}(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210|\u65e0\u8bef)|(?:\u901a\u8fc7|\u6210\u529f|\u5b8c\u6210).{0,12}(?:\u7f16\u8bd1|\u6784\u5efa)/i;
   const matches = computeFrontier([...nodes]).filter(
-    (node) => isExternalAcceptanceNode(node.claim)
+    (node) => isPureCompileAcceptanceNode(node.claim)
       && compileClaim.test(node.claim)
       && formalEvidenceAppliesToClaims(evidence, [node.claim]),
   );
   return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * Auto-reconciliation is deliberately narrower than the general "external chore" classifier.
+ * Only a node whose payload starts with an owner/user run instruction is machine-settleable.
+ * In particular, an `验收：` prefix must never launder a mixed theorem assertion into `proved`.
+ */
+export function isPureCompileAcceptanceNode(claim: string): boolean {
+  const payload = claim.replace(/\s+/g, ' ').trim()
+    .replace(/^(?:验收|人工验收|用户验收)[：:]\s*/i, '');
+  if (!payload) return false;
+  if (/(?:成立|已证(?:明)?|定理|引理|猜想|下界|上界)|\b(?:prove[sd]?|theorem|lemma|conjecture|bound)\b|[⟹⇒⇔≥≤]/i.test(payload)) {
+    return false;
+  }
+  return /^(?:用户|你|owner|user)\s*(?:在本机)?\s*(?:执行|运行|run\b|execute\b)/i.test(payload)
+    && /\b(?:lake|lean|build|compile|test)\b|(?:编译|构建)/i.test(payload);
 }
 
 /** Strict enough that `lean --version` cannot masquerade as proof/build verification. */

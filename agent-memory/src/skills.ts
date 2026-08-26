@@ -242,7 +242,12 @@ export class SkillStore extends EventEmitter {
     const scored: Array<{ skill: Skill; jaccard: number }> = [];
     for (const row of rows) {
       const skill = rowToSkill(row);
-      const candTokens = this.tokenize(skill.name + ' ' + skill.whenToUse);
+      const candTokens = this.tokenize([
+        skill.name,
+        skill.whenToUse,
+        skill.description,
+        ...skill.triggerKeywords,
+      ].filter(Boolean).join(' '));
       if (candTokens.size === 0) continue;
       const j = this.jaccard(targetTokens, candTokens);
       if (j >= threshold) scored.push({ skill, jaccard: j });
