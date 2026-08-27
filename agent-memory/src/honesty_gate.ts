@@ -603,11 +603,20 @@ export function findReasoningTerminalClaim(text: string): string | null {
         continue;
       }
       const matched = m[0];
-      // Positive terminal words inside an explicit denial are not terminal claims. Production example:
-      // “定理、未编译，我不声称已证” previously fired fabricated_reasoning_state on the word 已证.
+      // Negation normally sits BEFORE the terminal-pattern match ("没有 全部闭合", "并非 已闭合").
+      // Looking only inside m[0] made suppression structurally impossible for tight patterns and also
+      // required the denial vocabulary to duplicate every terminal word. Inspect the current clause's
+      // left context instead: future terminal phrases inherit the same protection automatically.
+      const clauseStart = Math.max(
+        text.lastIndexOf('。', m.index - 1), text.lastIndexOf('！', m.index - 1),
+        text.lastIndexOf('？', m.index - 1), text.lastIndexOf('\n', m.index - 1),
+        text.lastIndexOf('.', m.index - 1), text.lastIndexOf('!', m.index - 1),
+        text.lastIndexOf('?', m.index - 1),
+      ) + 1;
+      const claimContext = text.slice(Math.max(clauseStart, m.index - 40), m.index + matched.length);
       const deniesPositiveClaim =
-        /(?:未|没有|尚未|并非|不(?:会|能)?声称|不能说|无法确认)[^。！？\n]{0,20}(?:已证|成立|proved|proven|solved)/i.test(matched) ||
-        /(?:not|never|cannot|can'?t|do not claim)[^.!?\n]{0,20}(?:proved|proven|solved)/i.test(matched);
+        /(?:未|没有|尚未|并非|不是|不得|不(?:会|能)?声称|不能说|无法确认)[^。！？\n]{0,32}$/i.test(claimContext) ||
+        /(?:not|never|cannot|can'?t|do not|does not|is not|isn't|must not)[^.!?\n]{0,32}$/i.test(claimContext);
       const isExplicitImpossibilityConclusion = /(?:不能|无法|不可能).*(?:证明|证明路径)/.test(matched);
       if (deniesPositiveClaim && !isExplicitImpossibilityConclusion) continue; // this match only
       return matched.slice(0, 60);

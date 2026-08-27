@@ -15,11 +15,21 @@ export function draftValidationEnabled(env: NodeJS.ProcessEnv = process.env): bo
     && !/^(?:0|off|false|no)$/i.test((env.PHILONT_DRAFT_VALIDATION ?? '').trim());
 }
 
+/** File-backed SKILL.md entries are capabilities/protocols, not unverified learned repair hypotheses. */
+export function excludeFileBackedDrafts<T extends Pick<Skill, 'name'>>(
+  drafts: readonly T[],
+  onDiskNames: ReadonlySet<string>,
+): T[] {
+  return drafts.filter((draft) => !onDiskNames.has(draft.name));
+}
+
 export interface DraftFixture {
   skill: Skill;
   failure: LedgerFailure;
   signature: string;
   key: string;
+  /** Stable skill+failure-class cooldown; changing the historical input must not bypass it. */
+  cooldownKey: string;
 }
 
 /**
@@ -47,6 +57,13 @@ export function draftFixtureKey(skill: Skill, failure: LedgerFailure, signature:
   return createHash('sha256')
     .update(skill.name).update('\0').update(skill.actionTemplate).update('\0')
     .update(signature).update('\0').update(JSON.stringify(failure.input))
+    .digest('hex');
+}
+
+export function draftCooldownKey(skill: Skill, signature: string): string {
+  return createHash('sha256')
+    .update('cooldown\0').update(skill.name).update('\0').update(skill.actionTemplate).update('\0')
+    .update(signature)
     .digest('hex');
 }
 
@@ -88,10 +105,11 @@ export function selectDraftFixture(input: {
       // two filters above, not by the count. Ranking still prefers the best-matching fixture.
       if (!explicitlyNamesSignature && score < 1) continue;
       const key = draftFixtureKey(skill, failure, signature);
-      const prior = input.attemptFor(key);
+      const cooldownKey = draftCooldownKey(skill, signature);
+      const prior = input.attemptFor(cooldownKey) ?? input.attemptFor(key);
       if (prior?.permanent || (prior && now - prior.lastAttemptAt < COOLDOWN_MS)) continue;
       if (!best || score > best.score || (score === best.score && failure.recordedAt > best.fixture.failure.recordedAt)) {
-        best = { fixture: { skill, failure, signature, key }, score };
+        best = { fixture: { skill, failure, signature, key, cooldownKey }, score };
       }
     }
   }
@@ -117,13 +135,15 @@ export async function validateDraftFixture(input: {
     afterSignature: result.success ? undefined : input.signatureOf(fixture.failure.toolName, result.error ?? result.output ?? ''),
   });
   const recordAttempt = (reason: string | undefined, permanent = false): void => {
-    const prior = input.facts.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, fixture.key)?.value as Partial<ReplayAttemptState> | undefined;
-    input.facts.storeFact({ namespace: DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, key: fixture.key, value: {
-      attempts: Math.max(0, Number(prior?.attempts) || 0) + 1,
-      lastAttemptAt: now,
-      lastReason: reason,
-      permanent,
-    } satisfies ReplayAttemptState });
+    for (const key of new Set([fixture.key, fixture.cooldownKey])) {
+      const prior = input.facts.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, key)?.value as Partial<ReplayAttemptState> | undefined;
+      input.facts.storeFact({ namespace: DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, key, value: {
+        attempts: Math.max(0, Number(prior?.attempts) || 0) + 1,
+        lastAttemptAt: now,
+        lastReason: reason,
+        permanent,
+      } satisfies ReplayAttemptState });
+    }
   };
   try {
     const result = await attemptMechanicalRepair({

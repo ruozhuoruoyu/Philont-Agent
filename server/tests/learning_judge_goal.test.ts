@@ -16,6 +16,8 @@ import {
   formalEvidenceAppliesToClaims,
   resolveJudgeGoal,
   resolveRecallInput,
+  requestsExploreAutoHandoff,
+  episodeRelativeReasoningStats,
   selectCompileAcceptanceNode,
   selectJudgeFrontierGoal,
 } from '../src/chat-handler.js';
@@ -176,6 +178,31 @@ test('skill recall for a continuation uses active work before a carried directio
     'Complete plan step: prove region3 bound',
   );
   assert.equal(resolveRecallInput('总结我们目前的 LRC 证明状态', 'stale work'), '总结我们目前的 LRC 证明状态');
+});
+
+test('explicit owner handoff deterministically opts the focused exploration into auto advance', () => {
+  for (const text of ['你来推', '这个工作是交给你来做的', '由你继续完成']) {
+    assert.equal(requestsExploreAutoHandoff(text), true, text);
+  }
+  for (const text of ['继续', '你怎么看', '换方向']) assert.equal(requestsExploreAutoHandoff(text), false, text);
+});
+
+test('viability judges only progress and dead ends accumulated after an episode reset', () => {
+  assert.deepEqual(
+    episodeRelativeReasoningStats(
+      { id: 'r1', noProgressRounds: 8, provedCount: 14, deadCount: 9 },
+      { reasoningSessionId: 'r1', noProgressRounds: 7, provedCount: 13, deadCount: 7 },
+    ),
+    { noProgressRounds: 1, provedCount: 1, deadCount: 2, attempts: 3 },
+  );
+  assert.equal(
+    episodeRelativeReasoningStats(
+      { id: 'r1', noProgressRounds: 2, provedCount: 13, deadCount: 7 },
+      { reasoningSessionId: 'r1', noProgressRounds: 7, provedCount: 13, deadCount: 7 },
+    ).noProgressRounds,
+    2,
+    'after genuine progress resets the streak, new stalls count from zero rather than the old baseline',
+  );
 });
 
 test('judge frontier excludes owner acceptance chores and ranks actionable nodes like final report', () => {

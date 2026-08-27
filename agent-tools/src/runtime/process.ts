@@ -144,7 +144,7 @@ export const processTool: Tool = {
         }
         const p = processes.get(processId);
         if (!p) {
-          return { success: false, output: '', error: `Process not found: ${processId}` };
+          return { success: false, output: '', error: `[process-orphaned] Process handle unavailable in this runtime: ${processId}` };
         }
         return { success: true, output: formatStatus(p) };
       }
@@ -156,7 +156,7 @@ export const processTool: Tool = {
         }
         const p = processes.get(processId);
         if (!p) {
-          return { success: false, output: '', error: `Process not found: ${processId}` };
+          return { success: false, output: '', error: `[process-orphaned] Process handle unavailable in this runtime: ${processId}` };
         }
         if (isFinished(p)) {
           return { success: true, output: `Process ${processId} already exited` };

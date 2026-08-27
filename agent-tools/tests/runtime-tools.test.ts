@@ -58,7 +58,7 @@ describe('process tool', () => {
       processId: 'does-not-exist',
     });
     assert.equal(r.success, false);
-    assert.ok(r.error?.includes('not found'));
+    assert.match(r.error ?? '', /^\[process-orphaned\] Process handle unavailable in this runtime:/);
   });
 
   it('list includes spawned processes', async () => {

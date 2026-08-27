@@ -1355,3 +1355,16 @@ test('fabricated_reasoning_state: a hedge suppresses its own clause, not the cla
   assert.equal(findReasoningTerminalClaim('这个定理尚未编译，我不声称已证。'), null);
   assert.equal(findReasoningTerminalClaim('猜想尚未证明，我不声称已证。'), null);
 });
+
+test('reasoning terminal detection respects clause-local negation before tight matches', async () => {
+  const { findReasoningTerminalClaim } = await import('../src/honesty_gate.js');
+  for (const text of [
+    '会话不得谎称已闭合',
+    '推理树并非已闭合',
+    '五条路径没有全部闭合',
+    'the root proposition is not proven',
+  ]) assert.equal(findReasoningTerminalClaim(text), null, text);
+  for (const text of ['全部闭合', '会话已闭合', '根命题已证']) {
+    assert.ok(findReasoningTerminalClaim(text), text);
+  }
+});

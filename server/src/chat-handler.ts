@@ -259,6 +259,7 @@ import {
 import {
   DRAFT_VALIDATION_ATTEMPTS_NAMESPACE,
   draftValidationEnabled,
+  excludeFileBackedDrafts,
   selectDraftFixture,
   validateDraftFixture,
 } from './draft_validation.js';
@@ -1498,8 +1499,14 @@ const idleConsolidator = startIdleConsolidator({
         const failures: LedgerFailure[] = rows
           .filter((r) => eligible.has(r.toolName) && !!r.result && !!r.params && typeof r.params === 'object' && !Array.isArray(r.params))
           .map((r) => ({ toolName: r.toolName, input: r.params as Record<string, unknown>, errorText: r.result ?? '', recordedAt: r.timestamp }));
+        // File-backed SKILL.md entries are published capabilities/protocols. Their DB maturity may be
+        // NULL→draft because source frontmatter is optional, but they are not learned repair hypotheses.
+        // Determine identity from actual disk presence (the same rule as forget_skill), never from source.
+        const diskSkills = await loadSkills(process.cwd(), [bundledSkillsDir]);
+        const onDiskNames = new Set(diskSkills.map((s) => s.name));
+        const drafts = excludeFileBackedDrafts(memory.skills.listByMaturity('draft', 200), onDiskNames);
         const fixture = selectDraftFixture({
-          drafts: memory.skills.listByMaturity('draft', 200),
+          drafts,
           failures,
           eligibleTools: eligible,
           signatureOf: (tool, err) => extractFailureSignature(tool, err),
@@ -1528,7 +1535,10 @@ const idleConsolidator = startIdleConsolidator({
             toolCalls: outcome.transition === 'not-attempted' ? 0 : 1,
           });
           memory.metrics.increment('learning.maintenance.initiatives');
-          console.log(`[draft-validation] ${fixture.skill.name} on ${fixture.signature} → ${outcome.transition}`);
+          console.log(
+            `[draft-validation] ${fixture.skill.name} on ${fixture.signature} → ${outcome.transition}` +
+              (outcome.reason ? ` (${outcome.reason})` : ''),
+          );
         }
       }
     } catch (e) {
@@ -4660,6 +4670,31 @@ const viabilityPivotStreak = new Map<string, number>();
  */
 const episodeAnchorTs = new Map<string, number>();
 
+interface ReasoningEpisodeBaseline {
+  reasoningSessionId: string;
+  noProgressRounds: number;
+  provedCount: number;
+  deadCount: number;
+}
+const reasoningEpisodeBaselines = new Map<string, ReasoningEpisodeBaseline>();
+
+export function episodeRelativeReasoningStats(
+  current: { id: string; noProgressRounds: number; provedCount: number; deadCount: number },
+  baseline?: ReasoningEpisodeBaseline,
+): { noProgressRounds: number; provedCount: number; deadCount: number; attempts: number } {
+  const same = baseline?.reasoningSessionId === current.id;
+  // noProgressRounds is a trailing streak, not a cumulative counter. If progress reset it below the
+  // baseline, the current value already is the new episode's streak; otherwise subtract inherited stalls.
+  const noProgressRounds = same
+    ? (current.noProgressRounds < baseline.noProgressRounds
+        ? current.noProgressRounds
+        : current.noProgressRounds - baseline.noProgressRounds)
+    : current.noProgressRounds;
+  const provedCount = same ? Math.max(0, current.provedCount - baseline.provedCount) : current.provedCount;
+  const deadCount = same ? Math.max(0, current.deadCount - baseline.deadCount) : current.deadCount;
+  return { noProgressRounds, provedCount, deadCount, attempts: provedCount + deadCount };
+}
+
 /**
  * Last prompt seen per scheduled session, so a re-fire of the SAME stored prompt can be told apart from the
  * owner actually editing the schedule. A scheduled task replays byte-identical text forever; the doom-reset
@@ -6642,8 +6677,8 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
 
     const reviewSection = buildK7BridgeReviewSection(autonomousLoop.initiatives, {
       sinceTs,
-      topK: 3,
-      maxChars: 800,
+      topK: 2,
+      maxChars: 500,
     });
     if (reviewSection) {
       lines.push('');
@@ -6652,8 +6687,8 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
 
     const progressSection = buildAutonomousProgressInjection(autonomousLoop.initiatives, {
       sinceTs,
-      topK: 3,
-      maxChars: 800,
+      topK: 2,
+      maxChars: 400,
     });
     if (progressSection) {
       lines.push('');
@@ -7647,6 +7682,14 @@ export function resolveRecallInput(
     : (activeWorkGoal?.trim() || carriedGoal?.trim() || userMessage);
 }
 
+/** Strong owner hand-off wording: deterministic consent to run the focused exploration autonomously. */
+export function requestsExploreAutoHandoff(text: string): boolean {
+  const s = text.trim();
+  return /(?:这个|这项|该)?(?:工作|任务|证明|探索)?\s*(?:是)?\s*交给你(?:来)?(?:做|推|跑|完成)/.test(s) ||
+    /(?:你来|由你)(?:继续)?(?:推|跑|做|完成)/.test(s) ||
+    /(?:不用我|无需我)(?:再)?(?:回复|确认|继续)[^。！？\n]{0,12}(?:你|自动)/.test(s);
+}
+
 /** Current concrete work target shared by skill recall and the learning judge. */
 function activeWorkGoalForSession(sessionId: string): string | undefined {
   try {
@@ -7902,7 +7945,8 @@ export async function handleChatSend(
   // advances a manual session until "继续" anyway, so "pausing" it is just an honest acknowledgment + the
   // resume word.
   {
-    const ec = classifyExploreControlReply(userMessage);
+    const ec = classifyExploreControlReply(userMessage) ??
+      (requestsExploreAutoHandoff(userMessage) ? { kind: 'auto_advance' as const } : null);
     const openSessions = ec ? memory.reasoning.listActiveSessions(sessionId) : [];
     const autoOn = openSessions.filter((x) => x.autoAdvance);
     const applies = !!ec && openSessions.length > 0;
@@ -8667,6 +8711,13 @@ export async function handleChatSend(
     userMessage,
     activeWorkGoalForSession(sessionId),
     signalBus.carriedExploreGoal,
+  );
+  const recallActiveWork = activeWorkGoalForSession(sessionId);
+  console.log(
+    `[recall-query] session=${safeSessionId(sessionId)} raw=${JSON.stringify(userMessage.slice(0, 80))}` +
+      ` active=${JSON.stringify(recallActiveWork?.slice(0, 120) ?? null)}` +
+      ` carried=${JSON.stringify(signalBus.carriedExploreGoal?.slice(0, 120) ?? null)}` +
+      ` resolved=${JSON.stringify(recallInput.slice(0, 160))}`,
   );
 
   // Ask the aux model which stored skills this fresh turn is about BEFORE buildFreshMessages consumes
@@ -9964,6 +10015,18 @@ async function handleChatSendInner(
       viabilityRecommendStop.delete(sessionId);
       signalBus.recommendStop = false;
       episodeAnchorTs.set(sessionId, Date.now());
+      const reasoning = focusedReasoningSession(sessionId);
+      if (reasoning) {
+        const summary = memory.reasoning.summarizeSession(reasoning.id);
+        reasoningEpisodeBaselines.set(sessionId, {
+          reasoningSessionId: reasoning.id,
+          noProgressRounds: reasoning.noProgressRounds,
+          provedCount: summary?.provedCount ?? 0,
+          deadCount: summary?.deadCount ?? 0,
+        });
+      } else {
+        reasoningEpisodeBaselines.delete(sessionId);
+      }
       console.log(
         `[viability] session=${safeSessionId(sessionId)} doom-reset on user override ("${userMessage.slice(0, 20)}") — fresh episode, accumulated stop signals cleared`,
       );
@@ -13238,10 +13301,6 @@ async function runToolLoop(
           } catch {
             /* same_root_cause is one input of many; ignore lookup failure */
           }
-          // Real attempts this episode = settled nodes (proved + dead_end) in the current session. Gates the
-          // generic stop verdict: a direction with < MIN attempts can't be declared a wall (see viability_gate).
-          const vAttemptsThisEpisode =
-            (vSummary?.provedCount ?? 0) + (vSummary?.deadCount ?? 0);
           const advancedThisTurn = (signalBus.inTurnRecords ?? []).some(
             (r) => r.toolName === 'deep_explore' && r.success,
           );
@@ -13249,23 +13308,31 @@ async function runToolLoop(
             (m) => m.role === 'user' && typeof m.content === 'string',
           ).length;
           const priorPivotStreak = viabilityPivotStreak.get(sessionId) ?? 0;
+          const episodeStats = ownerSession
+            ? episodeRelativeReasoningStats({
+                id: ownerSession.id,
+                noProgressRounds: ownerSession.noProgressRounds,
+                provedCount: vSummary?.provedCount ?? 0,
+                deadCount: vSummary?.deadCount ?? 0,
+              }, reasoningEpisodeBaselines.get(sessionId))
+            : { noProgressRounds: 0, provedCount: 0, deadCount: 0, attempts: 0 };
           const v = computeViability({
             hasActiveSession: !!ownerSession,
             barrierApplies: applied.length > 0,
             barrierTitle: openMatch?.barrier.title ?? applied[0]?.barrier.title,
             barrierCircumvention: applied[0]?.barrier.circumvention,
             goalIsOpenProblem: !!openMatch,
-            noProgressRounds: ownerSession?.noProgressRounds ?? 0,
+            noProgressRounds: episodeStats.noProgressRounds,
             status: vSummary?.status ?? ownerSession?.status ?? null,
-            provedCount: vSummary?.provedCount ?? 0,
+            provedCount: episodeStats.provedCount,
             openFrontierCount: vSummary?.openFrontierCount ?? 0,
             sameRootCause: vSameRoot,
             turnCount: vTurnCount,
             recommendStop: signalBus.recommendStop === true,
             madeProgressThisTurn: advancedThisTurn && (ownerSession?.noProgressRounds ?? 1) === 0,
             repeatedPivotCount: priorPivotStreak,
-            attemptsThisEpisode: vAttemptsThisEpisode,
-            deadEndCount: vSummary?.deadCount ?? 0,
+            attemptsThisEpisode: episodeStats.attempts,
+            deadEndCount: episodeStats.deadCount,
           });
           // Cross-task hijack guard (2026-07-01): when an active reasoning session exists but THIS turn
           // neither engaged it (no deep_explore call) nor pitched to continue it, the pivot directive would

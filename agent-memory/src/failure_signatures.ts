@@ -47,6 +47,12 @@ export function extractFailureSignature(
   const text = (resultText ?? '').toString();
   const lower = text.toLowerCase();
 
+  // A process handle is runtime-local and disappears on restart. This is lifecycle state, not a
+  // repeated task failure; give it a stable signature so root-cause clustering can exclude it.
+  if (tool === 'process' && /\[process-orphaned\]|process handle unavailable in this runtime/.test(lower)) {
+    return `${tool}:orphaned`;
+  }
+
   // 0. Tool-specific taxonomies take precedence over the generic patterns below — otherwise a
   //    pariGp/z3 error whose text happens to contain a 3-digit number / "timeout" / etc. gets
   //    mislabelled (observed: `pariGp:http-500`). Classify by the compute tool first so its errors
@@ -245,6 +251,7 @@ export function groupFailures(
     if (EXCLUDED_FROM_ROOT_CAUSE.has(f.toolName)) continue;
     const sig = extractFailureSignature(f.toolName, f.result);
     if (MECHANISM_REJECTION_RE.test(sig)) continue;
+    if (sig === 'process:orphaned') continue;
     // A compute run launched via the generic shell/process tool normalizes to a
     // pariGp:/leanCheck:/z3Verify: signature (extractFailureSignature §0b). Exclude it from
     // same_root_cause clustering exactly like a native compute-tool call (whose toolName is

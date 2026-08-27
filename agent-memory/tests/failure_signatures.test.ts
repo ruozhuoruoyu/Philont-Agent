@@ -85,6 +85,16 @@ test('sig: EADDRINUSE', () => {
   );
 });
 
+test('runtime-local process orphans are classified but excluded from same-root failure counts', () => {
+  const message = '[process-orphaned] Process handle unavailable in this runtime: old-id';
+  assert.equal(extractFailureSignature('process', message), 'process:orphaned');
+  assert.equal(countSameRootCauseFailures([
+    { toolName: 'process', result: message, timestamp: 1 },
+    { toolName: 'process', result: message, timestamp: 2 },
+    { toolName: 'process', result: message, timestamp: 3 },
+  ] as Action[]), 0);
+});
+
 test('sig: HTTP status 4xx/5xx', () => {
   assert.equal(extractFailureSignature('webFetch', 'HTTP 404 Not Found'), 'webFetch:http-404');
   assert.equal(

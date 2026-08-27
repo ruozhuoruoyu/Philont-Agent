@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Skill } from '@agent/memory';
-import { DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, draftValidationEnabled, selectDraftFixture, validateDraftFixture } from '../src/draft_validation.js';
+import { DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, draftValidationEnabled, excludeFileBackedDrafts, selectDraftFixture, validateDraftFixture } from '../src/draft_validation.js';
 
 function skill(over: Partial<Skill> = {}): Skill {
   return {
@@ -31,6 +31,14 @@ test('draft validation is on by default and retains an explicit kill switch', ()
   assert.equal(draftValidationEnabled({ PHILONT_DRAFT_VALIDATION: 'off' } as NodeJS.ProcessEnv), false);
   assert.equal(draftValidationEnabled({ PHILONT_MECHANICAL_REPAIR: '0' } as NodeJS.ProcessEnv), false,
     'the parent repair kill switch must disable unattended draft repair too');
+});
+
+test('file-backed skills are not draft-validation repair hypotheses', () => {
+  assert.deepEqual(
+    excludeFileBackedDrafts([skill({ name: 'complex-task-protocol' }), skill({ name: 'learned-fix' })], new Set(['complex-task-protocol']))
+      .map((s) => s.name),
+    ['learned-fix'],
+  );
 });
 
 test('draft fixture selection requires real lexical applicability and never-used draft state', () => {
@@ -114,6 +122,18 @@ test('declined draft rewrite persists a cooldown without changing skill usage', 
   });
   assert.equal(out.transition, 'not-attempted');
   assert.ok(store.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, fixture.key));
+  assert.ok(store.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, fixture.cooldownKey));
+});
+
+test('draft cooldown is stable across historical inputs of the same failure class', () => {
+  const first = selectDraftFixture({ drafts: [skill()], failures: [failure], eligibleTools: new Set(['leanCheck']), signatureOf, attemptFor: () => null })!;
+  const secondFailure = { ...failure, input: { code: 'different bad input' }, recordedAt: 20 };
+  const picked = selectDraftFixture({
+    drafts: [skill()], failures: [secondFailure], eligibleTools: new Set(['leanCheck']), signatureOf,
+    attemptFor: (key) => key === first.cooldownKey ? { attempts: 1, lastAttemptAt: 100, permanent: false } : null,
+    now: 101,
+  });
+  assert.equal(picked, null, 'changing fixture input must not bypass the skill+signature cooldown');
 });
 
 test('mechanical repair kill switch prevents the unattended tool run and skill outcome', async () => {
