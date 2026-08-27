@@ -395,7 +395,22 @@ const EXPLORE_ASK_TTL_MS = 10 * 60_000;
  */
 const carriedIntent = new Map<
   string,
-  { decision: IntentDecision | null; selfReferentialMeta: boolean; goal: string; ts: number }
+  {
+    decision: IntentDecision | null;
+    selfReferentialMeta: boolean;
+    goal: string;
+    ts: number;
+    /**
+     * The owner already said yes to entering the engine on THIS goal.
+     *
+     * `decision` and `goal` survive an auth card; this did not, and it is the half force-start reads.
+     * Prod 2026-08-27: the ask card was answered "1", the turn reached for a file tool, ended
+     * auth_pending before the force backstop could run, and the resumed turn rebuilt a signal bus with
+     * no memory of the yes — so `depthWanted` was false and no round ever ran. Twice in one session.
+     * Cleared by the next fresh turn, which is a new question and inherits no consent.
+     */
+    askApproved?: boolean;
+  }
 >();
 const INTENT_CARRY_TTL_MS = 30 * 60_000;
 import {
@@ -8315,6 +8330,7 @@ export async function handleChatSend(
       selfReferentialMeta: carried?.selfReferentialMeta ?? false,
       goal: pendingQ.goal,
       ts: Date.now(),
+      askApproved: carried?.askApproved,
     });
   }
   if (pending) {
@@ -8326,10 +8342,14 @@ export async function handleChatSend(
       selfReferentialMeta: carried?.selfReferentialMeta ?? false,
       goal: pendingGoal,
       ts: Date.now(),
+      askApproved: carried?.askApproved,
     });
     intentDecision = carried?.decision ?? null;
     signalBus.intentDecision = carried?.decision ?? null;
     signalBus.selfReferentialMeta = carried?.selfReferentialMeta ?? false;
+    // The yes travels with the route. Without it the resumed turn — the one that actually does the
+    // work — cannot force-start, and the round the owner approved silently never happens.
+    if (carried?.askApproved) signalBus.exploreAskApproved = true;
     if (carried?.decision) {
       console.log(
         `[intent-router] session=${safeSessionId(sessionId)} auth-resume: carried route=${carried.decision.route} conf=${carried.decision.confidence} (router skipped on resume)`,
@@ -8408,6 +8428,9 @@ export async function handleChatSend(
       selfReferentialMeta: !!signalBus.selfReferentialMeta,
       goal: messageIsSelfContainedGoal(userMessage) ? userMessage : (priorCarried?.goal ?? userMessage),
       ts: Date.now(),
+      // Set on the turn the ask was granted (that resolution runs earlier in this same turn), so a
+      // later auth resume can still see it. A fresh turn with no grant writes false and clears it.
+      askApproved: !!signalBus.exploreAskApproved,
     });
     if (intentDecision) {
       console.log(`[intent-router] session=${safeSessionId(sessionId)} route=${intentDecision.route}${intentDecision.domain ? `:${intentDecision.domain}` : ''} conf=${intentDecision.confidence}`);

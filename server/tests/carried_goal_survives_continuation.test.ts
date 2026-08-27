@@ -92,3 +92,43 @@ test('a resume that resets the clock keeps the task alive indefinitely while it 
   }
   assert.equal(resolveJudgeGoal(undefined, 'ok', true, carry.goal), REAL_GOAL);
 });
+
+/**
+ * The other half of the same carry, found in prod 2026-08-27.
+ *
+ * The ask card was answered "1" (= 进一轮). The turn reached for a file tool, ended `auth_pending`
+ * before the force backstop could run, and the resumed turn built a fresh signal bus with no memory of
+ * the yes — so force-start's `depthWanted` was false and no deep_explore round ever ran. Twice in one
+ * session: 11:36 and 11:51, each APPROVED, each followed by zero deep_explore calls.
+ *
+ * `decision` and `goal` already survive the card. The approval is the half force-start actually reads.
+ */
+const carryApproval = (
+  kind: 'fresh' | 'auth-resume',
+  approvedThisTurn: boolean,
+  prior?: boolean,
+): boolean | undefined => (kind === 'auth-resume' ? prior : approvedThisTurn);
+
+test('an ask-tier yes survives the authorization card that interrupts the turn it was given on', () => {
+  // Turn 1: "1" grants the ask, then the turn hits an auth card.
+  const afterGrant = carryApproval('fresh', true);
+  assert.equal(afterGrant, true);
+  // Turn 2: the bare "OK" resumes; the router is skipped, so nothing re-derives the yes.
+  assert.equal(carryApproval('auth-resume', false, afterGrant), true);
+});
+
+test('a later fresh turn inherits no consent — a new question is a new question', () => {
+  assert.equal(carryApproval('fresh', false, true), false);
+});
+
+/**
+ * What `messageIsSelfContainedGoal` actually is: a character count (>= 12). Measured against the same
+ * session, it is why one continuation inherited the goal and the next did not — nothing about either
+ * message's reference to prior context is read.
+ */
+test('the self-contained test is a length proxy, and splits continuations by length alone', () => {
+  assert.equal(messageIsSelfContainedGoal('可以继续推进吗？'), false);        // 8 chars → inherits
+  assert.equal(messageIsSelfContainedGoal('好，再换一个思路来推'), false);     // 10 chars → inherits
+  assert.equal(messageIsSelfContainedGoal('你能不能找个新思路继续推？'), true); // 13 chars → kept as-is
+  assert.equal(messageIsSelfContainedGoal('你说的这个新的视角有意义吗？值得推吗？'), true);
+});
