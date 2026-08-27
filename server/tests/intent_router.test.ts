@@ -15,6 +15,7 @@ import {
   deepExploreForceStartEnabled,
   shouldForceDeepExploreStart,
   shouldForceRoutedDeepExploreContinue,
+  shouldPreemptWithRoutedDeepExplore,
   shouldForceDeepExploreAutoOn,
   buildForceStartInput,
   messageIsSelfContainedGoal,
@@ -113,6 +114,21 @@ test('contextual deep-explore route forces a live session to continue, but statu
     ...base,
     decision: { ...base.decision, selfContained: true },
   }), false, 'a standalone new goal must not be attached to the old tree');
+});
+
+test('contextual continuation preempts sideways first tools, but not a proposed reasoning call', () => {
+  const base = {
+    decision: { route: 'deep_explore', domain: 'formal', confidence: 0.9, reason: 'resume LRC', selfContained: false } as IntentDecision,
+    hasActiveSession: true,
+    advanceRanThisTurn: false,
+    alreadyForced: false,
+    selfReferentialMeta: false,
+    userAsksStatus: false,
+    proposedReasoningAdvance: false,
+  };
+  assert.equal(shouldPreemptWithRoutedDeepExplore(base), true, 'use_skill/shell must not reach a stale plan first');
+  assert.equal(shouldPreemptWithRoutedDeepExplore({ ...base, proposedReasoningAdvance: true }), false);
+  assert.equal(shouldPreemptWithRoutedDeepExplore({ ...base, hasActiveSession: false }), false);
 });
 
 test('continuous route arms auto advance only after a real round on a live session', () => {

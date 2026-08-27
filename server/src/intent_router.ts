@@ -154,6 +154,19 @@ export function shouldForceRoutedDeepExploreContinue(opts: {
     !opts.userAsksStatus;
 }
 
+/** Run the routed reasoning call before the model's first batch of unrelated tools reaches other gates. */
+export function shouldPreemptWithRoutedDeepExplore(opts: {
+  decision: IntentDecision | null;
+  hasActiveSession: boolean;
+  advanceRanThisTurn: boolean;
+  alreadyForced: boolean;
+  selfReferentialMeta: boolean;
+  userAsksStatus: boolean;
+  proposedReasoningAdvance: boolean;
+}): boolean {
+  return !opts.proposedReasoningAdvance && shouldForceRoutedDeepExploreContinue(opts);
+}
+
 /** Continuous is a semantic router output; arm background work only after a real round proved the binding. */
 export function shouldForceDeepExploreAutoOn(opts: {
   decision: IntentDecision | null;

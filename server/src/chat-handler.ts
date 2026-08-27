@@ -207,6 +207,7 @@ import {
   deepExploreForceStartEnabled,
   shouldForceDeepExploreStart,
   shouldForceRoutedDeepExploreContinue,
+  shouldPreemptWithRoutedDeepExplore,
   shouldForceDeepExploreAutoOn,
   buildForceStartInput,
   messageIsSelfContainedGoal,
@@ -8504,6 +8505,9 @@ export async function handleChatSend(
         !signalBus.exploreAskApproved &&
         !signalBus.exploreAskDeclined &&
         messageIsSelfContainedGoal(userMessage) &&
+        // A contextual continuation of an owned tree is already bound. Its age is irrelevant: asking
+        // permission to create a new dive is both redundant and harmful because it loses the resume path.
+        !(intentDecision.selfContained === false && hasOwnedActiveExploreSession(sessionId)) &&
         !hasRecentlyActiveExploreSession(sessionId);
       if (askTier) {
         const askDecisionId = `d${Math.random().toString(36).slice(2, 6)}`;
@@ -10612,6 +10616,37 @@ async function handleChatSendInner(
       return emitFinalText({ sessionId, text: firstTextContent, messages, audit, signalBus, onDelta });
     }
 
+    // A contextual deep-explore continuation is an execution route, not prompt advice. If the model's
+    // first response reaches sideways for use_skill/shell/etc., run the bound reasoning tree BEFORE those
+    // calls can be captured by a stale completed plan. The terminal-text force remains a backstop, but the
+    // owner's explicit continuation no longer waits for the model to eventually stop calling tools.
+    const proposedReasoningAdvance = response.calls.some(
+      (call) => isDeepExploreAdvanceRecord({ toolName: call.name, toolInput: call.input }),
+    );
+    if (shouldPreemptWithRoutedDeepExplore({
+      decision: signalBus.intentDecision ?? null,
+      hasActiveSession: hasOwnedActiveExploreSession(sessionId),
+      advanceRanThisTurn: (signalBus.inTurnRecords ?? []).some(isDeepExploreAdvanceRecord),
+      alreadyForced: !!signalBus.forcedDeepExploreContinue,
+      selfReferentialMeta: !!signalBus.selfReferentialMeta,
+      userAsksStatus: !!signalBus.userAsksExploreStatus,
+      proposedReasoningAdvance,
+    })) {
+      const forced = await decideForcedDeepExploreCall(sessionId, '', signalBus, turnStartTs);
+      if (forced) {
+        messages.push({
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: forced.id, name: forced.name, input: forced.input }],
+        });
+        return await runToolLoop(
+          sessionId, messages, grants, audit,
+          [forced], [], 0,
+          onDelta, onAuthRequest,
+          signalBus, onStatus, onTrace, statusLang,
+        );
+      }
+    }
+
     // 2026-05-07 #1 cont: tool_use.input in the assistantMessage returned by the LLM provider
     // is occasionally a string (multiple JSONs concatenated); pushing it directly into messages causes the next LLM call
     // to hit 400 Improperly formed request. Sanitize before pushing.
@@ -10987,6 +11022,20 @@ function hasRecentlyActiveExploreSession(sessionId: string): boolean {
 }
 
 /**
+ * Any resumable tree owned by this conversation, regardless of age. Recency answers "should a new,
+ * standalone request attach to an old tree?"; it must not answer "does the tree explicitly named by a
+ * continuation request exist?". Production 2026-08-27: the LRC tree was older than 20 minutes, so
+ * "继续推进 LRC" was asked to authorize a new dive and then fell into a completed plan instead of resuming.
+ */
+function hasOwnedActiveExploreSession(sessionId: string): boolean {
+  try {
+    return memory.reasoning.listActiveSessions(sessionId).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Derive a force-start goal for a SHORT context-dependent message ("重做深度调研" / "深入点") that refers back
  * to an earlier topic. messageIsSelfContainedGoal is false for these, so without this the force-start would
  * skip and the redo falls through to flat search (observed). A cheap aux call reads the recent transcript
@@ -11137,7 +11186,7 @@ async function decideForcedDeepExploreCall(
 ): Promise<{ id: string; name: string; input: Record<string, unknown> } | null> {
   const records = signalBus.inTurnRecords ?? [];
   const deepExploreRanThisTurn = records.some(isDeepExploreAdvanceRecord);
-  const activeExplore = hasRecentlyActiveExploreSession(sessionId);
+  const activeExplore = hasOwnedActiveExploreSession(sessionId);
   const forceMessage = signalBus.carriedExploreGoal ?? signalBus.userMessage ?? '';
   const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
 
