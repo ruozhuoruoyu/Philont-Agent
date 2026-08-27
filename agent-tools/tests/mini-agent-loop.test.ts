@@ -439,3 +439,30 @@ test('no-progress: the authoring-failure exemption is bounded, not unlimited', a
   assert.ok(r.toolCallsSpent < 12, `exemption must lapse (spent ${r.toolCallsSpent} of 12)`);
   assert.ok(r.toolCallsSpent >= 4, `and must not lapse before the repair budget (spent ${r.toolCallsSpent})`);
 });
+
+test('no-progress: exempt authoring failures break an earlier empty-lookup streak', async () => {
+  // Empty lookups separated by repairable authoring failures are not consecutive. Freezing the old
+  // count across the exempt rounds makes the final lookup stop the loop one round too early.
+  let round = 0;
+  const llm: MiniLoopLLMClient = {
+    async send() {
+      round++;
+      if (round === 1 || round === 4 || round === 5) {
+        return toolCallResponse([{ id: `lookup-${round}`, name: 'searchNotes', input: {} }]);
+      }
+      if (round === 6) return textResponse('continued after two genuinely consecutive empty lookups');
+      return toolCallResponse([{ id: `gp-${round}`, name: 'pariGp', input: {} }]);
+    },
+  };
+  const r = await runMiniAgentLoop({
+    systemPrompt: 'sys',
+    userMessage: 'test',
+    llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: async (name: string) => name === 'pariGp'
+      ? { ok: false, output: '', error: `distinct syntax error ${round}` }
+      : { ok: true, output: 'no results' },
+    maxIters: 7,
+  });
+  assert.equal(r.toolCallsSpent, 5, 'the first post-repair lookup starts a fresh no-progress streak');
+});

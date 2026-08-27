@@ -449,6 +449,7 @@ export async function runMiniAgentLoop(
     } else if (roundAllToolsFailed) {
       failureOnlyStreak += 1;
       if (failureOnlyStreak > REPEATED_FAILURE_LIMIT) unproductiveRounds += 1;
+      else unproductiveRounds = 0;
     } else {
       failureOnlyStreak = 0;
       unproductiveRounds += 1;
