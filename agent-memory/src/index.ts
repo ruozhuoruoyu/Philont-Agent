@@ -600,7 +600,7 @@ export type {
 } from './user_pattern_observer.js';
 
 export interface OpenMemoryDbOptions {
-  /** Pass BackupConfig to enable periodic local backups (default 6h × 28 copies) */
+  /** Pass BackupConfig to enable periodic local backups (default 6h × 4 copies) */
   backup?: BackupConfig;
 }
 

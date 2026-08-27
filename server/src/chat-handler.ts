@@ -691,7 +691,7 @@ const MEMORY_DB_PATH = (() => {
 export const memory = openMemoryDb(MEMORY_DB_PATH, {
   backup: {
     intervalMs: Number(process.env.MEMORY_BACKUP_INTERVAL_MS) || 6 * 60 * 60 * 1000,
-    retain: Number(process.env.MEMORY_BACKUP_RETAIN) || 28,
+    retain: Number(process.env.MEMORY_BACKUP_RETAIN) || 4,
     // dir defaults to <dbDir>/backups
   },
 });
