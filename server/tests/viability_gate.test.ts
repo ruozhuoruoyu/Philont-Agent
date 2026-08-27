@@ -12,6 +12,8 @@ import {
   CONTINUATION_PITCH_RE,
   buildViabilityDirective,
   decideTurnAnchors,
+  reasoningStateCarriesDoom,
+  isDeepExploreAdvanceRecord,
   type ViabilityInput,
 } from '../src/viability_gate.js';
 
@@ -264,6 +266,16 @@ test('redirect: substantive new instruction after doom → doomReset + anchor (n
   assert.equal(d.commit, false);
 });
 
+test('production redirect after restart: "再找新的思路，继续推" opens a fresh episode when tree doom persisted', () => {
+  const d = decideTurnAnchors({
+    lastAssistantText: '这个方向已经停滞。',
+    userMessage: '再找新的思路，继续推',
+    hadDoom: reasoningStateCarriesDoom({ status: 'stuck', noProgressRounds: 7, deadEndCount: 7 }),
+  });
+  assert.equal(d.doomReset, true);
+  assert.equal(d.anchor, true);
+});
+
 test('bare "ok" after doom is too ambiguous → no reset, no anchor', () => {
   const d = decideTurnAnchors({ lastAssistantText: '建议停在这里。', userMessage: 'ok', hadDoom: true });
   assert.equal(d.doomReset, false);
@@ -359,4 +371,21 @@ test('viabilityActuatorRelevant: no active session (session-less doom-grind) →
     viabilityActuatorRelevant({ hasActiveSession: false, turnEngagedReasoning: false, replyPitchesContinuation: false }),
     true,
   );
+});
+
+test('persisted reasoning doom survives restart, while a clean tree does not manufacture it', () => {
+  assert.equal(reasoningStateCarriesDoom({ status: 'stuck' }), true);
+  assert.equal(reasoningStateCarriesDoom({ status: 'active', noProgressRounds: 3 }), true);
+  assert.equal(reasoningStateCarriesDoom({ status: 'active', deadEndCount: 4 }), true);
+  assert.equal(reasoningStateCarriesDoom({ status: 'active', noProgressRounds: 0, deadEndCount: 0 }), false);
+});
+
+test('only advancing deep-explore actions engage reasoning for viability', () => {
+  for (const action of ['start', 'continue', 'discover']) {
+    assert.equal(isDeepExploreAdvanceRecord({ toolName: 'deep_explore', toolInput: { action } }), true, action);
+  }
+  for (const action of ['list', 'status', 'finalize', 'auto_on']) {
+    assert.equal(isDeepExploreAdvanceRecord({ toolName: 'deep_explore', toolInput: { action } }), false, action);
+  }
+  assert.equal(isDeepExploreAdvanceRecord({ toolName: 'shell', toolInput: { action: 'continue' } }), false);
 });

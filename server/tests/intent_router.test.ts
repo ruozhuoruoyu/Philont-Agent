@@ -14,6 +14,8 @@ import {
   buildDeepExploreNudge,
   deepExploreForceStartEnabled,
   shouldForceDeepExploreStart,
+  shouldForceRoutedDeepExploreContinue,
+  shouldForceDeepExploreAutoOn,
   buildForceStartInput,
   messageIsSelfContainedGoal,
   type IntentDecision,
@@ -88,9 +90,47 @@ test('parseIntentDecision: valid / embedded-in-prose / enum-guard / junk', () =>
 });
 
 test('parseIntentDecision preserves the router self-contained judgment', () => {
-  const r = parseIntentDecision('{"route":"deep_explore","domain":"formal","confidence":0.9,"reason":"continues prior proof","selfContained":false}');
+  const r = parseIntentDecision('{"route":"deep_explore","domain":"formal","confidence":0.9,"reason":"continues prior proof","selfContained":false,"continuous":true}');
   assert.equal(r?.selfContained, false);
+  assert.equal(r?.continuous, true);
   assert.match(buildIntentPrompt('你说的这个新视角值得推吗？'), /selfContained/);
+  assert.match(buildIntentPrompt('继续推'), /continuous/);
+});
+
+test('contextual deep-explore route forces a live session to continue, but status/new goals do not', () => {
+  const base = {
+    decision: { route: 'deep_explore', domain: 'discover', confidence: 0.8, reason: 'continue', selfContained: false } as IntentDecision,
+    hasActiveSession: true,
+    advanceRanThisTurn: false,
+    alreadyForced: false,
+    selfReferentialMeta: false,
+    userAsksStatus: false,
+  };
+  assert.equal(shouldForceRoutedDeepExploreContinue(base), true);
+  assert.equal(shouldForceRoutedDeepExploreContinue({ ...base, userAsksStatus: true }), false);
+  assert.equal(shouldForceRoutedDeepExploreContinue({ ...base, advanceRanThisTurn: true }), false);
+  assert.equal(shouldForceRoutedDeepExploreContinue({
+    ...base,
+    decision: { ...base.decision, selfContained: true },
+  }), false, 'a standalone new goal must not be attached to the old tree');
+});
+
+test('continuous route arms auto advance only after a real round on a live session', () => {
+  const base = {
+    decision: { route: 'deep_explore', confidence: 0.8, reason: 'keep pushing', continuous: true } as IntentDecision,
+    advanceRanThisTurn: true,
+    hasActiveSession: true,
+    autoOnRanThisTurn: false,
+    selfReferentialMeta: false,
+    userAsksStatus: false,
+  };
+  assert.equal(shouldForceDeepExploreAutoOn(base), true);
+  assert.equal(shouldForceDeepExploreAutoOn({ ...base, advanceRanThisTurn: false }), false);
+  assert.equal(shouldForceDeepExploreAutoOn({ ...base, autoOnRanThisTurn: true }), false);
+  assert.equal(shouldForceDeepExploreAutoOn({
+    ...base,
+    decision: { ...base.decision, continuous: false },
+  }), false);
 });
 
 test('classifyIntent: uses injected caller; routes a research turn to deep_explore', async () => {

@@ -206,6 +206,8 @@ import {
   classifyExploreAskReply,
   deepExploreForceStartEnabled,
   shouldForceDeepExploreStart,
+  shouldForceRoutedDeepExploreContinue,
+  shouldForceDeepExploreAutoOn,
   buildForceStartInput,
   messageIsSelfContainedGoal,
   deepExploreRouteTier,
@@ -439,6 +441,8 @@ import { safeSessionId } from './safe_session_id.js';
 import {
   computeViability,
   viabilityActuatorRelevant,
+  reasoningStateCarriesDoom,
+  isDeepExploreAdvanceRecord,
   buildViabilityDirective,
   isStopVerdict,
   CONTINUATION_PITCH_RE,
@@ -10089,7 +10093,28 @@ async function handleChatSendInner(
   // exempt: that confirms the stop. Placed before recommend_stop is consumed so the clear actually takes hold.
   let turnAnchors = { doomReset: false, commit: false, anchor: false };
   try {
-    const hadDoom = (viabilityPivotStreak.get(sessionId) ?? 0) >= 1 || viabilityRecommendStop.has(sessionId);
+    const focusedBeforeReset = focusedReasoningSession(sessionId);
+    const focusedSummary = focusedBeforeReset
+      ? memory.reasoning.summarizeSession(focusedBeforeReset.id)
+      : null;
+    const persistedEpisodeStats = focusedBeforeReset
+      ? episodeRelativeReasoningStats({
+          id: focusedBeforeReset.id,
+          noProgressRounds: focusedBeforeReset.noProgressRounds,
+          provedCount: focusedSummary?.provedCount ?? 0,
+          deadCount: focusedSummary?.deadCount ?? 0,
+        }, loadReasoningEpisode(sessionId))
+      : null;
+    // The two Maps are only turn-process accelerators. After a restart, the tree + persisted episode are
+    // still the ground truth that a stop had accumulated; otherwise an explicit "new approach, continue"
+    // cannot open a fresh episode and is immediately killed by the old dead/no-progress totals.
+    const hadDoom = (viabilityPivotStreak.get(sessionId) ?? 0) >= 1 ||
+      viabilityRecommendStop.has(sessionId) ||
+      reasoningStateCarriesDoom({
+        status: focusedSummary?.status ?? focusedBeforeReset?.status ?? null,
+        noProgressRounds: persistedEpisodeStats?.noProgressRounds ?? 0,
+        deadEndCount: persistedEpisodeStats?.deadCount ?? 0,
+      });
     turnAnchors = decideTurnAnchors({
       lastAssistantText: lastAssistantText(messages),
       userMessage,
@@ -11110,7 +11135,50 @@ async function decideForcedDeepExploreCall(
   signalBus: TurnSignalBus,
   idSeed: number,
 ): Promise<{ id: string; name: string; input: Record<string, unknown> } | null> {
-  const deepExploreRanThisTurn = (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore');
+  const records = signalBus.inTurnRecords ?? [];
+  const deepExploreRanThisTurn = records.some(isDeepExploreAdvanceRecord);
+  const activeExplore = hasRecentlyActiveExploreSession(sessionId);
+  const forceMessage = signalBus.carriedExploreGoal ?? signalBus.userMessage ?? '';
+  const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
+
+  // A live binding plus a contextual deep-explore route is an instruction to advance THAT tree. The ask
+  // tier is intentionally skipped for an active session, so without this branch the route had no actuator:
+  // prod called action=list, did flat Python work, then let stale viability stop the proof without one round.
+  if (
+    deepExploreForceAdvanceEnabled() &&
+    shouldForceRoutedDeepExploreContinue({
+      decision: signalBus.intentDecision ?? null,
+      hasActiveSession: activeExplore,
+      advanceRanThisTurn: deepExploreRanThisTurn,
+      alreadyForced: !!signalBus.forcedDeepExploreContinue,
+      selfReferentialMeta: metaQuestion,
+      userAsksStatus: !!signalBus.userAsksExploreStatus,
+    })
+  ) {
+    signalBus.forcedDeepExploreContinue = true;
+    console.warn(
+      `[force-continue] session=${safeSessionId(sessionId)} contextual deep_explore route + live binding — forcing action=continue`,
+    );
+    return { id: `forced-routed-de-continue-${idSeed}`, name: 'deep_explore', input: { action: 'continue' } };
+  }
+
+  // "Keep pushing" is a hand-off, not a request for one expensive round followed by another prompt.
+  // Arm the existing background ticker after this turn has really advanced the tree. auto_on is management,
+  // so it does not violate the one-advance-per-turn invariant.
+  const autoOnRan = records.some(
+    (r) => r.toolName === 'deep_explore' && String(r.toolInput?.action ?? '') === 'auto_on' && r.success,
+  );
+  if (shouldForceDeepExploreAutoOn({
+    decision: signalBus.intentDecision ?? null,
+    advanceRanThisTurn: deepExploreRanThisTurn,
+    hasActiveSession: activeExplore,
+    autoOnRanThisTurn: autoOnRan,
+    selfReferentialMeta: metaQuestion,
+    userAsksStatus: !!signalBus.userAsksExploreStatus,
+  })) {
+    console.warn(`[auto-advance] session=${safeSessionId(sessionId)} continuous explore request — forcing action=auto_on`);
+    return { id: `forced-de-auto-on-${idSeed}`, name: 'deep_explore', input: { action: 'auto_on' } };
+  }
 
   // Force-CONTINUE: the model recited deep_explore round results with ZERO deep_explore calls this turn.
   if (
@@ -11133,9 +11201,7 @@ async function decideForcedDeepExploreCall(
 
   // Force-START. On a pending-auth resume the live userMessage is the bare "ok" that answered the auth
   // card, so goal / depth-signal / meta all run against the ORIGINAL message carried across the resume.
-  const forceMessage = signalBus.carriedExploreGoal ?? signalBus.userMessage ?? '';
   const routeTier = deepExploreRouteTier(signalBus.intentDecision ?? null);
-  const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
   // Depth is ESTABLISHED, never inferred. The owner's yes (ask tier) is the only entry — the keyword
   // bypass (userSignaledDepth) is deleted: it read "编排系统" as a depth request and force-started a
   // session nobody asked for, and it missed "花点时间好好琢磨" entirely. 'force' tier is unreachable
@@ -12381,7 +12447,7 @@ async function runToolLoop(
       toolName: call.name,
       success: result.success,
       resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
-      toolInput: call.name === 'http' ? actualInput : undefined,
+      toolInput: call.name === 'http' || call.name === 'deep_explore' ? actualInput : undefined,
     });
     rememberFormalVerificationEvidence(sessionId, call.name, actualInput, result);
     // WS5: a successful use_skill makes that skill the turn's active linked skill, so the
@@ -13446,7 +13512,7 @@ async function runToolLoop(
           // session-less doom-grind, whose existing behavior is preserved via !ownerSession).
           const vRelevantToThisTurn = viabilityActuatorRelevant({
             hasActiveSession: !!ownerSession,
-            turnEngagedReasoning: (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore'),
+            turnEngagedReasoning: (signalBus.inTurnRecords ?? []).some(isDeepExploreAdvanceRecord),
             replyPitchesContinuation: CONTINUATION_PITCH_RE.test(response.content),
           });
           if (v.verdict !== 'continue' && !vRelevantToThisTurn) {
@@ -14075,7 +14141,7 @@ async function runToolLoop(
         toolName: call.name,
         success: result.success,
         resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
-        toolInput: call.name === 'http' ? actualInput2 : undefined,
+        toolInput: call.name === 'http' || call.name === 'deep_explore' ? actualInput2 : undefined,
       });
       rememberFormalVerificationEvidence(sessionId, call.name, actualInput2, result);
       if (result.success && mechanicalRetryTool === call.name) {

@@ -36,6 +36,8 @@ export interface IntentDecision {
   reason: string;
   /** Whether the message names a standalone goal rather than referring to prior work/context. */
   selfContained?: boolean;
+  /** Whether the owner wants the exploration to keep advancing without another continue message. */
+  continuous?: boolean;
 }
 
 export function intentRouterEnabled(): boolean {
@@ -97,8 +99,9 @@ export function buildIntentPrompt(userMessage: string): string {
     'unknown and external (a production incident, a system nobody can just read). A bug report about a ' +
     'file we just wrote is a work item, not an investigation.\n\n' +
     'Respond with ONLY a JSON object, no prose:\n' +
-    '{"route":"direct|deep_explore|plan","domain":"formal|deliberate|discover","confidence":0.0-1.0,"reason":"<short>","selfContained":true|false}\n' +
+    '{"route":"direct|deep_explore|plan","domain":"formal|deliberate|discover","confidence":0.0-1.0,"reason":"<short>","selfContained":true|false,"continuous":true|false}\n' +
     'Set selfContained=false when the message depends on prior context (for example: this/new angle/continue/change direction).\n' +
+    'Set continuous=true when the owner asks the exploration to keep pushing/running, rather than assess or advance only once.\n' +
     'Omit "domain" unless route is deep_explore.\n\n' +
     'User message:\n"""\n' +
     userMessage.slice(0, 2000) +
@@ -129,7 +132,44 @@ export function parseIntentDecision(raw: string): IntentDecision | null {
   const confidence = Math.max(0, Math.min(1, confRaw));
   const reason = typeof obj.reason === 'string' ? obj.reason.slice(0, 200) : '';
   const selfContained = typeof obj.selfContained === 'boolean' ? obj.selfContained : undefined;
-  return { route, domain, confidence, reason, selfContained };
+  const continuous = typeof obj.continuous === 'boolean' ? obj.continuous : undefined;
+  return { route, domain, confidence, reason, selfContained, continuous };
+}
+
+/** A contextual deep-explore request with a live session means continue it, rather than answer flat. */
+export function shouldForceRoutedDeepExploreContinue(opts: {
+  decision: IntentDecision | null;
+  hasActiveSession: boolean;
+  advanceRanThisTurn: boolean;
+  alreadyForced: boolean;
+  selfReferentialMeta: boolean;
+  userAsksStatus: boolean;
+}): boolean {
+  return opts.decision?.route === 'deep_explore' &&
+    opts.decision.selfContained === false &&
+    opts.hasActiveSession &&
+    !opts.advanceRanThisTurn &&
+    !opts.alreadyForced &&
+    !opts.selfReferentialMeta &&
+    !opts.userAsksStatus;
+}
+
+/** Continuous is a semantic router output; arm background work only after a real round proved the binding. */
+export function shouldForceDeepExploreAutoOn(opts: {
+  decision: IntentDecision | null;
+  advanceRanThisTurn: boolean;
+  hasActiveSession: boolean;
+  autoOnRanThisTurn: boolean;
+  selfReferentialMeta: boolean;
+  userAsksStatus: boolean;
+}): boolean {
+  return opts.decision?.route === 'deep_explore' &&
+    opts.decision.continuous === true &&
+    opts.advanceRanThisTurn &&
+    opts.hasActiveSession &&
+    !opts.autoOnRanThisTurn &&
+    !opts.selfReferentialMeta &&
+    !opts.userAsksStatus;
 }
 
 // ── Deterministic cleanup/cancel override (mechanism, not aux) ─────────────────────────────────────

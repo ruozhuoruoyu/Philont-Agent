@@ -228,6 +228,27 @@ export function viabilityActuatorRelevant(input: {
   return !input.hasActiveSession || input.turnEngagedReasoning || input.replyPitchesContinuation;
 }
 
+/** Tree-backed stop evidence that survives a process restart. */
+export function reasoningStateCarriesDoom(input: {
+  status?: string | null;
+  noProgressRounds?: number;
+  deadEndCount?: number;
+}): boolean {
+  return input.status === 'stuck' ||
+    (input.noProgressRounds ?? 0) >= STUCK_ROUNDS ||
+    (input.deadEndCount ?? 0) >= DEAD_END_INTRACTABLE_THRESHOLD;
+}
+
+/** list/status only observe a tree; they must not make viability think this turn advanced it. */
+export function isDeepExploreAdvanceRecord(record: {
+  toolName: string;
+  toolInput?: Record<string, unknown>;
+}): boolean {
+  if (record.toolName !== 'deep_explore') return false;
+  const action = String(record.toolInput?.action ?? '');
+  return action === 'start' || action === 'continue' || action === 'discover';
+}
+
 /**
  * Pure verdict computation. Weighted multi-signal accumulation (not a single trip-wire) so a single
  * noisy sensor never stops a task: stop needs the score from ≥2 independent sensor families. Any genuine
