@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test dist/tests/*.test.js"
+    "test": "tsc && node --test dist/tests/*.test.js"
   },
   "dependencies": {
     "@agent/policy": "file:../agent-policy"

@@ -386,3 +386,32 @@ test('单轮多 tool_use:全部跑完再下一轮', async () => {
   assert.equal(r.itersUsed, 2);
   assert.deepEqual(calls, ['/a', '/b']);
 });
+
+test('no-progress: one incidental failure does not buy unlimited empty-lookup rounds', async () => {
+  // The exemption above is for rounds that are NOTHING BUT mechanical failure. A round that also
+  // ran a successful-but-empty lookup is the spin this counter exists to stop, error or no error.
+  let round = 0;
+  const llm: MiniLoopLLMClient = {
+    // Never volunteers a final answer: the no-progress stop is the only exit before maxIters.
+    async send() {
+      round++;
+      return toolCallResponse([
+        { id: `ok-${round}`, name: 'searchNotes', input: {} },
+        { id: `bad-${round}`, name: 'pariGp', input: {} },
+      ]);
+    },
+  };
+  const r = await runMiniAgentLoop({
+    systemPrompt: 'sys',
+    userMessage: 'test',
+    llm,
+    toolDefs: NO_TOOLS,
+    // The lookup succeeds but returns nothing usable; the compute call fails with a fresh error.
+    toolRunner: async (name: string) => name === 'pariGp'
+      ? { ok: false, output: '', error: `syntax error ${round}` }
+      : { ok: true, output: 'no results' },
+    maxIters: 6,
+  });
+  // Default NO_PROGRESS_ROUNDS=2 → two rounds of 2 calls, not the full 6 rounds.
+  assert.ok(r.toolCallsSpent <= 4, `should stop early on repeated empty rounds, spent ${r.toolCallsSpent}`);
+});

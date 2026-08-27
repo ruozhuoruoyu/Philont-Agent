@@ -345,7 +345,8 @@ export async function runMiniAgentLoop(
 
     const toolResultBlocks: MiniLoopContentBlock[] = [];
     let roundProductive = false;
-    let roundHadToolFailure = false;
+    let roundToolCalls = 0;
+    let roundToolFailures = 0;
     for (const call of response.calls) {
       // Stop launching new tool runs once the deadline has fired; the tree is already
       // persisted incrementally, so returning 'aborted' here is resumable.
@@ -377,6 +378,7 @@ export async function runMiniAgentLoop(
       }
 
       toolCallsSpent += 1;
+      roundToolCalls++;
       if (isProductiveResult(runResult.ok, runResult.output)) roundProductive = true;
       toolCallHistory.push({
         name: call.name,
@@ -385,7 +387,7 @@ export async function runMiniAgentLoop(
         outputPreview: previewText(runResult.ok ? runResult.output : runResult.error ?? ''),
       });
       if (!runResult.ok) {
-        roundHadToolFailure = true;
+        roundToolFailures++;
         const normalized = (runResult.error ?? runResult.output ?? 'unknown')
           .toLowerCase()
           // Preserve short semantic numbers such as HTTP 404/503 and exit codes;
@@ -428,8 +430,13 @@ export async function runMiniAgentLoop(
     // that the research question yielded nothing. In particular, two syntax errors must not consume
     // a 40-round deep-explore budget as two "no progress" rounds. Repeated identical failures still
     // hit REPEATED_FAILURE_LIMIT above; distinct mechanical failures are returned to the model to repair.
+    //
+    // The exemption requires the round to be NOTHING BUT failures. Keyed on "had a failure" instead,
+    // one incidental error per round buys unlimited empty-lookup rounds — which is the exact spin this
+    // counter was written for (prod: 18 lookups, 9 iterations, zero commits).
+    const roundAllToolsFailed = roundToolCalls > 0 && roundToolFailures === roundToolCalls;
     if (roundProductive) unproductiveRounds = 0;
-    else if (!roundHadToolFailure) unproductiveRounds += 1;
+    else if (!roundAllToolsFailed) unproductiveRounds += 1;
     if (NO_PROGRESS_ROUNDS > 0 && unproductiveRounds >= NO_PROGRESS_ROUNDS && i + 1 < maxIters) {
       onStatus?.(`⚠ no progress ${unproductiveRounds} round(s) — stopping early (iter ${i + 1}/${maxIters})`);
       stoppedNoProgress = true;

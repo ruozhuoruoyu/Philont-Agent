@@ -7,7 +7,7 @@
   "types": "dist/src/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "node --test dist/tests/*.test.js",
+    "test": "tsc && node --test dist/tests/*.test.js",
     "test:build": "tsc && node --test dist/tests/*.test.js"
   },
   "dependencies": {

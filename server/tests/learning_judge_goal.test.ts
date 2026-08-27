@@ -173,10 +173,20 @@ test('a short status question stays the judge goal only when the turn remained o
 });
 
 test('skill recall for a continuation uses active work before a carried directional goal', () => {
+  // Active work still beats the carried goal — that is what this test is for. The message rides along
+  // rather than being dropped: see the four-character cases below for why nothing is thrown away.
   assert.equal(
     resolveRecallInput('继续', 'Complete plan step: prove region3 bound', '继续做 LRC 证明'),
-    'Complete plan step: prove region3 bound',
+    'Complete plan step: prove region3 bound\nCurrent instruction: 继续',
   );
+  // A length cut here dropped these outright. 换个方向 is four characters and is the whole instruction.
+  for (const short of ['换个方向', '换个角度', '先跑测试']) {
+    assert.equal(
+      resolveRecallInput(short, 'Prove the active LRC node'),
+      `Prove the active LRC node\nCurrent instruction: ${short}`,
+      short,
+    );
+  }
   assert.equal(resolveRecallInput('总结我们目前的 LRC 证明状态', 'stale work'), '总结我们目前的 LRC 证明状态');
   assert.equal(
     resolveRecallInput('你能不能找个新思路继续推？', 'Prove the active LRC node', undefined, false),

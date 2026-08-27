@@ -7733,9 +7733,12 @@ export function resolveRecallInput(
   const base = activeWorkGoal?.trim() || carriedGoal?.trim();
   const selfContained = routerSelfContained ?? messageIsSelfContainedGoal(message);
   if (selfContained || !base) return message;
-  // Acknowledgements add no semantic constraint. A context-dependent direction does: retain both the
-  // concrete target and the owner's current instruction instead of replacing either one.
-  return message.length <= 4 ? base : `${base}\nCurrent instruction: ${message}`;
+  // Always carry BOTH: the concrete target and the owner's current instruction. A length cut was tried
+  // here and dropped 换个方向 / 换个角度 / 先跑测试 (four characters each) — a change of direction is
+  // precisely the instruction that must not be lost, and length does not distinguish it from "OK".
+  // Appending an acknowledgement costs the relevance layer a couple of dead tokens; dropping a
+  // direction costs the turn its direction.
+  return `${base}\nCurrent instruction: ${message}`;
 }
 
 /** Current concrete work target shared by skill recall and the learning judge. */
