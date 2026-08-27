@@ -198,7 +198,7 @@ test('viability judges only progress and dead ends accumulated after an episode 
       { id: 'r1', noProgressRounds: 8, provedCount: 14, deadCount: 9 },
       { reasoningSessionId: 'r1', noProgressRounds: 7, provedCount: 13, deadCount: 7 },
     ),
-    { noProgressRounds: 1, provedCount: 1, deadCount: 2, attempts: 3 },
+    { noProgressRounds: 1, provedCount: 1, deadCount: 2, attempts: 3, inheritedStuckOnly: false },
   );
   assert.equal(
     episodeRelativeReasoningStats(
@@ -208,6 +208,26 @@ test('viability judges only progress and dead ends accumulated after an episode 
     2,
     'after genuine progress resets the streak, new stalls count from zero rather than the old baseline',
   );
+  // Carried stuckness is not this episode's evidence: `reallyStuck` accepts status==='stuck' alone,
+  // which sent a curated open-problem goal back to intractable one turn after the owner overrode it.
+  assert.equal(
+    episodeRelativeReasoningStats(
+      { id: 'r1', noProgressRounds: 7, provedCount: 13, deadCount: 7 },
+      { reasoningSessionId: 'r1', noProgressRounds: 7, provedCount: 13, deadCount: 7 },
+    ).inheritedStuckOnly,
+    true,
+  );
+  for (const current of [
+    { id: 'r1', noProgressRounds: 8, provedCount: 13, deadCount: 7 },  // stalled a round of its own
+    { id: 'r1', noProgressRounds: 7, provedCount: 13, deadCount: 8 },  // closed a dead end of its own
+  ]) {
+    assert.equal(
+      episodeRelativeReasoningStats(current, { reasoningSessionId: 'r1', noProgressRounds: 7, provedCount: 13, deadCount: 7 })
+        .inheritedStuckOnly,
+      false,
+      'one stall or one dead end of its own re-arms the stop',
+    );
+  }
 });
 
 test('judge frontier excludes owner acceptance chores and ranks actionable nodes like final report', () => {

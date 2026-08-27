@@ -1376,5 +1376,19 @@ test('reasoning terminal detection respects clause-local negation before tight m
     '前三轮未成功，第四轮根命题已证',
     '还有一些未知常数需要确认，但整个推理树已闭合',
     'There is not much left to check, the root proposition is proved',
+    // A connective ends the negator's scope just as punctuation does. Without this the writer only
+    // has to drop the comma: 未发现反例因此全部闭合 read as a denial and never fired.
+    '未发现反例因此全部闭合',
+    '辅助引理未证但根命题已证',
+    '边界情形没有验证而根命题已证',
+    '虽然还有未知常数然而整个推理树已闭合',
+    'the lemma is not checked but the root proposition is proved',
   ]) assert.ok(findReasoningTerminalClaim(text), text);
+  // `yet` / `still` live INSIDE a denial rather than ending one, and a denial that FOLLOWS a
+  // connective is still the operative one — both must stay suppressed.
+  for (const text of [
+    'the theorem is not yet proved',
+    '未发现反例因此不能说全部闭合',
+    '辅助引理未证所以我不声称已证',
+  ]) assert.equal(findReasoningTerminalClaim(text), null, text);
 });

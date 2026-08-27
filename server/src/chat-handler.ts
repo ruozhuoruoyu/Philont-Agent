@@ -4681,7 +4681,7 @@ const reasoningEpisodeBaselines = new Map<string, ReasoningEpisodeBaseline>();
 export function episodeRelativeReasoningStats(
   current: { id: string; noProgressRounds: number; provedCount: number; deadCount: number },
   baseline?: ReasoningEpisodeBaseline,
-): { noProgressRounds: number; provedCount: number; deadCount: number; attempts: number } {
+): { noProgressRounds: number; provedCount: number; deadCount: number; attempts: number; inheritedStuckOnly: boolean } {
   const same = baseline?.reasoningSessionId === current.id;
   // noProgressRounds is a trailing streak, not a cumulative counter. If progress reset it below the
   // baseline, the current value already is the new episode's streak; otherwise subtract inherited stalls.
@@ -4692,7 +4692,15 @@ export function episodeRelativeReasoningStats(
     : current.noProgressRounds;
   const provedCount = same ? Math.max(0, current.provedCount - baseline.provedCount) : current.provedCount;
   const deadCount = same ? Math.max(0, current.deadCount - baseline.deadCount) : current.deadCount;
-  return { noProgressRounds, provedCount, deadCount, attempts: provedCount + deadCount };
+  return {
+    noProgressRounds,
+    provedCount,
+    deadCount,
+    attempts: provedCount + deadCount,
+    // True when the ONLY thing saying "stuck" is state the episode inherited: this episode has
+    // neither stalled a round nor closed a dead end yet, so it has not been tried.
+    inheritedStuckOnly: same && noProgressRounds === 0 && deadCount === 0,
+  };
 }
 
 /**
@@ -13314,7 +13322,7 @@ async function runToolLoop(
                 provedCount: vSummary?.provedCount ?? 0,
                 deadCount: vSummary?.deadCount ?? 0,
               }, reasoningEpisodeBaselines.get(sessionId))
-            : { noProgressRounds: 0, provedCount: 0, deadCount: 0, attempts: 0 };
+            : { noProgressRounds: 0, provedCount: 0, deadCount: 0, attempts: 0, inheritedStuckOnly: false };
           const v = computeViability({
             hasActiveSession: !!ownerSession,
             barrierApplies: applied.length > 0,
@@ -13322,7 +13330,12 @@ async function runToolLoop(
             barrierCircumvention: applied[0]?.barrier.circumvention,
             goalIsOpenProblem: !!openMatch,
             noProgressRounds: episodeStats.noProgressRounds,
-            status: vSummary?.status ?? ownerSession?.status ?? null,
+            // Inherited stuckness is not this episode's evidence. `status` is a tree-lifetime flag,
+            // and `reallyStuck` accepts it on its own — so a curated open-problem goal went straight
+            // back to intractable on the turn after an override, bypassing the episode-attempt floor
+            // that protects the other stop paths. Treat a carried 'stuck' as active until the new
+            // episode produces a stall of its own; one stalled round or one dead end re-arms it.
+            status: episodeStats.inheritedStuckOnly ? 'active' : (vSummary?.status ?? ownerSession?.status ?? null),
             // ABSOLUTE, unlike the stall counters above. `provedCount` is not a stall signal — it is
             // the positive evidence that answers `frontier_empty_no_proof` (status stuck AND nothing
             // proved). Zeroing it at an episode boundary manufactures that emptiness: a tree with 13

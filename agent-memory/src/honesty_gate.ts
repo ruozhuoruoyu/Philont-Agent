@@ -626,8 +626,15 @@ export function findReasoningTerminalClaim(text: string): string | null {
         negAt = n.index;
         negLen = n[0].length;
       }
+      // A clause boundary is punctuation OR a contrastive/inferential connective. Punctuation alone
+      // missed 未发现反例因此全部闭合 and 辅助引理未证但根命题已证 — seven of eight connective shapes
+      // stayed suppressed. Deliberately excludes `yet`/`still`, which sit INSIDE a denial ("not yet
+      // proved") rather than ending one. Taking the LAST negator keeps a denial that follows a
+      // connective (…因此不能说全部闭合) suppressed, since nothing separates that one from the claim.
+      const clauseBoundary =
+        /[，、,;；:：]|但是|但|然而|不过|可是|却|而|因此|所以|于是|\b(?:but|however|therefore|thus|hence|nevertheless)\b/i;
       const deniesPositiveClaim =
-        negAt >= 0 && !/[，、,;；:：]/.test(claimContext.slice(negAt + negLen));
+        negAt >= 0 && !clauseBoundary.test(claimContext.slice(negAt + negLen));
       const isExplicitImpossibilityConclusion = /(?:不能|无法|不可能).*(?:证明|证明路径)/.test(matched);
       if (deniesPositiveClaim && !isExplicitImpossibilityConclusion) continue; // this match only
       return matched.slice(0, 60);
