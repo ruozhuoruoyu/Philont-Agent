@@ -466,3 +466,28 @@ test('no-progress: exempt authoring failures break an earlier empty-lookup strea
   });
   assert.equal(r.toolCallsSpent, 5, 'the first post-repair lookup starts a fresh no-progress streak');
 });
+
+test('no-progress: the repair budget is a total, so interleaving cannot make the loop immortal', async () => {
+  // Measured against a per-RUN budget: one failing call slipped between empty lookups reset the
+  // counter every other round and the stop never fired at all — 20 of 20 iterations, hitCap.
+  // A repair budget spent across the loop (refunded by a committed result) cannot be gamed that way.
+  let round = 0;
+  const llm: MiniLoopLLMClient = {
+    async send() {
+      round++;
+      const name = round % 2 === 1 ? 'searchNotes' : 'pariGp';
+      return toolCallResponse([{ id: `${name}-${round}`, name, input: {} }]);
+    },
+  };
+  const r = await runMiniAgentLoop({
+    systemPrompt: 'sys',
+    userMessage: 'test',
+    llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: async (name: string) => name === 'pariGp'
+      ? { ok: false, output: '', error: `distinct syntax error ${round}` }
+      : { ok: true, output: 'no results' },
+    maxIters: 20,
+  });
+  assert.ok(r.toolCallsSpent < 20, `alternating empty/failed rounds must still stop (spent ${r.toolCallsSpent})`);
+});

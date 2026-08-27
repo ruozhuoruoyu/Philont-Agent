@@ -228,14 +228,26 @@ export function viabilityActuatorRelevant(input: {
   return !input.hasActiveSession || input.turnEngagedReasoning || input.replyPitchesContinuation;
 }
 
-/** Tree-backed stop evidence that survives a process restart. */
+/**
+ * Tree-backed stop evidence that survives a process restart.
+ *
+ * Counted EPISODE-RELATIVE, and deliberately not from `status`. A session's status is sticky — the
+ * round loop only ever writes a non-'active' value (`if (status !== 'active') setSessionStatus(...)`),
+ * so a tree that was once 'stuck' reports 'stuck' forever. Feeding that here makes `hadDoom` true on
+ * every subsequent turn, and `hadDoom` is what licenses a doom-reset: every routine "继续" would then
+ * re-baseline the very counters this gate needs to accumulate, and the stop could only ever fire from
+ * evidence gathered inside a single message. The stop's own inputs must not decide when to clear the
+ * stop's own inputs.
+ *
+ * After a restart there is no persisted baseline, so the caller's episode-relative numbers ARE the
+ * lifetime ones — which is exactly the case this was written for: the owner's explicit redirect can
+ * still open a fresh episode instead of being killed by yesterday's totals.
+ */
 export function reasoningStateCarriesDoom(input: {
-  status?: string | null;
   noProgressRounds?: number;
   deadEndCount?: number;
 }): boolean {
-  return input.status === 'stuck' ||
-    (input.noProgressRounds ?? 0) >= STUCK_ROUNDS ||
+  return (input.noProgressRounds ?? 0) >= STUCK_ROUNDS ||
     (input.deadEndCount ?? 0) >= DEAD_END_INTRACTABLE_THRESHOLD;
 }
 

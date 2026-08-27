@@ -10115,7 +10115,6 @@ async function handleChatSendInner(
     const hadDoom = (viabilityPivotStreak.get(sessionId) ?? 0) >= 1 ||
       viabilityRecommendStop.has(sessionId) ||
       reasoningStateCarriesDoom({
-        status: focusedSummary?.status ?? focusedBeforeReset?.status ?? null,
         noProgressRounds: persistedEpisodeStats?.noProgressRounds ?? 0,
         deadEndCount: persistedEpisodeStats?.deadCount ?? 0,
       });

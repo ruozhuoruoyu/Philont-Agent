@@ -277,8 +277,8 @@ export async function runMiniAgentLoop(
   let llmTokensSpent = 0;
   let toolCallsSpent = 0;
   let unproductiveRounds = 0;
-  /** Consecutive rounds in which EVERY tool call failed — exempt from the no-progress count, up to a bound. */
-  let failureOnlyStreak = 0;
+  /** Rounds in which EVERY tool call failed, spent against this loop's repair budget (see below). */
+  let failureOnlyRounds = 0;
   let stoppedNoProgress = false;
   const failureCounts = new Map<string, number>();
 
@@ -444,14 +444,19 @@ export async function runMiniAgentLoop(
     // a new number of its own.
     const roundAllToolsFailed = roundToolCalls > 0 && roundToolFailures === roundToolCalls;
     if (roundProductive) {
+      // A committed result proves the loop can produce one: clear the stall count and refund the
+      // repair budget for whatever breaks next.
       unproductiveRounds = 0;
-      failureOnlyStreak = 0;
-    } else if (roundAllToolsFailed) {
-      failureOnlyStreak += 1;
-      if (failureOnlyStreak > REPEATED_FAILURE_LIMIT) unproductiveRounds += 1;
-      else unproductiveRounds = 0;
+      failureOnlyRounds = 0;
+    } else if (roundAllToolsFailed && failureOnlyRounds < REPEATED_FAILURE_LIMIT) {
+      // Within the repair budget the round is neutral — it does not count toward stagnation, and it
+      // clears an earlier empty-lookup streak, because lookups separated by a repair are not
+      // consecutive. The budget is a TOTAL for this loop, not a consecutive run: measured as a run,
+      // one failing call slipped between empty lookups resets the counter forever and the loop cannot
+      // terminate at all (probe: 20 of 20 iterations, hitCap, with the stop never firing).
+      failureOnlyRounds += 1;
+      unproductiveRounds = 0;
     } else {
-      failureOnlyStreak = 0;
       unproductiveRounds += 1;
     }
     if (NO_PROGRESS_ROUNDS > 0 && unproductiveRounds >= NO_PROGRESS_ROUNDS && i + 1 < maxIters) {

@@ -270,7 +270,7 @@ test('production redirect after restart: "再找新的思路，继续推" opens 
   const d = decideTurnAnchors({
     lastAssistantText: '这个方向已经停滞。',
     userMessage: '再找新的思路，继续推',
-    hadDoom: reasoningStateCarriesDoom({ status: 'stuck', noProgressRounds: 7, deadEndCount: 7 }),
+    hadDoom: reasoningStateCarriesDoom({ noProgressRounds: 7, deadEndCount: 7 }),
   });
   assert.equal(d.doomReset, true);
   assert.equal(d.anchor, true);
@@ -374,10 +374,13 @@ test('viabilityActuatorRelevant: no active session (session-less doom-grind) →
 });
 
 test('persisted reasoning doom survives restart, while a clean tree does not manufacture it', () => {
-  assert.equal(reasoningStateCarriesDoom({ status: 'stuck' }), true);
-  assert.equal(reasoningStateCarriesDoom({ status: 'active', noProgressRounds: 3 }), true);
-  assert.equal(reasoningStateCarriesDoom({ status: 'active', deadEndCount: 4 }), true);
-  assert.equal(reasoningStateCarriesDoom({ status: 'active', noProgressRounds: 0, deadEndCount: 0 }), false);
+  assert.equal(reasoningStateCarriesDoom({ noProgressRounds: 3 }), true);
+  assert.equal(reasoningStateCarriesDoom({ deadEndCount: 4 }), true);
+  assert.equal(reasoningStateCarriesDoom({ noProgressRounds: 0, deadEndCount: 0 }), false);
+  // A FRESH episode reports zeros whatever the tree's lifetime status says. If a sticky 'stuck' also
+  // counted, hadDoom would be true here — and every routine "继续" would re-baseline the counters the
+  // stop needs, leaving it able to fire only on evidence gathered inside one message.
+  assert.equal(reasoningStateCarriesDoom({ noProgressRounds: 0, deadEndCount: 0 }), false);
 });
 
 test('only advancing deep-explore actions engage reasoning for viability', () => {
