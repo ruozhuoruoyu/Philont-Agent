@@ -87,6 +87,12 @@ test('parseIntentDecision: valid / embedded-in-prose / enum-guard / junk', () =>
   assert.equal(parseIntentDecision(''), null);
 });
 
+test('parseIntentDecision preserves the router self-contained judgment', () => {
+  const r = parseIntentDecision('{"route":"deep_explore","domain":"formal","confidence":0.9,"reason":"continues prior proof","selfContained":false}');
+  assert.equal(r?.selfContained, false);
+  assert.match(buildIntentPrompt('你说的这个新视角值得推吗？'), /selfContained/);
+});
+
 test('classifyIntent: uses injected caller; routes a research turn to deep_explore', async () => {
   const dec = await classifyIntent('深度调研，看哪个适合GLM5.2的推理优化方案', {
     call: async () => '{"route":"deep_explore","domain":"deliberate","confidence":0.92,"reason":"compare inference stacks"}',

@@ -92,6 +92,7 @@ export interface TickEvent {
   skipped: number;
   failed: number;
   budgetExhausted: boolean;
+  ownerVisible: number;
 }
 
 export interface AutonomousLoopOptions {
@@ -198,10 +199,13 @@ export function startAutonomousLoop(
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
   let paused = false; // Runtime emergency-stop switch (can be toggled); tickOnce no-ops when true
+  const BACKOFF_NS = 'autonomy.backoff';
 
   function snapshot(now: number): MemorySnapshot {
     // facts: active facts across all namespaces. Number of namespaces is small (~10); list each and merge.
-    const namespaces = opts.facts.listNamespaces();
+    // Internal scheduler state is not knowledge to investigate. Feeding the backoff fact to GapDriver
+    // creates a proposal about its own throttle and defeats both dedupe and the throttle itself.
+    const namespaces = opts.facts.listNamespaces().filter((ns) => ns !== BACKOFF_NS);
     const facts = namespaces.flatMap((ns) => opts.facts.listFacts(ns));
 
     const routingRules = opts.routingRules.listAll();
@@ -235,6 +239,7 @@ export function startAutonomousLoop(
   async function runOne(initiative: Initiative): Promise<{
     finalStatus: 'done' | 'failed' | 'skipped';
     spent: { llmTokens: number; toolCalls: number };
+    ownerVisible: boolean;
   }> {
     const result = await opts.executor.run(initiative);
     const spent = {
@@ -251,6 +256,14 @@ export function startAutonomousLoop(
       );
       // Commit budget even if markDone fails (double safety)
       budget.commit(userId, spent);
+      const hasNewFacts = result.outcomeRefs != null && result.outcomeRefs.facts.length > 0;
+      let ownerDeclared = false;
+      try {
+        ownerDeclared = opts.isOwnerDeclared?.(initiative.targetRef) === true;
+      } catch {
+        ownerDeclared = false;
+      }
+      const ownerVisible = ownerDeclared || (result.escalate === true && hasNewFacts);
       if (updated && opts.interrupt) {
         // WS6 (selfhood_closure): escalate to 'high' only when the executor LLM flagged the finding
         // AND it produced at least one NEW FACT (evidence-backed knowledge). Notes do NOT qualify:
@@ -258,18 +271,10 @@ export function startAutonomousLoop(
         // no new data" and self-rated it escalate=true, so a zero-progress status report surfaced as
         // a HIGH finding in the web-ui. A discovery worth interrupting the user carries a sourced
         // fact by definition; note-only outcomes stay 'normal' (next-turn silent injection).
-        const hasNewFacts =
-          result.outcomeRefs != null && result.outcomeRefs.facts.length > 0;
         // Either the LLM cleared the (very high) evidence bar, or the mechanism knows the owner asked
         // for this by name. See isOwnerDeclared.
-        let ownerDeclared = false;
-        try {
-          ownerDeclared = opts.isOwnerDeclared?.(initiative.targetRef) === true;
-        } catch {
-          ownerDeclared = false; // never let relevance lookup break the loop
-        }
         opts.interrupt.fire(
-          ownerDeclared || (result.escalate === true && hasNewFacts) ? 'high' : 'normal',
+          ownerVisible ? 'high' : 'normal',
           {
             kind: 'discovery_made',
             initiativeId: initiative.id,
@@ -282,7 +287,7 @@ export function startAutonomousLoop(
       // onOutcome hook (PursuitProgressWriter etc.) — pass the latest persisted initiative
       // status as parameter; errors are only logged.
       await invokeOnOutcome(updated ?? initiative, result);
-      return { finalStatus: 'done', spent };
+      return { finalStatus: 'done', spent, ownerVisible };
     }
 
     if (result.status === 'failed') {
@@ -293,7 +298,7 @@ export function startAutonomousLoop(
       // semantics: "not really tried — retry when circumstances change" (it never enters the dedup set).
       if (/LlmEndpointDownError/.test(result.error ?? '') || (result.error ?? '').includes('endpoint is not responding')) {
         initiatives.markSkipped(initiative.id, 'llm endpoint down — not an attempt');
-        return { finalStatus: 'skipped', spent };
+        return { finalStatus: 'skipped', spent, ownerVisible: false };
       }
       const updated = initiatives.markFailed(initiative.id, result.error ?? 'unknown', spent.llmTokens);
       // Failed also spent tokens; must commit to prevent infinite retries
@@ -309,7 +314,7 @@ export function startAutonomousLoop(
           `reason="${reasonShort}"`,
       );
       await invokeOnOutcome(updated ?? initiative, result);
-      return { finalStatus: 'failed', spent };
+      return { finalStatus: 'failed', spent, ownerVisible: false };
     }
 
     // Skipped
@@ -324,7 +329,7 @@ export function startAutonomousLoop(
         `reason="${skipReason}"`,
     );
     await invokeOnOutcome(updated ?? initiative, result);
-    return { finalStatus: 'skipped', spent: { llmTokens: 0, toolCalls: 0 } };
+    return { finalStatus: 'skipped', spent: { llmTokens: 0, toolCalls: 0 }, ownerVisible: false };
   }
 
   async function invokeOnOutcome(
@@ -352,6 +357,7 @@ export function startAutonomousLoop(
       skipped: 0,
       failed: 0,
       budgetExhausted: false,
+      ownerVisible: 0,
     };
 
     if (!enabled) {
@@ -453,7 +459,16 @@ export function startAutonomousLoop(
         return b.utility - a.utility;
       });
 
-      for (const proposal of allProposals) {
+      const backoff = opts.facts.getFact(BACKOFF_NS, userId)?.value as
+        | { streak?: number; nextAllowedAt?: number }
+        | undefined;
+      const backoffActive = Number(backoff?.nextAllowedAt) > now;
+      const proposalsToRun = backoffActive ? allProposals.filter(ownerAsked) : allProposals;
+      if (backoffActive && proposalsToRun.length < allProposals.length) {
+        log.log(`[autonomous] all-drop backoff active; suppressed ${allProposals.length - proposalsToRun.length} opportunistic proposal(s)`);
+      }
+
+      for (const proposal of proposalsToRun) {
         const check = budget.checkCanRun(userId, now);
         if (!check.allowed) {
           event.budgetExhausted = true;
@@ -486,12 +501,22 @@ export function startAutonomousLoop(
           }
           event.llmTokensSpent += r.spent.llmTokens;
           event.toolCallsSpent += r.spent.toolCalls;
+          if (r.ownerVisible) event.ownerVisible += 1;
         } catch (e) {
           // Edge case: executor threw an uncaught exception (should not happen, but fallback)
           log.error(`[autonomous] runOne uncaught`, e);
           initiatives.markFailed(running.id, `uncaught: ${String(e)}`, 0);
           event.failed += 1;
         }
+      }
+
+      if (event.initiativesRun > 0) {
+        const priorStreak = Math.max(0, Number(backoff?.streak) || 0);
+        const streak = event.ownerVisible > 0 ? 0 : priorStreak + 1;
+        const nextAllowedAt = streak === 0
+          ? now
+          : now + Math.min(6 * 60 * 60_000, tickIntervalMs * (2 ** Math.min(streak, 6)));
+        opts.facts.storeFact({ namespace: BACKOFF_NS, key: userId, value: { streak, nextAllowedAt } });
       }
 
       event.durationMs = (nowOverride ?? Date.now()) - startedAt;

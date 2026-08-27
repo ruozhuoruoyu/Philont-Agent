@@ -30,6 +30,8 @@ export interface DraftFixture {
   key: string;
   /** Stable skill+failure-class cooldown; changing the historical input must not bypass it. */
   cooldownKey: string;
+  /** Applicability cooldown shared by every failure signature produced by the same tool. */
+  toolCooldownKey: string;
 }
 
 /**
@@ -64,6 +66,13 @@ export function draftCooldownKey(skill: Skill, signature: string): string {
   return createHash('sha256')
     .update('cooldown\0').update(skill.name).update('\0').update(skill.actionTemplate).update('\0')
     .update(signature)
+    .digest('hex');
+}
+
+export function draftToolCooldownKey(skill: Skill, toolName: string): string {
+  return createHash('sha256')
+    .update('tool-cooldown\0').update(skill.name).update('\0').update(skill.actionTemplate).update('\0')
+    .update(toolName)
     .digest('hex');
 }
 
@@ -106,10 +115,11 @@ export function selectDraftFixture(input: {
       if (!explicitlyNamesSignature && score < 1) continue;
       const key = draftFixtureKey(skill, failure, signature);
       const cooldownKey = draftCooldownKey(skill, signature);
-      const prior = input.attemptFor(cooldownKey) ?? input.attemptFor(key);
+      const toolCooldownKey = draftToolCooldownKey(skill, failure.toolName);
+      const prior = input.attemptFor(toolCooldownKey) ?? input.attemptFor(cooldownKey) ?? input.attemptFor(key);
       if (prior?.permanent || (prior && now - prior.lastAttemptAt < COOLDOWN_MS)) continue;
       if (!best || score > best.score || (score === best.score && failure.recordedAt > best.fixture.failure.recordedAt)) {
-        best = { fixture: { skill, failure, signature, key, cooldownKey }, score };
+        best = { fixture: { skill, failure, signature, key, cooldownKey, toolCooldownKey }, score };
       }
     }
   }
@@ -135,7 +145,12 @@ export async function validateDraftFixture(input: {
     afterSignature: result.success ? undefined : input.signatureOf(fixture.failure.toolName, result.error ?? result.output ?? ''),
   });
   const recordAttempt = (reason: string | undefined, permanent = false): void => {
-    for (const key of new Set([fixture.key, fixture.cooldownKey])) {
+    const keys = [fixture.key, fixture.cooldownKey];
+    // NONE/model-declined says the rule does not apply to this tool family. Persist that negative
+    // applicability evidence above the signature layer so gp-other cannot immediately retry the same
+    // prose against gp-timeout. Execution/infrastructure failures remain fixture/signature scoped.
+    if (reason === 'model-declined') keys.push(fixture.toolCooldownKey);
+    for (const key of new Set(keys)) {
       const prior = input.facts.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, key)?.value as Partial<ReplayAttemptState> | undefined;
       input.facts.storeFact({ namespace: DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, key, value: {
         attempts: Math.max(0, Number(prior?.attempts) || 0) + 1,

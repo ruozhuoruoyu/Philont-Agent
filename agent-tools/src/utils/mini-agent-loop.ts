@@ -345,6 +345,7 @@ export async function runMiniAgentLoop(
 
     const toolResultBlocks: MiniLoopContentBlock[] = [];
     let roundProductive = false;
+    let roundHadToolFailure = false;
     for (const call of response.calls) {
       // Stop launching new tool runs once the deadline has fired; the tree is already
       // persisted incrementally, so returning 'aborted' here is resumable.
@@ -384,6 +385,7 @@ export async function runMiniAgentLoop(
         outputPreview: previewText(runResult.ok ? runResult.output : runResult.error ?? ''),
       });
       if (!runResult.ok) {
+        roundHadToolFailure = true;
         const normalized = (runResult.error ?? runResult.output ?? 'unknown')
           .toLowerCase()
           // Preserve short semantic numbers such as HTTP 404/503 and exit codes;
@@ -422,7 +424,12 @@ export async function runMiniAgentLoop(
     // No-progress early exit: if the last NO_PROGRESS_ROUNDS rounds all returned nothing substantive, the
     // loop is spinning on empty lookups — stop and synthesize from what it has instead of burning the rest
     // of the budget. Only after ≥1 round (never pre-empts a productive first round).
-    unproductiveRounds = roundProductive ? 0 : unproductiveRounds + 1;
+    // A failed tool call is evidence that the attempted execution/authoring path broke, not evidence
+    // that the research question yielded nothing. In particular, two syntax errors must not consume
+    // a 40-round deep-explore budget as two "no progress" rounds. Repeated identical failures still
+    // hit REPEATED_FAILURE_LIMIT above; distinct mechanical failures are returned to the model to repair.
+    if (roundProductive) unproductiveRounds = 0;
+    else if (!roundHadToolFailure) unproductiveRounds += 1;
     if (NO_PROGRESS_ROUNDS > 0 && unproductiveRounds >= NO_PROGRESS_ROUNDS && i + 1 < maxIters) {
       onStatus?.(`⚠ no progress ${unproductiveRounds} round(s) — stopping early (iter ${i + 1}/${maxIters})`);
       stoppedNoProgress = true;

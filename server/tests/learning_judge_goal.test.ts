@@ -178,6 +178,10 @@ test('skill recall for a continuation uses active work before a carried directio
     'Complete plan step: prove region3 bound',
   );
   assert.equal(resolveRecallInput('总结我们目前的 LRC 证明状态', 'stale work'), '总结我们目前的 LRC 证明状态');
+  assert.equal(
+    resolveRecallInput('你能不能找个新思路继续推？', 'Prove the active LRC node', undefined, false),
+    'Prove the active LRC node\nCurrent instruction: 你能不能找个新思路继续推？',
+  );
 });
 
 test('the auto-advance word deep_explore offers is the word that arms it', () => {

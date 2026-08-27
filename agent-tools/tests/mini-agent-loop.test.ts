@@ -191,6 +191,29 @@ test('no-progress: a productive round resets the counter (does not stop on a sin
   assert.equal(r.finalText, 'finished after gathering enough', 'alternating empty/productive never trips early stop');
 });
 
+test('no-progress: tool authoring failures do not count as research stagnation', async () => {
+  let round = 0;
+  const llm: MiniLoopLLMClient = {
+    async send() {
+      round++;
+      if (round === 4) return textResponse('repaired the script and obtained a result');
+      return toolCallResponse([{ id: `tc-${round}`, name: 'pariGp', input: {} }]);
+    },
+  };
+  const errors = ['variable name expected', 'run-away string', 'unexpected token'];
+  const r = await runMiniAgentLoop({
+    systemPrompt: 'sys',
+    userMessage: 'test a mathematical hypothesis',
+    llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: async () => ({ ok: false, output: '', error: errors.shift() ?? 'syntax error' }),
+    maxIters: 6,
+  });
+  assert.equal(r.finalText, 'repaired the script and obtained a result');
+  assert.equal(r.toolCallsSpent, 3, 'distinct authoring errors remain repairable within the loop');
+  assert.equal(r.error, undefined);
+});
+
 // ── 测试 4:whitelist 拦截 ──────────────────────────────────────────────
 
 test('whitelist 拦截:LLM 调白名单外工具 → 返回 rejection,loop 继续', async () => {

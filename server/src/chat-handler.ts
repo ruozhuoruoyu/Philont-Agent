@@ -4686,12 +4686,40 @@ const viabilityPivotStreak = new Map<string, number>();
 const episodeAnchorTs = new Map<string, number>();
 
 interface ReasoningEpisodeBaseline {
+  episodeId: string;
+  startedAt: number;
   reasoningSessionId: string;
   noProgressRounds: number;
   provedCount: number;
   deadCount: number;
 }
 const reasoningEpisodeBaselines = new Map<string, ReasoningEpisodeBaseline>();
+const REASONING_EPISODE_NAMESPACE = 'reasoning.episode';
+
+function loadReasoningEpisode(sessionId: string): ReasoningEpisodeBaseline | undefined {
+  const cached = reasoningEpisodeBaselines.get(sessionId);
+  if (cached) return cached;
+  const raw = memory.facts.getFact(REASONING_EPISODE_NAMESPACE, sessionId)?.value as Partial<ReasoningEpisodeBaseline> | undefined;
+  if (!raw || typeof raw.episodeId !== 'string' || typeof raw.startedAt !== 'number' ||
+      typeof raw.reasoningSessionId !== 'string' || typeof raw.noProgressRounds !== 'number' ||
+      typeof raw.provedCount !== 'number' || typeof raw.deadCount !== 'number') return undefined;
+  const restored = raw as ReasoningEpisodeBaseline;
+  reasoningEpisodeBaselines.set(sessionId, restored);
+  episodeAnchorTs.set(sessionId, restored.startedAt);
+  return restored;
+}
+
+function persistReasoningEpisode(sessionId: string, baseline: ReasoningEpisodeBaseline | undefined): void {
+  if (!baseline) {
+    reasoningEpisodeBaselines.delete(sessionId);
+    const existing = memory.facts.getFact(REASONING_EPISODE_NAMESPACE, sessionId);
+    if (existing) memory.facts.softForget(existing.id);
+    return;
+  }
+  reasoningEpisodeBaselines.set(sessionId, baseline);
+  episodeAnchorTs.set(sessionId, baseline.startedAt);
+  memory.facts.storeFact({ namespace: REASONING_EPISODE_NAMESPACE, key: sessionId, value: baseline });
+}
 
 export function episodeRelativeReasoningStats(
   current: { id: string; noProgressRounds: number; provedCount: number; deadCount: number },
@@ -7699,22 +7727,30 @@ export function resolveRecallInput(
   userMessage: string,
   activeWorkGoal?: string,
   carriedGoal?: string,
+  routerSelfContained?: boolean,
 ): string {
-  return messageIsSelfContainedGoal(userMessage)
-    ? userMessage
-    : (activeWorkGoal?.trim() || carriedGoal?.trim() || userMessage);
+  const message = userMessage.trim();
+  const base = activeWorkGoal?.trim() || carriedGoal?.trim();
+  const selfContained = routerSelfContained ?? messageIsSelfContainedGoal(message);
+  if (selfContained || !base) return message;
+  // Acknowledgements add no semantic constraint. A context-dependent direction does: retain both the
+  // concrete target and the owner's current instruction instead of replacing either one.
+  return message.length <= 4 ? base : `${base}\nCurrent instruction: ${message}`;
 }
 
 /** Current concrete work target shared by skill recall and the learning judge. */
 function activeWorkGoalForSession(sessionId: string): string | undefined {
   try {
     const plan = memory.plans.listBySession(sessionId, { limit: 1 })[0];
-    if (plan && (plan.status === 'draft' || plan.status === 'executing')) {
+    const reasoningSession = focusedReasoningSession(sessionId);
+    // A still-open plan is not forever authoritative. If a focused reasoning session has advanced
+    // since the plan was last touched, the reasoning frontier is the fresher work ledger.
+    const planIsFresh = !!plan && (!reasoningSession || plan.updatedAt >= reasoningSession.updatedAt);
+    if (planIsFresh && plan && (plan.status === 'draft' || plan.status === 'executing')) {
       const step = plan.steps.find((s) => s.status === 'doing')
         ?? plan.steps.find((s) => s.status === 'pending' || s.status === 'blocked');
       if (step?.description.trim()) return `Complete plan step: ${step.description.trim()}`;
     }
-    const reasoningSession = focusedReasoningSession(sessionId);
     if (!reasoningSession) return undefined;
     const leaf = selectJudgeFrontierGoal(memory.reasoning.getNodes(reasoningSession.id));
     return leaf ? `Prove or refute the active reasoning node: ${leaf}` : undefined;
@@ -8231,6 +8267,23 @@ export async function handleChatSend(
           if (askIntent === 'auto') pendingAutoAdvanceOwners.set(sessionId, Date.now());
           signalBus.intentDecision = exploreAsk.decision;
           userMessage = exploreAsk.goal;
+          // An explicit owner approval is a new reasoning episode boundary. Persist the lifetime counters
+          // now, before an auth card can pause the turn, so a process restart cannot make the old tree's
+          // dead/stuck totals become evidence against the newly authorised round.
+          const approvedAt = Date.now();
+          episodeAnchorTs.set(sessionId, approvedAt);
+          const approvedReasoning = focusedReasoningSession(sessionId);
+          if (approvedReasoning) {
+            const summary = memory.reasoning.summarizeSession(approvedReasoning.id);
+            persistReasoningEpisode(sessionId, {
+              episodeId: `${approvedReasoning.id}:${approvedAt}`,
+              startedAt: approvedAt,
+              reasoningSessionId: approvedReasoning.id,
+              noProgressRounds: approvedReasoning.noProgressRounds,
+              provedCount: summary?.provedCount ?? 0,
+              deadCount: summary?.deadCount ?? 0,
+            });
+          }
           auditDecisionApplied(sessionId, exploreAsk.decisionId!, 'granted', 'deep_explore entry');
           console.log(`[intent-router] session=${safeSessionId(sessionId)} ask-tier APPROVED → deep_explore on restored goal`);
         } else if (askIntent === 'deny') {
@@ -8486,7 +8539,8 @@ export async function handleChatSend(
       // owner "11 same-root failures accumulated", every one of them from the night before — and caused by a
       // race that had since been fixed. Whatever those failures were about, they were against state the user
       // has just deleted; the next attempt deserves to be judged on its own.
-      episodeAnchorTs.set(sessionId, Date.now());
+      const episodeStartedAt = Date.now();
+      episodeAnchorTs.set(sessionId, episodeStartedAt);
       if (targets.length > 0) {
         try {
           const until = Date.now() + CLEANUP_SCHEDULE_PAUSE_MS;
@@ -8742,6 +8796,7 @@ export async function handleChatSend(
     userMessage,
     recallActiveWork,
     signalBus.carriedExploreGoal,
+    intentDecision?.selfContained,
   );
   console.log(
     `[recall-query] session=${safeSessionId(sessionId)} raw=${JSON.stringify(userMessage.slice(0, 80))}` +
@@ -10044,18 +10099,21 @@ async function handleChatSendInner(
       viabilityPivotStreak.delete(sessionId);
       viabilityRecommendStop.delete(sessionId);
       signalBus.recommendStop = false;
-      episodeAnchorTs.set(sessionId, Date.now());
+      const episodeStartedAt = Date.now();
+      episodeAnchorTs.set(sessionId, episodeStartedAt);
       const reasoning = focusedReasoningSession(sessionId);
       if (reasoning) {
         const summary = memory.reasoning.summarizeSession(reasoning.id);
-        reasoningEpisodeBaselines.set(sessionId, {
+        persistReasoningEpisode(sessionId, {
+          episodeId: `${reasoning.id}:${episodeStartedAt}`,
+          startedAt: episodeStartedAt,
           reasoningSessionId: reasoning.id,
           noProgressRounds: reasoning.noProgressRounds,
           provedCount: summary?.provedCount ?? 0,
           deadCount: summary?.deadCount ?? 0,
         });
       } else {
-        reasoningEpisodeBaselines.delete(sessionId);
+        persistReasoningEpisode(sessionId, undefined);
       }
       console.log(
         `[viability] session=${safeSessionId(sessionId)} doom-reset on user override ("${userMessage.slice(0, 20)}") — fresh episode, accumulated stop signals cleared`,
@@ -13323,7 +13381,7 @@ async function runToolLoop(
             const vSince = Math.max(
               Date.now() - 24 * 60 * 60_000,
               ownerSession?.createdAt ?? 0,
-              episodeAnchorTs.get(sessionId) ?? 0,
+              loadReasoningEpisode(sessionId)?.startedAt ?? episodeAnchorTs.get(sessionId) ?? 0,
             );
             vSameRoot = countSameRootCauseFailures(
               memory.actions.listRecentFailures({ sinceTs: vSince, limit: 30 }),
@@ -13344,7 +13402,7 @@ async function runToolLoop(
                 noProgressRounds: ownerSession.noProgressRounds,
                 provedCount: vSummary?.provedCount ?? 0,
                 deadCount: vSummary?.deadCount ?? 0,
-              }, reasoningEpisodeBaselines.get(sessionId))
+              }, loadReasoningEpisode(sessionId))
             : { noProgressRounds: 0, provedCount: 0, deadCount: 0, attempts: 0, inheritedStuckOnly: false };
           const v = computeViability({
             hasActiveSession: !!ownerSession,

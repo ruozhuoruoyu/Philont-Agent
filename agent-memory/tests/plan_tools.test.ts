@@ -913,6 +913,22 @@ test('spec-coverage C1: deliverable_status 多 key → reject', async () => {
   assert.match(r.error ?? '', /extra: \[d-extra\]/); // key normalized to kebab, still rejected as extra
 });
 
+test('spec-coverage C1: failure close repairs stale deliverable keys so an obsolete plan can terminate', async () => {
+  const { drafts, close, memory, sessionId } = setup();
+  await drafts.execute(specDraftArgs({ steps: [{ description: 'a' }, { description: 'b' }] }));
+  const planId = memory.plans.listBySession(sessionId)[0].id;
+  const r = await close.execute({
+    plan_id: planId,
+    outcome: 'failure',
+    summary: 'direction replaced by a newer reasoning session',
+    deliverable_status: { stale_old_id: 'failed' },
+  });
+  assert.equal(r.success, true);
+  const closed = memory.plans.get(planId)!;
+  assert.equal(closed.status, 'failed');
+  assert.deepEqual(closed.deliverableStatus, { d1: 'not-attempted', d2: 'not-attempted' });
+});
+
 test('spec-coverage C3: 重复 success+partial → 自动转 failure(打断重试循环,不假成功)', async () => {
   const { drafts, updateStep, close, memory, sessionId } = setup();
   await drafts.execute(specDraftArgs({ steps: [{ description: 'a' }] }));

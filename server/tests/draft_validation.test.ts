@@ -123,6 +123,20 @@ test('declined draft rewrite persists a cooldown without changing skill usage', 
   assert.equal(out.transition, 'not-attempted');
   assert.ok(store.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, fixture.key));
   assert.ok(store.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, fixture.cooldownKey));
+  assert.ok(store.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, fixture.toolCooldownKey));
+});
+
+test('model decline cools the skill across signatures from the same tool', () => {
+  const first = selectDraftFixture({ drafts: [skill()], failures: [failure], eligibleTools: new Set(['leanCheck']), signatureOf, attemptFor: () => null })!;
+  const picked = selectDraftFixture({
+    drafts: [skill()],
+    failures: [{ ...failure, errorText: 'omega generated a different parser failure', recordedAt: 20 }],
+    eligibleTools: new Set(['leanCheck']),
+    signatureOf: () => 'leanCheck:some-other-signature',
+    attemptFor: (key) => key === first.toolCooldownKey ? { attempts: 1, lastAttemptAt: 100, permanent: false } : null,
+    now: 101,
+  });
+  assert.equal(picked, null, 'a declined skill/tool pair must not retry every signature from that tool');
 });
 
 test('draft cooldown is stable across historical inputs of the same failure class', () => {

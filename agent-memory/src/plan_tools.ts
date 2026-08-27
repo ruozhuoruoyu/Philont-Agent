@@ -1666,6 +1666,13 @@ export function createPlanTools(deps: PlanToolsDeps): MemoryTool[] {
       const providedRaw = rawDelivStatus as Record<string, unknown>;
       const provided: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(providedRaw)) provided[kebabize(k) || k] = v;
+      // Failure close is bookkeeping, not a success claim. Let it close an obsolete plan even when the
+      // model transcribed an old deliverable set: missing entries are explicitly not-attempted and extras
+      // are discarded. Success remains exact and cannot bypass spec coverage.
+      if (outcomeRaw === 'failure') {
+        for (const id of expectedIds) if (!(id in provided)) provided[id] = 'not-attempted';
+        for (const id of Object.keys(provided)) if (!expectedIds.has(id)) delete provided[id];
+      }
       const providedKeys = new Set(Object.keys(provided));
 
       // (C1) keys must exactly equal the deliverable ids set

@@ -82,13 +82,14 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
     );
     const replayed = get('learning.replay.verified') + get('learning.replay.no_effect')
       + get('learning.replay.different_failure') + get('learning.replay.inconclusive');
-    if (replayed > 0 || get('learning.replay.not-attempted') > 0) {
+    const replayDeclined = get('learning.replay.not-attempted');
+    if (replayed > 0 || replayDeclined > 0) {
       lines.push(
-        `  rules replayed against their own past failure: ${replayed} ` +
+        `  rules selected for historical replay: selected=${replayed + replayDeclined} attempted=${replayed} ` +
           `(verified=${get('learning.replay.verified')} no_effect=${get('learning.replay.no_effect')} ` +
           `different_failure=${get('learning.replay.different_failure')} ` +
           `inconclusive=${get('learning.replay.inconclusive')} ` +
-          `not-attempted=${get('learning.replay.not-attempted')}) — ` +
+          `not-attempted=${replayDeclined}) — ` +
           `this is the count that no longer waits for the failure to recur`,
       );
     }

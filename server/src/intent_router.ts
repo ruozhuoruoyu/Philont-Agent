@@ -34,6 +34,8 @@ export interface IntentDecision {
   confidence: number;
   /** Short rationale (for audit / the suggestion text). */
   reason: string;
+  /** Whether the message names a standalone goal rather than referring to prior work/context. */
+  selfContained?: boolean;
 }
 
 export function intentRouterEnabled(): boolean {
@@ -95,7 +97,8 @@ export function buildIntentPrompt(userMessage: string): string {
     'unknown and external (a production incident, a system nobody can just read). A bug report about a ' +
     'file we just wrote is a work item, not an investigation.\n\n' +
     'Respond with ONLY a JSON object, no prose:\n' +
-    '{"route":"direct|deep_explore|plan","domain":"formal|deliberate|discover","confidence":0.0-1.0,"reason":"<short>"}\n' +
+    '{"route":"direct|deep_explore|plan","domain":"formal|deliberate|discover","confidence":0.0-1.0,"reason":"<short>","selfContained":true|false}\n' +
+    'Set selfContained=false when the message depends on prior context (for example: this/new angle/continue/change direction).\n' +
     'Omit "domain" unless route is deep_explore.\n\n' +
     'User message:\n"""\n' +
     userMessage.slice(0, 2000) +
@@ -125,7 +128,8 @@ export function parseIntentDecision(raw: string): IntentDecision | null {
   const confRaw = typeof obj.confidence === 'number' ? obj.confidence : 0.5;
   const confidence = Math.max(0, Math.min(1, confRaw));
   const reason = typeof obj.reason === 'string' ? obj.reason.slice(0, 200) : '';
-  return { route, domain, confidence, reason };
+  const selfContained = typeof obj.selfContained === 'boolean' ? obj.selfContained : undefined;
+  return { route, domain, confidence, reason, selfContained };
 }
 
 // ── Deterministic cleanup/cancel override (mechanism, not aux) ─────────────────────────────────────
