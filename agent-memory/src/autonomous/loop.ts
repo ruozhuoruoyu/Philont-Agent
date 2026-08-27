@@ -175,6 +175,51 @@ export interface AutonomousLoopHandle {
   readonly initiatives: InitiativeStore;
 }
 
+/**
+ * Throttle for a discovery loop nobody is reading.
+ *
+ * Prod 2026-08-26/27: five initiatives per tick, ~6000 tokens, every one DROPPED at gate 1 — for hours.
+ * Gate 1 cannot be moved earlier (it reads the executor's escalate + new-fact output), so the lever is
+ * how OFTEN the opportunistic drivers get to spend. Owner-declared work is never throttled: the point is
+ * to stop paying for findings the owner will not see, not to stop working on what they asked for.
+ *
+ * Doubling per barren tick, capped, and reset by a single owner-visible finding — so the loop pays full
+ * price again the moment it proves it can produce one.
+ */
+export interface AutonomyBackoffState {
+  /** Consecutive ticks that ran initiatives and surfaced nothing the owner would see. */
+  streak: number;
+  /** Before this timestamp, only owner-asked proposals run. */
+  nextAllowedAt: number;
+}
+
+export const AUTONOMY_BACKOFF_NAMESPACE = 'autonomy.backoff';
+/** Doubling stops here; past it every barren tick waits the same capped interval. */
+const AUTONOMY_BACKOFF_MAX_DOUBLINGS = 6;
+const AUTONOMY_BACKOFF_MAX_MS = 6 * 60 * 60_000;
+
+export function autonomyBackoffActive(
+  state: Partial<AutonomyBackoffState> | undefined,
+  now: number,
+): boolean {
+  return Number(state?.nextAllowedAt) > now;
+}
+
+export function nextAutonomyBackoff(input: {
+  ownerVisible: number;
+  prior?: Partial<AutonomyBackoffState>;
+  now: number;
+  tickIntervalMs: number;
+}): AutonomyBackoffState {
+  if (input.ownerVisible > 0) return { streak: 0, nextAllowedAt: input.now };
+  const streak = Math.max(0, Number(input.prior?.streak) || 0) + 1;
+  const wait = Math.min(
+    AUTONOMY_BACKOFF_MAX_MS,
+    input.tickIntervalMs * 2 ** Math.min(streak, AUTONOMY_BACKOFF_MAX_DOUBLINGS),
+  );
+  return { streak, nextAllowedAt: input.now + wait };
+}
+
 export function startAutonomousLoop(
   opts: AutonomousLoopOptions,
 ): AutonomousLoopHandle {
@@ -199,13 +244,12 @@ export function startAutonomousLoop(
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
   let paused = false; // Runtime emergency-stop switch (can be toggled); tickOnce no-ops when true
-  const BACKOFF_NS = 'autonomy.backoff';
 
   function snapshot(now: number): MemorySnapshot {
     // facts: active facts across all namespaces. Number of namespaces is small (~10); list each and merge.
     // Internal scheduler state is not knowledge to investigate. Feeding the backoff fact to GapDriver
     // creates a proposal about its own throttle and defeats both dedupe and the throttle itself.
-    const namespaces = opts.facts.listNamespaces().filter((ns) => ns !== BACKOFF_NS);
+    const namespaces = opts.facts.listNamespaces().filter((ns) => ns !== AUTONOMY_BACKOFF_NAMESPACE);
     const facts = namespaces.flatMap((ns) => opts.facts.listFacts(ns));
 
     const routingRules = opts.routingRules.listAll();
@@ -459,10 +503,10 @@ export function startAutonomousLoop(
         return b.utility - a.utility;
       });
 
-      const backoff = opts.facts.getFact(BACKOFF_NS, userId)?.value as
-        | { streak?: number; nextAllowedAt?: number }
+      const backoff = opts.facts.getFact(AUTONOMY_BACKOFF_NAMESPACE, userId)?.value as
+        | Partial<AutonomyBackoffState>
         | undefined;
-      const backoffActive = Number(backoff?.nextAllowedAt) > now;
+      const backoffActive = autonomyBackoffActive(backoff, now);
       const proposalsToRun = backoffActive ? allProposals.filter(ownerAsked) : allProposals;
       if (backoffActive && proposalsToRun.length < allProposals.length) {
         log.log(`[autonomous] all-drop backoff active; suppressed ${allProposals.length - proposalsToRun.length} opportunistic proposal(s)`);
@@ -511,12 +555,11 @@ export function startAutonomousLoop(
       }
 
       if (event.initiativesRun > 0) {
-        const priorStreak = Math.max(0, Number(backoff?.streak) || 0);
-        const streak = event.ownerVisible > 0 ? 0 : priorStreak + 1;
-        const nextAllowedAt = streak === 0
-          ? now
-          : now + Math.min(6 * 60 * 60_000, tickIntervalMs * (2 ** Math.min(streak, 6)));
-        opts.facts.storeFact({ namespace: BACKOFF_NS, key: userId, value: { streak, nextAllowedAt } });
+        opts.facts.storeFact({
+          namespace: AUTONOMY_BACKOFF_NAMESPACE,
+          key: userId,
+          value: nextAutonomyBackoff({ ownerVisible: event.ownerVisible, prior: backoff, now, tickIntervalMs }),
+        });
       }
 
       event.durationMs = (nowOverride ?? Date.now()) - startedAt;

@@ -415,3 +415,27 @@ test('no-progress: one incidental failure does not buy unlimited empty-lookup ro
   // Default NO_PROGRESS_ROUNDS=2 → two rounds of 2 calls, not the full 6 rounds.
   assert.ok(r.toolCallsSpent <= 4, `should stop early on repeated empty rounds, spent ${r.toolCallsSpent}`);
 });
+
+test('no-progress: the authoring-failure exemption is bounded, not unlimited', async () => {
+  // Repairing a broken script deserves patience; producing a fresh error forever is not repairing.
+  // Past REPEATED_FAILURE_LIMIT consecutive all-failure rounds the exemption lapses and the
+  // no-progress counter starts again, so maxIters stops being the only remaining bound.
+  let round = 0;
+  const llm: MiniLoopLLMClient = {
+    async send() {
+      round++;
+      return toolCallResponse([{ id: `tc-${round}`, name: 'pariGp', input: {} }]);
+    },
+  };
+  const r = await runMiniAgentLoop({
+    systemPrompt: 'sys',
+    userMessage: 'test a mathematical hypothesis',
+    llm,
+    toolDefs: NO_TOOLS,
+    // A DIFFERENT error every time, so the repeated-failure backstop never fires.
+    toolRunner: async () => ({ ok: false, output: '', error: `distinct syntax error ${round}` }),
+    maxIters: 12,
+  });
+  assert.ok(r.toolCallsSpent < 12, `exemption must lapse (spent ${r.toolCallsSpent} of 12)`);
+  assert.ok(r.toolCallsSpent >= 4, `and must not lapse before the repair budget (spent ${r.toolCallsSpent})`);
+});

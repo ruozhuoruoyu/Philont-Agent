@@ -696,3 +696,43 @@ test('loop WS6: note-only outcome NEVER escalates (prod 2026-07-08 "no new data"
   await loop.stop();
   handle.close();
 });
+
+// ── all-drop backoff ──────────────────────────────────────────────────────────────────────────────
+//
+// The throttle for a discovery loop nobody is reading: prod 2026-08-26/27 ran five initiatives per
+// tick, ~6000 tokens each time, every one DROPPED at gate 1, for hours. The decision is pure so the
+// thing that decides how often the agent may spend is testable without driving a whole tick.
+
+test('all-drop backoff: doubles while barren, caps, and one owner-visible finding clears it', async () => {
+  const { nextAutonomyBackoff, autonomyBackoffActive } = await import('../src/index.js');
+  const tickIntervalMs = 300_000; // the production 5-minute tick
+  const now = 1_000_000;
+
+  const first = nextAutonomyBackoff({ ownerVisible: 0, now, tickIntervalMs });
+  assert.deepEqual(first, { streak: 1, nextAllowedAt: now + tickIntervalMs * 2 });
+
+  const second = nextAutonomyBackoff({ ownerVisible: 0, prior: first, now, tickIntervalMs });
+  assert.deepEqual(second, { streak: 2, nextAllowedAt: now + tickIntervalMs * 4 });
+
+  // Doubling stops; a barren loop waits a bounded interval rather than an unbounded one. At the
+  // production 5-minute tick the doubling cap binds first (2^6 ticks ≈ 5.3h, under the 6h ceiling).
+  const deep = nextAutonomyBackoff({ ownerVisible: 0, prior: { streak: 20 }, now, tickIntervalMs });
+  const deeper = nextAutonomyBackoff({ ownerVisible: 0, prior: { streak: 200 }, now, tickIntervalMs });
+  assert.equal(deep.nextAllowedAt, deeper.nextAllowedAt, 'the wait stops growing');
+  assert.ok(deep.nextAllowedAt - now <= 6 * 60 * 60_000, 'and never exceeds the ceiling');
+  // A slow tick hits the ceiling instead of the doubling cap.
+  assert.equal(
+    nextAutonomyBackoff({ ownerVisible: 0, prior: { streak: 20 }, now, tickIntervalMs: 60 * 60_000 }).nextAllowedAt - now,
+    6 * 60 * 60_000,
+  );
+
+  // Producing one finding the owner would actually see buys full price back immediately.
+  const cleared = nextAutonomyBackoff({ ownerVisible: 1, prior: { streak: 20 }, now, tickIntervalMs });
+  assert.deepEqual(cleared, { streak: 0, nextAllowedAt: now });
+  assert.equal(autonomyBackoffActive(cleared, now), false);
+
+  // And the throttle actually lifts on its own.
+  assert.equal(autonomyBackoffActive(first, now + 1), true);
+  assert.equal(autonomyBackoffActive(first, first.nextAllowedAt), false);
+  assert.equal(autonomyBackoffActive(undefined, now), false, 'no record ⇒ never throttled');
+});

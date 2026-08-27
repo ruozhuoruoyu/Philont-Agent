@@ -9,6 +9,8 @@ import type { LedgerFailure, ReplayAttemptState } from './repair_replay.js';
 
 export const DRAFT_VALIDATION_ATTEMPTS_NAMESPACE = 'draft_validation_attempts';
 const COOLDOWN_MS = 7 * 24 * 60 * 60_000;
+/** Declines on distinct failure classes before a skill is judged inapplicable to the whole tool. */
+const DECLINES_BEFORE_TOOL_COOLDOWN = 2;
 
 export function draftValidationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return mechanicalRepairEnabled(env)
@@ -116,7 +118,18 @@ export function selectDraftFixture(input: {
       const key = draftFixtureKey(skill, failure, signature);
       const cooldownKey = draftCooldownKey(skill, signature);
       const toolCooldownKey = draftToolCooldownKey(skill, failure.toolName);
-      const prior = input.attemptFor(toolCooldownKey) ?? input.attemptFor(cooldownKey) ?? input.attemptFor(key);
+      // The tool-wide block takes TWO declines, not one. One NONE is the repair model answering about
+      // one failure class; a whole tool has eight or more of them, and shutting all of them for a week
+      // on a single answer throws away the only evidence this path produces. The signature-level
+      // cooldown already prevents an immediate retry of the same class, so the second strike lands on
+      // a different class — which is what makes it evidence about the tool rather than the class.
+      const toolPrior = input.attemptFor(toolCooldownKey);
+      const toolBlocked = !!toolPrior && (
+        toolPrior.permanent ||
+        ((toolPrior.attempts ?? 0) >= DECLINES_BEFORE_TOOL_COOLDOWN && now - toolPrior.lastAttemptAt < COOLDOWN_MS)
+      );
+      if (toolBlocked) continue;
+      const prior = input.attemptFor(cooldownKey) ?? input.attemptFor(key);
       if (prior?.permanent || (prior && now - prior.lastAttemptAt < COOLDOWN_MS)) continue;
       if (!best || score > best.score || (score === best.score && failure.recordedAt > best.fixture.failure.recordedAt)) {
         best = { fixture: { skill, failure, signature, key, cooldownKey, toolCooldownKey }, score };

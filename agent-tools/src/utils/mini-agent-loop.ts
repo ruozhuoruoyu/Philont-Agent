@@ -277,6 +277,8 @@ export async function runMiniAgentLoop(
   let llmTokensSpent = 0;
   let toolCallsSpent = 0;
   let unproductiveRounds = 0;
+  /** Consecutive rounds in which EVERY tool call failed — exempt from the no-progress count, up to a bound. */
+  let failureOnlyStreak = 0;
   let stoppedNoProgress = false;
   const failureCounts = new Map<string, number>();
 
@@ -434,9 +436,23 @@ export async function runMiniAgentLoop(
     // The exemption requires the round to be NOTHING BUT failures. Keyed on "had a failure" instead,
     // one incidental error per round buys unlimited empty-lookup rounds — which is the exact spin this
     // counter was written for (prod: 18 lookups, 9 iterations, zero commits).
+    //
+    // The exemption is bounded. It exists so the model can REPAIR a broken script; a model still
+    // producing a fresh error on the fourth consecutive attempt is not repairing, and without a
+    // bound the only remaining stops are maxIters and the deadline. The bound is
+    // REPEATED_FAILURE_LIMIT — the patience this loop already grants to a failing call — rather than
+    // a new number of its own.
     const roundAllToolsFailed = roundToolCalls > 0 && roundToolFailures === roundToolCalls;
-    if (roundProductive) unproductiveRounds = 0;
-    else if (!roundAllToolsFailed) unproductiveRounds += 1;
+    if (roundProductive) {
+      unproductiveRounds = 0;
+      failureOnlyStreak = 0;
+    } else if (roundAllToolsFailed) {
+      failureOnlyStreak += 1;
+      if (failureOnlyStreak > REPEATED_FAILURE_LIMIT) unproductiveRounds += 1;
+    } else {
+      failureOnlyStreak = 0;
+      unproductiveRounds += 1;
+    }
     if (NO_PROGRESS_ROUNDS > 0 && unproductiveRounds >= NO_PROGRESS_ROUNDS && i + 1 < maxIters) {
       onStatus?.(`⚠ no progress ${unproductiveRounds} round(s) — stopping early (iter ${i + 1}/${maxIters})`);
       stoppedNoProgress = true;

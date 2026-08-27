@@ -393,6 +393,9 @@ export type {
 // K8 initiative layer (autonomous loop)
 export {
   startAutonomousLoop,
+  autonomyBackoffActive,
+  nextAutonomyBackoff,
+  AUTONOMY_BACKOFF_NAMESPACE,
   InitiativeStore,
   BudgetTracker,
   DEFAULT_BUDGET_CAPS,

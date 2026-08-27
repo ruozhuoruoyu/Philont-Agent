@@ -58,8 +58,12 @@ export type {
 
 export {
   startAutonomousLoop,
+  autonomyBackoffActive,
+  nextAutonomyBackoff,
+  AUTONOMY_BACKOFF_NAMESPACE,
 } from './loop.js';
 export type {
+  AutonomyBackoffState,
   AutonomousAuditHook,
   AutonomousInterruptKind,
   AutonomousInterruptPayload,

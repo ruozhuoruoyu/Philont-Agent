@@ -126,17 +126,22 @@ test('declined draft rewrite persists a cooldown without changing skill usage', 
   assert.ok(store.getFact(DRAFT_VALIDATION_ATTEMPTS_NAMESPACE, fixture.toolCooldownKey));
 });
 
-test('model decline cools the skill across signatures from the same tool', () => {
+test('two declines cool the skill across the whole tool; one does not', () => {
   const first = selectDraftFixture({ drafts: [skill()], failures: [failure], eligibleTools: new Set(['leanCheck']), signatureOf, attemptFor: () => null })!;
-  const picked = selectDraftFixture({
+  const onAnotherSignature = (toolAttempts: number) => selectDraftFixture({
     drafts: [skill()],
     failures: [{ ...failure, errorText: 'omega generated a different parser failure', recordedAt: 20 }],
     eligibleTools: new Set(['leanCheck']),
     signatureOf: () => 'leanCheck:some-other-signature',
-    attemptFor: (key) => key === first.toolCooldownKey ? { attempts: 1, lastAttemptAt: 100, permanent: false } : null,
+    attemptFor: (key) => key === first.toolCooldownKey
+      ? { attempts: toolAttempts, lastAttemptAt: 100, permanent: false }
+      : null,
     now: 101,
   });
-  assert.equal(picked, null, 'a declined skill/tool pair must not retry every signature from that tool');
+  // One NONE answers about ONE failure class. A tool has eight or more; shutting all of them for a
+  // week on a single answer throws away the only evidence this path produces.
+  assert.ok(onAnotherSignature(1), 'a single decline leaves the rest of the tool open');
+  assert.equal(onAnotherSignature(2), null, 'a second decline, on a different class, is about the tool');
 });
 
 test('draft cooldown is stable across historical inputs of the same failure class', () => {
