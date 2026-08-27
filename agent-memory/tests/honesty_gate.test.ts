@@ -1367,4 +1367,14 @@ test('reasoning terminal detection respects clause-local negation before tight m
   for (const text of ['全部闭合', '会话已闭合', '根命题已证']) {
     assert.ok(findReasoningTerminalClaim(text), text);
   }
+  // A negator earlier in the clause denies what FOLLOWS it up to the next separator — not the
+  // terminal phrase on the other side of that separator. Suppressing by proximity instead let a
+  // fabricated closure through whenever the sentence happened to open with a denial.
+  for (const text of [
+    '没有发现反例，全部闭合',
+    '未发现漏洞，全部闭合',
+    '前三轮未成功，第四轮根命题已证',
+    '还有一些未知常数需要确认，但整个推理树已闭合',
+    'There is not much left to check, the root proposition is proved',
+  ]) assert.ok(findReasoningTerminalClaim(text), text);
 });

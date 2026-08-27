@@ -7682,14 +7682,6 @@ export function resolveRecallInput(
     : (activeWorkGoal?.trim() || carriedGoal?.trim() || userMessage);
 }
 
-/** Strong owner hand-off wording: deterministic consent to run the focused exploration autonomously. */
-export function requestsExploreAutoHandoff(text: string): boolean {
-  const s = text.trim();
-  return /(?:这个|这项|该)?(?:工作|任务|证明|探索)?\s*(?:是)?\s*交给你(?:来)?(?:做|推|跑|完成)/.test(s) ||
-    /(?:你来|由你)(?:继续)?(?:推|跑|做|完成)/.test(s) ||
-    /(?:不用我|无需我)(?:再)?(?:回复|确认|继续)[^。！？\n]{0,12}(?:你|自动)/.test(s);
-}
-
 /** Current concrete work target shared by skill recall and the learning judge. */
 function activeWorkGoalForSession(sessionId: string): string | undefined {
   try {
@@ -7945,8 +7937,13 @@ export async function handleChatSend(
   // advances a manual session until "继续" anyway, so "pausing" it is just an honest acknowledgment + the
   // resume word.
   {
-    const ec = classifyExploreControlReply(userMessage) ??
-      (requestsExploreAutoHandoff(userMessage) ? { kind: 'auto_advance' as const } : null);
+    // Only the words we PRINTED arm unattended advancing. A free-text intent regex was tried here
+    // ("你来推 / 交给你来做") and fired on 你来推荐几篇论文, 你来做个总结, 你来推导一下这个不等式 and
+    // 这个交给你来做，但先问我 — every one of which would have started background spend with nobody
+    // watching. Reading back our own enum is parsing; deciding what free text wants is intent, and
+    // intent does not belong in a regex. The deterministic entry the owner needs is that 自动 — the
+    // word deep_explore's own status line offers — now actually works (see explore_control).
+    const ec = classifyExploreControlReply(userMessage);
     const openSessions = ec ? memory.reasoning.listActiveSessions(sessionId) : [];
     const autoOn = openSessions.filter((x) => x.autoAdvance);
     const applies = !!ec && openSessions.length > 0;
@@ -8707,12 +8704,14 @@ export async function handleChatSend(
     }
   }
 
+  // Resolved once: activeWorkGoalForSession walks the plan table and computes the reasoning frontier,
+  // so calling it again just to log it doubles that work on every turn.
+  const recallActiveWork = activeWorkGoalForSession(sessionId);
   const recallInput = resolveRecallInput(
     userMessage,
-    activeWorkGoalForSession(sessionId),
+    recallActiveWork,
     signalBus.carriedExploreGoal,
   );
-  const recallActiveWork = activeWorkGoalForSession(sessionId);
   console.log(
     `[recall-query] session=${safeSessionId(sessionId)} raw=${JSON.stringify(userMessage.slice(0, 80))}` +
       ` active=${JSON.stringify(recallActiveWork?.slice(0, 120) ?? null)}` +
@@ -13324,7 +13323,14 @@ async function runToolLoop(
             goalIsOpenProblem: !!openMatch,
             noProgressRounds: episodeStats.noProgressRounds,
             status: vSummary?.status ?? ownerSession?.status ?? null,
-            provedCount: episodeStats.provedCount,
+            // ABSOLUTE, unlike the stall counters above. `provedCount` is not a stall signal — it is
+            // the positive evidence that answers `frontier_empty_no_proof` (status stuck AND nothing
+            // proved). Zeroing it at an episode boundary manufactures that emptiness: a tree with 13
+            // proved nodes read as "frontier exhausted, 0 proved" on the turn after the owner said
+            // keep going, verdict=pivot. `status` is tree-lifetime too, so both sides of that test
+            // have to describe the same window. The episode-relative proved count is still used —
+            // as half of attemptsThisEpisode, where "what has THIS direction tried" is the question.
+            provedCount: vSummary?.provedCount ?? 0,
             openFrontierCount: vSummary?.openFrontierCount ?? 0,
             sameRootCause: vSameRoot,
             turnCount: vTurnCount,

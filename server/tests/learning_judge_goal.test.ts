@@ -9,6 +9,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { classifyExploreControlReply } from '../src/explore_control.js';
 import {
   isExternalAcceptanceNode,
   isMachineSettleableAcceptanceNode,
@@ -16,7 +17,6 @@ import {
   formalEvidenceAppliesToClaims,
   resolveJudgeGoal,
   resolveRecallInput,
-  requestsExploreAutoHandoff,
   episodeRelativeReasoningStats,
   selectCompileAcceptanceNode,
   selectJudgeFrontierGoal,
@@ -180,11 +180,16 @@ test('skill recall for a continuation uses active work before a carried directio
   assert.equal(resolveRecallInput('总结我们目前的 LRC 证明状态', 'stale work'), '总结我们目前的 LRC 证明状态');
 });
 
-test('explicit owner handoff deterministically opts the focused exploration into auto advance', () => {
-  for (const text of ['你来推', '这个工作是交给你来做的', '由你继续完成']) {
-    assert.equal(requestsExploreAutoHandoff(text), true, text);
+test('the auto-advance word deep_explore offers is the word that arms it', () => {
+  // The status line prints "auto: off — say 自动 and I run it myself". Offering a word the matcher
+  // rejects is how this valve stayed unplumbed the first time.
+  for (const text of ['自动', '自动。', '自动推进', 'auto']) {
+    assert.equal(classifyExploreControlReply(text)?.kind, 'auto_advance', text);
   }
-  for (const text of ['继续', '你怎么看', '换方向']) assert.equal(requestsExploreAutoHandoff(text), false, text);
+  // Open-language hand-offs stay with the model. A regex here fired on all of these.
+  for (const text of ['你来推荐几篇论文', '你来做个总结', '你来推导一下这个不等式', '这个交给你来做，但先问我']) {
+    assert.equal(classifyExploreControlReply(text), null, text);
+  }
 });
 
 test('viability judges only progress and dead ends accumulated after an episode reset', () => {

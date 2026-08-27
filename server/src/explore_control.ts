@@ -35,7 +35,10 @@ export function classifyExploreControlReply(userMessage: string): ExploreControl
   if (/^(全清|全部清理|全部放弃|全都放弃|clearall|abandonall|dropall)$/.test(m)) {
     return { kind: 'abandon_all' };
   }
-  if (/^(自动推进|后台推进|继续自动推进|autoadvance|keepgoing)$/.test(m)) {
+  // 自动 is in this list because deep_explore's status line PRINTS it: "auto: off — say 自动 and I
+  // run it myself". It was offered and not accepted — the same defect this module was written to
+  // remove, one word further down. Whatever a card offers has to appear here.
+  if (/^(自动|自动推进|后台推进|继续自动推进|auto|autoadvance|keepgoing)$/.test(m)) {
     return { kind: 'auto_advance' };
   }
   if (/^(停|停止|停下|暂停|别推了|stop|pause)$/.test(m)) {

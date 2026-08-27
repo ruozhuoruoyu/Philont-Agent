@@ -613,10 +613,21 @@ export function findReasoningTerminalClaim(text: string): string | null {
         text.lastIndexOf('.', m.index - 1), text.lastIndexOf('!', m.index - 1),
         text.lastIndexOf('?', m.index - 1),
       ) + 1;
-      const claimContext = text.slice(Math.max(clauseStart, m.index - 40), m.index + matched.length);
+      const claimContext = text.slice(clauseStart, m.index + matched.length);
+      // A negator scopes forward until the next separator, and no further. Measuring by distance
+      // instead ("a negator within N characters") reads the wrong denial: 「没有发现反例，全部闭合」
+      // denies the counterexample and then claims the closure outright — four such shapes slipped
+      // through a 32-character window. Take the LAST negator and ask whether anything separates it
+      // from the terminal phrase; if something does, it is denying that something, not this claim.
+      const negators = /(?:未|没有|尚未|并非|不是|不得|不(?:会|能)?声称|不能说|无法确认)|\b(?:not|never|cannot|can't|do not|does not|is not|isn't|must not)\b/gi;
+      let negAt = -1;
+      let negLen = 0;
+      for (let n = negators.exec(claimContext); n !== null; n = negators.exec(claimContext)) {
+        negAt = n.index;
+        negLen = n[0].length;
+      }
       const deniesPositiveClaim =
-        /(?:未|没有|尚未|并非|不是|不得|不(?:会|能)?声称|不能说|无法确认)[^。！？\n]{0,32}$/i.test(claimContext) ||
-        /(?:not|never|cannot|can'?t|do not|does not|is not|isn't|must not)[^.!?\n]{0,32}$/i.test(claimContext);
+        negAt >= 0 && !/[，、,;；:：]/.test(claimContext.slice(negAt + negLen));
       const isExplicitImpossibilityConclusion = /(?:不能|无法|不可能).*(?:证明|证明路径)/.test(matched);
       if (deniesPositiveClaim && !isExplicitImpossibilityConclusion) continue; // this match only
       return matched.slice(0, 60);
