@@ -9,7 +9,7 @@ import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 
 // MAX_ROUNDS is captured at module load → set a small budget BEFORE importing, so the budget-cap test is fast.
 process.env.PHILONT_GOAL_LOOP_MAX_ROUNDS = '2';
-const { createAutoAdvanceLoop, autoAdvanceEnabled } = await import('../src/deep_explore_autoadvance.js');
+const { createAutoAdvanceLoop, autoAdvanceEnabled, episodeNoProgressRounds } = await import('../src/deep_explore_autoadvance.js');
 
 function sess(over: Partial<ReasoningSession>): ReasoningSession {
   return {
@@ -44,6 +44,13 @@ test('auto-advance: 默认 ON; =0 才关', () => {
   }
 });
 
+test('auto-advance: 新 episode 不继承旧的无进展 streak', () => {
+  assert.equal(episodeNoProgressRounds(9, 9), 0);
+  assert.equal(episodeNoProgressRounds(10, 9), 1);
+  assert.equal(episodeNoProgressRounds(0, 9), 0, '真实进展重置 persisted streak');
+  assert.equal(episodeNoProgressRounds(2, 9), 2, '重置后的新 streak 直接计数');
+});
+
 test('auto-advance: 关闭(=0)→ 不推进', async () => {
   process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = '0';
   let advanced = 0;
@@ -58,7 +65,7 @@ test('auto-advance: 关闭(=0)→ 不推进', async () => {
   assert.equal(advanced, 0);
 });
 
-test('auto-advance: 2 轮无进展(switchAfter)→ 暂停 + 建议换角度,不推进', async () => {
+test('auto-advance: 旧 2 轮无进展不让刚启用的 episode 立即暂停', async () => {
   process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
   let advanced = 0;
   const notes: Array<{ text: string; important?: boolean }> = [];
@@ -70,25 +77,32 @@ test('auto-advance: 2 轮无进展(switchAfter)→ 暂停 + 建议换角度,不�
     notify: (text, opts) => notes.push({ text, important: opts?.important }),
   });
   await loop.tickOnce();
-  assert.equal(advanced, 0, 'switch_engine pauses before advancing');
-  assert.deepEqual(calls.setAutoAdvance, [['a', false]]);
-  assert.match(notes[0].text, /换/);
-  assert.equal(notes[0].important, true);
+  assert.equal(advanced, 1);
+  assert.deepEqual(calls.setAutoAdvance, []);
+  assert.equal(notes.length, 1, 'fresh session reset is reported as a milestone by this fake store');
 });
 
-test('auto-advance: 卡住(noProgressRounds≥3)→ 暂停 + important 升级,不推进', async () => {
+test('auto-advance: 本 episode 累积到阈值后仍会暂停', async () => {
   process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
   let advanced = 0;
   const notes: Array<{ text: string; important?: boolean }> = [];
-  const { store, calls } = fakeStore({ active: [sess({ id: 'a', noProgressRounds: 3 })] });
+  let noProgress = 3;
+  const calls = { setAutoAdvance: [] as Array<[string, boolean]> };
+  const store = {
+    listAutoAdvanceSessions: () => [sess({ id: 'a', noProgressRounds: noProgress })],
+    setAutoAdvance: (id: string, on: boolean) => { calls.setAutoAdvance.push([id, on]); },
+    getSession: (id: string) => sess({ id, noProgressRounds: noProgress }),
+  } as unknown as ReasoningStore;
   const loop = createAutoAdvanceLoop({
     reasoning: store,
     advanceSession: async () => { advanced++; return { success: true, output: '' }; },
     runInContext: passthroughCtx,
     notify: (text, opts) => notes.push({ text, important: opts?.important }),
   });
+  await loop.tickOnce(); // baseline=3, one round is allowed
+  noProgress = 6;       // three flat automatic rounds relative to that baseline
   await loop.tickOnce();
-  assert.equal(advanced, 0);
+  assert.equal(advanced, 1);
   assert.deepEqual(calls.setAutoAdvance, [['a', false]]);
   assert.equal(notes[0].important, true);
   assert.match(notes[0].text, /卡住|暂停/);

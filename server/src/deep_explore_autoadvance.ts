@@ -90,6 +90,18 @@ export interface AutoAdvanceLoop {
   tickOnce: () => Promise<void>;
 }
 
+/**
+ * `noProgressRounds` is a trailing streak persisted on the reasoning session.  Enabling automatic
+ * advance is a new execution episode: an old manual/deep-explore streak must not make the freshly
+ * enabled driver pause before it has run once.  Once a substantive round resets the persisted streak,
+ * the smaller current value is already the complete streak for the new episode.
+ */
+export function episodeNoProgressRounds(current: number, baseline: number): number {
+  const now = Math.max(0, Math.trunc(current));
+  const start = Math.max(0, Math.trunc(baseline));
+  return now < start ? now : Math.max(0, now - start);
+}
+
 export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
   const intervalMs = deps.intervalMs ?? 30_000;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -97,6 +109,8 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
   let running = false;
   /** Rounds this driver has advanced per session (in-memory budget counter; resets on restart). */
   const roundsAdvanced = new Map<string, number>();
+  /** Persisted no-progress streak at the start of this auto-advance episode. */
+  const noProgressBaselines = new Map<string, number>();
   /** S3 contract base — DEFAULT_LOOP_CONTRACT with stuckAfter overridden by the env STUCK_STOP. */
   const baseContract: LoopContract = { ...DEFAULT_LOOP_CONTRACT, stuckAfter: STUCK_STOP };
 
@@ -121,11 +135,25 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
       for (const s of sessions) {
         if (stopped) break;
 
+        // First sight of an opted-in session starts a fresh automatic episode. This deliberately
+        // absorbs historical/manual stagnation; only rounds attempted by this driver may stop it.
+        if (!noProgressBaselines.has(s.id)) {
+          noProgressBaselines.set(s.id, s.noProgressRounds);
+          console.log(
+            `[auto-advance] episode started session=${s.id} inheritedNoProgress=${s.noProgressRounds}`,
+          );
+        }
+        const episodeNoProgress = episodeNoProgressRounds(
+          s.noProgressRounds,
+          noProgressBaselines.get(s.id) ?? 0,
+        );
+
         // 1. Per-loop ROUNDS budget — pause + ask (cost checkpoint, not a silent kill).
         const rounds = roundsAdvanced.get(s.id) ?? 0;
         if (rounds >= MAX_ROUNDS) {
           deps.reasoning.setAutoAdvance(s.id, false);
           roundsAdvanced.delete(s.id);
+          noProgressBaselines.delete(s.id);
           deps.notify(
             (deps.lang?.() ?? 'zh') === 'en'
               ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" used its ${MAX_ROUNDS}-round budget. Reply "auto advance" for another batch, or "stop".`
@@ -135,9 +163,9 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           continue;
         }
 
-        // 2. Direction (S3): decide BEFORE spending another round. The session's noProgressRounds IS the
-        //    trailing flat-tick run → scoreTrajectory turns it into continue / switch_engine / escalate.
-        const flatHist: TickOutcome[] = Array.from({ length: s.noProgressRounds }, () => ({
+        // 2. Direction (S3): decide BEFORE spending another round. Use only the trailing flat run in
+        //    THIS auto episode; the persisted session counter may include old manual rounds.
+        const flatHist: TickOutcome[] = Array.from({ length: episodeNoProgress }, () => ({
           progress: 0,
           bodyKind: 'deep_explore' as const,
         }));
@@ -145,14 +173,15 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
         if (decision === 'escalate' || decision === 'switch_engine') {
           deps.reasoning.setAutoAdvance(s.id, false);
           roundsAdvanced.delete(s.id);
+          noProgressBaselines.delete(s.id);
           deps.notify(
             (deps.lang?.() ?? 'zh') === 'en'
               ? decision === 'switch_engine'
-                ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" produced nothing for ${s.noProgressRounds} rounds — a different angle or mode may work better. Reply "continue" to push on as-is, try a new angle, or "stop".`
-                : `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" has made no progress for ${s.noProgressRounds} rounds (stuck). Reply "continue" to advance it by hand, or restart from a new angle.`
+                ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" produced nothing for ${episodeNoProgress} automatic rounds — a different angle or mode may work better. Reply "continue" to push on as-is, try a new angle, or "stop".`
+                : `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" has made no progress for ${episodeNoProgress} automatic rounds (stuck). Reply "continue" to advance it by hand, or restart from a new angle.`
               : decision === 'switch_engine'
-                ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 这条路连续 ${s.noProgressRounds} 轮没产出——换个角度/模式可能更有效。回复"继续"原路推进、或换个角度、或"停"。`
-                : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 连续 ${s.noProgressRounds} 轮无进展(卡住)。回复"继续"手动推进,或换个角度重启。`,
+                ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮没产出——换个角度/模式可能更有效。回复"继续"原路推进、或换个角度、或"停"。`
+                : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮无进展(卡住)。回复"继续"手动推进,或换个角度重启。`,
             { important: true },
           );
           continue;
@@ -173,6 +202,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           // Solved / closed → stop and report.
           deps.reasoning.setAutoAdvance(s.id, false);
           roundsAdvanced.delete(s.id);
+          noProgressBaselines.delete(s.id);
           deps.notify(
             `✅ 自动推进结束:"${s.goal.slice(0, 50)}" 状态=${fresh?.status ?? 'closed'}。\n${(out?.output ?? '').slice(0, 600)}`,
             { important: true },
@@ -234,6 +264,8 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
      */
     rearm: (sessionId: string): void => {
       roundsAdvanced.delete(sessionId);
+      const current = deps.reasoning.getSession(sessionId);
+      noProgressBaselines.set(sessionId, current?.noProgressRounds ?? 0);
       deps.reasoning.setAutoAdvance(sessionId, true);
     },
     tickOnce,
