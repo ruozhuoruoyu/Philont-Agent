@@ -89,6 +89,7 @@ export function createToolChecker(config: PolicyConfig): (input: ToolCheckInput)
     }
 
     const classify = (name: string) => classifyTool?.(name, parsedParams) ?? null;
+    let matrixGrantMatched = false;
 
     // 1. Permission matrix check (quick-filter layer)
     //    - Denied and no grant → terminate
@@ -109,10 +110,11 @@ export function createToolChecker(config: PolicyConfig): (input: ToolCheckInput)
       }
 
       if (allowed === false) {
-        // useGrant, not isGranted: this is the check that immediately precedes execution, so a match
-        // here means the authorised workflow is still running and its window is re-armed. See GrantStore.
-        const hasGrant = grantStore?.useGrant(toolName, parsedParams) ?? false;
+        // Match now, renew only after every validator has passed. A rejected call is not use and must
+        // not keep an authorization alive.
+        const hasGrant = grantStore?.isGranted(toolName, parsedParams) ?? false;
         if (hasGrant) {
+          matrixGrantMatched = true;
           audit.append('tool_call', { toolName, allowed: true, grantOverride: true });
           // Continue to validator chain; grant cannot bypass deep checks
         } else {
@@ -124,7 +126,9 @@ export function createToolChecker(config: PolicyConfig): (input: ToolCheckInput)
           // "Never approved" and "the approval ran out" are the same sentence to a reader and call for
           // opposite responses. Say which one it is; a sub-task that cannot ask anyone especially needs
           // to report that the window closed rather than that permission was refused.
-          const lapsedAt = grantStore?.expiredRecently(toolName, GRANT_LAPSE_REPORT_WINDOW_MS) ?? null;
+          const lapsedAt = grantStore?.expiredRecently(
+            toolName, GRANT_LAPSE_REPORT_WINDOW_MS, parsedParams,
+          ) ?? null;
           audit.append('permission_denied', {
             toolName, phase: 'pre_execution', stage: 'matrix',
             ...(lapsedAt !== null ? { grantLapsedAt: lapsedAt } : {}),
@@ -207,7 +211,7 @@ export function createToolChecker(config: PolicyConfig): (input: ToolCheckInput)
 
     // 3. ApprovalLevel check (tool self-declared as always)
     if (approval === 'always') {
-      if (grantStore && grantStore.isGranted(toolName, parsedParams)) {
+      if (grantStore && grantStore.useGrant(toolName, parsedParams)) {
         audit.append('tool_call', { toolName, allowed: true, approvalGranted: true });
         return null;
       }
@@ -222,6 +226,19 @@ export function createToolChecker(config: PolicyConfig): (input: ToolCheckInput)
     }
 
     // 4. Allow
+    if (matrixGrantMatched && !grantStore?.useGrant(toolName, parsedParams)) {
+      const lapsedAt = grantStore?.expiredRecently(
+        toolName, GRANT_LAPSE_REPORT_WINDOW_MS, parsedParams,
+      ) ?? null;
+      audit.append('permission_denied', {
+        toolName, phase: 'pre_execution', stage: 'matrix',
+        ...(lapsedAt !== null ? { grantLapsedAt: lapsedAt } : {}),
+      });
+      return lapsedAt !== null
+        ? `Tool '${toolName}' denied by permission matrix — the approval that covered it EXPIRED during validation. ` +
+          `This is a lapsed window, not a refusal: report it as expired authorization and ask the owner to re-approve.`
+        : `Tool '${toolName}' denied by permission matrix`;
+    }
     audit.append('tool_call', { toolName, allowed: true });
     return null;
   };

@@ -71,6 +71,11 @@ interface Z3Run {
   spawnError?: string; // ENOENT etc. (executable not found)
 }
 
+/** Replace only unpaired UTF-16 surrogates; preserve valid astral-code-point pairs. */
+export function sanitizeSmtlibText(text: string): string {
+  return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+}
+
 /** Run the harness with one python candidate; ENOENT is flagged separately so the caller can try the next candidate. */
 function runOnce(python: string, smtlib: string, timeoutMs: number): Promise<Z3Run> {
   return new Promise((resolve) => {
@@ -114,7 +119,7 @@ function runOnce(python: string, smtlib: string, timeoutMs: number): Promise<Z3R
 
     // SMT-LIB via stdin (not argv)
     try {
-      child.stdin.write(smtlib);
+      child.stdin.write(sanitizeSmtlibText(smtlib));
       child.stdin.end();
     } catch {
       /* stdin write failure is caught by close/error */

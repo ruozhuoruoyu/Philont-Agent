@@ -97,8 +97,10 @@ function normalizePath(p: string): string {
 export class GrantStore {
   // Indexed by toolName; value is a list of grants
   private grants = new Map<string, Grant[]>();
-  /** Most recent expiry seen while pruning, per tool — lets a denial say "it ran out" (see expiredRecently). */
-  private lastExpiredAt = new Map<string, number>();
+  /** Recently pruned grants, retained briefly so a denial can distinguish expiry from no matching approval. */
+  private recentlyExpired = new Map<string, Grant[]>();
+
+  constructor(private readonly now: () => number = Date.now) {}
 
   /**
    * Add a grant
@@ -135,15 +137,16 @@ export class GrantStore {
     ttlMs: number = DEFAULT_GRANT_TTL_MS,
   ): void {
     let g: Grant;
+    const issuedAt = this.now();
     if (typeof arg === 'string') {
       g = {
         toolName: arg,
         scope: 'tool',
         capability: capability!,
         domain: domain!,
-        expiresAt: Date.now() + ttlMs,
+        expiresAt: issuedAt + ttlMs,
         reason: reason!,
-        issuedAt: Date.now(),
+        issuedAt,
         ttlMs,
       };
     } else {
@@ -153,10 +156,10 @@ export class GrantStore {
         pattern: arg.pattern,
         capability: arg.capability,
         domain: arg.domain,
-        expiresAt: Date.now() + (arg.ttlMs ?? DEFAULT_GRANT_TTL_MS),
+        expiresAt: issuedAt + (arg.ttlMs ?? DEFAULT_GRANT_TTL_MS),
         reason: arg.reason,
         audience: arg.audience,
-        issuedAt: Date.now(),
+        issuedAt,
         ttlMs: arg.ttlMs ?? DEFAULT_GRANT_TTL_MS,
       };
     }
@@ -201,7 +204,7 @@ export class GrantStore {
   ): boolean {
     const g = this.findActive(toolName, params, scopeMin, audience);
     if (!g) return false;
-    const now = Date.now();
+    const now = this.now();
     const ceiling = g.issuedAt + g.ttlMs * RENEWAL_CEILING_FACTOR;
     // Never shrink, never exceed the ceiling.
     g.expiresAt = Math.max(g.expiresAt, Math.min(ceiling, now + g.ttlMs));
@@ -215,9 +218,27 @@ export class GrantStore {
    * existed, and the two call for opposite responses — ask the owner, versus say the approval ran out.
    * Prod 2026-08-28 read as the former and printed twelve identical matrix denials.
    */
-  expiredRecently(toolName: string, windowMs: number, now: number = Date.now()): number | null {
-    const at = this.lastExpiredAt.get(toolName);
-    return at !== undefined && now - at <= windowMs ? at : null;
+  expiredRecently(
+    toolName: string,
+    windowMs: number,
+    params?: Record<string, unknown>,
+    scopeMin: GrantScope = 'tool',
+    audience?: string,
+    now?: number,
+  ): number | null {
+    const current = now ?? this.now();
+    const recent = (this.recentlyExpired.get(toolName) ?? []).filter((g) => current - g.expiresAt <= windowMs);
+    if (recent.length === 0) {
+      this.recentlyExpired.delete(toolName);
+      return null;
+    }
+    this.recentlyExpired.set(toolName, recent);
+    const matching = recent.filter((g) => {
+      if (scopeMin !== 'tool' && g.scope === 'tool') return false;
+      if (g.audience !== undefined && g.audience !== audience) return false;
+      return this.matches(g, params);
+    });
+    return matching.length > 0 ? Math.max(...matching.map((g) => g.expiresAt)) : null;
   }
 
   private findActive(
@@ -229,11 +250,14 @@ export class GrantStore {
     const list = this.grants.get(toolName);
     if (!list || list.length === 0) return null;
 
-    const now = Date.now();
+    const now = this.now();
     const active = list.filter(g => g.expiresAt > now);
     if (active.length !== list.length) {
-      const lapsed = Math.max(...list.filter(g => g.expiresAt <= now).map(g => g.expiresAt));
-      this.lastExpiredAt.set(toolName, lapsed);
+      const expired = list.filter(g => g.expiresAt <= now);
+      const remembered = [...(this.recentlyExpired.get(toolName) ?? []), ...expired]
+        .sort((a, b) => b.expiresAt - a.expiresAt)
+        .slice(0, 32);
+      this.recentlyExpired.set(toolName, remembered);
     }
     if (active.length === 0) {
       this.grants.delete(toolName);
@@ -283,7 +307,7 @@ export class GrantStore {
 
   /** Return all unexpired grants (for debugging) */
   list(): Grant[] {
-    const now = Date.now();
+    const now = this.now();
     const out: Grant[] = [];
     for (const [name, list] of this.grants) {
       const active = list.filter(g => g.expiresAt > now);

@@ -6375,8 +6375,11 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
   // falsify-structural-hypotheses-before-attacking in slots 1 and 6, and the aux's sixth pick fell off
   // the cap to make room for the duplicate. One of six slots, spent on nothing.
   const explore = memory.skills
-    .untestedDraftsForExploration(1)
-    .filter((s) => !META_SKILL_NAMES.has(s.name) && !rankedWithAux.some((r) => r.name === s.name));
+    // Pull past every occupied recommendation slot before filtering. Asking for one and then
+    // discarding it when aux already chose it silently removed the reserved exploration slot.
+    .untestedDraftsForExploration(POSITIVE_CAP + 1)
+    .filter((s) => !META_SKILL_NAMES.has(s.name) && !rankedWithAux.some((r) => r.name === s.name))
+    .slice(0, 1);
   const positives = explore.length > 0
     ? [...rankedWithAux.slice(0, Math.max(0, POSITIVE_CAP - 1)), ...explore]
     : rankedWithAux;

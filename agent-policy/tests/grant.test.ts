@@ -45,7 +45,8 @@ test('an ordinary grant still answers to everyone, including audiences', () => {
 // compile result with its verifiers dark.
 
 test('a granted call in progress re-arms its own window; merely asking does not', () => {
-  const store = new GrantStore();
+  let now = 10_000;
+  const store = new GrantStore(() => now);
   store.grant('z3Verify', 'execute', 'local', 'approved', 1_000);
 
   // Asking is not using: isGranted must leave the clock alone.
@@ -54,22 +55,26 @@ test('a granted call in progress re-arms its own window; merely asking does not'
   assert.equal(store.isGranted('z3Verify'), true);
   assert.equal(store.list().find((g) => g.toolName === 'z3Verify')!.expiresAt, beforeUse);
 
-  // Using it pushes the window out from now.
+  // Using it late in the window pushes expiry one full TTL from actual use.
+  now += 900;
   assert.equal(store.useGrant('z3Verify'), true);
-  assert.ok(store.list().find((g) => g.toolName === 'z3Verify')!.expiresAt >= beforeUse);
+  assert.equal(store.list().find((g) => g.toolName === 'z3Verify')!.expiresAt, now + 1_000);
 });
 
 test('renewal is bounded by a multiple of the window the caller asked for', () => {
-  const store = new GrantStore();
+  let now = 10_000;
+  const store = new GrantStore(() => now);
   const ttl = 60_000;
   store.grant('pariGp', 'execute', 'local', 'approved', ttl);
   const issued = store.list().find((g) => g.toolName === 'pariGp')!;
   const ceiling = issued.issuedAt + ttl * RENEWAL_CEILING_FACTOR;
-  for (let i = 0; i < 20; i++) store.useGrant('pariGp');
-  assert.ok(
-    store.list().find((g) => g.toolName === 'pariGp')!.expiresAt <= ceiling,
-    'continuous use must not hold a grant open forever',
-  );
+  for (let i = 0; i < 4; i++) {
+    now += 50_000;
+    assert.equal(store.useGrant('pariGp'), true);
+  }
+  assert.equal(store.list().find((g) => g.toolName === 'pariGp')!.expiresAt, ceiling);
+  now = ceiling;
+  assert.equal(store.useGrant('pariGp'), false, 'the hard ceiling eventually closes continuous use');
 });
 
 test('a lapsed grant is reported as expired, not as never-granted', () => {
@@ -78,7 +83,32 @@ test('a lapsed grant is reported as expired, not as never-granted', () => {
   // The prune that discovers the expiry is what records it.
   assert.equal(store.isGranted('shell'), false);
   const now = Date.now();
-  assert.notEqual(store.expiredRecently('shell', 60 * 60_000, now), null);
-  assert.equal(store.expiredRecently('shell', 1, now + 10_000), null, 'outside the window it is silent');
-  assert.equal(store.expiredRecently('neverGranted', 60 * 60_000, now), null);
+  assert.notEqual(store.expiredRecently('shell', 60 * 60_000, undefined, 'tool', undefined, now), null);
+  assert.equal(store.expiredRecently('shell', 1, undefined, 'tool', undefined, now + 10_000), null, 'outside the window it is silent');
+  assert.equal(store.expiredRecently('neverGranted', 60 * 60_000, undefined, 'tool', undefined, now), null);
+});
+
+test('expiry diagnostics match the same command scope and audience', () => {
+  let now = 1_000;
+  const store = new GrantStore(() => now);
+  store.grant({
+    toolName: 'shell', scope: 'command', pattern: 'lake *', capability: 'execute', domain: 'local',
+    reason: 'Lean workflow', ttlMs: 100, audience: 'research:lrc',
+  });
+  now = 1_101;
+  assert.equal(store.isGranted('shell', { command: 'lake build' }, 'command', 'research:lrc'), false);
+  assert.notEqual(
+    store.expiredRecently('shell', 1_000, { command: 'lake build' }, 'command', 'research:lrc'),
+    null,
+  );
+  assert.equal(
+    store.expiredRecently('shell', 1_000, { command: 'git push' }, 'command', 'research:lrc'),
+    null,
+    'an unrelated command was never covered by the expired approval',
+  );
+  assert.equal(
+    store.expiredRecently('shell', 1_000, { command: 'lake build' }, 'command', 'research:other'),
+    null,
+    'an approval for another audience must not be attributed to this caller',
+  );
 });

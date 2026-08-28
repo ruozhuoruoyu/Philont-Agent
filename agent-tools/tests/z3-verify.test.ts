@@ -9,6 +9,7 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { z3VerifyTool } from '../src/index.js';
+import { sanitizeSmtlibText } from '../src/runtime/z3.js';
 
 let z3Available = false;
 
@@ -22,6 +23,12 @@ describe('z3Verify', () => {
   });
 
   // ── 无条件:输入校验 + 降级 ──────────────────────────────────────────────
+  it('边界清洗只替换孤立 surrogate,保留合法代理对和中文', () => {
+    const astral = '\uD83D\uDE00';
+    assert.equal(sanitizeSmtlibText(`中文 ${astral}`), `中文 ${astral}`);
+    assert.equal(sanitizeSmtlibText(`a\uDCA4b\uD800c`), 'a�b�c');
+  });
+
   it('空 smtlib → 失败 + 清晰 error', async () => {
     const r = await z3VerifyTool.execute({ smtlib: '' });
     assert.equal(r.success, false);
@@ -52,6 +59,13 @@ describe('z3Verify', () => {
     });
     assert.equal(r.success, true);
     assert.match(r.output, /result: unsat/);
+  });
+
+  it('中文注释和孤立 surrogate 不会炸 Python stdio', async () => {
+    if (!z3Available) return;
+    const r = await z3VerifyTool.execute({ smtlib: '; 中文注释\uDCA4\n(assert true)' });
+    assert.equal(r.success, true, r.error);
+    assert.match(r.output, /result: sat/);
   });
 
   it('sat:可满足 + 附 model', async () => {
