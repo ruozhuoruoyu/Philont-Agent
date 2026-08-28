@@ -25,12 +25,12 @@ export interface BackupConfig {
   intervalMs?: number;
   /** Backup directory; default <dbDir>/backups */
   dir?: string;
-  /** Number of rolling copies to retain; default 4 (combined with default 6h cadence ≈ covers 1 day) */
+  /** Number of rolling copies to retain; default 28 (combined with default 6h cadence ≈ covers 1 week) */
   retain?: number;
 }
 
 const DEFAULT_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const DEFAULT_RETAIN = 4;
+const DEFAULT_RETAIN = 28;
 const BACKUP_FILE_PREFIX = 'memory-';
 const BACKUP_FILE_SUFFIX = '.sqlite';
 
