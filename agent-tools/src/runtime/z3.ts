@@ -15,6 +15,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { pythonUtf8Env } from './shell.js';
 import type { Tool } from '@agent/policy';
 
 const DEFAULT_TIMEOUT_MS = 5000;
@@ -78,6 +79,13 @@ function runOnce(python: string, smtlib: string, timeoutMs: number): Promise<Z3R
     let settled = false;
     const child = spawn(python, ['-c', HARNESS, String(timeoutMs)], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Same trap the shell tool already fixed, one tool over: on a Chinese Windows install Python's
+      // stdio defaults to cp936, so any non-ASCII byte in the SMT-LIB text — a Chinese comment is
+      // enough — decodes into lone surrogates and the harness dies encoding them back out. Prod
+      // 2026-08-28: `'utf-8' codec can't encode character '\udca4' in position 194: surrogates not
+      // allowed`, reported to the reasoner as a solver error, costing a verifier round. The helper is
+      // shared rather than re-derived so the next spawn site inherits the fix instead of the bug.
+      env: pythonUtf8Env(),
     });
     const killTimer = setTimeout(() => {
       if (!settled) {

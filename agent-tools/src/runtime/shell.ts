@@ -235,7 +235,7 @@ function formatFailure(error: any, durationMs: number, requestedTimeout: number,
  * PYTHONIOENCODING/PYTHONUTF8 are set unconditionally — they are no-ops where Python is absent or already
  * UTF-8, and setting them only on win32 would leave the same trap for any non-UTF-8 POSIX locale.
  */
-function childEnv(): NodeJS.ProcessEnv {
+export function pythonUtf8Env(): NodeJS.ProcessEnv {
   return { ...process.env, PYTHONIOENCODING: process.env.PYTHONIOENCODING ?? 'utf-8', PYTHONUTF8: process.env.PYTHONUTF8 ?? '1' };
 }
 
@@ -288,7 +288,7 @@ export const shellTool: Tool = {
         timeout,
         shell: POSIX_PREFERRED_SHELL,
         encoding: 'buffer',
-        env: childEnv(),
+        env: pythonUtf8Env(),
       });
       const durationMs = Date.now() - startedAt;
       // Success path: exit 0. Prefer stdout; append stderr as supplementary info (many tools

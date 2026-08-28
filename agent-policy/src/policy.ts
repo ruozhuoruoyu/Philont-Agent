@@ -70,6 +70,9 @@ export interface ToolCheckInput {
  * Returns null to allow, or a string containing the denial reason.
  * This implements PRE-EXECUTION permission interception, replacing the former POST-EXECUTION recording.
  */
+/** How long after a grant lapses a denial still explains itself as an expiry rather than a refusal. */
+const GRANT_LAPSE_REPORT_WINDOW_MS = 60 * 60_000;
+
 export function createToolChecker(config: PolicyConfig): (input: ToolCheckInput) => Promise<string | null> {
   const { permissions, audit, classifyTool, grantStore, onApprovalNeeded, validatorChain } = config;
 
@@ -106,7 +109,9 @@ export function createToolChecker(config: PolicyConfig): (input: ToolCheckInput)
       }
 
       if (allowed === false) {
-        const hasGrant = grantStore?.isGranted(toolName, parsedParams) ?? false;
+        // useGrant, not isGranted: this is the check that immediately precedes execution, so a match
+        // here means the authorised workflow is still running and its window is re-armed. See GrantStore.
+        const hasGrant = grantStore?.useGrant(toolName, parsedParams) ?? false;
         if (hasGrant) {
           audit.append('tool_call', { toolName, allowed: true, grantOverride: true });
           // Continue to validator chain; grant cannot bypass deep checks
@@ -116,8 +121,19 @@ export function createToolChecker(config: PolicyConfig): (input: ToolCheckInput)
             audit.append('approval_requested', { toolName, capability: cls.capability, domain: cls.domain });
             onApprovalNeeded(toolName, cls.capability, cls.domain);
           }
-          audit.append('permission_denied', { toolName, phase: 'pre_execution', stage: 'matrix' });
-          return `Tool '${toolName}' denied by permission matrix`;
+          // "Never approved" and "the approval ran out" are the same sentence to a reader and call for
+          // opposite responses. Say which one it is; a sub-task that cannot ask anyone especially needs
+          // to report that the window closed rather than that permission was refused.
+          const lapsedAt = grantStore?.expiredRecently(toolName, GRANT_LAPSE_REPORT_WINDOW_MS) ?? null;
+          audit.append('permission_denied', {
+            toolName, phase: 'pre_execution', stage: 'matrix',
+            ...(lapsedAt !== null ? { grantLapsedAt: lapsedAt } : {}),
+          });
+          return lapsedAt !== null
+            ? `Tool '${toolName}' denied by permission matrix — the approval that covered it EXPIRED ` +
+              `${Math.max(1, Math.round((Date.now() - lapsedAt) / 60_000))} min ago. This is a lapsed ` +
+              `window, not a refusal: report it as expired authorization and ask the owner to re-approve.`
+            : `Tool '${toolName}' denied by permission matrix`;
         }
       }
     }

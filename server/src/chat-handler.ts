@@ -6357,9 +6357,6 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
   //
   // Exactly one slot, and it comes out of the cap rather than adding to it: context budget is a hard
   // constraint, and the point is to let the pool ROTATE, not to promote drafts over things that work.
-  const explore = memory.skills
-    .untestedDraftsForExploration(1)
-    .filter((s) => !META_SKILL_NAMES.has(s.name) && !ranked.some((r) => r.name === s.name));
   // The aux selector's picks come FIRST when it had an opinion — it is the only layer in this stack that
   // can tell a Chinese task from an English skill name. The exploration slot survives beside it: a
   // selector that only ever picks what it recognises would freeze the ladder exactly as the lexical
@@ -6372,6 +6369,14 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
     auxSkills.length > 0
       ? [...auxSkills, ...ranked.filter((r) => !auxSkills.some((a) => a.name === r.name))]
       : ranked;
+  // Deduped against what will actually be offered, not against the lexical ranking alone. An aux pick
+  // is usually a draft and usually NOT in `ranked` (that is the whole reason the aux layer exists), so
+  // filtering against `ranked` let the same draft be drawn twice — prod 2026-08-28 offered
+  // falsify-structural-hypotheses-before-attacking in slots 1 and 6, and the aux's sixth pick fell off
+  // the cap to make room for the duplicate. One of six slots, spent on nothing.
+  const explore = memory.skills
+    .untestedDraftsForExploration(1)
+    .filter((s) => !META_SKILL_NAMES.has(s.name) && !rankedWithAux.some((r) => r.name === s.name));
   const positives = explore.length > 0
     ? [...rankedWithAux.slice(0, Math.max(0, POSITIVE_CAP - 1)), ...explore]
     : rankedWithAux;

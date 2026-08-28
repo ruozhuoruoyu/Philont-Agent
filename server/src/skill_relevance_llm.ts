@@ -118,6 +118,9 @@ export function parseSelectedSkillNames(raw: string | null | undefined, offered:
  * Names the aux model considers relevant, in its order; null when it could not be consulted or said
  * nothing usable. Null means "no opinion" and the caller must keep its existing ranking.
  */
+/** Draws of the sampled selector before an empty answer is taken as "nothing relevant". */
+const SELECTOR_ATTEMPTS = 2;
+
 export async function selectSkillsByAux(
   query: string,
   candidates: SkillCandidate[],
@@ -139,18 +142,35 @@ export async function selectSkillsByAux(
   try {
     const { system, user } = buildSkillSelectionPrompt(query, candidates, k);
     const ask = deps.ask ?? ((req) => callAuxLLM({ ...req, fallbackToMain: false }));
-    const raw = await ask({ system, user, maxTokens: 200, requireComplete: true });
-    const names = parseSelectedSkillNames(raw, candidates.map((c) => c.name));
+    const names: string[] = [];
+    let raw: string | null = null;
+    // ONE sample is not a decision. Prod 2026-08-28: the identical resolved query (the L4e-3 node) was
+    // asked three times in twenty minutes and answered NONE / six picks / NONE. The picks were good when
+    // they came, so the corpus and the query were fine — the selector is simply sampled, and a single
+    // draw was deciding whether the whole skill layer participated in the turn.
+    //
+    // Only NONE is re-asked. `model-named-unknown` means it answered with names we do not offer, which
+    // is a prompt or matching problem that a second identical draw cannot fix, and `selector-failed`
+    // is an endpoint problem. Cost is bounded: one extra 200-token call, only on the empty answer.
+    for (let attempt = 0; attempt < SELECTOR_ATTEMPTS; attempt++) {
+      raw = await ask({ system, user, maxTokens: 200, requireComplete: true });
+      const parsed = parseSelectedSkillNames(raw, candidates.map((c) => c.name));
+      if (parsed.length > 0) {
+        names.push(...parsed);
+        break;
+      }
+      const answered = (raw ?? '').trim();
+      // Not an empty/NONE answer → re-asking is pointless; report the real cause now.
+      if (answered && !/^NONE\b/i.test(answered)) {
+        return fallback('model-named-unknown', answered.slice(0, 120));
+      }
+    }
     if (names.length === 0) {
       // "there is nothing relevant" and "it answered with names we do not recognise" both end up as
       // zero picks, and they call for opposite fixes: the first is about the corpus, the second about
       // the prompt or the exact-match rule. Reporting them as one reason would leave the next reader
       // exactly where this whole module started — a fallback with no cause. A reply that is neither
       // empty nor an explicit NONE, yet matched nothing we offered, is the second case.
-      const answered = (raw ?? '').trim();
-      if (answered && !/^NONE\b/i.test(answered)) {
-        return fallback('model-named-unknown', answered.slice(0, 120));
-      }
       return fallback('model-picked-nothing');
     }
     const picked = names.slice(0, k);

@@ -34,10 +34,33 @@ export interface Grant {
    * string recorded which research had asked, and nothing read it.
    */
   audience?:  string;
+  /**
+   * When the owner approved. Renewal-on-use never pushes expiry past
+   * `issuedAt + ttlMs * RENEWAL_CEILING_FACTOR`, so an unattended loop cannot hold a grant forever.
+   */
+  issuedAt:   number;
+  /** The window the caller asked for. A use re-arms exactly this much from the moment of use. */
+  ttlMs:      number;
 }
 
 /** Default is long enough for a multi-step workflow; callers may still narrow it. */
 export const DEFAULT_GRANT_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * How far USE may stretch a grant, as a multiple of the window its caller asked for.
+ *
+ * The TTL was measuring the wrong thing. Prod 2026-08-28: a writeFile approval at 10:34:41 granted the
+ * local research set for 30 minutes; the turn it authorised was still running at 11:05 and every
+ * z3Verify/pariGp call from then on was denied by the matrix — the verifiers went dark mid-turn while
+ * the turn kept working and reported a compile result. A 30-minute window and a 16-minute turn are the
+ * same order of magnitude, so expiry inside the authorised loop is the normal case, not the edge one.
+ *
+ * The owner's yes was about a loop, so the clock should measure whether that loop is still running.
+ * Expressed as a multiple of the caller's own window rather than a new global constant: a 30-minute
+ * workflow grant survives up to two hours of CONTINUOUS use, a 60-minute one up to four, and any of
+ * them lapses on schedule the moment the work actually stops.
+ */
+export const RENEWAL_CEILING_FACTOR = 4;
 
 /** Simple glob compiler (supports *, **, ?) */
 function globToRegex(pattern: string): RegExp {
@@ -74,6 +97,8 @@ function normalizePath(p: string): string {
 export class GrantStore {
   // Indexed by toolName; value is a list of grants
   private grants = new Map<string, Grant[]>();
+  /** Most recent expiry seen while pruning, per tool — lets a denial say "it ran out" (see expiredRecently). */
+  private lastExpiredAt = new Map<string, number>();
 
   /**
    * Add a grant
@@ -118,6 +143,8 @@ export class GrantStore {
         domain: domain!,
         expiresAt: Date.now() + ttlMs,
         reason: reason!,
+        issuedAt: Date.now(),
+        ttlMs,
       };
     } else {
       g = {
@@ -129,6 +156,8 @@ export class GrantStore {
         expiresAt: Date.now() + (arg.ttlMs ?? DEFAULT_GRANT_TTL_MS),
         reason: arg.reason,
         audience: arg.audience,
+        issuedAt: Date.now(),
+        ttlMs: arg.ttlMs ?? DEFAULT_GRANT_TTL_MS,
       };
     }
 
@@ -153,14 +182,62 @@ export class GrantStore {
     scopeMin: GrantScope = 'tool',
     audience?: string,
   ): boolean {
+    return this.findActive(toolName, params, scopeMin, audience) !== null;
+  }
+
+  /**
+   * Same question as `isGranted`, but records that a granted call is actually HAPPENING, which re-arms
+   * the grant's own window (bounded by RENEWAL_CEILING_FACTOR).
+   *
+   * Separate from `isGranted` on purpose: several callers ask "is this tool granted?" to widen a
+   * whitelist or render a status, and merely asking must not keep an approval alive. Only the
+   * authorization check that immediately precedes execution should call this one.
+   */
+  useGrant(
+    toolName: string,
+    params?: Record<string, unknown>,
+    scopeMin: GrantScope = 'tool',
+    audience?: string,
+  ): boolean {
+    const g = this.findActive(toolName, params, scopeMin, audience);
+    if (!g) return false;
+    const now = Date.now();
+    const ceiling = g.issuedAt + g.ttlMs * RENEWAL_CEILING_FACTOR;
+    // Never shrink, never exceed the ceiling.
+    g.expiresAt = Math.max(g.expiresAt, Math.min(ceiling, now + g.ttlMs));
+    return true;
+  }
+
+  /**
+   * When a grant for this tool last lapsed, if it lapsed within `windowMs`.
+   *
+   * A grant that runs out mid-workflow is indistinguishable at the denial site from one that never
+   * existed, and the two call for opposite responses — ask the owner, versus say the approval ran out.
+   * Prod 2026-08-28 read as the former and printed twelve identical matrix denials.
+   */
+  expiredRecently(toolName: string, windowMs: number, now: number = Date.now()): number | null {
+    const at = this.lastExpiredAt.get(toolName);
+    return at !== undefined && now - at <= windowMs ? at : null;
+  }
+
+  private findActive(
+    toolName: string,
+    params?: Record<string, unknown>,
+    scopeMin: GrantScope = 'tool',
+    audience?: string,
+  ): Grant | null {
     const list = this.grants.get(toolName);
-    if (!list || list.length === 0) return false;
+    if (!list || list.length === 0) return null;
 
     const now = Date.now();
     const active = list.filter(g => g.expiresAt > now);
+    if (active.length !== list.length) {
+      const lapsed = Math.max(...list.filter(g => g.expiresAt <= now).map(g => g.expiresAt));
+      this.lastExpiredAt.set(toolName, lapsed);
+    }
     if (active.length === 0) {
       this.grants.delete(toolName);
-      return false;
+      return null;
     }
     if (active.length !== list.length) {
       this.grants.set(toolName, active);
@@ -172,9 +249,9 @@ export class GrantStore {
       // An audience-scoped grant answers only to that audience. An unscoped one answers to everyone,
       // which keeps every existing grant behaving exactly as before.
       if (g.audience !== undefined && g.audience !== audience) continue;
-      if (this.matches(g, params)) return true;
+      if (this.matches(g, params)) return g;
     }
-    return false;
+    return null;
   }
 
   private matches(g: Grant, params?: Record<string, unknown>): boolean {

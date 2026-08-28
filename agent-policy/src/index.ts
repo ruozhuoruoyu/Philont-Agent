@@ -44,7 +44,7 @@ export type {
 } from './types.js';
 
 export type { Grant } from './grant.js';
-export { GrantStore } from './grant.js';
+export { GrantStore, RENEWAL_CEILING_FACTOR } from './grant.js';
 
 export type { GrantIntent, IntentClassifier } from './intent.js';
 export { LLMIntentClassifier, KeywordIntentClassifier } from './intent.js';

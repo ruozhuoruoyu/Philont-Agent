@@ -210,3 +210,43 @@ test('a reply naming skills we never offered is reported apart from an honest NO
   assert.equal(unknown.reason, 'model-named-unknown');
   assert.match(String(unknown.error), /write-a-word-document/, 'the reply is sampled so the cause is diagnosable');
 });
+
+// ── the selector is sampled (2026-08-28) ──────────────────────────────────────────────────────────
+//
+// The identical resolved query (the L4e-3 node) was asked three times in twenty minutes and answered
+// NONE / six picks / NONE. The picks were good when they came, so neither the corpus nor the query was
+// at fault — a single draw was deciding whether the skill layer participated in the turn at all.
+
+test('an empty answer is re-asked once; a good second draw is used', async () => {
+  let calls = 0;
+  const picked = await selectSkillsByAux('推进 LRC 的 L4e-3 核心界证明', CANDIDATES, 6, {
+    configured: true,
+    ask: async () => (++calls === 1 ? 'NONE' : NAMES[0]),
+  });
+  assert.deepEqual(picked, [NAMES[0]]);
+  assert.equal(calls, 2, 'the first NONE must not be the whole decision');
+});
+
+test('two empty answers are an answer; a named-unknown reply is not re-asked', async () => {
+  let none = 0;
+  assert.equal(
+    await selectSkillsByAux('unrelated task at length', CANDIDATES, 6, {
+      configured: true,
+      ask: async () => { none++; return 'NONE'; },
+    }),
+    null,
+  );
+  assert.equal(none, 2, 'bounded: one retry, not a loop');
+
+  // Naming skills we do not offer is a prompt/matching problem — an identical second draw cannot fix
+  // it, and re-asking would just double the cost of a diagnosable failure.
+  let unknown = 0;
+  assert.equal(
+    await selectSkillsByAux('unrelated task at length', CANDIDATES, 6, {
+      configured: true,
+      ask: async () => { unknown++; return 'some-skill-we-never-had'; },
+    }),
+    null,
+  );
+  assert.equal(unknown, 1);
+});
