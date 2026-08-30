@@ -30,6 +30,7 @@ import { extractUserSection, recordFilterCall } from '../../output_section_filte
 import { runConscienceGate } from '../../conscience_gate.js';
 import { recordControllerFire } from '../../controller_registry.js';
 import { createHash } from 'node:crypto';
+import { authRequestCode } from '../../auth_request_id.js';
 
 const safeTelegramId = (value: string | number): string =>
   `tg_${createHash('sha256').update(String(value)).digest('hex').slice(0, 12)}`;
@@ -254,9 +255,11 @@ function makeSessionId(botId: string, e: InboundEvent): string {
 /** AuthRequest → human-readable Telegram authorization prompt (plain text). */
 export function renderAuthPrompt(req: AuthRequestPayload): string {
   const en = currentPhraseLang('telegram') === 'en';
+  const requestCode = authRequestCode(req.requestId);
   const lines = en
     ? ['🔐 I need your permission', `Tool: ${req.toolName} (${req.capability} / ${req.domain})`]
     : ['🔐 需要你授权', `工具:${req.toolName}（${req.capability} / ${req.domain}）`];
+  if (requestCode) lines.push(en ? `Request: ${requestCode}` : `请求编号:${requestCode}`);
   if (req.clarification) lines.push(req.clarification);
   let inputStr = '';
   try {
@@ -272,8 +275,12 @@ export function renderAuthPrompt(req: AuthRequestPayload): string {
   const grantWords = offeredAuthWords(lang, 'grant').map((word) => `"${word}"`).join(' / ');
   const denyWords = offeredAuthWords(lang, 'deny').map((word) => `"${word}"`).join(' / ');
   lines.push(en
-    ? `Reply ${grantWords} to allow, or ${denyWords} to cancel.`
-    : `回复 ${grantWords} 放行,或 ${denyWords} 取消。`);
+    ? requestCode
+      ? `Reply "approve ${requestCode}" to allow, or "reject ${requestCode}" to cancel.`
+      : `Reply ${grantWords} to allow, or ${denyWords} to cancel.`
+    : requestCode
+      ? `回复“批准 ${requestCode}”放行，或“拒绝 ${requestCode}”取消。`
+      : `回复 ${grantWords} 放行,或 ${denyWords} 取消。`);
   return lines.join('\n');
 }
 

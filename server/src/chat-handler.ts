@@ -162,7 +162,8 @@ import {
   renderSkillOffer,
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
-import { classifyAuthIntent } from './auth_intent.js';
+import { classifyAuthIntent, matchOfferedAuthWord } from './auth_intent.js';
+import { authRequestCode, matchScopedAuthReply } from './auth_request_id.js';
 import { classifyExploreControlReply, resolveExploreTarget } from './explore_control.js';
 import { judgeRun, type JudgeToolRecord } from './learning_judge.js';
 import {
@@ -4592,6 +4593,12 @@ interface PendingAuth {
 }
 
 const pendingAuth = new Map<string, PendingAuth>();
+
+/** A visible authorization card is never silently superseded by another tool call. */
+function conflictingPendingAuth(sessionId: string, incomingRequestId: string): PendingAuth | undefined {
+  const existing = pendingAuth.get(sessionId);
+  return existing && existing.toolCallId !== incomingRequestId ? existing : undefined;
+}
 
 /** Re-sending the same card must not move the point after which owner replies are eligible to approve it. */
 export function firstAuthDeliveryAt(existing: number | undefined, deliveredAt: number): number {
@@ -9399,6 +9406,13 @@ async function handleChatSendInner(
       // the same request (the map entry is unchanged) so channel flush ordering restores it as the
       // final, prominent message.
       onAuthRequest(authRequestToReissue(signalBus.authInboundDisposition, pending)!);
+      // A short approval/denial word is almost certainly aimed at a visible authorization card.
+      // It cannot approve a card delivered after it was sent, but treating it as a fresh agent
+      // instruction lets the fresh turn replace the pending request and creates an endless stream
+      // of newer cards. Keep the original request stable and wait for an answer to the reissued card.
+      if (matchOfferedAuthWord(userMessage) || matchScopedAuthReply(userMessage, pending.toolCallId)) {
+        return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+      }
       break pendingAuthBlock;
     }
     if (signalBus.authInboundDisposition === 'bypass_undelivered') {
@@ -9490,8 +9504,20 @@ async function handleChatSendInner(
     // classifier — with a word the owner was never offered for that purpose.
     const explicitRecoveryRetry =
       wasUncertain && classifyUncertainToolReply(userMessage) === 'retry';
+    const scopedIntent = matchScopedAuthReply(userMessage, pending.toolCallId);
+    if (scopedIntent === 'mismatch') {
+      const code = authRequestCode(pending.toolCallId);
+      onDelta(
+        `这条回复指向另一张授权卡，当前待批准请求是 ${code ?? pending.toolCallId}（${pending.toolName}）。` +
+        `请回复“批准 ${code ?? pending.toolCallId}”或“拒绝 ${code ?? pending.toolCallId}”。`,
+      );
+      onAuthRequest(authRequestToReissue('bypass_predelivery', pending)!);
+      return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+    }
     const intent = explicitRecoveryRetry
       ? 'grant'
+      : scopedIntent === 'grant' || scopedIntent === 'deny'
+        ? scopedIntent
       : expired
         ? 'unclear'
         : await classifyAuthIntent(userMessage, context);
@@ -12186,6 +12212,15 @@ async function runToolLoop(
 
     if (!allowed) {
       // Pause: save state, wait for user authorization
+      const conflict = conflictingPendingAuth(sessionId, call.id);
+      if (conflict) {
+        console.warn(
+          `[auth] session=${safeSessionId(sessionId)} kept pending request ${authRequestCode(conflict.toolCallId)} ` +
+            `for ${conflict.toolName}; did not replace it with ${authRequestCode(call.id)} for ${call.name}`,
+        );
+        onAuthRequest(authRequestToReissue('bypass_predelivery', conflict)!);
+        return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+      }
       const remainingCalls = calls.slice(calls.indexOf(call) + 1);
       pendingAuth.set(sessionId, {
         goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
@@ -12434,6 +12469,15 @@ async function runToolLoop(
     // same call, which resumes from the checkpoint instead of re-running the finished steps.
     const blocked = subLoopBlockedAuthorization(result);
     if (blocked && !isAutonomousTurn) {
+      const conflict = conflictingPendingAuth(sessionId, call.id);
+      if (conflict) {
+        console.warn(
+          `[auth] session=${safeSessionId(sessionId)} kept pending request ${authRequestCode(conflict.toolCallId)} ` +
+            `for ${conflict.toolName}; did not replace it with ${authRequestCode(call.id)} for ${blocked.tool}`,
+        );
+        onAuthRequest(authRequestToReissue('bypass_predelivery', conflict)!);
+        return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+      }
       const remainingCalls = calls.slice(calls.indexOf(call) + 1);
       pendingAuth.set(sessionId, {
         goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',
@@ -14094,6 +14138,15 @@ async function runToolLoop(
       }
 
       if (!allowed) {
+        const conflict = conflictingPendingAuth(sessionId, call.id);
+        if (conflict) {
+          console.warn(
+            `[auth] session=${safeSessionId(sessionId)} kept pending request ${authRequestCode(conflict.toolCallId)} ` +
+              `for ${conflict.toolName}; did not replace it with ${authRequestCode(call.id)} for ${call.name}`,
+          );
+          onAuthRequest(authRequestToReissue('bypass_predelivery', conflict)!);
+          return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
+        }
         const remainingCalls = response.calls.slice(response.calls.indexOf(call) + 1);
         pendingAuth.set(sessionId, {
           goal: signalBus.carriedExploreGoal ?? carriedIntent.get(sessionId)?.goal ?? findLastUserText(messages) ?? '',

@@ -149,6 +149,23 @@ test('re-sending a bypassed auth card preserves first delivery as the approval r
   );
 });
 
+test('a delayed bare approval remains in auth-pending instead of becoming a fresh tool-producing turn', async () => {
+  const { pendingAuthInboundDisposition } = await import('../src/chat-handler.js');
+  assert.equal(
+    pendingAuthInboundDisposition({ deliveryState: 'delivered', deliveredAt: NOW }, NOW - 1),
+    'bypass_predelivery',
+  );
+  // The integration branch additionally recognizes the offered bare word and returns auth_pending
+  // immediately. Pin the source ordering: reissue first, then return, never break into a fresh turn.
+  const source = await import('node:fs/promises').then((fs) =>
+    fs.readFile(new URL('../src/chat-handler.ts', import.meta.url), 'utf8'),
+  );
+  const branch = source.slice(source.indexOf("if (signalBus.authInboundDisposition === 'bypass_predelivery')"));
+  const bounded = branch.slice(0, branch.indexOf("if (signalBus.authInboundDisposition === 'bypass_undelivered')"));
+  assert.match(bounded, /matchOfferedAuthWord\(userMessage\)/);
+  assert.match(bounded, /outcomeType: 'auth_pending'/);
+});
+
 test('when auth and askUserQuestion are both bypassed, neither half-open chain becomes turn context', async () => {
   const { selectTurnContextSource } = await import('../src/chat-handler.js');
   const auth = { ts: NOW - MIN, executionState: 'awaiting_auth' as const };

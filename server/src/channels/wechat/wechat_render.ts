@@ -17,6 +17,7 @@
 
 import { currentPhraseLang } from '../../response_language.js';
 import { offeredAuthWords } from '../../auth_intent.js';
+import { authRequestCode } from '../../auth_request_id.js';
 
 // ── 1. markdown → WeChat text ──────────────────────────────────────────────
 
@@ -284,6 +285,7 @@ function safeStringify(v: unknown): string {
  *   - Decision prompt line
  */
 export function renderAuthPromptForWeChat(req: {
+  requestId?: string;
   toolName: string;
   capability: string;
   domain: string;
@@ -293,6 +295,10 @@ export function renderAuthPromptForWeChat(req: {
   const en = currentPhraseLang('wechat') === 'en';
   const lines: string[] = [];
   lines.push(en ? '🔐 The agent is asking for permission' : '🔐 Agent 请求授权');
+  const requestCode = authRequestCode(req.requestId);
+  if (requestCode) {
+    lines.push(en ? `Request: ${requestCode}` : `请求编号: ${requestCode}`);
+  }
   if (req.clarification) {
     lines.push(req.clarification);
   }
@@ -309,8 +315,12 @@ export function renderAuthPromptForWeChat(req: {
   const grantWords = offeredAuthWords(lang, 'grant').map((word) => `"${word}"`).join(' / ');
   const denyWords = offeredAuthWords(lang, 'deny').map((word) => `"${word}"`).join(' / ');
   lines.push(en
-    ? `Reply ${grantWords} to allow; ${denyWords} to refuse`
-    : `回复 ${grantWords} 允许;回复 ${denyWords} 拒绝`);
+    ? requestCode
+      ? `Reply "approve ${requestCode}" to allow; "reject ${requestCode}" to refuse`
+      : `Reply ${grantWords} to allow; ${denyWords} to refuse`
+    : requestCode
+      ? `回复“批准 ${requestCode}”允许；回复“拒绝 ${requestCode}”拒绝`
+      : `回复 ${grantWords} 允许;回复 ${denyWords} 拒绝`);
   lines.push(en ? '(valid for 30 minutes by default)' : '(默认 30 分钟有效)');
   return lines.join('\n');
 }

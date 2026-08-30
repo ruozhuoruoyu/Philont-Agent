@@ -199,6 +199,7 @@ test('formatToolForAuth: 空 input 不抛错', () => {
 
 test('renderAuthPromptForWeChat: 完整消息含标题 / 工具详情 / 决策提示', () => {
   const out = withLang('zh', () => renderAuthPromptForWeChat({
+    requestId: 'tool-call-123',
     toolName: 'writeFile',
     capability: 'write',
     domain: 'local',
@@ -207,7 +208,8 @@ test('renderAuthPromptForWeChat: 完整消息含标题 / 工具详情 / 决策�
   assert.match(out, /^🔐 Agent 请求授权/);
   assert.match(out, /📝 writeFile/);
   assert.match(out, /权限: write\/local/);
-  assert.match(out, /同意/);
+  assert.match(out, /请求编号: [A-F0-9]{6}/);
+  assert.match(out, /批准 [A-F0-9]{6}/);
   assert.match(out, /拒绝/);
   assert.match(out, /30 分钟有效/);
 });
