@@ -9406,11 +9406,27 @@ async function handleChatSendInner(
       // the same request (the map entry is unchanged) so channel flush ordering restores it as the
       // final, prominent message.
       onAuthRequest(authRequestToReissue(signalBus.authInboundDisposition, pending)!);
-      // A short approval/denial word is almost certainly aimed at a visible authorization card.
-      // It cannot approve a card delivered after it was sent, but treating it as a fresh agent
-      // instruction lets the fresh turn replace the pending request and creates an endless stream
-      // of newer cards. Keep the original request stable and wait for an answer to the reissued card.
-      if (matchOfferedAuthWord(userMessage) || matchScopedAuthReply(userMessage, pending.toolCallId)) {
+      // A reply aimed at a visible card must not become a fresh agent instruction. It cannot APPROVE
+      // a card delivered after it was sent, but running it as a new turn produces another card, and
+      // the owner answers that one late too — prod 2026-08-30: six `ok`s in four minutes, six turns,
+      // zero writes. Keep the original request stable and wait for an answer to the reissued card.
+      //
+      // Asked with the same layering the normal path uses, not with layer 1 alone: `ok` is exactly the
+      // word the owner sends and it is deliberately NOT in the offered/compat enum (see auth_intent —
+      // 可以/好/继续/确认 are kept out of the deterministic path on purpose), so a layer-1-only test
+      // answers `no` to the very case this branch exists for.
+      //
+      // Safe to consult the classifier here BECAUSE NEITHER OUTCOME GRANTS ANYTHING: it chooses
+      // between re-showing the card and spending a turn. `unclear` — including an unconfigured or
+      // failing aux — falls through to the old behaviour, so uncertainty still never authorises.
+      const addressesCard = matchOfferedAuthWord(userMessage)
+        ?? (matchScopedAuthReply(userMessage, pending.toolCallId) === undefined
+          ? await classifyAuthIntent(
+              userMessage,
+              `Tool "${pending.toolName}" (${pending.capability}/${pending.domain})`,
+            )
+          : 'grant');
+      if (addressesCard === 'grant' || addressesCard === 'deny') {
         return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
       }
       break pendingAuthBlock;

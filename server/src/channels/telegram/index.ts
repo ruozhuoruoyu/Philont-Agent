@@ -276,10 +276,10 @@ export function renderAuthPrompt(req: AuthRequestPayload): string {
   const denyWords = offeredAuthWords(lang, 'deny').map((word) => `"${word}"`).join(' / ');
   lines.push(en
     ? requestCode
-      ? `Reply "approve ${requestCode}" to allow, or "reject ${requestCode}" to cancel.`
+      ? `Reply ${grantWords} to allow, or ${denyWords} to cancel (name it with "approve ${requestCode}" if several are open).`
       : `Reply ${grantWords} to allow, or ${denyWords} to cancel.`
     : requestCode
-      ? `回复“批准 ${requestCode}”放行，或“拒绝 ${requestCode}”取消。`
+      ? `回复 ${grantWords} 放行,或 ${denyWords} 取消(多张卡时用“批准 ${requestCode}”指名)。`
       : `回复 ${grantWords} 放行,或 ${denyWords} 取消。`);
   return lines.join('\n');
 }

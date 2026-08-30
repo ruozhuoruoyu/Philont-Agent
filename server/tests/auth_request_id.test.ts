@@ -21,3 +21,4 @@ test('scoped authorization replies approve only the named card', () => {
   assert.equal(matchScopedAuthReply(`批准 ${other}`, current), 'mismatch');
   assert.equal(matchScopedAuthReply('ok', current), undefined);
 });
+
