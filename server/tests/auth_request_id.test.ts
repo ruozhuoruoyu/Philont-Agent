@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { authRequestCode, matchScopedAuthReply } from '../src/auth_request_id.js';
+import {
+  authRequestCode,
+  isBarePredeliveryAuthReply,
+  matchScopedAuthReply,
+} from '../src/auth_request_id.js';
 
 test('authorization cards have stable short addresses', () => {
   const code = authRequestCode('tool-call-123');
@@ -22,3 +26,11 @@ test('scoped authorization replies approve only the named card', () => {
   assert.equal(matchScopedAuthReply('ok', current), undefined);
 });
 
+test('only bare ok/okay get the non-authorizing pre-delivery compatibility treatment', () => {
+  assert.equal(isBarePredeliveryAuthReply('ok'), true);
+  assert.equal(isBarePredeliveryAuthReply('OK!'), true);
+  assert.equal(isBarePredeliveryAuthReply('okay'), true);
+  assert.equal(isBarePredeliveryAuthReply('不要拉取缓存，本地有版本'), false);
+  assert.equal(isBarePredeliveryAuthReply('继续LRC任务'), false);
+  assert.equal(isBarePredeliveryAuthReply('可以'), false);
+});

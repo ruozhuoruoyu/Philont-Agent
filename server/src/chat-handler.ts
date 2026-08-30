@@ -163,7 +163,7 @@ import {
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
 import { classifyAuthIntent, matchOfferedAuthWord } from './auth_intent.js';
-import { authRequestCode, matchScopedAuthReply } from './auth_request_id.js';
+import { authRequestCode, isBarePredeliveryAuthReply, matchScopedAuthReply } from './auth_request_id.js';
 import { classifyExploreControlReply, resolveExploreTarget } from './explore_control.js';
 import { judgeRun, type JudgeToolRecord } from './learning_judge.js';
 import {
@@ -9411,22 +9411,16 @@ async function handleChatSendInner(
       // the owner answers that one late too — prod 2026-08-30: six `ok`s in four minutes, six turns,
       // zero writes. Keep the original request stable and wait for an answer to the reissued card.
       //
-      // Asked with the same layering the normal path uses, not with layer 1 alone: `ok` is exactly the
-      // word the owner sends and it is deliberately NOT in the offered/compat enum (see auth_intent —
-      // 可以/好/继续/确认 are kept out of the deterministic path on purpose), so a layer-1-only test
-      // answers `no` to the very case this branch exists for.
-      //
-      // Safe to consult the classifier here BECAUSE NEITHER OUTCOME GRANTS ANYTHING: it chooses
-      // between re-showing the card and spending a turn. `unclear` — including an unconfigured or
-      // failing aux — falls through to the old behaviour, so uncertainty still never authorises.
-      const addressesCard = matchOfferedAuthWord(userMessage)
-        ?? (matchScopedAuthReply(userMessage, pending.toolCallId) === undefined
-          ? await classifyAuthIntent(
-              userMessage,
-              `Tool "${pending.toolName}" (${pending.capability}/${pending.domain})`,
-            )
-          : 'grant');
-      if (addressesCard === 'grant' || addressesCard === 'deny') {
+      // Do not use the open-language authorization classifier here. A real instruction such as
+      // “不要拉取缓存，本地有版本” may reasonably look like a denial to that classifier, but it must
+      // still reach the ordinary turn. This branch only recognizes closed card replies plus the
+      // owner's historical bare `ok` spelling. None of these can grant on the pre-delivery path.
+      const scopedReply = matchScopedAuthReply(userMessage, pending.toolCallId);
+      if (
+        matchOfferedAuthWord(userMessage) !== null ||
+        scopedReply !== undefined ||
+        isBarePredeliveryAuthReply(userMessage)
+      ) {
         return { outcome: { outcomeType: 'auth_pending' }, auditEvents: audit.length };
       }
       break pendingAuthBlock;

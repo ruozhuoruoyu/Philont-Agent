@@ -9,6 +9,16 @@ export function authRequestCode(requestId: string | undefined): string | undefin
 export type ScopedAuthReply = 'grant' | 'deny' | 'mismatch' | undefined;
 
 /**
+ * Historical UI clients and the owner's established workflow use bare `ok`. It is
+ * intentionally NOT a general authorization word: this compatibility check is only
+ * used after a pre-delivery bypass, where it can keep a card pending but can never
+ * grant the capability.
+ */
+export function isBarePredeliveryAuthReply(reply: string): boolean {
+  return /^(?:ok|okay)[.!。！\s]*$/i.test(reply.trim());
+}
+
+/**
  * Parse an explicitly addressed reply such as `ok A1B2C3` or `拒绝 A1B2C3`.
  * An address that names another visible card fails closed instead of falling through
  * to the semantic classifier and accidentally approving the current request.

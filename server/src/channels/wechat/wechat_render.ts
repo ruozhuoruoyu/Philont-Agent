@@ -309,10 +309,6 @@ export function renderAuthPromptForWeChat(req: {
     en ? `Permission: ${req.capability}/${req.domain}` : `权限: ${req.capability}/${req.domain}`,
   );
   lines.push('');
-  // The bare word stays the headline: at most one card is ever pending per session (pendingAuth is
-  // keyed by session, and a visible card is no longer replaced), so demanding a transcribed code for
-  // every ordinary approval taxes the common case to disambiguate one that cannot occur. The code is
-  // offered as the precise form for the case it was written for.
   // Every word offered here is matched exactly by matchOfferedAuthWord (auth_intent.ts) before any
   // classifier sees it — reading back our own enum is parsing, not intent inference.
   const lang = en ? 'en' : 'zh';
@@ -320,10 +316,10 @@ export function renderAuthPromptForWeChat(req: {
   const denyWords = offeredAuthWords(lang, 'deny').map((word) => `"${word}"`).join(' / ');
   lines.push(en
     ? requestCode
-      ? `Reply ${grantWords} to allow; ${denyWords} to refuse (name it with "approve ${requestCode}" if several are open)`
+      ? `Reply "approve ${requestCode}" to allow; "reject ${requestCode}" to refuse`
       : `Reply ${grantWords} to allow; ${denyWords} to refuse`
     : requestCode
-      ? `回复 ${grantWords} 允许;回复 ${denyWords} 拒绝(多张卡时用“批准 ${requestCode}”指名)`
+      ? `回复“批准 ${requestCode}”允许；回复“拒绝 ${requestCode}”拒绝`
       : `回复 ${grantWords} 允许;回复 ${denyWords} 拒绝`);
   lines.push(en ? '(valid for 30 minutes by default)' : '(默认 30 分钟有效)');
   return lines.join('\n');
