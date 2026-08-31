@@ -40,7 +40,12 @@ test('evidence levels distinguish draft, execution, experiment, and formal proof
   assert.equal(assessEvidenceLevel([]), 'drafted');
   assert.equal(assessEvidenceLevel([{ toolName: 'writeFile', content: '✓ TOOL OK' }]), 'executed');
   assert.equal(assessEvidenceLevel([{ toolName: 'pariGp', content: '✓ TOOL OK' }]), 'experimentally_supported');
-  assert.equal(assessEvidenceLevel([{ toolName: 'leanCheck', content: '✓ TOOL OK' }]), 'formally_proved');
+  assert.equal(assessEvidenceLevel([{ toolName: 'leanCheck', content: '✓ TOOL OK' }]), 'formally_checked');
+  assert.equal(assessEvidenceLevel([
+    { toolName: 'leanCheck', content: '✓ TOOL OK\nexit 0' },
+    { toolName: 'shell', toolInput: { command: 'rg -n "sorry|admit|axiom" Lrc' }, content: '✓ TOOL OK\n0 matches' },
+    { toolName: 'shell', toolInput: { command: 'lake build Lrc' }, content: '✓ TOOL OK\nBuild completed' },
+  ]), 'formally_proved');
 });
 
 test('formal proof claim requires a successful verifier in the same turn', () => {
@@ -50,7 +55,11 @@ test('formal proof claim requires a successful verifier in the same turn', () =>
   assert.equal(blocked?.reason, 'formal_claim_without_verifier');
 
   const accepted = evaluateHonesty('LowerRegion 引理的 Lean 形式化证明已完成，无 sorry。', {
-    toolResults: [{ toolName: 'leanCheck', content: '✓ TOOL OK\nexit 0' }],
+    toolResults: [
+      { toolName: 'leanCheck', content: '✓ TOOL OK\nexit 0' },
+      { toolName: 'shell', toolInput: { command: 'rg -n "sorry|admit|axiom" Lrc' }, content: '✓ TOOL OK\n0 matches' },
+      { toolName: 'shell', toolInput: { command: 'lake build Lrc' }, content: '✓ TOOL OK\nBuild completed' },
+    ],
   });
   assert.equal(accepted, null);
 });
@@ -82,7 +91,7 @@ test('shell probes mentioning Lean are execution, never formal proof evidence', 
   }
 });
 
-test('a real successful Lean/Lake build is formal proof evidence', () => {
+test('a real successful Lean/Lake check is formal_checked until placeholders and dependencies are closed', () => {
   for (const command of [
     'lake build Lrc.K13.Region3Sum',
     'cd project && lake env lean Lrc/K13/Region3Sum.lean',
@@ -93,8 +102,8 @@ test('a real successful Lean/Lake build is formal proof evidence', () => {
       toolInput: { command },
       content: '✓ TOOL OK\nBuilt Lrc.K13.Region3Sum\nexit 0',
     }];
-    assert.equal(assessEvidenceLevel(tools), 'formally_proved', command);
-    assert.equal(evaluateHonesty('形式化证明已完成。', { toolResults: tools }), null, command);
+    assert.equal(assessEvidenceLevel(tools), 'formally_checked', command);
+    assert.equal(evaluateHonesty('形式化证明已完成。', { toolResults: tools })?.reason, 'formal_claim_without_verifier', command);
   }
 });
 

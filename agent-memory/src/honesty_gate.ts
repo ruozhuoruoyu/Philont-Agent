@@ -427,6 +427,7 @@ export type EvidenceLevel =
   | 'drafted'
   | 'executed'
   | 'experimentally_supported'
+  | 'formally_checked'
   | 'formally_proved';
 
 /** Native tools whose successful structured result is accepted as formal proof evidence. */
@@ -504,9 +505,27 @@ function successfulFormalVerifier(record: ToolResultRecord): boolean {
   return isStrictFormalVerificationCommand(evidenceShellCommand(record.toolInput) ?? '');
 }
 
+function successfulZeroPlaceholderScan(record: ToolResultRecord): boolean {
+  if (classifyToolResult(record.content) !== 'ok') return false;
+  const input = evidenceShellCommand(record.toolInput) ?? '';
+  if (!/\b(?:rg|grep)\b/i.test(input) || !/\b(?:sorry|admit|axiom)\b/i.test(input)) return false;
+  return /(?:0\s+(?:matches?|hits?)|no\s+(?:matches?|sorry|admit)|zero[- ](?:sorry|admit)|clean)/i.test(record.content);
+}
+
+function successfulDependencyClosure(record: ToolResultRecord): boolean {
+  if (classifyToolResult(record.content) !== 'ok') return false;
+  const input = evidenceShellCommand(record.toolInput) ?? '';
+  return /\blake\s+build(?:\s|$)/i.test(input)
+    || /(?:dependency|dependencies|imports?)\s*(?:closed|resolved|ok)|olean[^\n]*(?:present|resolved|ok)/i.test(record.content);
+}
+
 /** Highest evidence level actually reached by this turn's successful tools. */
 export function assessEvidenceLevel(records: ReadonlyArray<ToolResultRecord>): EvidenceLevel {
-  if (records.some(successfulFormalVerifier)) return 'formally_proved';
+  if (records.some(successfulFormalVerifier)) {
+    const zeroPlaceholders = records.some(successfulZeroPlaceholderScan);
+    const dependenciesClosed = records.some(successfulDependencyClosure);
+    return zeroPlaceholders && dependenciesClosed ? 'formally_proved' : 'formally_checked';
+  }
   const successful = records.filter((r) => classifyToolResult(r.content) === 'ok');
   if (successful.some((r) =>
     ['pariGp', 'python', 'process'].includes(r.toolName)
