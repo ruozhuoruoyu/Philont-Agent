@@ -37,6 +37,8 @@ import {
   buildDeliberateDivergePrompt,
   createDeepExploreTool,
   roundWasSubstantive,
+  attributeRound,
+  attributeRound,
   parseLiteratureCards,
   renderLiteratureCards,
   buildLiteratureGroundingPrompt,
@@ -119,7 +121,7 @@ test('withNoProgressStop:连续无树提交则早停,reason 提交会重置(真�
   assert.equal(aborts2, 0);
 });
 
-test('withNoProgressStop: reason_record ok但树未变不算提交', async () => {
+test('withNoProgressStop: a reason_record that returns ok without changing the tree is not a commit', async () => {
   let aborts = 0;
   const version = 'v1';
   const wrapped = withNoProgressStop(
@@ -940,6 +942,24 @@ test('roundWasSubstantive: a round with no settle and no decompose is not substa
   assert.equal(roundWasSubstantive(before, after, 0.35), false);
 });
 
+test('attributeRound derives target relation from snapshots, not model narration', () => {
+  const target = node({ id: 't', parentId: 'r', status: 'open', depth: 1 });
+  const sibling = node({ id: 's', parentId: 'r', status: 'open', depth: 1 });
+  const before = [node({ id: 'r', parentId: null, status: 'open', depth: 0 }), target, sibling];
+
+  const sideBranch = before.map((n) => n.id === 's' ? { ...n, status: 'proved' as const } : n);
+  assert.deepEqual(attributeRound(before, sideBranch, 't'), {
+    targetNodeId: 't', relation: 'unrelated', targetProgress: false, treeProgress: true,
+  });
+
+  const targetProved = before.map((n) => n.id === 't' ? { ...n, status: 'proved' as const } : n);
+  assert.equal(attributeRound(before, targetProved, 't').relation, 'proves_target');
+  assert.equal(attributeRound(before, targetProved, 't').targetProgress, true);
+
+  const targetDead = before.map((n) => n.id === 't' ? { ...n, status: 'dead_end' as const } : n);
+  assert.equal(attributeRound(before, targetDead, 't').relation, 'dead_end_target');
+});
+
 // ── #1: literature grounding (parse cited cards / render / prompt) ─────────────────────────────────
 
 test('parseLiteratureCards: valid JSON array → typed cards, unknown type → background', () => {
@@ -1504,4 +1524,111 @@ test('withSessionWebDedup: repeat web call short-circuits; new/non-web pass; sha
   const other = withSessionWebDedup(delegate, 'dedup-unit-sess-2');
   await other('webFetch', { url: 'https://arxiv.org/abs/2506.12708' });
   assert.equal(calls, 4, 'dedup is per-session');
+});
+
+/**
+ * Mechanism-side target attribution. The relation must come out of the two snapshots, because the
+ * production failure it exists for is exactly a model reporting target progress that the tree denies.
+ */
+test('attributeRound: settling the pinned target keeps proved / refuted / dead_end distinct', () => {
+  // dead_end is not refutation: the claim may well be true, the route is spent. Collapsing them would
+  // tell the owner a claim was disproved when all that happened was an approach running out.
+  const before = [node({ id: 't', depth: 1, status: 'open' })];
+  assert.equal(attributeRound(before, [node({ id: 't', depth: 1, status: 'proved' })], 't').relation, 'proves_target');
+  assert.equal(attributeRound(before, [node({ id: 't', depth: 1, status: 'refuted' })], 't').relation, 'refutes_target');
+  assert.equal(attributeRound(before, [node({ id: 't', depth: 1, status: 'dead_end' })], 't').relation, 'dead_end_target');
+  for (const st of ['proved', 'refuted', 'dead_end'] as const) {
+    assert.equal(attributeRound(before, [node({ id: 't', depth: 1, status: st })], 't').targetProgress, true);
+  }
+});
+
+test('attributeRound: closing a dependency of the target, or decomposing it, reduces it', () => {
+  const before = [
+    node({ id: 't', depth: 1, status: 'open' }),
+    node({ id: 'c', parentId: 't', depth: 2, status: 'open' }),
+  ];
+  const settledChild = [
+    node({ id: 't', depth: 1, status: 'open' }),
+    node({ id: 'c', parentId: 't', depth: 2, status: 'proved' }),
+  ];
+  const d = attributeRound(before, settledChild, 't');
+  assert.equal(d.relation, 'reduces_target');
+  assert.equal(d.targetProgress, true);
+  const decomposed = [...before, node({ id: 'c2', parentId: 't', depth: 2, status: 'open' })];
+  assert.equal(attributeRound(before, decomposed, 't').relation, 'reduces_target');
+});
+
+test('attributeRound: growing scaffolding under a dependency is not progress ON the target', () => {
+  // The 2026-08-30/31 shape: every round commits SOMETHING, none of it closes anything.
+  const before = [
+    node({ id: 't', depth: 1, status: 'open' }),
+    node({ id: 'c', parentId: 't', depth: 2, status: 'open' }),
+  ];
+  const after = [...before, node({ id: 'g', parentId: 'c', depth: 3, status: 'open' })];
+  const d = attributeRound(before, after, 't');
+  assert.equal(d.relation, 'scaffold_only');
+  assert.equal(d.targetProgress, false, 'the target did not move');
+  assert.equal(d.treeProgress, true, 'but the tree did grow — the two must stay distinguishable');
+});
+
+test('attributeRound: work on a side branch never counts as target progress', () => {
+  const before = [
+    node({ id: 'r', parentId: null, depth: 0, status: 'open' }),
+    node({ id: 't', parentId: 'r', depth: 1, status: 'open' }),
+    node({ id: 's', parentId: 'r', depth: 1, status: 'open' }),
+  ];
+  const after = [
+    node({ id: 'r', parentId: null, depth: 0, status: 'open' }),
+    node({ id: 't', parentId: 'r', depth: 1, status: 'open' }),
+    node({ id: 's', parentId: 'r', depth: 1, status: 'proved' }),
+  ];
+  const d = attributeRound(before, after, 't');
+  assert.equal(d.relation, 'unrelated');
+  assert.equal(d.targetProgress, false);
+  assert.equal(d.treeProgress, true);
+});
+
+test('attributeRound: a round that commits nothing is progress nowhere', () => {
+  const tree = [node({ id: 't', depth: 1, status: 'open' })];
+  const d = attributeRound(tree, tree, 't');
+  assert.equal(d.relation, 'no_commit', 'nothing was created and nothing settled — not "scaffolding"');
+  assert.equal(d.targetProgress, false);
+  assert.equal(d.treeProgress, false);
+});
+
+test('attributeRound: with no pinned target the round is unattributable, never a false positive', () => {
+  const before = [node({ id: 'x', depth: 1, status: 'open' })];
+  const after = [node({ id: 'x', depth: 1, status: 'proved' })];
+  for (const target of [null, undefined, 'gone']) {
+    const d = attributeRound(before, after, target);
+    assert.equal(d.targetProgress, false);
+    assert.equal(d.treeProgress, true);
+    assert.equal(d.relation, 'unrelated');
+  }
+  const idle = attributeRound(before, before, null);
+  assert.equal(idle.relation, 'no_commit');
+});
+
+test('a round that changes nothing reports relation=no_commit to the model, not silence', async () => {
+  // The prod shape: the round ends, the tree is byte-identical, and the model writes the owner a
+  // paragraph about progress on the goal. The result now carries the mechanism's own verdict.
+  const mem = openMemoryDb(':memory:');
+  const idleLLM: MiniLoopLLMClient = {
+    async send() { return { type: 'text' as const, content: 'I read some notes.', tokensUsed: 10 }; },
+  };
+  const { tool } = createDeepExploreTool({
+    reasoning: mem.reasoning,
+    miniLoopLLM: idleLLM,
+    subTurnToolRunner: async () => ({ ok: true, output: '' }),
+    readOnlyToolDefs: [],
+  });
+  // `start` runs the first converge round itself.
+  const r = await tool.execute({ action: 'start', goal: 'Design the retry policy for the ingest worker', mode: 'formal' });
+  assert.equal(r.success, true);
+  assert.match(r.output, /relation=no_commit/);
+  assert.match(r.output, /targetProgress=no/);
+  const session = mem.reasoning.getMostRecentActiveSession()!;
+  assert.equal(mem.reasoning.getNodes(session.id).every((n) => n.status === 'open'), true);
+  assert.ok(mem.reasoning.getSession(session.id)!.noProgressRounds > 0, 'and it counts as stuck');
+  mem.close();
 });

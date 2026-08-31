@@ -391,9 +391,12 @@ export function roundWasSubstantive(
 export type TargetRelation =
   | 'proves_target'
   | 'refutes_target'
+  | 'dead_end_target'
   | 'reduces_target'
   | 'scaffold_only'
-  | 'unrelated';
+  | 'unrelated'
+  /** The round ended with the tree exactly as it found it — the shape prod logged as `tree_delta=0`. */
+  | 'no_commit';
 
 export interface RoundAttribution {
   targetNodeId: string | null;
@@ -418,7 +421,12 @@ export function attributeRound(
   const created = after.filter((n) => !beforeById.has(n.id));
   const treeProgress = created.length > 0 || after.some(settled);
   if (!targetNodeId || !afterById.has(targetNodeId)) {
-    return { targetNodeId: targetNodeId ?? null, relation: 'unrelated', targetProgress: false, treeProgress };
+    return {
+      targetNodeId: targetNodeId ?? null,
+      relation: treeProgress ? 'unrelated' : 'no_commit',
+      targetProgress: false,
+      treeProgress,
+    };
   }
   // Closure computed on the AFTER tree so nodes created this round are inside it.
   const inClosure = (id: string): boolean => {
@@ -433,9 +441,14 @@ export function attributeRound(
   };
   const target = afterById.get(targetNodeId)!;
   if (settled(target)) {
+    const relation: TargetRelation = target.status === 'proved'
+      ? 'proves_target'
+      : target.status === 'refuted'
+        ? 'refutes_target'
+        : 'dead_end_target';
     return {
       targetNodeId,
-      relation: target.status === 'proved' ? 'proves_target' : 'refutes_target',
+      relation,
       targetProgress: true,
       treeProgress: true,
     };
@@ -448,7 +461,9 @@ export function attributeRound(
   const closureTouched = created.some((n) => inClosure(n.id));
   return {
     targetNodeId,
-    relation: closureTouched ? 'scaffold_only' : 'unrelated',
+    // scaffold_only = the closure grew but nothing closed; unrelated = the work all landed elsewhere;
+    // no_commit = nothing happened at all. Three different reports to the owner, three different fixes.
+    relation: closureTouched ? 'scaffold_only' : treeProgress ? 'unrelated' : 'no_commit',
     targetProgress: false,
     treeProgress,
   };
@@ -1087,6 +1102,16 @@ export const REASON_TOOL_DEFS: ToolDefinition[] = [
           items: { type: 'string' },
           description: 'Sources / observations backing the conclusion (a citation, URL, fact key, or file). REQUIRED to settle a finding in deliberate (evidence-based) mode; optional in formal proof mode.',
         },
+        relation: {
+          type: 'string',
+          enum: ['proves_target', 'refutes_target', 'dead_end_target', 'reduces_target', 'scaffold_only'],
+          description:
+            'What this commit does to THIS round\'s pinned target: proves_target / refutes_target (this IS ' +
+            'the target) / dead_end_target (the attempted route is exhausted without refuting the claim) / ' +
+            'reduces_target (it closes a dependency of the target) / scaffold_only (setup work ' +
+            'that does not yet move it). Audit field only — the mechanism derives the real relation from the ' +
+            'tree, so an optimistic answer here changes nothing except the honesty record.',
+        },
         basis: {
           type: 'string',
           enum: ['empirical', 'preferential'],
@@ -1279,6 +1304,18 @@ function recordSessionToolFailure(sessionId: string, toolName: string, error: st
  * In-memory, process-scoped; once a session verifies once we stop nagging it (low false-positive).
  */
 const sessionVerifierUsed = new Set<string>();
+/**
+ * Audit-only: what the model SAID each reason_record commit does to the pinned target, per round.
+ * Compared against the derived relation (attributeRound) and drained by the round; never read by any gate.
+ */
+const sessionClaimedRelations = new Map<string, string[]>();
+
+/** Drain the relations the model claimed during a round (audit shadow). */
+export function takeClaimedRelations(sessionId: string): string[] {
+  const claims = sessionClaimedRelations.get(sessionId) ?? [];
+  sessionClaimedRelations.delete(sessionId);
+  return claims;
+}
 const VERIFIER_TOOLS = new Set(['magnitude', 'z3Verify', 'pariGp']);
 
 /**
@@ -2726,6 +2763,12 @@ export function makeReasoningToolRunner(
       }
       const offTarget = rejectOffTarget(nodeId);
       if (offTarget) return offTarget;
+      // Record the claim at the ATTEMPT, not at the commit: a settle the skeptics reject is precisely a
+      // case where the model said "this proves the target" and the tree disagreed.
+      if (typeof input.relation === 'string' && input.relation) {
+        const prior = sessionClaimedRelations.get(sessionId) ?? [];
+        sessionClaimedRelations.set(sessionId, [...prior, input.relation].slice(-16));
+      }
       const writeEvidence = (nid: string) => {
         for (const e of evidence) reasoning.updateNode(sessionId, nid, { addEvidence: e });
       };
@@ -2993,6 +3036,8 @@ export interface DeepExploreDeps {
   takeAutoAdvanceOnCreate?: (owner: string | null, session: ReasoningSession) => boolean;
   /** Shadow-only comparison: does the existing aux value scorer change the deterministic frontier top? */
   onFrontierRankingShadow?: (event: { sessionId: string; baselineTopId: string; scoredTopId: string; agreed: boolean }) => void;
+  /** Audit shadow: the model's claimed relation to the round target vs the one derived from the tree. */
+  onRelationShadow?: (event: { sessionId: string; claimed: string; derived: TargetRelation; agreed: boolean }) => void;
   /** Clears a consumer's binding when the selected session is closed. */
   onSessionAbandoned?: (owner: string | null, session: ReasoningSession) => void;
 }
@@ -3382,9 +3427,32 @@ export function createDeepExploreTool(
       summary.newlyRefuted.length > 0 ||
       summary.newDeadEnds.length > 0 ||
       summary.decomposedInto > 0;
+    // Mechanism-side attribution: what did this round do to the node it was pinned to? Derived from the
+    // two snapshots — the model's own `relation` argument is only compared against it below.
+    const attribution = attributeRound(before, after, roundTarget?.id);
+    const claimedRelations = takeClaimedRelations(session.id);
+    if (roundTarget) {
+      console.log(
+        `[deep-explore] round attribution session=${safeSessionId(session.id)} target=${attribution.targetNodeId} ` +
+        `relation=${attribution.relation} targetProgress=${attribution.targetProgress} ` +
+        `treeProgress=${attribution.treeProgress} claimed=${claimedRelations.join(',') || 'none'}`,
+      );
+      for (const claimed of claimedRelations) {
+        const agreed = claimed === attribution.relation;
+        deps.onRelationShadow?.({ sessionId: session.id, claimed, derived: attribution.relation, agreed });
+      }
+    }
     // Tooth B: only SUBSTANTIVE progress resets the stuck counter — trivial churn (decomposing /
     // "proving" low-value sub-lemmas around a wall) accrues toward pivot/escalate instead of masking it.
-    const substantive = STRICT_PROGRESS ? roundWasSubstantive(before, after, SUBSTANTIVE_VALUE) : madeProgress;
+    // Tooth B': and it has to be progress on THE PINNED TARGET — a round that settles things on a side
+    // branch must not reset the stuck counter. Honest note: with the tool runner already rejecting writes
+    // outside the target's subtree, this second condition is today a REDUNDANCY (no reachable round
+    // satisfies substantiveTree without targetProgress, and removing it breaks no test). It is kept as
+    // the invariant the pinning is FOR, so loosening the pinning later cannot silently restore the
+    // side-branch reset. The observable half of this work is the derived relation logged and reported
+    // below. Only applied when a target was actually pinned (an empty frontier pins nothing).
+    const substantiveTree = STRICT_PROGRESS ? roundWasSubstantive(before, after, SUBSTANTIVE_VALUE) : madeProgress;
+    const substantive = roundTarget ? substantiveTree && attribution.targetProgress : substantiveTree;
     const noProgressRounds = reasoning.recordRoundProgress(session.id, substantive);
     // Post-loop convergence judgment (sub-LLM is not given reason_close).
     const status = judgeConvergence(after);
@@ -3457,19 +3525,31 @@ export function createDeepExploreTool(
     // Tooth B: when a round made nominal commits but no SUBSTANTIVE progress, say so — so a tree that
     // grows trivial lemmas around a wall reads as churn, not as a win.
     const churnNote =
-      STRICT_PROGRESS && madeProgress && !substantive
-        ? `\n(note: this round only expanded the tree / settled low-value nodes — the core frontier did ` +
-          `not move, so it does not count as substantive progress.)`
-        : '';
+      substantiveTree && !substantive && roundTarget
+        ? `\n(note: this round settled work OFF the pinned target [${roundTarget.id}] — derived relation ` +
+          `\`${attribution.relation}\`. Real work, but the target did not move, so it does not count as ` +
+          `progress on it. Say that plainly rather than reporting the target as advanced.)`
+        : STRICT_PROGRESS && madeProgress && !substantive
+          ? `\n(note: this round only expanded the tree / settled low-value nodes — the core frontier did ` +
+            `not move, so it does not count as substantive progress.)`
+          : '';
     // After enough stuck rounds, escalate to the user instead of grinding the same frontier silently.
     const stuckNote =
       status === 'active' && !substantive && noProgressRounds >= STUCK_ESCALATE_AFTER
         ? `\n⚠️ No substantive progress for ${noProgressRounds} consecutive rounds — this frontier looks stuck. ` +
           `Consider redirecting: start a fresh angle (a different framing of the problem), or tell me which sub-problem to focus on.`
         : '';
+    // The mechanism's own account of the round, stated in the round's result so the report the owner
+    // eventually reads is anchored to the tree rather than to the model's recollection of it. Prod
+    // 2026-08-30/31: rounds that committed nothing were relayed as work on the goal.
+    const attributionLine = roundTarget
+      ? `\n[mechanism] target [${roundTarget.id}] relation=${attribution.relation} ` +
+        `targetProgress=${attribution.targetProgress ? 'yes' : 'no'}. Relay this relation as it stands; ` +
+        `you may not describe the target as advanced when it reads no.`
+      : '';
     return {
       success: true,
-      output: `${text}${tail}${churnNote}${stuckNote}\n${renderSessionSubject(session.goal, session.id, session.mode, session.autoAdvance)}`,
+      output: `${text}${tail}${churnNote}${stuckNote}${attributionLine}\n${renderSessionSubject(session.goal, session.id, session.mode, session.autoAdvance)}`,
     };
   }
 

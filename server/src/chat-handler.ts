@@ -3145,6 +3145,10 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     onFrontierRankingShadow: ({ agreed }) => {
       memory.metrics.increment(`deep_explore.frontier_shadow.${agreed ? 'agree' : 'disagree'}`);
     },
+    onRelationShadow: ({ claimed, derived, agreed }) => {
+      memory.metrics.increment(`deep_explore.relation_shadow.${agreed ? 'agree' : 'disagree'}`);
+      if (!agreed) console.log(`[deep-explore] relation shadow: model claimed ${claimed}, tree shows ${derived}`);
+    },
     onSessionSelected: (owner, session, source) => {
       if (!owner) return;
       memory.reasoning.setFocusedSession(owner, session.id);
