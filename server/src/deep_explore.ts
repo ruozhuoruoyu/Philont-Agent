@@ -974,6 +974,28 @@ export function reasoningTreeVersion(nodes: ReasoningNode[]): string {
     .join('\u001d');
 }
 
+export interface FrontierLease {
+  version: string | null;
+  targetNodeId: string | null;
+}
+
+/** Reuse a persisted frontier target only while the structural tree version still matches. */
+export function selectFrontierTarget(
+  frontier: ReasoningNode[],
+  currentVersion: string,
+  lease: FrontierLease | null | undefined,
+): { target: ReasoningNode | null; staleLease: boolean } {
+  if (lease?.version === currentVersion && lease.targetNodeId) {
+    const target = frontier.find((n) => n.id === lease.targetNodeId) ?? null;
+    if (target) return { target, staleLease: false };
+  }
+  const staleLease = !!lease?.version && (
+    lease.version !== currentVersion ||
+    (!!lease.targetNodeId && !frontier.some((n) => n.id === lease.targetNodeId))
+  );
+  return { target: frontier[0] ?? null, staleLease };
+}
+
 /**
  * Value-guided node selection (LATS/rStar style) master switch. On by default;
  * set env PHILONT_DEEP_EXPLORE_VALUE_GUIDED=0 to disable → reverts to old behaviour
@@ -3374,7 +3396,20 @@ export function createDeepExploreTool(
     const roundFrontier = VALUE_GUIDED
       ? rankFrontier(rawRoundFrontier, before, UCB_C, NOVELTY_W)
       : rawRoundFrontier;
-    const roundTarget = roundFrontier[0] ?? null;
+    const currentFrontierVersion = reasoningTreeVersion(before);
+    const persisted = reasoning.getSession(session.id);
+    const selected = selectFrontierTarget(roundFrontier, currentFrontierVersion, persisted ? {
+      version: persisted.frontierVersion,
+      targetNodeId: persisted.frontierTargetNodeId,
+    } : null);
+    const roundTarget = selected.target;
+    if (selected.staleLease) {
+      console.warn(
+        `[deep-explore] stale frontier invalidated session=${safeSessionId(session.id)} ` +
+        `oldTarget=${persisted?.frontierTargetNodeId ?? 'none'}`,
+      );
+    }
+    reasoning.setFrontierSnapshot(session.id, currentFrontierVersion, roundTarget?.id ?? null);
     if (roundTarget) {
       console.log(
         `[deep-explore] round target session=${safeSessionId(session.id)} node=${roundTarget.id} ` +

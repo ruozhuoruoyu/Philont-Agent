@@ -74,6 +74,9 @@ export interface ReasoningSession {
   divergeIdleRounds: number;
   /** Cumulative count of advancing rounds run (never reset). Backs the deliberate auto-answer round ceiling. */
   roundsRun: number;
+  /** Structural tree version and target selected by the last advancing round (restart-durable lease). */
+  frontierVersion: string | null;
+  frontierTargetNodeId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -123,6 +126,8 @@ interface SessionRow {
   phase: string | null;
   diverge_idle_rounds: number;
   rounds_run: number;
+  frontier_version: string | null;
+  frontier_target_node_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -163,6 +168,8 @@ function rowToSession(r: SessionRow): ReasoningSession {
     phase: (r.phase === 'diverge' ? 'diverge' : 'converge') as ReasoningPhase,
     divergeIdleRounds: r.diverge_idle_rounds ?? 0,
     roundsRun: r.rounds_run ?? 0,
+    frontierVersion: r.frontier_version ?? null,
+    frontierTargetNodeId: r.frontier_target_node_id ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -522,6 +529,14 @@ export class ReasoningStore {
         `UPDATE reasoning_sessions SET status = ?, updated_at = ? WHERE id = ?`,
       )
       .run(status, Date.now(), id);
+  }
+
+  /** Save/replace the restart-durable lease for the frontier actually rendered to the round. */
+  setFrontierSnapshot(id: string, version: string, targetNodeId: string | null): void {
+    this.db.prepare<[string, string | null, number, string]>(
+      `UPDATE reasoning_sessions
+       SET frontier_version = ?, frontier_target_node_id = ?, updated_at = ? WHERE id = ?`,
+    ).run(version, targetNodeId, Date.now(), id);
   }
 
   /** Accumulate cross-turn budget cost. */

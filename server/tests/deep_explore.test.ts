@@ -56,6 +56,7 @@ import {
   withSessionWebDedup,
   renderProgressMilestone,
   pariMethodFingerprint,
+  selectFrontierTarget,
 } from '../src/deep_explore.js';
 
 function node(over: Partial<ReasoningNode>): ReasoningNode {
@@ -104,6 +105,31 @@ test('the same failed PARI method is delegated once per session target', async (
   assert.equal(repeat.ok, false);
   assert.match(repeat.error ?? '', /Repeated failed PARI method blocked/);
   assert.equal(calls, 1);
+});
+
+test('frontier lease survives restart only while its structural version is current', () => {
+  const a = node({ id: 'a' });
+  const b = node({ id: 'b' });
+  assert.equal(selectFrontierTarget([a, b], 'v1', { version: 'v1', targetNodeId: 'b' }).target?.id, 'b');
+  const stale = selectFrontierTarget([a], 'v2', { version: 'v1', targetNodeId: 'b' });
+  assert.equal(stale.staleLease, true);
+  assert.equal(stale.target?.id, 'a');
+});
+
+test('frontier lease is invalid when its target left the frontier even if version text matches', () => {
+  const a = node({ id: 'a' });
+  const selected = selectFrontierTarget([a], 'v1', { version: 'v1', targetNodeId: 'gone' });
+  assert.equal(selected.staleLease, true);
+  assert.equal(selected.target?.id, 'a');
+});
+
+test('frontier lease is persisted by ReasoningStore rather than held in process memory', () => {
+  const mem = openMemoryDb(':memory:');
+  const { session, rootNode } = mem.reasoning.createSession({ goal: 'persist lease' });
+  mem.reasoning.setFrontierSnapshot(session.id, 'tree-v7', rootNode.id);
+  const reloaded = mem.reasoning.getSession(session.id);
+  assert.equal(reloaded?.frontierVersion, 'tree-v7');
+  assert.equal(reloaded?.frontierTargetNodeId, rootNode.id);
 });
 
 test('computeFrontier = open 叶节点(有子节点的不算 frontier)', () => {

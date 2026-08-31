@@ -20,7 +20,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
 } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 43;
+export const SCHEMA_VERSION = 44;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -1059,6 +1059,8 @@ function migrateV24ToV25(db: Database.Database): void {
       -- restart. Without this the in-memory ask log was cleared on every restart, so a stalled/unproven
       -- exploration was re-asked forever and never auto-abandoned (it just nagged the owner each restart).
       followup_asked_at INTEGER,
+      frontier_version TEXT,
+      frontier_target_node_id TEXT,
       created_at        INTEGER NOT NULL,
       updated_at        INTEGER NOT NULL
     );
@@ -1320,6 +1322,12 @@ function migrateV42ToV43(db: Database.Database): void {
     Date.now(),
     BOOTSTRAP_ROOT_PURSUIT_ID,
   );
+}
+
+/** v44: persist the frontier lease so a restart/continue cannot silently reuse a stale target. */
+function migrateV43ToV44(db: Database.Database): void {
+  addColumnIfMissing(db, 'reasoning_sessions', 'frontier_version', 'TEXT');
+  addColumnIfMissing(db, 'reasoning_sessions', 'frontier_target_node_id', 'TEXT');
 }
 
 function migrateV39ToV40(db: Database.Database): void {
@@ -1600,6 +1608,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 43) {
     migrateV42ToV43(db);
+  }
+  if (current < 44) {
+    migrateV43ToV44(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns
