@@ -119,6 +119,21 @@ test('withNoProgressStop:连续无树提交则早停,reason 提交会重置(真�
   assert.equal(aborts2, 0);
 });
 
+test('withNoProgressStop: reason_record ok但树未变不算提交', async () => {
+  let aborts = 0;
+  const version = 'v1';
+  const wrapped = withNoProgressStop(
+    async () => ({ ok: true, output: 'Node stays open — precheck rejected the settle.' }),
+    () => { aborts++; },
+    { noProgressCap: 3, treeVersion: () => version },
+  );
+  await wrapped.runner('reason_record', {});
+  await wrapped.runner('reason_record', {});
+  await wrapped.runner('reason_record', {});
+  assert.equal(wrapped.stalled.value, true);
+  assert.equal(aborts, 1);
+});
+
 test('formatOpenIds 列出 open 节点 id', () => {
   const ns = [node({ id: 'x', status: 'open' }), node({ id: 'y', status: 'dead_end' }), node({ id: 'z', status: 'open' })];
   assert.equal(formatOpenIds(ns), 'x, z');
@@ -199,6 +214,38 @@ test('reason_decompose 成功:写树 + output 回显新建 nodeId', async () => 
   const kids = mem.reasoning.getNodes(session.id).filter((n) => n.parentId === rootNode.id);
   assert.equal(kids.length, 2);
   for (const k of kids) assert.match(r.output, new RegExp(k.id));
+  mem.close();
+});
+
+test('round target binding rejects commits to a sibling but allows target descendants', async () => {
+  const mem = openMemoryDb(':memory:');
+  const { session, rootNode } = mem.reasoning.createSession({ goal: 'G' });
+  const [target, sibling] = mem.reasoning.addNodes(session.id, rootNode.id, [
+    { claim: 'target', kind: 'subgoal' },
+    { claim: 'sibling', kind: 'subgoal' },
+  ]);
+  const run = makeReasoningToolRunner(
+    mem.reasoning,
+    session.id,
+    noopDelegate,
+    undefined,
+    undefined,
+    FORMAL_PROFILE,
+    target.id,
+  );
+  const rejected = await run('reason_record', { nodeId: sibling.id, status: 'dead_end', approach: 'x' });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error!, /Off-target tree commit rejected/);
+  assert.equal(mem.reasoning.getNode(session.id, sibling.id)!.status, 'open');
+
+  const expanded = await run('reason_decompose', {
+    parentNodeId: target.id,
+    subClaims: [{ claim: 'target child', kind: 'lemma' }],
+  });
+  assert.equal(expanded.ok, true);
+  const child = mem.reasoning.getNodes(session.id).find((n) => n.parentId === target.id)!;
+  const settled = await run('reason_record', { nodeId: child.id, status: 'dead_end', approach: 'checked' });
+  assert.equal(settled.ok, true);
   mem.close();
 });
 

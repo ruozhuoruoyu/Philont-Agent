@@ -373,6 +373,88 @@ export function roundWasSubstantive(
 }
 
 /**
+ * Mechanism-side target attribution (2026-08-31).
+ *
+ * The round pins a target node and the tool runner already refuses writes outside its subtree. What was
+ * still missing is the other half: deciding, from the tree itself, WHAT the round did to that target.
+ * Prod 2026-08-30/31 shows why it cannot be left to the model — round after round reported work on the
+ * LRC bound while `tree_delta=0`, and the frontier shadow disagreed 14 times against 2 agreements: the
+ * narrative and the tree had come apart, and only the narrative reached the owner.
+ *
+ * So the relation is DERIVED from the before/after snapshots, never declared. A model-supplied
+ * `relation` on reason_record is kept strictly as an audit signal (see roundRelationShadow) — the moment
+ * a self-graded field decides anything, it stops describing the work and starts describing what scores.
+ *
+ * `targetProgress` is deliberately narrower than `treeProgress`: a round may settle things and still not
+ * move the pinned target, which is exactly the shape that let a session grind for fourteen rounds.
+ */
+export type TargetRelation =
+  | 'proves_target'
+  | 'refutes_target'
+  | 'reduces_target'
+  | 'scaffold_only'
+  | 'unrelated';
+
+export interface RoundAttribution {
+  targetNodeId: string | null;
+  relation: TargetRelation;
+  /** The pinned target closed, or got strictly closer to closing. */
+  targetProgress: boolean;
+  /** Anything anywhere in the tree settled or was created. */
+  treeProgress: boolean;
+}
+
+export function attributeRound(
+  before: ReasoningNode[],
+  after: ReasoningNode[],
+  targetNodeId: string | null | undefined,
+): RoundAttribution {
+  const beforeById = new Map(before.map((n) => [n.id, n]));
+  const afterById = new Map(after.map((n) => [n.id, n]));
+  const settled = (n: ReasoningNode): boolean => {
+    const prev = beforeById.get(n.id);
+    return !!prev && prev.status === 'open' && n.status !== 'open';
+  };
+  const created = after.filter((n) => !beforeById.has(n.id));
+  const treeProgress = created.length > 0 || after.some(settled);
+  if (!targetNodeId || !afterById.has(targetNodeId)) {
+    return { targetNodeId: targetNodeId ?? null, relation: 'unrelated', targetProgress: false, treeProgress };
+  }
+  // Closure computed on the AFTER tree so nodes created this round are inside it.
+  const inClosure = (id: string): boolean => {
+    let cur = afterById.get(id);
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur.id)) {
+      if (cur.id === targetNodeId) return true;
+      seen.add(cur.id);
+      cur = cur.parentId ? afterById.get(cur.parentId) : undefined;
+    }
+    return false;
+  };
+  const target = afterById.get(targetNodeId)!;
+  if (settled(target)) {
+    return {
+      targetNodeId,
+      relation: target.status === 'proved' ? 'proves_target' : 'refutes_target',
+      targetProgress: true,
+      treeProgress: true,
+    };
+  }
+  const descendantSettled = after.some((n) => n.id !== targetNodeId && settled(n) && inClosure(n.id));
+  const targetDecomposed = created.some((n) => n.parentId === targetNodeId);
+  if (descendantSettled || targetDecomposed) {
+    return { targetNodeId, relation: 'reduces_target', targetProgress: true, treeProgress: true };
+  }
+  const closureTouched = created.some((n) => inClosure(n.id));
+  return {
+    targetNodeId,
+    relation: closureTouched ? 'scaffold_only' : 'unrelated',
+    targetProgress: false,
+    treeProgress,
+  };
+}
+
+/**
  * Did a DISCOVER (experimental-math) round make substantive progress? (2026-06-24)
  *
  * Discover mode used to opt out of stuck judgment entirely ("getting stuck is not applicable"), making it a
@@ -791,16 +873,23 @@ export function withWebCallCap(
 
 /**
  * Wrap a round's tool runner so the round aborts early once it has made NO tree progress for
- * NO_PROGRESS_CAP consecutive tool calls. "Progress" = a successful reason_decompose / reason_record
- * (any status — recording a dead_end IS progress, it's backtracking). pariGp/recall/failed calls do
- * NOT reset the counter. Steady progress keeps resetting it, so a genuinely productive round (which
+ * NO_PROGRESS_CAP consecutive tool calls. With treeVersion supplied, "progress" = an actual persisted
+ * diff caused by reason_decompose / reason_record (recording a dead_end IS progress, it's backtracking),
+ * not merely an ok:true response from a rejected settle. pariGp/recall/failed calls do NOT reset the
+ * counter. Steady progress keeps resetting it, so a genuinely productive round (which
  * is exactly the one that SHOULD use the full time budget) is never cut — only a stalled/spinning
  * round stops early. `stalled.value` lets the caller render a "no progress" tail instead of a timeout.
  */
 export function withNoProgressStop(
   base: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>,
   abort: () => void,
-  opts: { noProgressTimeoutMs?: number; noProgressCap?: number; now?: () => number } = {},
+  opts: {
+    noProgressTimeoutMs?: number;
+    noProgressCap?: number;
+    now?: () => number;
+    /** Mechanism-owned tree version: only a real persisted diff resets the stall clock. */
+    treeVersion?: () => string;
+  } = {},
 ): { runner: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>; stalled: { value: boolean } } {
   const now = opts.now ?? Date.now;
   const timeoutMs = opts.noProgressTimeoutMs;
@@ -818,9 +907,13 @@ export function withNoProgressStop(
   let lastProgressTs = now(); // round start; reset on every tree commit
   const stalled = { value: false };
   const runner = async (name: string, input: Record<string, unknown>) => {
+    const treeBefore = opts.treeVersion?.();
     const r = await base(name, input);
+    const treeAfter = opts.treeVersion?.();
     callsSinceProgress++;
-    if (r.ok && (name === 'reason_decompose' || name === 'reason_record')) {
+    const reasonAction = name === 'reason_decompose' || name === 'reason_record';
+    const committed = reasonAction && r.ok && (opts.treeVersion ? treeBefore !== treeAfter : true);
+    if (committed) {
       callsSinceProgress = 0;
       lastProgressTs = now();
     } else if (r.ok && callsSinceProgress >= nudgeAt && callsSinceProgress < cap) {
@@ -848,6 +941,23 @@ export function withNoProgressStop(
     return r;
   };
   return { runner, stalled };
+}
+
+/** Stable version of the persisted fields that constitute a reasoning-tree commit. */
+export function reasoningTreeVersion(nodes: ReasoningNode[]): string {
+  return nodes
+    .map((n) => [
+      n.id,
+      n.parentId ?? '',
+      n.status,
+      n.result ?? '',
+      n.approachesTried.join('\u001f'),
+      n.evidenceRefs.join('\u001f'),
+      n.checkCriterion ?? '',
+      n.settleBasis ?? '',
+    ].join('\u001e'))
+    .sort()
+    .join('\u001d');
 }
 
 /**
@@ -2517,8 +2627,32 @@ export function makeReasoningToolRunner(
   verifyProved?: (node: ReasoningNode, argument: string | null, basis?: ReasoningSettleBasis) => Promise<VerificationTally | null>,
   actions?: ActionLog,
   profile: ReasoningProfile = FORMAL_PROFILE,
+  /** Mechanism-selected frontier node for this round. Tree writes must stay in its subtree. */
+  roundTargetNodeId?: string,
 ): (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult> {
   return async (name, input) => {
+    const belongsToRoundTarget = (nodeId: string): boolean => {
+      if (!roundTargetNodeId) return true;
+      const byId = new Map(reasoning.getNodes(sessionId).map((n) => [n.id, n]));
+      let current = byId.get(nodeId);
+      const seen = new Set<string>();
+      while (current && !seen.has(current.id)) {
+        if (current.id === roundTargetNodeId) return true;
+        seen.add(current.id);
+        current = current.parentId ? byId.get(current.parentId) : undefined;
+      }
+      return false;
+    };
+    const rejectOffTarget = (nodeId: string): MiniLoopToolRunResult | null =>
+      belongsToRoundTarget(nodeId)
+        ? null
+        : {
+            ok: false,
+            output: '',
+            error:
+              `Off-target tree commit rejected: this round is pinned to [${roundTargetNodeId}], ` +
+              `but [${nodeId}] is outside that subtree. Finish/decompose the pinned target first.`,
+          };
     if (name === 'reason_decompose') {
       const parentNodeId = typeof input.parentNodeId === 'string' ? input.parentNodeId : '';
       const rawSub = Array.isArray(input.subClaims) ? input.subClaims : [];
@@ -2538,6 +2672,8 @@ export function makeReasoningToolRunner(
           error: `Need parentNodeId + a non-empty subClaims. Current open nodes: [${formatOpenIds(nodes)}]`,
         };
       }
+      const offTarget = rejectOffTarget(parentNodeId);
+      if (offTarget) return offTarget;
       try {
         const created = reasoning.addNodes(sessionId, parentNodeId, subClaims);
         // Critical: echo newly created node ids; without this the sub-LLM has no ids to
@@ -2588,6 +2724,8 @@ export function makeReasoningToolRunner(
       if (!RECORD_STATUSES.has(status)) {
         return { ok: false, output: '', error: `status must be proved/refuted/dead_end, got ${String(status)}` };
       }
+      const offTarget = rejectOffTarget(nodeId);
+      if (offTarget) return offTarget;
       const writeEvidence = (nid: string) => {
         for (const e of evidence) reasoning.updateNode(sessionId, nid, { addEvidence: e });
       };
@@ -3141,8 +3279,21 @@ export function createDeepExploreTool(
     // Re-fetch (includes just-written values) as the snapshot for this round's render;
     // record the starting frontier ids for UCB visit accounting.
     const before = reasoning.getNodes(session.id);
-    const frontierStartIds = new Set(computeFrontier(before).map((n) => n.id));
-    const activeClaims = computeFrontier(before).map((node) => node.claim);
+    const rawRoundFrontier = computeFrontier(before);
+    // Match the order rendered by the profile prompt. Pinning the raw DB order while the prompt shows
+    // a value-ranked frontier would make the mechanism and model disagree about "the current target".
+    const roundFrontier = VALUE_GUIDED
+      ? rankFrontier(rawRoundFrontier, before, UCB_C, NOVELTY_W)
+      : rawRoundFrontier;
+    const roundTarget = roundFrontier[0] ?? null;
+    if (roundTarget) {
+      console.log(
+        `[deep-explore] round target session=${safeSessionId(session.id)} node=${roundTarget.id} ` +
+        `depth=${roundTarget.depth} value=${roundTarget.value ?? 'unscored'}`,
+      );
+    }
+    const frontierStartIds = new Set(roundFrontier.map((n) => n.id));
+    const activeClaims = roundFrontier.map((node) => node.claim);
     const externalEvidence = deps.getExternalVerificationEvidence?.(session.ownerSessionId ?? '', activeClaims) ?? [];
     const reconciliationPrompt = externalEvidence.length
       ? `\n\n## External verification ledger (reconcile with the tree now)\n` +
@@ -3152,7 +3303,13 @@ export function createDeepExploreTool(
       : '';
     const systemPrompt =
       AGENT_SELF_REFERENCE_NOTE + '\n\n' +
-      profile.buildConvergePrompt(session, before, collectComputeLessons(skills, session.goal)) + reconciliationPrompt;
+      profile.buildConvergePrompt(session, before, collectComputeLessons(skills, session.goal)) +
+      (roundTarget
+        ? `\n\n## Mechanism-pinned target for THIS round\n[${roundTarget.id}] ${roundTarget.claim}\n` +
+          `All reason_decompose/reason_record writes are restricted to this node's subtree. ` +
+          `Work it to a real tree change before touching another frontier branch.`
+        : '') +
+      reconciliationPrompt;
     const userMessage =
       profile.buildUserMessage(session, before.length <= 1) + buildStuckDirective(session.noProgressRounds ?? 0);
 
@@ -3174,10 +3331,15 @@ export function createDeepExploreTool(
         buildVerifyProved(session, ctrl.signal, profile),
         actions,
         profile,
+        roundTarget?.id,
       ),
       () => ctrl.abort(),
       // Stop a round that has made NO tree commit for half the round budget (the slow all-pariGp spin).
-      { noProgressTimeoutMs: Math.round(roundDeadlineMs * 0.5), noProgressCap: profile.noProgressCap },
+      {
+        noProgressTimeoutMs: Math.round(roundDeadlineMs * 0.5),
+        noProgressCap: profile.noProgressCap,
+        treeVersion: () => reasoningTreeVersion(reasoning.getNodes(session.id)),
+      },
     );
     let result;
     try {
@@ -3354,7 +3516,11 @@ export function createDeepExploreTool(
       ),
       () => ctrl.abort(),
       // Stop a round that has made NO tree commit for half the round budget (the slow all-pariGp spin).
-      { noProgressTimeoutMs: Math.round(roundDeadlineMs * 0.5), noProgressCap: profile.noProgressCap },
+      {
+        noProgressTimeoutMs: Math.round(roundDeadlineMs * 0.5),
+        noProgressCap: profile.noProgressCap,
+        treeVersion: () => reasoningTreeVersion(reasoning.getNodes(session.id)),
+      },
     );
     // Diverge browses-instead-of-generating backstop: cap web lookups so the round must decompose.
     const cappedRunner = withWebCallCap(boundRunner, { cap: DIVERGE_WEB_CAP, webTools: WEB_TOOL_NAMES });
