@@ -4679,7 +4679,18 @@ const VIABILITY_STOP_RECOMMEND_TTL_MS = 30 * 60_000;
  * (reflection's cross-turn judgment, derived mechanically from its own trigger signals rather than a fragile LLM
  * output-schema change). Read the next turn pre-LLM into signalBus.recommendStop, arming the ViabilityGate (+3).
  */
-const viabilityRecommendStop = new Map<string, number>();
+/**
+ * A recommended stop, and whether the OWNER has actually seen it.
+ *
+ * `armed` is reflection's internal conclusion; `delivered` means a turn actually ended as
+ * stop_and_report, i.e. the recommendation reached the person. Only a delivered stop can be
+ * overridden — prod 2026-08-31 armed the same stop at 09:59, 10:03 and 10:08, every one of those
+ * turns ended as an ordinary `response`, and each routine "继续" cleared it. The owner was never
+ * told anything, and the accumulation the gate needs was destroyed three times before it could
+ * produce a verdict. Reading `armed` as "the owner refused to stop" is the defect.
+ */
+type StopRecommendation = { state: 'armed' | 'delivered'; at: number };
+const viabilityRecommendStop = new Map<string, StopRecommendation>();
 const VIABILITY_RECOMMEND_STOP_TTL_MS = 30 * 60_000;
 
 /**
@@ -9044,7 +9055,11 @@ export async function handleChatSend(
         // recommending a stop because an unrelated tree stalled is the same mis-binding one layer over.
         const os = focusedReasoningSession(sessionId);
         if (os && os.status === 'active' && os.noProgressRounds >= 3 && sameRootCauseFailures >= 2) {
-          viabilityRecommendStop.set(sessionId, Date.now());
+          // Re-arming never downgrades: a stop the owner has already been shown stays delivered
+          // until they override it.
+          if (viabilityRecommendStop.get(sessionId)?.state !== 'delivered') {
+            viabilityRecommendStop.set(sessionId, { state: 'armed', at: Date.now() });
+          }
           console.log(
             `[viability] session=${safeSessionId(sessionId)} reflection recommend_stop armed (noProgressRounds=${os.noProgressRounds}, sameRootCause=${sameRootCauseFailures})`,
           );
@@ -9566,7 +9581,18 @@ async function handleChatSendInner(
 
       const grantTtlMs =
         pending.toolName === 'deep_explore' ? DEEP_EXPLORE_GRANT_TTL_MS : WORKFLOW_GRANT_TTL_MS;
-      grants.grant(pending.toolName, pending.capability as any, pending.domain as any, userMessage, grantTtlMs);
+      // ONE approval, one bundle id — the approved tool and the workflow siblings below. Using any of
+      // them re-arms all of them; see GrantStore.useGrant for why per-member renewal decayed a bundle
+      // one tool at a time.
+      const grantBundleId = `wf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      grants.grant({
+        toolName: pending.toolName,
+        capability: pending.capability as any,
+        domain: pending.domain as any,
+        reason: userMessage,
+        ttlMs: grantTtlMs,
+        bundleId: grantBundleId,
+      });
       if (commandGated) {
         grants.grant({
           toolName: pending.toolName,
@@ -9604,7 +9630,14 @@ async function handleChatSendInner(
         ? []
         : localWorkflowGrants(pending.capability, pending.domain, pending.toolName);
       for (const g of wfGrants) {
-        grants.grant(g.tool, g.capability as any, g.domain as any, `research workflow grant via ${pending.toolName} approval`, WORKFLOW_GRANT_TTL_MS);
+        grants.grant({
+          toolName: g.tool,
+          capability: g.capability as any,
+          domain: g.domain as any,
+          reason: `research workflow grant via ${pending.toolName} approval`,
+          ttlMs: WORKFLOW_GRANT_TTL_MS,
+          bundleId: grantBundleId,
+        });
       }
       if (wfGrants.length > 0) {
         console.log(
@@ -10157,7 +10190,7 @@ async function handleChatSendInner(
     // still the ground truth that a stop had accumulated; otherwise an explicit "new approach, continue"
     // cannot open a fresh episode and is immediately killed by the old dead/no-progress totals.
     const hadDoom = (viabilityPivotStreak.get(sessionId) ?? 0) >= 1 ||
-      viabilityRecommendStop.has(sessionId) ||
+      viabilityRecommendStop.get(sessionId)?.state === 'delivered' ||
       reasoningStateCarriesDoom({
         noProgressRounds: persistedEpisodeStats?.noProgressRounds ?? 0,
         deadEndCount: persistedEpisodeStats?.deadCount ?? 0,
@@ -10203,7 +10236,9 @@ async function handleChatSendInner(
   {
     const rs = viabilityRecommendStop.get(sessionId);
     if (rs !== undefined) {
-      if (Date.now() - rs < VIABILITY_RECOMMEND_STOP_TTL_MS) {
+      // Both states score: `armed` is exactly the state that still has to REACH the owner, so it must
+      // keep feeding the gate until a turn delivers it.
+      if (Date.now() - rs.at < VIABILITY_RECOMMEND_STOP_TTL_MS) {
         signalBus.recommendStop = true;
       } else {
         viabilityRecommendStop.delete(sessionId);
@@ -11775,6 +11810,12 @@ function emitFinalText(opts: {
     couldNotVerify: signalBus.couldNotVerify === true,
     inTurnRecords: signalBus.inTurnRecords ?? [],
   });
+  // The stop has now been SAID. From here a "继续" is the owner overriding something they read,
+  // which is the only thing that should clear the accumulated stop signals.
+  if (outcomeType === 'stop_and_report') {
+    const prior = viabilityRecommendStop.get(sessionId);
+    viabilityRecommendStop.set(sessionId, { state: 'delivered', at: prior?.at ?? Date.now() });
+  }
   return { outcome: { outcomeType, text: safeText }, auditEvents: audit.length };
 }
 

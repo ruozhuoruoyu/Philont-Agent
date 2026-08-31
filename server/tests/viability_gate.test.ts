@@ -392,3 +392,50 @@ test('only advancing deep-explore actions engage reasoning for viability', () =>
   }
   assert.equal(isDeepExploreAdvanceRecord({ toolName: 'shell', toolInput: { action: 'continue' } }), false);
 });
+
+/**
+ * A stop the owner never saw is not a stop the owner refused.
+ *
+ * Prod 2026-08-31: reflection armed the same recommendation at 09:59, 10:03 and 10:08. All three of
+ * those turns ended `outcome=response` — an ordinary report about hitting the tool-round cap — so
+ * nothing about stopping ever reached the owner. Each routine "继续" then cleared it, and the gate
+ * restarted from zero. Armed three times, delivered never.
+ *
+ * The rule lives at the write sites in chat-handler (the map is module-private); it is pinned here so
+ * it cannot be quietly re-flattened into a single boolean.
+ */
+type StopState = { state: 'armed' | 'delivered'; at: number } | undefined;
+const armStop = (prior: StopState, now: number): StopState =>
+  prior?.state === 'delivered' ? prior : { state: 'armed', at: now };
+const deliverStop = (prior: StopState, now: number): StopState =>
+  ({ state: 'delivered', at: prior?.at ?? now });
+const licensesOverride = (s: StopState): boolean => s?.state === 'delivered';
+
+test('an armed-but-undelivered stop is not cleared by a routine continuation', () => {
+  let stop: StopState = undefined;
+  // Three turns that arm and end as ordinary responses.
+  for (let i = 0; i < 3; i++) {
+    stop = armStop(stop, 1_000 + i);
+    assert.equal(licensesOverride(stop), false, 'the owner has not been told anything yet');
+    // A "继续" on such a turn must not read as "the owner overrode the stop".
+    assert.equal(
+      decideTurnAnchors({ lastAssistantText: '', userMessage: '继续', hadDoom: licensesOverride(stop) }).doomReset,
+      false,
+    );
+  }
+  // The turn that actually ends as stop_and_report is the one the owner reads.
+  stop = deliverStop(stop, 9_999);
+  assert.equal(licensesOverride(stop), true);
+  assert.equal(
+    decideTurnAnchors({ lastAssistantText: '', userMessage: '继续', hadDoom: licensesOverride(stop) }).doomReset,
+    true,
+    'overriding a stop they were actually shown still buys a fresh episode',
+  );
+});
+
+test('re-arming never downgrades a delivered stop, and delivery keeps the original arming time', () => {
+  const armed = armStop(undefined, 100);
+  const delivered = deliverStop(armed, 500);
+  assert.deepEqual(delivered, { state: 'delivered', at: 100 }, 'the TTL runs from when it was armed');
+  assert.deepEqual(armStop(delivered, 900), delivered, 'a later arming cannot un-deliver it');
+});

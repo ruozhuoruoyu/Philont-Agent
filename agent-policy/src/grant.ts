@@ -41,6 +41,16 @@ export interface Grant {
   issuedAt:   number;
   /** The window the caller asked for. A use re-arms exactly this much from the moment of use. */
   ttlMs:      number;
+  /**
+   * Grants issued by ONE approval share a bundle id, and using any member re-arms all of them.
+   *
+   * The owner approves a WORKFLOW, not seven independent tools. Prod 2026-08-30: one write/local
+   * approval handed out writeFile/patch/moveFile/shell/process/pariGp/z3Verify; `shell` was used
+   * constantly and stayed alive while pariGp and z3Verify sat idle for thirty minutes and died — so a
+   * deep_explore round that reached its verifiers mid-turn found them expired ("EXPIRED 2 min ago")
+   * and fell back to reading memory. Per-member renewal decays a bundle one tool at a time.
+   */
+  bundleId?:  string;
 }
 
 /** Default is long enough for a multi-step workflow; callers may still narrow it. */
@@ -119,6 +129,7 @@ export class GrantStore {
     reason: string;
     ttlMs?: number;
     audience?: string;
+    bundleId?: string;
   }): void;
   grant(
     arg: string | {
@@ -130,6 +141,7 @@ export class GrantStore {
       reason: string;
       ttlMs?: number;
       audience?: string;
+      bundleId?: string;
     },
     capability?: Capability,
     domain?: Domain,
@@ -161,6 +173,7 @@ export class GrantStore {
         audience: arg.audience,
         issuedAt,
         ttlMs: arg.ttlMs ?? DEFAULT_GRANT_TTL_MS,
+        bundleId: arg.bundleId,
       };
     }
 
@@ -205,10 +218,27 @@ export class GrantStore {
     const g = this.findActive(toolName, params, scopeMin, audience);
     if (!g) return false;
     const now = this.now();
+    this.rearm(g, now);
+    // One approval, one lifetime: using any member of the bundle keeps the whole workflow alive. Each
+    // member still re-arms to ITS OWN window and stops at ITS OWN ceiling, so the bundle cannot be
+    // stretched further than the individual grants could. Members already revoked or expired are gone
+    // from the store and are NOT resurrected — renewal only touches what is still live.
+    if (g.bundleId) {
+      for (const list of this.grants.values()) {
+        for (const member of list) {
+          if (member !== g && member.bundleId === g.bundleId && member.expiresAt > now) {
+            this.rearm(member, now);
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  private rearm(g: Grant, now: number): void {
     const ceiling = g.issuedAt + g.ttlMs * RENEWAL_CEILING_FACTOR;
     // Never shrink, never exceed the ceiling.
     g.expiresAt = Math.max(g.expiresAt, Math.min(ceiling, now + g.ttlMs));
-    return true;
   }
 
   /**

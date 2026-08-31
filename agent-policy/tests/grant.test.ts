@@ -112,3 +112,56 @@ test('expiry diagnostics match the same command scope and audience', () => {
     'an approval for another audience must not be attributed to this caller',
   );
 });
+
+test('one approval is one lifetime: using any bundle member re-arms all of them', () => {
+  let clock = 1_000_000;
+  const store = new GrantStore(() => clock);
+  const bundleId = 'wf-test';
+  const ttl = 30 * 60_000; // the production workflow window
+  for (const tool of ['shell', 'pariGp', 'z3Verify']) {
+    store.grant({ toolName: tool, capability: 'execute', domain: 'local', reason: 'one yes', ttlMs: ttl, bundleId });
+  }
+  const idleAtIssue = store.list().find((g) => g.toolName === 'pariGp')!.expiresAt;
+
+  // Half an hour of `shell` work with the verifiers untouched — the shape of the production loop,
+  // where pariGp/z3Verify are first needed inside a deep_explore round long after the approval.
+  for (let i = 0; i < 6; i++) {
+    clock += 5 * 60_000;
+    assert.equal(store.useGrant('shell'), true);
+  }
+
+  const pariGp = store.list().find((g) => g.toolName === 'pariGp');
+  assert.ok(pariGp, 'an idle member of an actively-used workflow must not expire out from under it');
+  assert.ok(pariGp!.expiresAt > idleAtIssue, 'and its window must actually have moved');
+  assert.equal(store.isGranted('z3Verify'), true);
+});
+
+test('renewing a bundle neither resurrects a revoked member nor exceeds any member ceiling', () => {
+  let clock = 1_000_000;
+  const store = new GrantStore(() => clock);
+  const ttl = 30 * 60_000;
+  for (const tool of ['shell', 'pariGp']) {
+    store.grant({ toolName: tool, capability: 'execute', domain: 'local', reason: 'one yes', ttlMs: ttl, bundleId: 'wf-2' });
+  }
+  const issuedAt = clock;
+  store.revoke('pariGp');
+  // Twenty minutes of continuous use, comfortably inside the 2h ceiling this ttl implies.
+  for (let i = 0; i < 20; i++) {
+    clock += 60_000;
+    store.useGrant('shell');
+  }
+  assert.equal(store.isGranted('pariGp'), false, 'a revoked member stays revoked');
+  assert.ok(store.list().find((g) => g.toolName === 'shell')!.expiresAt <= issuedAt + ttl * RENEWAL_CEILING_FACTOR);
+});
+
+test('a grant issued outside any bundle still renews only itself', () => {
+  let clock = 1_000_000;
+  const store = new GrantStore(() => clock);
+  store.grant('shell', 'execute', 'local', 'lone', 30 * 60_000);
+  store.grant('pariGp', 'execute', 'local', 'lone', 30 * 60_000);
+  const before = store.list().find((g) => g.toolName === 'pariGp')!.expiresAt;
+  clock += 60_000;
+  store.useGrant('shell');
+  assert.equal(store.list().find((g) => g.toolName === 'pariGp')!.expiresAt, before);
+  assert.ok(store.list().find((g) => g.toolName === 'shell')!.expiresAt > before);
+});
