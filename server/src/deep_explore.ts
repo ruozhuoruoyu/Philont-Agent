@@ -1283,6 +1283,32 @@ const KIND_LABEL: Record<ReasoningNodeKind, string> = {
 interface ToolFailureMemo { sig: string; snippet: string }
 const RECENT_TOOL_FAILURES_MAX = 6;
 const sessionToolFailures = new Map<string, ToolFailureMemo[]>();
+const failedPariMethods = new Map<string, Set<string>>();
+
+/**
+ * Identity of a PARI method, not its error wording. The target and explicit assumptions/range are part
+ * of the identity; comments and formatting are not. A failed method is therefore tried once per target,
+ * while a corrected script or a genuinely different range remains available.
+ */
+export function pariMethodFingerprint(
+  targetNodeId: string | undefined,
+  input: Record<string, unknown>,
+): string {
+  const script = typeof input.script === 'string' ? input.script : '';
+  const normalized = script
+    .replace(/\\[^\n\r]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*([(),;=+*\/\-])\s*/g, '$1')
+    .trim();
+  const range = typeof input.range === 'string' ? input.range.trim().replace(/\s+/g, ' ') : '';
+  const assumptions = Array.isArray(input.assumptions)
+    ? input.assumptions.map(String).map((s) => s.trim()).filter(Boolean).sort().join('|')
+    : typeof input.assumptions === 'string'
+      ? input.assumptions.trim().replace(/\s+/g, ' ')
+      : '';
+  return `${targetNodeId ?? '(unbound)'}\u0000${range}\u0000${assumptions}\u0000${normalized}`;
+}
 function recordSessionToolFailure(sessionId: string, toolName: string, error: string | undefined): void {
   const sig = extractFailureSignature(toolName, error ?? '');
   const snippet = (error ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
@@ -2963,6 +2989,20 @@ export function makeReasoningToolRunner(
       }
     }
 
+    // A failed PARI method is not evidence and should not consume the next round again merely because
+    // the model re-emitted the same script with different whitespace. This is scoped to session+target;
+    // corrected scripts and different targets are not blocked.
+    const pariFingerprint = name === 'pariGp' ? pariMethodFingerprint(roundTargetNodeId, input) : null;
+    if (pariFingerprint && failedPariMethods.get(sessionId)?.has(pariFingerprint)) {
+      return {
+        ok: false,
+        output: '',
+        error:
+          `Repeated failed PARI method blocked for target [${roundTargetNodeId ?? 'unbound'}]. ` +
+          `Change the method, assumptions, or range before retrying; whitespace/comment changes do not count.`,
+      };
+    }
+
     // Delegate everything else (read-only research tools + verify teeth z3Verify/pariGp/magnitude).
     const result = await delegate(name, input);
     // Estimate-honesty: a successful verification call clears the session's "never verified" flag.
@@ -2971,6 +3011,11 @@ export function makeReasoningToolRunner(
     // spawn error, timeout, bad script) is silent except for a "⚠ pariGp" status ping, and the
     // computational verification quietly never works. The full error stays in the sub-LLM's tool_result.
     if (!result.ok && (name === 'pariGp' || name === 'z3Verify' || name === 'magnitude')) {
+      if (pariFingerprint) {
+        const failed = failedPariMethods.get(sessionId) ?? new Set<string>();
+        failed.add(pariFingerprint);
+        failedPariMethods.set(sessionId, failed);
+      }
       console.warn(`[deep-explore] ${name} failed: ${(result.error ?? '(no error message)').slice(0, 400)}`);
       // Learn from it: stash this failure (deduped by signature) so the next round's prompt warns
       // the model off repeating the same pariGp/z3 mistake (renderRecentToolFailures).

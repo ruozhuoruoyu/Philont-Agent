@@ -55,6 +55,7 @@ import {
   shouldDeliberateAutoAnswer,
   withSessionWebDedup,
   renderProgressMilestone,
+  pariMethodFingerprint,
 } from '../src/deep_explore.js';
 
 function node(over: Partial<ReasoningNode>): ReasoningNode {
@@ -73,6 +74,36 @@ test('user milestone never leaks the model-facing no-progress directive', () => 
   }, false, 'active');
   assert.match(text, /21 open nodes remain/);
   assert.doesNotMatch(text, /pick ONE open node|Do not report this as progress|committed NOTHING/);
+});
+
+test('PARI method fingerprint ignores formatting but includes target, range, and assumptions', () => {
+  const a = pariMethodFingerprint('t1', { script: 'for(i=1, 10, \\ comment\n print(i))', range: '1 .. 10', assumptions: ['prime', 'odd'] });
+  const b = pariMethodFingerprint('t1', { script: ' for(i=1, 10, print(i)) ', range: '1  ..  10', assumptions: ['odd', 'prime'] });
+  assert.equal(a, b);
+  assert.notEqual(a, pariMethodFingerprint('t2', { script: 'for(i=1, 10, print(i))', range: '1 .. 10', assumptions: ['odd', 'prime'] }));
+  assert.notEqual(a, pariMethodFingerprint('t1', { script: 'for(i=1, 20, print(i))', range: '1 .. 20', assumptions: ['odd', 'prime'] }));
+});
+
+test('the same failed PARI method is delegated once per session target', async () => {
+  const db = openMemoryDb(':memory:');
+  const reasoning = db.reasoning;
+  const { session, rootNode } = reasoning.createSession({ goal: 'g' });
+  let calls = 0;
+  const runner = makeReasoningToolRunner(
+    reasoning,
+    session.id,
+    async () => { calls++; return { ok: false, output: '', error: 'timeout' }; },
+    undefined,
+    undefined,
+    FORMAL_PROFILE,
+    rootNode.id,
+  );
+  const first = await runner('pariGp', { script: 'for(i=1,10,print(i))' });
+  const repeat = await runner('pariGp', { script: ' for(i=1,10, print(i)) \\ same method' });
+  assert.equal(first.ok, false);
+  assert.equal(repeat.ok, false);
+  assert.match(repeat.error ?? '', /Repeated failed PARI method blocked/);
+  assert.equal(calls, 1);
 });
 
 test('computeFrontier = open 叶节点(有子节点的不算 frontier)', () => {
