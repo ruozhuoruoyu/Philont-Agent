@@ -162,6 +162,7 @@ import {
   renderSkillOffer,
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
+import { renderHonestyFallback } from './honesty_fallback.js';
 import { classifyAuthIntent, matchOfferedAuthWord } from './auth_intent.js';
 import { authRequestCode, isBarePredeliveryAuthReply, matchScopedAuthReply } from './auth_request_id.js';
 import { classifyExploreControlReply, resolveExploreTarget } from './explore_control.js';
@@ -10614,6 +10615,7 @@ async function handleChatSendInner(
             `[honesty] session=${safeSessionId(sessionId)} fired severity=${honesty.severity} reason=${honesty.reason} ` +
             `failCount=${honesty.failCount} okCount=${honesty.okCount} claim="${honesty.matchedClaim}" (zero-tool first response)`,
           );
+          console.warn(`[honesty] session=${safeSessionId(sessionId)} pass=1 action=rewrite branch=zero-tool`);
           messages.push({ role: 'assistant', content: firstTextContent });
           pushGateDirective(
             messages,
@@ -10661,8 +10663,28 @@ async function handleChatSendInner(
             );
           }
           firstTextContent = regen.content;
+          const second = evaluateHonesty(firstTextContent, {
+            toolResults: extractRecentToolResults(messages),
+            userMessage: signalBus.userMessage,
+            reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
+            detectAnnouncementStall: announceStallEnabled,
+            skillDeleteSucceededThisTurn,
+            turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
+          });
+          if (second) {
+            firstTextContent = renderHonestyFallback(
+              extractRecentToolResults(messages),
+              statusLang === 'en' ? 'en' : 'zh',
+            );
+            memory.metrics.increment('honesty.second_pass_fallback');
+            console.error(
+              `[honesty] session=${safeSessionId(sessionId)} pass=2 action=fallback branch=zero-tool reason=${second.reason}`,
+            );
+          } else {
+            console.log(`[honesty] session=${safeSessionId(sessionId)} pass=2 action=accept branch=zero-tool`);
+          }
         } else if (!honesty) {
-          console.log(`[honesty] session=${safeSessionId(sessionId)} passed (zero-tool first response)`);
+          console.log(`[honesty] session=${safeSessionId(sessionId)} pass=1 action=accept branch=zero-tool`);
         }
 
         // Claim grounding — the same chain the tool loop runs, and the reason this branch no longer
@@ -13149,7 +13171,8 @@ async function runToolLoop(
           const okN = recentToolResults.filter((r) => r.content.startsWith('✓')).length;
           const failN = recentToolResults.filter((r) => r.content.startsWith('⚠')).length;
           console.log(
-            `[honesty] session=${safeSessionId(sessionId)} passed (${okN} ok / ${failN} fail / ${recentToolResults.length} total)`,
+            `[honesty] session=${safeSessionId(sessionId)} pass=1 action=accept ` +
+            `(${okN} ok / ${failN} fail / ${recentToolResults.length} total)`,
           );
         }
         if (honestyVerdict) {
@@ -13169,6 +13192,7 @@ async function runToolLoop(
           console.warn(
             `[honesty] session=${safeSessionId(sessionId)} fired severity=${honestyVerdict.severity} reason=${honestyVerdict.reason} failCount=${honestyVerdict.failCount} okCount=${honestyVerdict.okCount} claim="${honestyVerdict.matchedClaim}"`,
           );
+          console.warn(`[honesty] session=${safeSessionId(sessionId)} pass=1 action=rewrite branch=tool-loop`);
           // K7→K8 bridge: write fire to signalBus so the finally block produces a K8 initiative.
           // Take **the most recent** fire (honestyAttempts cap is 1 per turn; at most one overwrite).
           signalBus.honesty = {
@@ -13298,6 +13322,32 @@ async function runToolLoop(
             meta: { gateName: 'Honesty', severity: honestyVerdict.severity },
           });
           continue;
+        }
+      }
+
+      // The first rewrite is not trusted merely because it is the second draft. Re-run the detector;
+      // if it still fails, publish a deterministic ledger-only fallback instead of giving the model a
+      // third opportunity to embellish the same unsupported claim.
+      if (honestyAttempts >= 1) {
+        const secondRecords = extractRecentToolResults(messages);
+        const ownerReasoning = focusedReasoningSession(sessionId);
+        const secondHonesty = evaluateHonesty(response.content, {
+          toolResults: secondRecords,
+          userMessage: signalBus.userMessage,
+          reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
+          turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
+        });
+        if (secondHonesty) {
+          response = {
+            ...response,
+            content: renderHonestyFallback(secondRecords, statusLang === 'en' ? 'en' : 'zh'),
+          };
+          memory.metrics.increment('honesty.second_pass_fallback');
+          console.error(
+            `[honesty] session=${safeSessionId(sessionId)} pass=2 action=fallback branch=tool-loop reason=${secondHonesty.reason}`,
+          );
+        } else {
+          console.log(`[honesty] session=${safeSessionId(sessionId)} pass=2 action=accept branch=tool-loop`);
         }
       }
 
