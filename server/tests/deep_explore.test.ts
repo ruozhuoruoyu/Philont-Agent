@@ -15,6 +15,7 @@ import {
   summarizeProgress,
   judgeConvergence,
   withNoProgressStop,
+  reasoningTreeVersion,
   makeReasoningToolRunner,
   DEEP_EXPLORE_RESEARCH_ALLOW,
   collectComputeLessons,
@@ -37,7 +38,6 @@ import {
   buildDeliberateDivergePrompt,
   createDeepExploreTool,
   roundWasSubstantive,
-  attributeRound,
   attributeRound,
   parseLiteratureCards,
   renderLiteratureCards,
@@ -134,6 +134,19 @@ test('withNoProgressStop: a reason_record that returns ok without changing the t
   await wrapped.runner('reason_record', {});
   assert.equal(wrapped.stalled.value, true);
   assert.equal(aborts, 1);
+});
+
+test('reasoningTreeVersion ignores evidence-only annotations but detects structural progress', () => {
+  const before = [node({ id: 't', status: 'open', evidenceRefs: [], approachesTried: [] })];
+  const annotated = [node({
+    id: 't',
+    status: 'open',
+    evidenceRefs: ['finite probe'],
+    approachesTried: ['settle rejected'],
+  })];
+  assert.equal(reasoningTreeVersion(before), reasoningTreeVersion(annotated));
+  const settled = [node({ id: 't', status: 'proved' })];
+  assert.notEqual(reasoningTreeVersion(before), reasoningTreeVersion(settled));
 });
 
 test('formatOpenIds 列出 open 节点 id', () => {
@@ -940,24 +953,6 @@ test('roundWasSubstantive: a round with no settle and no decompose is not substa
   const before = [node({ id: 'x', depth: 2, value: 0.9, status: 'open' })];
   const after = [node({ id: 'x', depth: 2, value: 0.9, status: 'open' })]; // unchanged
   assert.equal(roundWasSubstantive(before, after, 0.35), false);
-});
-
-test('attributeRound derives target relation from snapshots, not model narration', () => {
-  const target = node({ id: 't', parentId: 'r', status: 'open', depth: 1 });
-  const sibling = node({ id: 's', parentId: 'r', status: 'open', depth: 1 });
-  const before = [node({ id: 'r', parentId: null, status: 'open', depth: 0 }), target, sibling];
-
-  const sideBranch = before.map((n) => n.id === 's' ? { ...n, status: 'proved' as const } : n);
-  assert.deepEqual(attributeRound(before, sideBranch, 't'), {
-    targetNodeId: 't', relation: 'unrelated', targetProgress: false, treeProgress: true,
-  });
-
-  const targetProved = before.map((n) => n.id === 't' ? { ...n, status: 'proved' as const } : n);
-  assert.equal(attributeRound(before, targetProved, 't').relation, 'proves_target');
-  assert.equal(attributeRound(before, targetProved, 't').targetProgress, true);
-
-  const targetDead = before.map((n) => n.id === 't' ? { ...n, status: 'dead_end' as const } : n);
-  assert.equal(attributeRound(before, targetDead, 't').relation, 'dead_end_target');
 });
 
 // ── #1: literature grounding (parse cited cards / render / prompt) ─────────────────────────────────

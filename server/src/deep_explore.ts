@@ -958,18 +958,17 @@ export function withNoProgressStop(
   return { runner, stalled };
 }
 
-/** Stable version of the persisted fields that constitute a reasoning-tree commit. */
+/**
+ * Stable version of STRUCTURAL progress fields. Evidence/approach annotations deliberately do not
+ * count: a settle rejected by precheck may bank those annotations while leaving the node open, and
+ * must not reset the in-round stall clock only to be classified `no_commit` by attributeRound later.
+ */
 export function reasoningTreeVersion(nodes: ReasoningNode[]): string {
   return nodes
     .map((n) => [
       n.id,
       n.parentId ?? '',
       n.status,
-      n.result ?? '',
-      n.approachesTried.join('\u001f'),
-      n.evidenceRefs.join('\u001f'),
-      n.checkCriterion ?? '',
-      n.settleBasis ?? '',
     ].join('\u001e'))
     .sort()
     .join('\u001d');
