@@ -41,6 +41,7 @@ test('evidence levels distinguish draft, execution, experiment, and formal proof
   assert.equal(assessEvidenceLevel([{ toolName: 'writeFile', content: '✓ TOOL OK' }]), 'executed');
   assert.equal(assessEvidenceLevel([{ toolName: 'pariGp', content: '✓ TOOL OK' }]), 'experimentally_supported');
   assert.equal(assessEvidenceLevel([{ toolName: 'leanCheck', content: '✓ TOOL OK' }]), 'formally_checked');
+  assert.equal(assessEvidenceLevel([{ toolName: 'z3Verify', content: '✓ TOOL OK\nunsat' }]), 'formally_proved');
   assert.equal(assessEvidenceLevel([
     { toolName: 'leanCheck', content: '✓ TOOL OK\nexit 0' },
     { toolName: 'shell', toolInput: { command: 'rg -n "sorry|admit|axiom" Lrc' }, content: '✓ TOOL OK\n0 matches' },

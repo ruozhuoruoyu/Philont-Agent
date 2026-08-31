@@ -522,6 +522,11 @@ function successfulDependencyClosure(record: ToolResultRecord): boolean {
 /** Highest evidence level actually reached by this turn's successful tools. */
 export function assessEvidenceLevel(records: ReadonlyArray<ToolResultRecord>): EvidenceLevel {
   if (records.some(successfulFormalVerifier)) {
+    // Z3's successful result is itself a closed proof object for the submitted formula; Lean checks
+    // additionally need repository-level placeholder and dependency closure before "proof complete".
+    if (records.some((r) => r.toolName === 'z3Verify' && classifyToolResult(r.content) === 'ok')) {
+      return 'formally_proved';
+    }
     const zeroPlaceholders = records.some(successfulZeroPlaceholderScan);
     const dependenciesClosed = records.some(successfulDependencyClosure);
     return zeroPlaceholders && dependenciesClosed ? 'formally_proved' : 'formally_checked';
