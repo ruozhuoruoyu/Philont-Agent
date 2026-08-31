@@ -108,6 +108,73 @@ test('a real successful Lean/Lake check is formal_checked until placeholders and
   }
 });
 
+/**
+ * The evidence-grade fixtures below are the VERBATIM output shapes of the real shellTool run through
+ * chat-handler's formatToolResultContent — captured by execution, not imagined. That matters here more
+ * than anywhere: the first version of this rule read a clean scan as "a successful tool whose output
+ * says zero", and reality is the opposite on both sides.
+ *   • Nothing matched  → grep/rg exit 1 → shell.ts reports success:false → `⚠ TOOL FAILED — [exitCode=1…]`
+ *     with no stdout. That FAILURE is the proof of cleanliness.
+ *   • Something matched → exit 0 → `✓ TOOL OK` whose body is the match lines. That SUCCESS is the proof
+ *     of a `sorry` still sitting in the file.
+ */
+const LAKE_BUILD = {
+  toolName: 'shell',
+  toolInput: { command: 'lake build Lrc.K13' },
+  content: '✓ TOOL OK\nBuilt Lrc.K13\nexit 0',
+};
+const CLEAN_SCAN = {
+  toolName: 'shell',
+  toolInput: { command: 'grep -rnE "sorry|admit|axiom" Lrc' },
+  content:
+    '⚠ TOOL FAILED — [exitCode=1, durationMs=4] (no stderr output — a non-zero exit with no error text ' +
+    'usually means "nothing matched / not found", not a broken command; any stdout below is real output ' +
+    'and may already answer the question)',
+};
+
+test('a clean placeholder scan is a FAILED tool record, and it must still grade the proof closed', () => {
+  assert.equal(assessEvidenceLevel([LAKE_BUILD, CLEAN_SCAN]), 'formally_proved');
+  assert.equal(evaluateHonesty('Lean 形式化证明已完成，无 sorry。', { toolResults: [LAKE_BUILD, CLEAN_SCAN] }), null);
+  // grep -c prints `path:0` on a clean tree, still exiting 1 — also clean.
+  const cleanCount = {
+    toolName: 'shell',
+    toolInput: { command: 'grep -rc "sorry" Lrc' },
+    content: '⚠ TOOL FAILED — [exitCode=1, durationMs=3] (no stderr output — …)\nSTDOUT (partial):\nLrc/Ok.lean:0',
+  };
+  assert.equal(assessEvidenceLevel([LAKE_BUILD, cleanCount]), 'formally_proved');
+});
+
+test('a scan that FOUND a placeholder never grades proved, whatever words the match line contains', () => {
+  // `sorry -- cleanup needed` contains "clean"; matching on that word graded a repository full of
+  // `sorry` as fully proved and let the completion claim through.
+  const dirty = {
+    toolName: 'shell',
+    toolInput: { command: 'grep -rnE "sorry|admit|axiom" Lrc' },
+    content: '✓ TOOL OK\nLrc/K13.lean:2:  sorry -- cleanup needed',
+  };
+  assert.equal(assessEvidenceLevel([LAKE_BUILD, dirty]), 'formally_checked');
+  assert.equal(
+    evaluateHonesty('Lean 形式化证明已完成，无 sorry。', { toolResults: [LAKE_BUILD, dirty] })?.reason,
+    'formal_claim_without_verifier',
+  );
+});
+
+test('a BROKEN scan proves nothing — exit 2 is a missing directory, not a clean tree', () => {
+  const broken = {
+    toolName: 'shell',
+    toolInput: { command: 'grep -rnE "sorry|admit|axiom" Lrc' },
+    content: '⚠ TOOL FAILED — [exitCode=2, durationMs=2] stderr: grep: Lrc: No such file or directory',
+  };
+  assert.equal(assessEvidenceLevel([LAKE_BUILD, broken]), 'formally_checked');
+});
+
+test('the formally_checked block names the missing step instead of denying the verifier ran', () => {
+  const v = evaluateHonesty('形式化证明已完成。', { toolResults: [LAKE_BUILD] });
+  assert.equal(v?.reason, 'formal_claim_without_verifier');
+  assert.match(v!.evidence, /verifier DID succeed/);
+  assert.doesNotMatch(v!.evidence, /no Lean\/Coq\/Isabelle\/Z3 verifier succeeded/);
+});
+
 // ── classifyToolResult ─────────────────────────────────────────────────
 
 test('classifyToolResult: ✓ TOOL OK 前缀 → ok', () => {

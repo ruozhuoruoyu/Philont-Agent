@@ -56,6 +56,7 @@ import {
   withSessionWebDedup,
   renderProgressMilestone,
   pariMethodFingerprint,
+  pariFailureIsMethodFault,
   selectFrontierTarget,
 } from '../src/deep_explore.js';
 
@@ -93,7 +94,7 @@ test('the same failed PARI method is delegated once per session target', async (
   const runner = makeReasoningToolRunner(
     reasoning,
     session.id,
-    async () => { calls++; return { ok: false, output: '', error: 'timeout' }; },
+    async () => { calls++; return { ok: false, output: '', error: 'PARI/GP error:\n *** unexpected character' }; },
     undefined,
     undefined,
     FORMAL_PROFILE,
@@ -103,8 +104,38 @@ test('the same failed PARI method is delegated once per session target', async (
   const repeat = await runner('pariGp', { script: ' for(i=1,10, print(i)) \\ same method' });
   assert.equal(first.ok, false);
   assert.equal(repeat.ok, false);
-  assert.match(repeat.error ?? '', /Repeated failed PARI method blocked/);
+  assert.match(repeat.error ?? '', /already failed on target/);
   assert.equal(calls, 1);
+  db.close();
+});
+
+test('a TIMEOUT does not retire the method — the same script with a bigger timeout must still run', async () => {
+  // gp.ts's own advice after a timeout is "narrow the range or raise timeoutMs", and timeoutMs is not
+  // part of the method identity. Blocking here would strand a correct script behind a transient failure,
+  // and a blocked verifier is how a round ends up reasoning from memory instead of from computation.
+  const db = openMemoryDb(':memory:');
+  const { session, rootNode } = db.reasoning.createSession({ goal: 'g' });
+  let calls = 0;
+  const runner = makeReasoningToolRunner(
+    db.reasoning,
+    session.id,
+    async () => { calls++; return { ok: false, output: '', error: 'PARI/GP computation timed out (>20000ms); process killed.' }; },
+    undefined, undefined, FORMAL_PROFILE, rootNode.id,
+  );
+  await runner('pariGp', { script: 'for(i=1,10^9,print(i))' });
+  const retry = await runner('pariGp', { script: 'for(i=1,10^9,print(i))', timeoutMs: 120000 });
+  assert.doesNotMatch(retry.error ?? '', /already failed on target/);
+  assert.equal(calls, 2, 'the retry reached the tool');
+  db.close();
+});
+
+test('a missing gp binary does not retire the method either', () => {
+  assert.equal(pariFailureIsMethodFault('No usable gp (PARI/GP) executable found (tried: gp)'), false);
+  assert.equal(pariFailureIsMethodFault('PARI/GP computation timed out (>20000ms); process killed.'), false);
+  assert.equal(pariFailureIsMethodFault(undefined), false, 'unknown errors fail open');
+  assert.equal(pariFailureIsMethodFault('some unrecognised transport error'), false, 'unknown errors fail open');
+  assert.equal(pariFailureIsMethodFault('PARI/GP error:\n *** syntax error'), true);
+  assert.equal(pariFailureIsMethodFault('[gp-precheck-paren] unbalanced parentheses'), true);
 });
 
 test('frontier lease survives restart only while its structural version is current', () => {

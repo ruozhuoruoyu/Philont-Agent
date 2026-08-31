@@ -1331,6 +1331,28 @@ export function pariMethodFingerprint(
       : '';
   return `${targetNodeId ?? '(unbound)'}\u0000${range}\u0000${assumptions}\u0000${normalized}`;
 }
+/**
+ * Is a pariGp failure the METHOD's fault, or the environment's?
+ *
+ * Only a method fault may retire a fingerprint. A timeout says nothing about whether the script is
+ * right — and the natural next move after one is the SAME script with a larger `timeoutMs`, which
+ * fingerprints identically and would be blocked forever. "No usable gp executable" is the same story:
+ * the method was never tried. Recognised method faults only, so an unfamiliar error fails OPEN (the
+ * retry is allowed) rather than stranding a correct script behind a transient failure.
+ */
+export function pariFailureIsMethodFault(error: string | undefined): boolean {
+  const e = (error ?? '').toLowerCase();
+  if (!e) return false;
+  return (
+    e.includes('pari/gp error') ||       // a fatal *** line from gp itself
+    e.includes('gp-precheck') ||         // paren balance / nested braces / line-spanning parens
+    e.includes('need a non-empty script')
+  );
+}
+
+/** Cap the per-session fingerprint set — a long session should not grow one entry per failed script forever. */
+const FAILED_PARI_METHODS_MAX = 64;
+
 function recordSessionToolFailure(sessionId: string, toolName: string, error: string | undefined): void {
   const sig = extractFailureSignature(toolName, error ?? '');
   const snippet = (error ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
@@ -3020,8 +3042,9 @@ export function makeReasoningToolRunner(
         ok: false,
         output: '',
         error:
-          `Repeated failed PARI method blocked for target [${roundTargetNodeId ?? 'unbound'}]. ` +
-          `Change the method, assumptions, or range before retrying; whitespace/comment changes do not count.`,
+          `This exact PARI script already failed on target [${roundTargetNodeId ?? 'unbound'}] with a script ` +
+          `error, so it was not run again. Fix the script — reformatting or re-commenting it is the same ` +
+          `method. (A timeout or a missing gp binary does NOT land here: those are retryable as-is.)`,
       };
     }
 
@@ -3033,9 +3056,10 @@ export function makeReasoningToolRunner(
     // spawn error, timeout, bad script) is silent except for a "⚠ pariGp" status ping, and the
     // computational verification quietly never works. The full error stays in the sub-LLM's tool_result.
     if (!result.ok && (name === 'pariGp' || name === 'z3Verify' || name === 'magnitude')) {
-      if (pariFingerprint) {
+      if (pariFingerprint && pariFailureIsMethodFault(result.error)) {
         const failed = failedPariMethods.get(sessionId) ?? new Set<string>();
         failed.add(pariFingerprint);
+        if (failed.size > FAILED_PARI_METHODS_MAX) failed.delete(failed.values().next().value as string);
         failedPariMethods.set(sessionId, failed);
       }
       console.warn(`[deep-explore] ${name} failed: ${(result.error ?? '(no error message)').slice(0, 400)}`);

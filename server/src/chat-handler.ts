@@ -10671,7 +10671,13 @@ async function handleChatSendInner(
             skillDeleteSucceededThisTurn,
             turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
           });
-          if (second) {
+          // High only — see the tool-loop pass for why a 'medium' verdict must not cost the whole reply.
+          if (second && second.severity !== 'high') {
+            console.warn(
+              `[honesty] session=${safeSessionId(sessionId)} pass=2 action=accept_medium branch=zero-tool ` +
+              `reason=${second.reason}`,
+            );
+          } else if (second) {
             firstTextContent = renderHonestyFallback(
               extractRecentToolResults(messages),
               statusLang === 'en' ? 'en' : 'zh',
@@ -13086,6 +13092,32 @@ async function runToolLoop(
     }
 
     if (response.type === 'text') {
+      // Option sources for the honesty detector, defined ONCE for both passes. The second pass must be
+      // the same detector as the first: evaluated with fewer options it is a different one, and its
+      // verdict costs the whole reply rather than a rewrite.
+      const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
+      const announceStallRaw = (process.env.PHILONT_HONESTY_ANNOUNCE ?? '').trim().toLowerCase();
+      const announceStallEnabled = !(
+        announceStallRaw === '0' ||
+        announceStallRaw === 'off' ||
+        announceStallRaw === 'false' ||
+        announceStallRaw === 'no'
+      );
+      // Turn-durable skill-delete signal: did forget_skill/uninstallSkill succeed ANYWHERE this turn? The
+      // per-iteration recentToolResults window resets whenever a gate injects a string user message, so an
+      // early successful forget_skill can drop out of view and false-fire the skill_forget branch on a
+      // restated claim. inTurnRecords is the whole-turn ledger and does not reset.
+      const skillDeleteSucceededThisTurn = (signalBus.inTurnRecords ?? []).some(
+        (r) => r.success && (r.toolName === 'forget_skill' || r.toolName === 'uninstallSkill'),
+      );
+      const honestySessionSnapshot = () =>
+        honestySessionEnabled
+          ? {
+              unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,
+              priorViolations: honestySessionStore.get(sessionId).violationCount,
+              fabricatedExecClaim: honestySessionStore.get(sessionId).fabricatedExecClaim,
+            }
+          : undefined;
       // K2 HonestyGate: verify "completion claim vs actual tool results" **before** onDelta pushes text to the user.
       // If high severity hits and budget is not used → inject a reminder message to make the LLM
       // regenerate once so the lie never leaves.
@@ -13109,24 +13141,13 @@ async function runToolLoop(
         const ownerReasoning = focusedReasoningSession(sessionId);
         // Session-aware say-do-gap latch (PHILONT_HONESTY_SESSION=0 disables). Carries "promised a run but
         // didn't" / fabrication count across turns so a REPEATED unkept run-promise escalates to high.
-        const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
         // Verb-agnostic announce-then-yield stall (e.g. ends with "正在调研中……" / commits to start
         // deep_explore, but issues 0 tools → permanent stall). Default ON (env set via web-ui);
         // PHILONT_HONESTY_ANNOUNCE=0/off/false/no disables.
-        const announceStallRaw = (process.env.PHILONT_HONESTY_ANNOUNCE ?? '').trim().toLowerCase();
-        const announceStallEnabled = !(
-          announceStallRaw === '0' ||
-          announceStallRaw === 'off' ||
-          announceStallRaw === 'false' ||
-          announceStallRaw === 'no'
-        );
         // Turn-durable skill-delete signal: did forget_skill/uninstallSkill succeed ANYWHERE this turn? The
         // per-iteration recentToolResults window resets whenever a gate injects a string user message, so an
         // early successful forget_skill can drop out of view and false-fire the skill_forget branch on a
         // restated claim. inTurnRecords is the whole-turn ledger and does not reset.
-        const skillDeleteSucceededThisTurn = (signalBus.inTurnRecords ?? []).some(
-          (r) => r.success && (r.toolName === 'forget_skill' || r.toolName === 'uninstallSkill'),
-        );
         const honesty = evaluateHonesty(response.content, {
           toolResults: recentToolResults,
           userMessage: signalBus.userMessage,
@@ -13136,13 +13157,7 @@ async function runToolLoop(
           // Turn-durable: the zero-tool branch must not false-fire just because a gate reset the
           // per-iteration window (prod: replyWithMedia succeeded, gate still cried "ZERO tool calls").
           turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
-          session: honestySessionEnabled
-            ? {
-                unkeptRunPromise: honestySessionStore.get(sessionId).unkeptRunPromise,
-                priorViolations: honestySessionStore.get(sessionId).violationCount,
-                fabricatedExecClaim: honestySessionStore.get(sessionId).fabricatedExecClaim,
-              }
-            : undefined,
+          session: honestySessionSnapshot(),
         });
         // The session-claim adjudicator used to live here, inline, and nowhere else — which is how a
         // fabricated session sailed through the zero-tool exit on 2026-07-28 while the identical claim was
@@ -13331,13 +13346,29 @@ async function runToolLoop(
       if (honestyAttempts >= 1) {
         const secondRecords = extractRecentToolResults(messages);
         const ownerReasoning = focusedReasoningSession(sessionId);
+        // The SAME option set as the first pass. A second pass evaluated with fewer options is a
+        // different detector: dropping skillDeleteSucceededThisTurn re-opens the exact false positive
+        // that option exists to close (the per-iteration window resets when a gate injects a reminder,
+        // so a successful forget_skill looks like no call at all) — and here a false positive does not
+        // merely nudge, it DELETES the reply.
         const secondHonesty = evaluateHonesty(response.content, {
           toolResults: secondRecords,
           userMessage: signalBus.userMessage,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
+          detectAnnouncementStall: announceStallEnabled,
+          skillDeleteSucceededThisTurn,
           turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
+          session: honestySessionSnapshot(),
         });
-        if (secondHonesty) {
+        // Only a HIGH verdict is worth throwing the answer away for. 'medium' means "claimed done without
+        // an observation tool confirming it" — replacing a whole reply, possibly full of correct work, with
+        // a ledger paragraph would turn a detector's borderline call into the user's loss.
+        if (secondHonesty && secondHonesty.severity !== 'high') {
+          console.warn(
+            `[honesty] session=${safeSessionId(sessionId)} pass=2 action=accept_medium branch=tool-loop ` +
+            `reason=${secondHonesty.reason}`,
+          );
+        } else if (secondHonesty) {
           response = {
             ...response,
             content: renderHonestyFallback(secondRecords, statusLang === 'en' ? 'en' : 'zh'),
