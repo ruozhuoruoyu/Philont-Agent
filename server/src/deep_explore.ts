@@ -99,6 +99,7 @@ import { currentSessionId } from './channels/turn_context.js';
 import { decidePhaseTransition, goalNeedsDecision, classifyGoal, looksDeductive } from './phase_gate.js';
 import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
 import { safeSessionId } from './safe_session_id.js';
+import { currentPhraseLang } from './response_language.js';
 
 const VALID_KINDS: ReadonlySet<string> = new Set([
   'subgoal',
@@ -1372,6 +1373,9 @@ function recordSessionToolFailure(sessionId: string, toolName: string, error: st
  * annotate the recorded result with a caveat so it can't masquerade as a verified lemma downstream.
  * In-memory, process-scoped; once a session verifies once we stop nagging it (low false-positive).
  */
+/** Manual (owner-driven) advancing rounds per session, and whether the hand-off offer has been made. */
+const sessionManualRounds = new Map<string, number>();
+const sessionAutoOfferMade = new Set<string>();
 const sessionVerifierUsed = new Set<string>();
 /**
  * Audit-only: what the model SAID each reason_record commit does to the pinned target, per round.
@@ -1818,6 +1822,36 @@ export function renderSessionSubject(
     ? '\nauto: ON — I advance this myself, no 继续 needed'
     : '\nauto: off — say 自动 and I run it myself (auto_on)';
   return `on: "${short}"${modeLine}${mismatch}${handoff}\nsession id: ${id}`;
+}
+
+/**
+ * The hand-off offer, said to the OWNER.
+ *
+ * renderSessionSubject already ends every round with `auto: off — say 自动 and I run it myself`, and
+ * `自动` really is matched (classifyExploreControlReply). But that line goes into the TOOL RESULT, which
+ * only the model reads — whether the owner ever hears about it is the model's discretion, and across the
+ * 2026-09-01 log (seven turns, seven bare 继续) it never once relayed it. An offer nobody is told about
+ * is not an offer; the owner went on being the ticker.
+ *
+ * So the mechanism says it itself, on the milestone channel the owner actually receives. Once per
+ * session per process, and only after they have hand-cranked it several times — the complaint being
+ * answered is "too many interruptions", and a nag every round would be a new one.
+ */
+export const AUTO_OFFER_AFTER_MANUAL_ROUNDS = 3;
+
+export function renderAutoHandoffOffer(input: {
+  autoAdvance: boolean;
+  manualRoundsThisSession: number;
+  alreadyOffered: boolean;
+  en?: boolean;
+}): string | null {
+  if (input.autoAdvance || input.alreadyOffered) return null;
+  if (input.manualRoundsThisSession < AUTO_OFFER_AFTER_MANUAL_ROUNDS) return null;
+  return input.en
+    ? `\n(You have advanced this by hand ${input.manualRoundsThisSession} times. Reply 自动 and I will keep ` +
+      `running it myself — reporting milestones, and interrupting only for a decision that needs you.)`
+    : `\n(这已经是你第 ${input.manualRoundsThisSession} 次手动推进了。回复「自动」我就自己连着跑，` +
+      `只报里程碑，只有真正需要你决定时才打扰。)`;
 }
 
 /** Nothing entered the tree this round: no decomposition, nothing settled, nothing ruled out. */
@@ -3655,7 +3689,20 @@ export function createDeepExploreTool(
     // is deferred until a signal that does not misfire on those cases. The pure gate keeps the branch.
 
     const text = renderProgressText(summary, result.hitCap, status, profile.settledVerb);
-    deps.onMilestone?.(renderProgressMilestone(summary, result.hitCap, status, profile.settledVerb));
+    // Count only the rounds the OWNER cranked: a background round is not evidence they are the ticker.
+    if (!session.autoAdvance) {
+      sessionManualRounds.set(session.id, (sessionManualRounds.get(session.id) ?? 0) + 1);
+    }
+    const autoOffer = renderAutoHandoffOffer({
+      autoAdvance: session.autoAdvance,
+      manualRoundsThisSession: sessionManualRounds.get(session.id) ?? 0,
+      alreadyOffered: sessionAutoOfferMade.has(session.id),
+      en: currentPhraseLang() === 'en',
+    });
+    if (autoOffer) sessionAutoOfferMade.add(session.id);
+    deps.onMilestone?.(
+      renderProgressMilestone(summary, result.hitCap, status, profile.settledVerb) + (autoOffer ?? ''),
+    );
     const tail =
       result.error === 'aborted'
         ? stalled.value

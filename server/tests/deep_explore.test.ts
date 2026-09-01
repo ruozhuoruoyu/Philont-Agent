@@ -39,6 +39,8 @@ import {
   createDeepExploreTool,
   roundWasSubstantive,
   attributeRound,
+  renderAutoHandoffOffer,
+  AUTO_OFFER_AFTER_MANUAL_ROUNDS,
   parseLiteratureCards,
   renderLiteratureCards,
   buildLiteratureGroundingPrompt,
@@ -1761,4 +1763,32 @@ test('two callers advancing the same session join one round instead of racing tw
   await advanceSession(session);
   assert.equal(llmCalls, callsAfterStart + 2);
   mem.close();
+});
+
+test('the auto hand-off is offered to the owner after a few hand-cranked rounds, once', () => {
+  // renderSessionSubject has ended every round with "auto: off — say 自动" for months, and 自动 really is
+  // matched. But that line goes into the TOOL RESULT, which only the model reads. Across 2026-09-01 —
+  // seven turns, seven bare 继续 — it was never relayed, and the owner went on being the ticker.
+  const base = { autoAdvance: false, alreadyOffered: false };
+  for (let n = 0; n < AUTO_OFFER_AFTER_MANUAL_ROUNDS; n++) {
+    assert.equal(renderAutoHandoffOffer({ ...base, manualRoundsThisSession: n }), null, `round ${n}`);
+  }
+  const offer = renderAutoHandoffOffer({ ...base, manualRoundsThisSession: AUTO_OFFER_AFTER_MANUAL_ROUNDS });
+  assert.ok(offer, 'offered once they are clearly hand-cranking it');
+  assert.match(offer!, /自动/, 'it names the word the matcher actually listens for');
+  // Said once. The complaint being answered is "too many interruptions"; a nag every round is a new one.
+  assert.equal(
+    renderAutoHandoffOffer({ ...base, alreadyOffered: true, manualRoundsThisSession: 9 }),
+    null,
+  );
+  // And never while it is already running itself.
+  assert.equal(
+    renderAutoHandoffOffer({ autoAdvance: true, alreadyOffered: false, manualRoundsThisSession: 9 }),
+    null,
+  );
+  assert.match(
+    renderAutoHandoffOffer({ ...base, manualRoundsThisSession: 4, en: true })!,
+    /Reply 自动/,
+    'the English text still offers the word that is matched, not a translation of it',
+  );
 });
