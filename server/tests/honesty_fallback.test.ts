@@ -37,3 +37,21 @@ test('duplicate tool names are listed once, and long output lines are truncated'
   assert.ok(!text.includes(long), 'the 400-char line is not pasted whole');
   assert.match(text, /…/);
 });
+
+test('a credential-shaped tool output line is withheld, not published to the channel', () => {
+  // The deterministic path has no model in between to leave things out: whatever it quotes, it sends.
+  for (const leak of [
+    'OPENAI_API_KEY=sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGG',
+    'export GITHUB_TOKEN=ghp_0123456789abcdefghijklmnopqrstuvwxyz',
+    '{"api_key": "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6"}',
+  ]) {
+    const text = renderHonestyFallback([{ toolName: 'readFile', content: `✓ TOOL OK\n${leak}` }], 'en');
+    assert.match(text, /withheld/);
+    assert.ok(!text.includes('sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGG'), leak);
+    assert.ok(!text.includes('ghp_0123456789abcdefghijklmnopqrstuvwxyz'), leak);
+    assert.ok(!text.includes('AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6'), leak);
+  }
+  // Ordinary output still comes through — the point is a report, not a redaction exercise.
+  const ok = renderHonestyFallback([{ toolName: 'shell', content: '✓ TOOL OK\nBuilt Lrc.K13.Region3Sum' }], 'en');
+  assert.match(ok, /Built Lrc\.K13\.Region3Sum/);
+});

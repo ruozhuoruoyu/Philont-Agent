@@ -164,6 +164,14 @@ const OFFER_QUESTION_RE =
 /** A bare acknowledgement, too ambiguous on its own to count as a stop-override. */
 const BARE_AFFIRM_RE = /^\s*(?:ok|okay|yes|y|嗯+|好的?|收到|continue)\s*$/i;
 
+/**
+ * Vocabulary that only means "go on". Removed from a message before asking whether anything of
+ * substance is left — so "继续下一步" reads as the continuation it is, while "继续，先把 Region3 的等分布
+ * 引理证了" keeps its direction and still counts.
+ */
+const CONTINUATION_ONLY_RE =
+  /(?:继续|接着|接下来|再来|再跑|再试|再推|下一步|往下|推进一?下?|探索一?下?|一下|一次|一轮|吧|呢|啊|好的?|ok|okay|please|pls|keep\s+going|go\s+on|carry\s+on|continue|next\s+step|proceed)/gi;
+
 export interface TurnAnchorDecision {
   /** User overrode an accumulated stop (explicit push-forward OR a substantive redirect) → caller resets the
    *  doom accounting and anchors a fresh episode. */
@@ -212,8 +220,22 @@ export function decideTurnAnchors(input: {
   const accepts = VIABILITY_ACCEPT_RE.test(msg);
   const bareAffirm = BARE_AFFIRM_RE.test(msg);
   const replay = input.promptIsReplay === true;
-  // A message carrying new direction, as opposed to a bare "go on".
-  const substantive = !bareAffirm && msg.trim().length >= 4;
+  // A message carrying NEW DIRECTION, as opposed to a longer way of saying "go on".
+  //
+  // Length was the wrong proxy: "继续下一步", "继续探索", "再试一次", "keep going", "continue please" all
+  // clear four characters while telling the mechanism nothing it did not already know, and the first of
+  // those is a phrase the owner actually types. Strip the vocabulary that only means "go on" and judge
+  // what is LEFT.
+  //
+  // This is a deterministic floor over OUR OWN continuation vocabulary, not an attempt to classify
+  // intent — and it is built to fail in the safe direction. Withholding a reset never loses the owner's
+  // instruction: the gate keeps accumulating, delivers the stop, and any word then overrides it. The
+  // opposite error is the one that costs something, because it silently erases a stop nobody ever saw.
+  const residual = msg
+    .replace(CONTINUATION_ONLY_RE, ' ')
+    .replace(/[\s,.;:!?，。；：！？、~-]+/g, '')
+    .trim();
+  const substantive = !bareAffirm && residual.length >= 4;
   const doomReset =
     !replay && !accepts &&
     ((input.hadDoom && (pushesForward || substantive)) ||
@@ -283,6 +305,28 @@ export function reasoningStateCarriesDoom(input: {
 }): boolean {
   return (input.noProgressRounds ?? 0) >= STUCK_ROUNDS ||
     (input.deadEndCount ?? 0) >= DEAD_END_INTRACTABLE_THRESHOLD;
+}
+
+/**
+ * Did this turn OBSERVE the owner's current reasoning session? — the hijack guard's actual question.
+ *
+ * Narrower than "called deep_explore at all": `list` enumerates every open session and says nothing
+ * about which one the turn is on, and a status/continue naming a DIFFERENT session is a turn about that
+ * other session. Both would let the pivot directive take over a reply it has no business in — the very
+ * thing the guard exists to prevent.
+ *
+ * The tool accepts an id PREFIX (as printed by action=list), so the comparison is prefix-wise.
+ */
+export function isDeepExploreSessionRecord(
+  record: { toolName: string; toolInput?: Record<string, unknown> },
+  focusedSessionId: string | null | undefined,
+): boolean {
+  if (record.toolName !== 'deep_explore') return false;
+  const action = String(record.toolInput?.action ?? '');
+  if (!action || action === 'list') return false;
+  const named = String(record.toolInput?.sessionId ?? '').trim();
+  if (!named) return true; // no id given → the tool resolves it to the focused session
+  return !!focusedSessionId && focusedSessionId.startsWith(named);
 }
 
 /** list/status only observe a tree; they must not make viability think this turn advanced it. */

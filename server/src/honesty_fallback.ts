@@ -1,4 +1,4 @@
-import { classifyToolResult } from '@agent/memory';
+import { classifyToolResult, looksLikeCredential } from '@agent/memory';
 
 interface LedgerRecord {
   toolName: string;
@@ -15,6 +15,15 @@ function firstFactLine(content: string): string {
   const body = rest.map((l) => l.trim()).filter(Boolean);
   const reason = marker.includes('—') ? marker.slice(marker.indexOf('—') + 1).trim() : '';
   const line = body[0] || reason;
+  if (!line) return '';
+  // This path quotes raw tool output to a chat channel with no model in between to leave things out —
+  // a readFile of an .env, a shell that echoed a token, and the deterministic reply would publish it
+  // verbatim. Drop the WHOLE line on any credential-shaped token: losing one fact line costs nothing,
+  // and this asymmetry is the one credential_shape.ts was written for.
+  const tokens = line.split(/[\s,;'"(){}\[\]<>]+/).filter(Boolean);
+  if (tokens.some((t) => looksLikeCredential(t))) {
+    return '(withheld — this line contains credential-shaped text)';
+  }
   return line.length > 160 ? `${line.slice(0, 157)}…` : line;
 }
 

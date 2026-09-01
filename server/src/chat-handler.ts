@@ -445,6 +445,7 @@ import {
   computeViability,
   viabilityActuatorRelevant,
   reasoningStateCarriesDoom,
+  isDeepExploreSessionRecord,
   isDeepExploreAdvanceRecord,
   buildViabilityDirective,
   isStopVerdict,
@@ -13765,7 +13766,9 @@ async function runToolLoop(
           const vRelevantToThisTurn = viabilityActuatorRelevant({
             hasActiveSession: !!ownerSession,
             turnEngagedReasoning: (signalBus.inTurnRecords ?? []).some(isDeepExploreAdvanceRecord),
-            turnObservedReasoning: (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore'),
+            turnObservedReasoning: (signalBus.inTurnRecords ?? []).some(
+              (r) => isDeepExploreSessionRecord(r, ownerSession?.id ?? null),
+            ),
             replyPitchesContinuation: CONTINUATION_PITCH_RE.test(response.content),
           });
           if (v.verdict !== 'continue' && !vRelevantToThisTurn) {

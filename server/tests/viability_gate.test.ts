@@ -13,6 +13,7 @@ import {
   buildViabilityDirective,
   decideTurnAnchors,
   reasoningStateCarriesDoom,
+  isDeepExploreSessionRecord,
   isDeepExploreAdvanceRecord,
   type ViabilityInput,
 } from '../src/viability_gate.js';
@@ -480,4 +481,34 @@ test('a turn that only OBSERVED the session can still deliver the stop', () => {
     }),
     false,
   );
+});
+
+test('a longer way of saying "go on" is not a new direction', () => {
+  // Length was standing in for information. "继续下一步" is five characters and tells the mechanism
+  // nothing; it is also a phrase the owner actually types, so this was a live hole.
+  const tree = reasoningStateCarriesDoom({ noProgressRounds: 4, deadEndCount: 8 });
+  for (const userMessage of ['继续下一步', '继续探索', '再试一次', 'keep going', 'continue please', 'ok 继续', '接着跑一轮']) {
+    const d = decideTurnAnchors({ lastAssistantText: '本轮 no_commit。', userMessage, hadDoom: false, undeliveredDoom: tree });
+    assert.equal(d.doomReset, false, userMessage);
+  }
+  // A message that actually names where to go next still opens a fresh episode.
+  assert.equal(
+    decideTurnAnchors({
+      lastAssistantText: '本轮 no_commit。',
+      userMessage: '继续，先把 Region3 的等分布引理证了',
+      hadDoom: false,
+      undeliveredDoom: tree,
+    }).doomReset,
+    true,
+  );
+});
+
+test('observing SOME OTHER session is not "this turn is about this session"', () => {
+  const focused = 'd88d106e-42a4-42b8-ad6d-33f9ce5e2384';
+  const rec = (toolInput: Record<string, unknown>) => ({ toolName: 'deep_explore', toolInput });
+  assert.equal(isDeepExploreSessionRecord(rec({ action: 'status' }), focused), true, 'no id → the focused one');
+  assert.equal(isDeepExploreSessionRecord(rec({ action: 'status', sessionId: 'd88d106e' }), focused), true, 'id prefix');
+  assert.equal(isDeepExploreSessionRecord(rec({ action: 'status', sessionId: '5ef4b79d' }), focused), false, 'other session');
+  assert.equal(isDeepExploreSessionRecord(rec({ action: 'list' }), focused), false, 'list is not about one session');
+  assert.equal(isDeepExploreSessionRecord({ toolName: 'listDir', toolInput: {} }, focused), false);
 });
