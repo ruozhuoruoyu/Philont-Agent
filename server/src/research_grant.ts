@@ -134,6 +134,7 @@ export const LOCAL_RESEARCH_WORKFLOW: WorkflowGrant[] = [
   { tool: 'process', capability: 'execute', domain: 'local' },
   { tool: 'pariGp', capability: 'execute', domain: 'local' },
   { tool: 'z3Verify', capability: 'execute', domain: 'local' },
+  { tool: 'leanCheck', capability: 'execute', domain: 'local' },
   { tool: 'downloadFile', capability: 'write', domain: 'network' },
 ];
 

@@ -20,7 +20,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
 } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 44;
+export const SCHEMA_VERSION = 45;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -1061,6 +1061,8 @@ function migrateV24ToV25(db: Database.Database): void {
       followup_asked_at INTEGER,
       frontier_version TEXT,
       frontier_target_node_id TEXT,
+      auto_pause_reason TEXT,
+      auto_pause_at INTEGER,
       created_at        INTEGER NOT NULL,
       updated_at        INTEGER NOT NULL
     );
@@ -1328,6 +1330,12 @@ function migrateV42ToV43(db: Database.Database): void {
 function migrateV43ToV44(db: Database.Database): void {
   addColumnIfMissing(db, 'reasoning_sessions', 'frontier_version', 'TEXT');
   addColumnIfMissing(db, 'reasoning_sessions', 'frontier_target_node_id', 'TEXT');
+}
+
+/** v45: restart-durable auto-advance pause/admission state. */
+function migrateV44ToV45(db: Database.Database): void {
+  addColumnIfMissing(db, 'reasoning_sessions', 'auto_pause_reason', 'TEXT');
+  addColumnIfMissing(db, 'reasoning_sessions', 'auto_pause_at', 'INTEGER');
 }
 
 function migrateV39ToV40(db: Database.Database): void {
@@ -1611,6 +1619,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 44) {
     migrateV43ToV44(db);
+  }
+  if (current < 45) {
+    migrateV44ToV45(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns

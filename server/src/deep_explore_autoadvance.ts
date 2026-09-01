@@ -10,8 +10,8 @@
  * Rounds run sequentially (a `running` guard + a recursive timer), so there is no overlap and a single
  * 15-min background round never stacks. The round runs inside a `system:auto-advance:<id>` ALS context
  * so effectiveRoundDeadlineMs() picks the longer background cap. The round is invoked directly via
- * advanceSession (not the tool dispatch), so it does not go through the interactive auth gate — the
- * per-session opt-in IS the authorization.
+ * advanceSession (not the tool dispatch), so the driver MUST perform episode admission before a formal
+ * round. Opting into unattended scheduling is not permission to execute local tools.
  */
 import type { PhraseLang } from './channel_phrases.js';
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
@@ -79,13 +79,21 @@ export interface AutoAdvanceDeps {
    * stuck). An explicitly-set PHILONT_DEEP_EXPLORE_AUTO_STUCK_STOP still wins.
    */
   traits?: () => TraitProfile;
+  /** Formal background work needs an explicitly approved workflow lease before it may start. */
+  hasFormalAdmission?: (session: ReasoningSession) => boolean;
+  /** Register and deliver one approval request. The loop pauses until the owner answers it. */
+  requestFormalAdmission?: (session: ReasoningSession) => void;
 }
+
+export type AutoAdvancePauseReason = 'stuck' | 'budget' | 'auth';
 
 export interface AutoAdvanceLoop {
   start: () => void;
   stop: () => void;
   /** Grant one session another batch of rounds — the owner replied "自动推进" to the pause card. */
   rearm: (sessionId: string) => void;
+  /** Why the current focused session is paused, if the pause was made by this driver. */
+  pauseReason: (sessionId: string) => AutoAdvancePauseReason | null;
   /** Exposed for tests: run one tick synchronously. */
   tickOnce: () => Promise<void>;
 }
@@ -111,6 +119,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
   const roundsAdvanced = new Map<string, number>();
   /** Persisted no-progress streak at the start of this auto-advance episode. */
   const noProgressBaselines = new Map<string, number>();
+  const pauseReasons = new Map<string, AutoAdvancePauseReason>();
   /** S3 contract base — DEFAULT_LOOP_CONTRACT with stuckAfter overridden by the env STUCK_STOP. */
   const baseContract: LoopContract = { ...DEFAULT_LOOP_CONTRACT, stuckAfter: STUCK_STOP };
 
@@ -135,6 +144,20 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
       for (const s of sessions) {
         if (stopped) break;
 
+        // Scheduling consent (`auto_advance=1`) and execution consent are deliberately separate. A formal
+        // background round without the local workflow lease has no verifier teeth: pariGp/z3/Lean are
+        // denied, the round falls back to memory, records no_commit, and eventually turns the owner into a
+        // heartbeat button. Pause BEFORE spending the round and ask once instead.
+        if (s.mode === 'formal' && deps.hasFormalAdmission && !deps.hasFormalAdmission(s)) {
+          deps.reasoning.setAutoAdvance(s.id, false);
+          roundsAdvanced.delete(s.id);
+          noProgressBaselines.delete(s.id);
+          pauseReasons.set(s.id, 'auth');
+          deps.reasoning.setAutoPause(s.id, 'auth');
+          deps.requestFormalAdmission?.(s);
+          continue;
+        }
+
         // First sight of an opted-in session starts a fresh automatic episode. This deliberately
         // absorbs historical/manual stagnation; only rounds attempted by this driver may stop it.
         if (!noProgressBaselines.has(s.id)) {
@@ -154,6 +177,8 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           deps.reasoning.setAutoAdvance(s.id, false);
           roundsAdvanced.delete(s.id);
           noProgressBaselines.delete(s.id);
+          pauseReasons.set(s.id, 'budget');
+          deps.reasoning.setAutoPause(s.id, 'budget');
           deps.notify(
             (deps.lang?.() ?? 'zh') === 'en'
               ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" used its ${MAX_ROUNDS}-round budget. Reply "auto advance" for another batch, or "stop".`
@@ -174,14 +199,16 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           deps.reasoning.setAutoAdvance(s.id, false);
           roundsAdvanced.delete(s.id);
           noProgressBaselines.delete(s.id);
+          pauseReasons.set(s.id, 'stuck');
+          deps.reasoning.setAutoPause(s.id, 'stuck');
           deps.notify(
             (deps.lang?.() ?? 'zh') === 'en'
               ? decision === 'switch_engine'
-                ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" produced nothing for ${episodeNoProgress} automatic rounds — a different angle or mode may work better. Reply "continue" to push on as-is, try a new angle, or "stop".`
-                : `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" has made no progress for ${episodeNoProgress} automatic rounds (stuck). Reply "continue" to advance it by hand, or restart from a new angle.`
+                ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" produced nothing for ${episodeNoProgress} automatic rounds — a different angle or mode may work better. Reply "continue" to run another automatic batch as-is, name a new angle, or "stop".`
+                : `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" has made no progress for ${episodeNoProgress} automatic rounds (stuck). Reply "continue" to run another automatic batch, or restart from a new angle.`
               : decision === 'switch_engine'
-                ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮没产出——换个角度/模式可能更有效。回复"继续"原路推进、或换个角度、或"停"。`
-                : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮无进展(卡住)。回复"继续"手动推进,或换个角度重启。`,
+                ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮没产出——换个角度/模式可能更有效。回复"继续"原路再自动跑一批、或指定新角度、或"停"。`
+                : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮无进展(卡住)。回复"继续"再自动跑一批,或换个角度重启。`,
             { important: true },
           );
           continue;
@@ -203,6 +230,8 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           deps.reasoning.setAutoAdvance(s.id, false);
           roundsAdvanced.delete(s.id);
           noProgressBaselines.delete(s.id);
+          pauseReasons.delete(s.id);
+          deps.reasoning.setAutoPause(s.id, null);
           deps.notify(
             `✅ 自动推进结束:"${s.goal.slice(0, 50)}" 状态=${fresh?.status ?? 'closed'}。\n${(out?.output ?? '').slice(0, 600)}`,
             { important: true },
@@ -266,8 +295,12 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
       roundsAdvanced.delete(sessionId);
       const current = deps.reasoning.getSession(sessionId);
       noProgressBaselines.set(sessionId, current?.noProgressRounds ?? 0);
+      pauseReasons.delete(sessionId);
+      deps.reasoning.setAutoPause(sessionId, null);
       deps.reasoning.setAutoAdvance(sessionId, true);
     },
+    pauseReason: (sessionId: string): AutoAdvancePauseReason | null =>
+      pauseReasons.get(sessionId) ?? deps.reasoning.getSession(sessionId)?.autoPauseReason ?? null,
     tickOnce,
   };
 }

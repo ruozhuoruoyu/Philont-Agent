@@ -24,6 +24,7 @@ export type ExploreControl =
   | { kind: 'abandon'; target: string | null }  // target = null → the current-focus session
   | { kind: 'abandon_all' }
   | { kind: 'auto_advance' }
+  | { kind: 'resume_batch' }
   | { kind: 'stop_auto' };
 
 /** Match the words the follow-up / auto-advance cards offered, in both languages. */
@@ -31,6 +32,10 @@ export function classifyExploreControlReply(userMessage: string): ExploreControl
   const raw = (userMessage ?? '').trim();
   if (!raw) return null;
   const m = raw.toLowerCase().replace(/[。！？，,!?.\s"'「」]+/g, '');
+
+  // This word is only consumed when the auto driver has a recorded pause for the focused session.
+  // Otherwise chat-handler deliberately falls through to the existing manual continue path.
+  if (/^(继续|continue)$/.test(m)) return { kind: 'resume_batch' };
 
   if (/^(全清|全部清理|全部放弃|全都放弃|clearall|abandonall|dropall)$/.test(m)) {
     return { kind: 'abandon_all' };
@@ -72,4 +77,35 @@ export function resolveExploreTarget<T extends { id: string; goal: string }>(
   if (hits.length === 1) return { session: hits[0] };
   if (hits.length > 1) return { ambiguous: hits };
   return null;
+}
+
+/**
+ * What a bare 继续 should DO when the auto-advance driver has paused the focused session.
+ *
+ * Extracted as a pure decision because it runs before the model on every single turn, on the most
+ * ordinary word in the system, and each branch is a different promise to the owner:
+ *
+ *   'fall_through'   — not ours to answer. No focused session, or no pause this driver made. Silence,
+ *                      so the long-standing manual continue path keeps working.
+ *   'rearm'          — the lease is in place; run another automatic batch. One word, one episode.
+ *   'await_card'     — the approval card is live and unanswered; 继续 is not the word it asked for.
+ *   'request_admission' — a formal batch with no lease. Includes the case where the pause reason
+ *                      OUTLIVED its card (it is persisted; the card is not): after a restart or a TTL
+ *                      lapse, telling the owner to answer a card that no longer exists is a dead end
+ *                      no word gets them out of. Raise it again instead.
+ */
+export type ResumeBatchAction = 'fall_through' | 'rearm' | 'await_card' | 'request_admission';
+
+export function decideResumeBatch(input: {
+  hasFocus: boolean;
+  pauseReason: 'stuck' | 'budget' | 'auth' | null;
+  focusIsFormal: boolean;
+  hasFormalAdmission: boolean;
+  admissionCardPending: boolean;
+}): ResumeBatchAction {
+  if (!input.hasFocus || !input.pauseReason) return 'fall_through';
+  if (input.focusIsFormal && !input.hasFormalAdmission) {
+    return input.admissionCardPending ? 'await_card' : 'request_admission';
+  }
+  return 'rearm';
 }

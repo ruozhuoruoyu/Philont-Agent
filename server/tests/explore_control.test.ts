@@ -8,13 +8,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyExploreControlReply, resolveExploreTarget } from '../src/explore_control.js';
+import { classifyExploreControlReply, resolveExploreTarget, decideResumeBatch} from '../src/explore_control.js';
 
 test('classifyExploreControlReply: matches the words the cards offer, in both languages', () => {
   assert.deepEqual(classifyExploreControlReply('全清'), { kind: 'abandon_all' });
   assert.deepEqual(classifyExploreControlReply('clear all'), { kind: 'abandon_all' });
   assert.deepEqual(classifyExploreControlReply('自动推进'), { kind: 'auto_advance' });
   assert.deepEqual(classifyExploreControlReply('auto advance'), { kind: 'auto_advance' });
+  assert.deepEqual(classifyExploreControlReply('继续'), { kind: 'resume_batch' });
+  assert.deepEqual(classifyExploreControlReply('continue'), { kind: 'resume_batch' });
   assert.deepEqual(classifyExploreControlReply('停'), { kind: 'stop_auto' });
   assert.deepEqual(classifyExploreControlReply('stop'), { kind: 'stop_auto' });
   assert.deepEqual(classifyExploreControlReply('放弃'), { kind: 'abandon', target: null });
@@ -56,4 +58,68 @@ test('resolveExploreTarget: ambiguity is REFUSED, never guessed', () => {
   const r = resolveExploreTarget([a, b], 'prime', null);
   assert.ok(r && 'ambiguous' in r, '"prime" matches both — must ask, not pick');
   assert.equal((r as { ambiguous: unknown[] }).ambiguous.length, 2);
+});
+
+test('a bare 继续 is only ours to answer when this driver paused the focused session', () => {
+  const base = {
+    hasFocus: true,
+    pauseReason: 'stuck' as const,
+    focusIsFormal: true,
+    hasFormalAdmission: true,
+    admissionCardPending: false,
+  };
+  // Nothing focused → we cannot even know the word was about an exploration. Answering "name one first"
+  // would hijack every routine 继续 the moment a stale session sits in the list.
+  assert.equal(decideResumeBatch({ ...base, hasFocus: false }), 'fall_through');
+  // Focused, but this driver never paused it → the long-standing manual continue path keeps it.
+  assert.equal(decideResumeBatch({ ...base, pauseReason: null }), 'fall_through');
+  // Our pause + a live lease → one word buys one episode.
+  assert.equal(decideResumeBatch(base), 'rearm');
+  assert.equal(decideResumeBatch({ ...base, pauseReason: 'budget' }), 'rearm');
+  // A deliberate session needs no local verifier lease.
+  assert.equal(
+    decideResumeBatch({ ...base, focusIsFormal: false, hasFormalAdmission: false }),
+    'rearm',
+  );
+});
+
+test('a pause reason that outlived its approval card re-raises the card, never a dead end', () => {
+  // autoPauseReason is persisted; the pending card is in-memory with a TTL. After a restart or a lapse,
+  // "reply 同意 to the authorization card" names a card that no longer exists — and no word the owner
+  // types can get them out of it.
+  assert.equal(
+    decideResumeBatch({
+      hasFocus: true, pauseReason: 'auth', focusIsFormal: true,
+      hasFormalAdmission: false, admissionCardPending: false,
+    }),
+    'request_admission',
+  );
+  // While the card IS live, 继续 is simply not the word it asked for.
+  assert.equal(
+    decideResumeBatch({
+      hasFocus: true, pauseReason: 'auth', focusIsFormal: true,
+      hasFormalAdmission: false, admissionCardPending: true,
+    }),
+    'await_card',
+  );
+  // Lease came back (the foreground approved something else) → just run the batch.
+  assert.equal(
+    decideResumeBatch({
+      hasFocus: true, pauseReason: 'auth', focusIsFormal: true,
+      hasFormalAdmission: true, admissionCardPending: false,
+    }),
+    'rearm',
+  );
+});
+
+test('a stuck formal pause does not promise a batch the next tick would refuse', () => {
+  // The driver checks admission at the top of every tick, so answering "已重新武装一批" without the
+  // lease means the owner gets an authorization card instead of the batch they were just promised.
+  assert.equal(
+    decideResumeBatch({
+      hasFocus: true, pauseReason: 'stuck', focusIsFormal: true,
+      hasFormalAdmission: false, admissionCardPending: false,
+    }),
+    'request_admission',
+  );
 });

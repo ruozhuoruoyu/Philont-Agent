@@ -15,16 +15,22 @@ function sess(over: Partial<ReasoningSession>): ReasoningSession {
   return {
     id: 's', goal: 'G', assumptions: [], status: 'active', ownerSessionId: 'u',
     rootNodeId: null, budgetSpent: 0, noProgressRounds: 0, autoAdvance: true,
+    autoPauseReason: null, autoPauseAt: null, mode: 'formal',
     createdAt: 0, updatedAt: 0, ...over,
   };
 }
 
 function fakeStore(opts: { active: ReasoningSession[]; afterRound?: (id: string) => ReasoningSession | null }) {
   const calls = { setAutoAdvance: [] as Array<[string, boolean]> };
+  const pauses = new Map<string, ReasoningSession['autoPauseReason']>();
   const store = {
     listAutoAdvanceSessions: () => opts.active,
     setAutoAdvance: (id: string, on: boolean) => { calls.setAutoAdvance.push([id, on]); },
-    getSession: (id: string) => (opts.afterRound ? opts.afterRound(id) : sess({ id })),
+    setAutoPause: (id: string, reason: ReasoningSession['autoPauseReason']) => { pauses.set(id, reason); },
+    getSession: (id: string) => {
+      const s = opts.afterRound ? opts.afterRound(id) : sess({ id });
+      return s ? { ...s, autoPauseReason: pauses.get(id) ?? s.autoPauseReason } : null;
+    },
   } as unknown as ReasoningStore;
   return { store, calls };
 }
@@ -82,6 +88,42 @@ test('auto-advance: 旧 2 轮无进展不让刚启用的 episode 立即暂停', 
   assert.equal(notes.length, 1, 'fresh session reset is reported as a milestone by this fake store');
 });
 
+test('auto-advance: formal episode without workflow admission pauses before spending a round', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  let advanced = 0;
+  const requested: string[] = [];
+  const { store, calls } = fakeStore({ active: [sess({ id: 'formal-no-grant' })] });
+  const loop = createAutoAdvanceLoop({
+    reasoning: store,
+    advanceSession: async () => { advanced++; return { success: true, output: '' }; },
+    runInContext: passthroughCtx,
+    notify: () => {},
+    hasFormalAdmission: () => false,
+    requestFormalAdmission: (s) => requested.push(s.id),
+  });
+  await loop.tickOnce();
+  assert.equal(advanced, 0, 'no blind verifier-less round ran');
+  assert.deepEqual(calls.setAutoAdvance, [['formal-no-grant', false]]);
+  assert.deepEqual(requested, ['formal-no-grant']);
+  assert.equal(loop.pauseReason('formal-no-grant'), 'auth');
+});
+
+test('auto-advance: deliberate episode does not request the formal local-tool bundle', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  let advanced = 0;
+  const { store } = fakeStore({ active: [sess({ id: 'deliberate', mode: 'deliberate' })] });
+  const loop = createAutoAdvanceLoop({
+    reasoning: store,
+    advanceSession: async () => { advanced++; return { success: true, output: '' }; },
+    runInContext: passthroughCtx,
+    notify: () => {},
+    hasFormalAdmission: () => false,
+    requestFormalAdmission: () => assert.fail('deliberate work must not ask for formal verifier admission'),
+  });
+  await loop.tickOnce();
+  assert.equal(advanced, 1);
+});
+
 test('auto-advance: 本 episode 累积到阈值后仍会暂停', async () => {
   process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
   let advanced = 0;
@@ -91,6 +133,7 @@ test('auto-advance: 本 episode 累积到阈值后仍会暂停', async () => {
   const store = {
     listAutoAdvanceSessions: () => [sess({ id: 'a', noProgressRounds: noProgress })],
     setAutoAdvance: (id: string, on: boolean) => { calls.setAutoAdvance.push([id, on]); },
+    setAutoPause: () => {},
     getSession: (id: string) => sess({ id, noProgressRounds: noProgress }),
   } as unknown as ReasoningStore;
   const loop = createAutoAdvanceLoop({
@@ -106,6 +149,9 @@ test('auto-advance: 本 episode 累积到阈值后仍会暂停', async () => {
   assert.deepEqual(calls.setAutoAdvance, [['a', false]]);
   assert.equal(notes[0].important, true);
   assert.match(notes[0].text, /卡住|暂停/);
+  assert.equal(loop.pauseReason('a'), 'stuck');
+  loop.rearm('a');
+  assert.equal(loop.pauseReason('a'), null, 'continue/auto advance buys a fresh automatic batch');
 });
 
 test('auto-advance: 有进展(counter 归零)→ 推进 + 里程碑(非 important)', async () => {

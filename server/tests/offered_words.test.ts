@@ -23,6 +23,7 @@ import {
 import { renderCheckInText } from '../src/push/service_driver.js';
 import { classifyProposalReply, renderSelfhoodStatusText } from '../src/autonomy_status.js';
 import { matchOfferedAuthWord, offeredAuthWords } from '../src/auth_intent.js';
+import { classifyGrantReply } from '../src/research_grant.js';
 import { renderAuthPromptForWeChat } from '../src/channels/wechat/wechat_render.js';
 import { renderAuthPrompt as renderAuthPromptForTelegram } from '../src/channels/telegram/index.js';
 import { classifyExploreControlReply } from '../src/explore_control.js';
@@ -143,6 +144,8 @@ test('the deep_explore cards offer words the control layer accepts, in both lang
     ['clear all', 'abandon_all'],
     ['自动推进', 'auto_advance'],
     ['auto advance', 'auto_advance'],
+    ['继续', 'resume_batch'],
+    ['continue', 'resume_batch'],
     ['停', 'stop_auto'],
     ['stop', 'stop_auto'],
   ] as const) {
@@ -150,4 +153,20 @@ test('the deep_explore cards offer words the control layer accepts, in both lang
     assert.ok(r, `we print "${word}" on a card — we must listen for it`);
     assert.equal(r!.kind, kind);
   }
+});
+
+test('the formal auto-advance admission card offers words the grant matcher answers', () => {
+  // The card is raised by a background driver and answered in whatever conversation the owner is in,
+  // so the words on it are the entire interface. 同意/拒绝 and approve/reject must all land.
+  const src = readFileSync(new URL('../src/chat-handler.ts', import.meta.url), 'utf8');
+  const start = src.indexOf('function requestFormalAutoAdmission');
+  assert.ok(start > 0, 'the admission card function still exists');
+  const card = src.slice(start, start + 2500);
+  for (const word of ['同意', '拒绝', 'approve', 'reject']) {
+    assert.ok(card.includes(word), `the card offers "${word}"`);
+  }
+  assert.equal(classifyGrantReply('同意'), 'grant');
+  assert.equal(classifyGrantReply('拒绝'), 'deny');
+  assert.equal(classifyGrantReply('approve'), 'grant');
+  assert.equal(classifyGrantReply('reject'), 'deny');
 });

@@ -165,7 +165,7 @@ import { honestySessionStore } from './honesty_session_state.js';
 import { renderHonestyFallback } from './honesty_fallback.js';
 import { classifyAuthIntent, matchOfferedAuthWord } from './auth_intent.js';
 import { authRequestCode, isBarePredeliveryAuthReply, matchScopedAuthReply } from './auth_request_id.js';
-import { classifyExploreControlReply, resolveExploreTarget } from './explore_control.js';
+import { classifyExploreControlReply, decideResumeBatch, resolveExploreTarget } from './explore_control.js';
 import { judgeRun, type JudgeToolRecord } from './learning_judge.js';
 import {
   extractScheduleIdFromSession,
@@ -311,6 +311,7 @@ import {
   renderResearchGrantPrompt,
   reconstructDmSessionId,
   decideResearchGrantAction,
+  LOCAL_RESEARCH_WORKFLOW,
   localWorkflowGrants,
   type PendingResearchGrant,
 } from './research_grant.js';
@@ -1855,6 +1856,78 @@ const pushToolAdapters: Tool[] = createPushTools(memory.pushSubscriptions).map((
 // GrantStore singleton: dynamic authorization (with TTL decay). Shared by PolicyGate auth flow + proactive research "request permission".
 // Defined before researchToolAdapters / PursuitDriver / executor so they can consume it.
 const globalGrants = new GrantStore();
+
+/**
+ * A formal auto-advance episode is allowed to SCHEDULE itself only after the owner separately approves
+ * its local proof workflow. Kept outside pendingAuth: no foreground tool call is suspended here; the
+ * background driver pauses before its first effectful round and resumes as a batch after this decision.
+ */
+const pendingFormalAutoAdmission = new Map<string, { sessionId: string; goal: string; ts: number }>();
+
+const FORMAL_AUTO_WORKFLOW = LOCAL_RESEARCH_WORKFLOW.filter((g) => g.tool !== 'downloadFile');
+
+function hasFormalAutoAdmission(): boolean {
+  return FORMAL_AUTO_WORKFLOW.every((g) => globalGrants.isGranted(g.tool));
+}
+
+/**
+ * Raise the one approval card a formal background episode needs, and register it under every session
+ * that could carry the answer.
+ *
+ * `ownerSessionId` alone is not enough, and the research-grant path already learned why: a card
+ * DELIVERED by push is ANSWERED in whatever conversation the owner is sitting in. A web-ui session id
+ * changes on every reconnect (prod: gzjg6xuymww → bj950jq0m8g inside one hour), so an admission keyed
+ * only to the id that existed when the driver paused is an admission nobody can grant — the session
+ * would sit paused forever with a card on screen that does nothing.
+ */
+function requestFormalAutoAdmission(s: ReasoningSession): void {
+  const entry = { sessionId: s.id, goal: s.goal, ts: Date.now() };
+  const owner = s.ownerSessionId;
+  const targets = new Set<string>();
+  if (owner) targets.add(owner);
+  for (const sub of memory.pushSubscriptions.listActive()) {
+    const sid = reconstructDmSessionId(sub.channel, sub.peer);
+    if (sid) targets.add(sid);
+  }
+  for (const [sid] of webuiClients) targets.add(sid);
+  if (targets.size === 0) {
+    console.warn(`[auto-advance] formal admission has nobody to ask: session=${safeSessionId(s.id)}`);
+    return;
+  }
+  for (const sid of targets) pendingFormalAutoAdmission.set(sid, { ...entry });
+  const en = resolvePhraseLang({ channel: owner ?? '', userLocale: readUserLanguage() }) === 'en';
+  const text = en
+    ? `🔐 Formal auto-advance is paused before its first local proof round for "${s.goal.slice(0, 50)}". ` +
+      `It needs one workflow approval for local write/shell/Lean/PARI/Z3 tools (about ${Math.round(WORKFLOW_GRANT_TTL_MS / 60_000)} minutes). ` +
+      `Reply "approve" to start the batch, or "reject" to leave it paused.`
+    : `🔐 形式化自动推进已在首个本地验证回合前暂停:「${s.goal.slice(0, 50)}」。` +
+      `需要一次工作流授权，用于本地写入/shell/Lean/PARI/Z3（约 ${Math.round(WORKFLOW_GRANT_TTL_MS / 60_000)} 分钟）。` +
+      `回复「同意」开始这一批，或「拒绝」保持暂停。`;
+  for (const [, send] of webuiClients) send({ type: 'milestone', text });
+  void pushDispatcher.enqueue({
+    severity: 'urgent',
+    kind: 'deep_explore:auto_admission',
+    targetRef: `deep_explore:auto-admission:${s.id}`,
+    text,
+  }).catch(() => {});
+  console.log(
+    `[auto-advance] formal admission card raised session=${safeSessionId(s.id)} targets=${targets.size}`,
+  );
+}
+
+function grantFormalAutoAdmission(reason: string): void {
+  const bundleId = `auto-formal-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  for (const g of FORMAL_AUTO_WORKFLOW) {
+    globalGrants.grant({
+      toolName: g.tool,
+      capability: g.capability,
+      domain: g.domain,
+      reason,
+      ttlMs: WORKFLOW_GRANT_TTL_MS,
+      bundleId,
+    });
+  }
+}
 
 // 2026-05-30 proactive research loop: research_focus + grant_research_tool tools (domain='self').
 // When the user explicitly requests "continuously research X", the LLM calls research_focus to register an active-research pursuit;
@@ -4457,6 +4530,8 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
       ? deepExploreAdvanceSession(s)
       : Promise.resolve({ success: false, output: '', error: 'deep_explore disabled' }),
   runInContext: runInTurnContext,
+  hasFormalAdmission: () => hasFormalAutoAdmission(),
+  requestFormalAdmission: (s) => requestFormalAutoAdmission(s),
   // WS1 (selfhood_closure): trait-tuned stuck threshold — competitiveness earned from lived
   // history buys more no-progress rounds before the loop declares stuck.
   traits: () =>
@@ -8018,11 +8093,44 @@ export async function handleChatSend(
     }
   }
 
+  // A background formal episode has no suspended foreground call, so its admission decision is consumed
+  // here rather than by pendingAuth. The explicit card is the authority; auto_on by itself never grants
+  // shell/write/verifier capabilities.
+  {
+    const pending = pendingFormalAutoAdmission.get(sessionId);
+    if (pending) {
+      const expired = Date.now() - pending.ts > PENDING_AUTH_TTL_MS;
+      if (expired) pendingFormalAutoAdmission.delete(sessionId);
+      const decision = expired ? null : classifyGrantReply(userMessage);
+      if (decision) {
+        // The same card was registered under every conversation that could answer it; one answer
+        // retires all of them, or a later "ok" somewhere else re-decides a question already decided.
+        for (const [sid, p] of [...pendingFormalAutoAdmission]) {
+          if (p.sessionId === pending.sessionId) pendingFormalAutoAdmission.delete(sid);
+        }
+        const en = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en';
+        if (decision === 'grant') {
+          grantFormalAutoAdmission(`formal auto-advance admission: ${userMessage.slice(0, 40)}`);
+          deepExploreAutoAdvance.rearm(pending.sessionId);
+          console.log(`[auto-advance] formal workflow admitted and batch rearmed session=${safeSessionId(pending.sessionId)}`);
+          onDelta(en
+            ? `Approved once for the local formal workflow. I am starting an automatic batch for "${pending.goal.slice(0, 40)}"; milestones are push-only, not questions.`
+            : `已一次性授权本地形式化工作流。现在开始自动跑「${pending.goal.slice(0, 40)}」这一批；里程碑只推送，不要求回复。`);
+        } else {
+          memory.reasoning.setAutoAdvance(pending.sessionId, false);
+          console.log(`[auto-advance] formal workflow admission rejected session=${safeSessionId(pending.sessionId)}`);
+          onDelta(en ? 'Understood. Formal auto-advance remains paused.' : '好的，形式化自动推进保持暂停。');
+        }
+        return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+      }
+    }
+  }
+
   // deep_explore session control — the words the follow-up / auto-advance cards printed. 放弃 / 全清 /
   // 自动推进 / 停 had NO listener anywhere: the phrases existed only in the cards that printed them, while
   // the verbs they name (setSessionStatus('abandoned'), setAutoAdvance) sat fully built and unplumbed.
-  // Handled here, before the model, so the exact words we PRINTED always work. 继续 is deliberately left to
-  // the existing force-continue path — it already works, and a second owner of it is pure regression risk.
+  // Handled here, before the model, so the exact words we PRINTED always work. 继续 is consumed here ONLY
+  // when this driver itself delivered a pause; otherwise it falls through to the existing manual path.
   //
   // HIJACK GUARD. This runs before the model on EVERY turn, and 停 / 放弃 / stop are ordinary words a person
   // says for ordinary reasons ("stop what you're doing", "give up on that idea"). So a match is NOT enough:
@@ -8053,7 +8161,37 @@ export async function handleChatSend(
       const focus = focusedReasoningSession(sessionId);
       let reply: string;
 
-      if (ec.kind === 'stop_auto') {
+      if (ec.kind === 'resume_batch') {
+        // 继续 is the most ordinary word in this system, and this branch runs before the model on every
+        // turn — so it may only act when THIS driver paused THIS owner's focused session. The decision
+        // table lives in explore_control.decideResumeBatch, where it can be read and tested.
+        const why = focus ? deepExploreAutoAdvance.pauseReason(focus.id) : null;
+        const action = decideResumeBatch({
+          hasFocus: !!focus,
+          pauseReason: why,
+          focusIsFormal: focus?.mode === 'formal',
+          hasFormalAdmission: hasFormalAutoAdmission(),
+          admissionCardPending: !!focus && [...pendingFormalAutoAdmission.values()].some((p) => p.sessionId === focus.id),
+        });
+        if (action === 'fall_through' || !focus) {
+          reply = '';
+        } else if (action === 'await_card') {
+          reply = en
+            ? 'This batch is waiting for workflow permission, not a continue signal. Reply "approve" or "reject" to the authorization card.'
+            : '这一批等的是工作流授权，不是续接指令。请对授权卡回复「同意」或「拒绝」。';
+        } else if (action === 'request_admission') {
+          requestFormalAutoAdmission(focus);
+          reply = en
+            ? `"${focus.goal.slice(0, 40)}" needs one local workflow approval before another automatic batch — the card has just been sent. Reply "approve" to start it.`
+            : `「${focus.goal.slice(0, 40)}」再跑一批之前需要一次本地工作流授权，授权卡已发出。回复「同意」开始。`;
+        } else {
+          deepExploreAutoAdvance.rearm(focus.id);
+          console.log(`[explore-control] owner rearmed ${why} pause as an automatic batch for ${focus.id}`);
+          reply = en
+            ? `Another automatic batch is running for "${focus.goal.slice(0, 40)}". I will only push milestones or a decision that needs you.`
+            : `已给「${focus.goal.slice(0, 40)}」重新武装一批自动推进。之后只推送里程碑，或真正需要你决策的暂停。`;
+        }
+      } else if (ec.kind === 'stop_auto') {
         // Turn off any auto-advance, and acknowledge the pause for manual sessions too (they were never
         // going to advance without "继续", so this is an honest ack, not a state change).
         for (const x of autoOn) memory.reasoning.setAutoAdvance(x.id, false);
@@ -8103,8 +8241,10 @@ export async function handleChatSend(
             : `没有匹配的探索。当前开着的:${list}`;
         }
       }
-      onDelta(reply);
-      return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+      if (reply) {
+        onDelta(reply);
+        return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+      }
     }
   }
 

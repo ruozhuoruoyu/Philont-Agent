@@ -64,6 +64,9 @@ export interface ReasoningSession {
   noProgressRounds: number;
   /** Per-session opt-in: when true, the background loop auto-advances this session round-by-round. */
   autoAdvance: boolean;
+  /** Driver-created pause boundary; persisted so the card's reply still means the same after restart. */
+  autoPauseReason: 'stuck' | 'budget' | 'auth' | null;
+  autoPauseAt: number | null;
   /** When the followup loop last asked the owner about this idle session (persisted; null = never asked). */
   followupAskedAt: number | null;
   /** Which reasoning profile this session runs (formal proof vs general evidence-based deliberation). Default 'formal'. */
@@ -121,6 +124,8 @@ interface SessionRow {
   budget_spent: number;
   no_progress_rounds: number;
   auto_advance: number;
+  auto_pause_reason: string | null;
+  auto_pause_at: number | null;
   followup_asked_at: number | null;
   mode: string | null;
   phase: string | null;
@@ -163,6 +168,12 @@ function rowToSession(r: SessionRow): ReasoningSession {
     budgetSpent: r.budget_spent,
     noProgressRounds: r.no_progress_rounds ?? 0,
     autoAdvance: !!r.auto_advance,
+    autoPauseReason: (
+      r.auto_pause_reason === 'stuck' || r.auto_pause_reason === 'budget' || r.auto_pause_reason === 'auth'
+        ? r.auto_pause_reason
+        : null
+    ),
+    autoPauseAt: r.auto_pause_at ?? null,
     followupAskedAt: r.followup_asked_at ?? null,
     mode: (r.mode === 'deliberate' ? 'deliberate' : 'formal') as ReasoningSessionMode,
     phase: (r.phase === 'diverge' ? 'diverge' : 'converge') as ReasoningPhase,
@@ -644,6 +655,14 @@ export class ReasoningStore {
         `UPDATE reasoning_sessions SET auto_advance = ?, updated_at = ? WHERE id = ?`,
       )
       .run(on ? 1 : 0, Date.now(), id);
+  }
+
+  setAutoPause(id: string, reason: 'stuck' | 'budget' | 'auth' | null, at: number | null = Date.now()): void {
+    this.db
+      .prepare<[string | null, number | null, number, string]>(
+        `UPDATE reasoning_sessions SET auto_pause_reason = ?, auto_pause_at = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(reason, reason ? at : null, Date.now(), id);
   }
 
   /**
