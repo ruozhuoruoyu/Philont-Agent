@@ -270,10 +270,27 @@ test('production redirect after restart: "再找新的思路，继续推" opens 
   const d = decideTurnAnchors({
     lastAssistantText: '这个方向已经停滞。',
     userMessage: '再找新的思路，继续推',
-    hadDoom: reasoningStateCarriesDoom({ noProgressRounds: 7, deadEndCount: 7 }),
+    undeliveredDoom: reasoningStateCarriesDoom({ noProgressRounds: 7, deadEndCount: 7 }),
   });
   assert.equal(d.doomReset, true);
   assert.equal(d.anchor, true);
+});
+
+test('tree doom nobody was told about is not overridden by a bare "继续"', () => {
+  // Prod 2026-09-01: recommend_stop armed at 08:37:39 (noProgressRounds=4), the owner was told nothing
+  // about it, and the routine "继续" 41 seconds later cleared the whole accumulator. Repeat daily and the
+  // stop can never survive long enough to be spoken.
+  const tree = reasoningStateCarriesDoom({ noProgressRounds: 4, deadEndCount: 8 });
+  assert.equal(tree, true, 'the tree really is stalled');
+  for (const userMessage of ['继续', 'ok', '嗯']) {
+    const d = decideTurnAnchors({ lastAssistantText: '本轮 no_commit。', userMessage, hadDoom: false, undeliveredDoom: tree });
+    assert.equal(d.doomReset, false, userMessage);
+  }
+  // Once it HAS been delivered, the same word is a real override and buys a fresh episode.
+  assert.equal(
+    decideTurnAnchors({ lastAssistantText: '建议停在这里。', userMessage: '继续', hadDoom: true }).doomReset,
+    true,
+  );
 });
 
 test('bare "ok" after doom is too ambiguous → no reset, no anchor', () => {
@@ -438,4 +455,29 @@ test('re-arming never downgrades a delivered stop, and delivery keeps the origin
   const delivered = deliverStop(armed, 500);
   assert.deepEqual(delivered, { state: 'delivered', at: 100 }, 'the TTL runs from when it was armed');
   assert.deepEqual(armStop(delivered, 900), delivered, 'a later arming cannot un-deliver it');
+});
+
+test('a turn that only OBSERVED the session can still deliver the stop', () => {
+  // 2026-09-01: three turns in a row read the session's Lean files and called `deep_explore status`,
+  // and all three logged `verdict=pivot score=3 SKIPPED … unrelated task`. A pivot the gate had already
+  // decided on was never delivered — while every "继续" in between cleared the accumulator.
+  assert.equal(
+    viabilityActuatorRelevant({
+      hasActiveSession: true,
+      turnEngagedReasoning: false,
+      turnObservedReasoning: true,
+      replyPitchesContinuation: false,
+    }),
+    true,
+  );
+  // The turn the guard exists for still is not hijacked: it never touches deep_explore at all.
+  assert.equal(
+    viabilityActuatorRelevant({
+      hasActiveSession: true,
+      turnEngagedReasoning: false,
+      turnObservedReasoning: false,
+      replyPitchesContinuation: false,
+    }),
+    false,
+  );
 });

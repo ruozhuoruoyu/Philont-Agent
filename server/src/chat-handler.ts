@@ -10194,16 +10194,32 @@ async function handleChatSendInner(
     // The two Maps are only turn-process accelerators. After a restart, the tree + persisted episode are
     // still the ground truth that a stop had accumulated; otherwise an explicit "new approach, continue"
     // cannot open a fresh episode and is immediately killed by the old dead/no-progress totals.
+    // What licenses an OVERRIDE is not "a stop had accumulated" — it is "a stop reached the owner".
+    // 49fe7e7 closed that hole for the recommendation itself and left the other door open: prod
+    // 2026-09-01 armed recommend_stop at 08:37:39, said nothing about it to the owner, and the routine
+    // "继续" at 08:38:20 still cleared everything — because tree state alone (noProgressRounds=4) made
+    // hadDoom true. reasoningStateCarriesDoom is one of the stop's own INPUTS; its own file says "the
+    // stop's own inputs must not decide when to clear the stop's own inputs", and being an OR-term of
+    // the override licence is exactly that. It still feeds the gate (see computeViability) — it just no
+    // longer counts as something the owner refused.
+    //
+    // A pivot streak does license it: the streak is only extended when the actuator was RELEVANT to the
+    // turn, i.e. the pivot directive actually rewrote the reply the owner read.
+    //
+    // Cost after a restart: a stop delivered before the restart is forgotten, so the first override does
+    // not land and the gate re-delivers once. One extra delivery is the correct side to err on — it is
+    // the owner being told, not the owner being ignored.
     const hadDoom = (viabilityPivotStreak.get(sessionId) ?? 0) >= 1 ||
-      viabilityRecommendStop.get(sessionId)?.state === 'delivered' ||
-      reasoningStateCarriesDoom({
-        noProgressRounds: persistedEpisodeStats?.noProgressRounds ?? 0,
-        deadEndCount: persistedEpisodeStats?.deadCount ?? 0,
-      });
+      viabilityRecommendStop.get(sessionId)?.state === 'delivered';
+    const undeliveredDoom = reasoningStateCarriesDoom({
+      noProgressRounds: persistedEpisodeStats?.noProgressRounds ?? 0,
+      deadEndCount: persistedEpisodeStats?.deadCount ?? 0,
+    });
     turnAnchors = decideTurnAnchors({
       lastAssistantText: lastAssistantText(messages),
       userMessage,
       hadDoom,
+      undeliveredDoom,
       promptIsReplay: isScheduledPromptReplay(sessionId, userMessage),
     });
     if (turnAnchors.doomReset) {
@@ -13749,6 +13765,7 @@ async function runToolLoop(
           const vRelevantToThisTurn = viabilityActuatorRelevant({
             hasActiveSession: !!ownerSession,
             turnEngagedReasoning: (signalBus.inTurnRecords ?? []).some(isDeepExploreAdvanceRecord),
+            turnObservedReasoning: (signalBus.inTurnRecords ?? []).some((r) => r.toolName === 'deep_explore'),
             replyPitchesContinuation: CONTINUATION_PITCH_RE.test(response.content),
           });
           if (v.verdict !== 'continue' && !vRelevantToThisTurn) {

@@ -129,6 +129,14 @@ test('a TIMEOUT does not retire the method — the same script with a bigger tim
   db.close();
 });
 
+test('a PERMISSION denial never retires the method — the script was never even run', () => {
+  // Prod 2026-09-01 08:31:45: the background round hit "NOT AUTHORIZED … denied by permission matrix"
+  // twice before the owner approved at 08:32:07. If that retired the fingerprint, the approval would
+  // have bought the owner a permanently blocked script.
+  const denied = "NOT AUTHORIZED for this sub-task: pariGp (execute/local). Tool 'pariGp' denied by permission matrix";
+  assert.equal(pariFailureIsMethodFault(denied), false);
+});
+
 test('a missing gp binary does not retire the method either', () => {
   assert.equal(pariFailureIsMethodFault('No usable gp (PARI/GP) executable found (tried: gp)'), false);
   assert.equal(pariFailureIsMethodFault('PARI/GP computation timed out (>20000ms); process killed.'), false);
@@ -1713,5 +1721,44 @@ test('a round that changes nothing reports relation=no_commit to the model, not 
   const session = mem.reasoning.getMostRecentActiveSession()!;
   assert.equal(mem.reasoning.getNodes(session.id).every((n) => n.status === 'open'), true);
   assert.ok(mem.reasoning.getSession(session.id)!.noProgressRounds > 0, 'and it counts as stuck');
+  mem.close();
+});
+
+test('two callers advancing the same session join one round instead of racing two', async () => {
+  // Prod 2026-09-01 08:31: the background auto-advance loop and the owner's turn both advanced session
+  // d88d106e, and the log shows the pair — two `blocked pariGp … iter 1/40` one millisecond apart, then
+  // duplicate z3Verify iterations. Two rounds writing one tree means the second round's `before`
+  // snapshot already contains the first one's commits, so every progress judgement describes a tree
+  // neither round actually worked on.
+  const mem = openMemoryDb(':memory:');
+  let llmCalls = 0;
+  const slowLLM: MiniLoopLLMClient = {
+    async send() {
+      llmCalls++;
+      await new Promise((r) => setTimeout(r, 50));
+      return { type: 'text' as const, content: 'thinking', tokensUsed: 10 };
+    },
+  };
+  const { tool, advanceSession } = createDeepExploreTool({
+    reasoning: mem.reasoning,
+    miniLoopLLM: slowLLM,
+    subTurnToolRunner: async () => ({ ok: true, output: '' }),
+    readOnlyToolDefs: [],
+  });
+  await tool.execute({ action: 'start', goal: 'Design the retry policy for the ingest worker', mode: 'formal' });
+  const session = mem.reasoning.getMostRecentActiveSession()!;
+  const callsAfterStart = llmCalls;
+
+  const [background, foreground] = await Promise.all([
+    advanceSession(session),
+    advanceSession(session),
+  ]);
+  assert.equal(llmCalls, callsAfterStart + 1, 'exactly one round ran');
+  const joined = [background, foreground].filter((r) => /ALREADY running/.test(r.output));
+  assert.equal(joined.length, 1, 'the second caller is told it joined, not that its request ran a round');
+
+  // And the lock is released: a later call runs a real round again.
+  await advanceSession(session);
+  assert.equal(llmCalls, callsAfterStart + 2);
   mem.close();
 });

@@ -184,6 +184,19 @@ export function decideTurnAnchors(input: {
   userMessage: string;
   hadDoom: boolean;
   /**
+   * Doom that has accumulated but that NOBODY WAS TOLD ABOUT — tree state alone (stalled rounds, dead
+   * ends). It licenses a narrower override than `hadDoom`: a substantive redirect only, never a bare
+   * push-forward.
+   *
+   * The asymmetry is the whole point. A bare "继续" answers nothing when nothing was delivered, so
+   * letting it clear the accumulator means the stop can never survive to be spoken — prod 2026-09-01:
+   * recommend_stop armed at 08:37:39, the owner heard nothing about it, and "继续" at 08:38:20 wiped it
+   * (and the same pattern had repeated for days). A substantive redirect is different in kind: it
+   * supplies a NEW direction, and the old episode's stall counters describe the old one, so they must
+   * not be allowed to kill it — that is the case 33e12ec exists for and it keeps working.
+   */
+  undeliveredDoom?: boolean;
+  /**
    * This turn's message is a REPLAY — a scheduled task firing the same stored prompt again, with no user
    * in the loop. Every branch below asks "how did the user respond to the stop?", and a replay is not a
    * response: nobody read the stop, nobody overrode it. Treating it as an override cleared the doom
@@ -199,8 +212,12 @@ export function decideTurnAnchors(input: {
   const accepts = VIABILITY_ACCEPT_RE.test(msg);
   const bareAffirm = BARE_AFFIRM_RE.test(msg);
   const replay = input.promptIsReplay === true;
+  // A message carrying new direction, as opposed to a bare "go on".
+  const substantive = !bareAffirm && msg.trim().length >= 4;
   const doomReset =
-    input.hadDoom && !replay && !accepts && (pushesForward || (!bareAffirm && msg.trim().length >= 4));
+    !replay && !accepts &&
+    ((input.hadDoom && (pushesForward || substantive)) ||
+      (input.undeliveredDoom === true && substantive));
   const prior = input.lastAssistantText ?? '';
   const priorPitch = prior.length > 0 && (CONTINUATION_PITCH_RE.test(prior) || OFFER_QUESTION_RE.test(prior));
   // !accepts guard: a trailing-吧 acceptance ("算了吧 / 放弃吧") must never read as "execute the proposal".
@@ -224,8 +241,25 @@ export function viabilityActuatorRelevant(input: {
   hasActiveSession: boolean;
   turnEngagedReasoning: boolean;
   replyPitchesContinuation: boolean;
+  /**
+   * The turn OBSERVED the session — a deep_explore status/list call. Not progress (that is
+   * `turnEngagedReasoning`, which only advancing actions satisfy), but proof that this turn is ABOUT
+   * this session, which is the only question the hijack guard is asking.
+   *
+   * Without it the guard was starving the stop. Prod 2026-09-01: three consecutive turns worked on the
+   * session — read its Lean files, called `deep_explore status` — and each logged
+   * `verdict=pivot score=3 SKIPPED … unrelated task`, so a pivot the gate had already decided on was
+   * never delivered on any of them. The turn it was written to protect (a "删除豆瓣技能" reply with a
+   * stale background session) touches deep_explore not at all, and is still protected.
+   */
+  turnObservedReasoning?: boolean;
 }): boolean {
-  return !input.hasActiveSession || input.turnEngagedReasoning || input.replyPitchesContinuation;
+  return (
+    !input.hasActiveSession ||
+    input.turnEngagedReasoning ||
+    input.turnObservedReasoning === true ||
+    input.replyPitchesContinuation
+  );
 }
 
 /**

@@ -3341,7 +3341,46 @@ export function createDeepExploreTool(
     return cards;
   }
 
-  async function runRound(session: ReasoningSession): Promise<ToolResult> {
+  /**
+   * One advancing round per reasoning session at a time (2026-09-01).
+   *
+   * The background auto-advance loop and the foreground tool call reach the same session through the
+   * same door, and nothing stopped them from opening it together. Prod 2026-09-01 08:31: auto-advance
+   * started a round on d88d106e at 08:30:58, the owner's turn advanced the same session moments later,
+   * and the log shows the pair — two `blocked pariGp … iter 1/40` a millisecond apart, then two
+   * `z3Verify … iter 4/40` and two `iter 5/40`. Two rounds, one tree, both writing: the second round's
+   * `before` snapshot already contains the first round's commits, so attribution and progress
+   * accounting describe a tree neither of them actually saw.
+   *
+   * A second caller JOINS the round in flight rather than being refused. What it asked for was a round
+   * on this session, and one is running; returning its result costs nothing extra and cannot deadlock
+   * (every round is deadline-bounded). It is told so plainly, because "your continue started a round"
+   * would not be true.
+   */
+  const roundsInFlight = new Map<string, Promise<ToolResult>>();
+
+  function runRound(session: ReasoningSession): Promise<ToolResult> {
+    const running = roundsInFlight.get(session.id);
+    if (running) {
+      console.warn(
+        `[deep-explore] round already in flight session=${safeSessionId(session.id)} — joining it instead of starting a second`,
+      );
+      return running.then((r) => ({
+        ...r,
+        output:
+          `${r.output}
+(note: a round was ALREADY running on this session — this is that round's result. ` +
+          `No second round was started, so nothing here was produced by this request.)`,
+      }));
+    }
+    const started = runRoundExclusive(session).finally(() => {
+      if (roundsInFlight.get(session.id) === started) roundsInFlight.delete(session.id);
+    });
+    roundsInFlight.set(session.id, started);
+    return started;
+  }
+
+  async function runRoundExclusive(session: ReasoningSession): Promise<ToolResult> {
     if (session.budgetSpent >= SESSION_TOKEN_BUDGET) {
       return {
         success: true,
