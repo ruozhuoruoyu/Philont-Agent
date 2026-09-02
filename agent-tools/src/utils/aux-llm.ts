@@ -39,6 +39,11 @@ export interface AuxLLMRequest {
    * inert against a null spec).
    */
   timeoutMs?: number;
+  /**
+   * Force thinking off for THIS call regardless of the model name. Set by the retry ladder when a
+   * response came back with no content and no reasoning — see AuxLLMError.emptyOutput.
+   */
+  disableThinking?: boolean;
   /** Abort signal */
   signal?: AbortSignal;
   /**
@@ -67,6 +72,12 @@ export class AuxLLMError extends Error {
       | 'output_truncated'
       | 'aborted',
     public readonly status?: number,
+    /**
+     * The budget was spent and NOTHING came back — no content and no reasoning either. That is not
+     * "the answer was too long", it is "something we never saw ate the whole budget", and the two
+     * call for opposite remedies. See INVISIBLE_THINKING in the retry ladder.
+     */
+    public readonly emptyOutput?: boolean,
   ) {
     super(message);
     this.name = 'AuxLLMError';
@@ -174,6 +185,7 @@ function auxThinkingDisabled(model: string): boolean {
   if (m.startsWith('deepseek-v') && !m.startsWith('deepseek-v3')) return true;
   if (m === 'deepseek-reasoner') return true;
   if (m.includes('kimi') || m.includes('moonshot')) return true;
+  if (m.includes('glm') || m.includes('zhipu') || m.includes('chatglm')) return true;
   return false;
 }
 
@@ -306,8 +318,27 @@ export async function callAuxLLM(request: AuxLLMRequest): Promise<string> {
           result = await callConfiguredAux(attempt);
           break;
         } catch (e) {
+          // Two failures wear the same `finish_reason=length` label and need opposite remedies.
+          //
+          // The budget really being too small → give it more. But `content_chars=0` AND
+          // `reasoning_chars=0` means the whole budget went somewhere we never saw, and doubling it
+          // just buys a bigger nothing: prod 2026-09-02, after the owner switched aux to
+          // glm5.3-flash-b30t, the ladder walked 256 → 512 → 1024 and returned empty every time. The
+          // model was thinking; `auxThinkingDisabled` is a list of model-name prefixes
+          // (deepseek-v4+/reasoner/kimi/moonshot) and GLM was not on it, so nothing turned thinking
+          // off. A hard-coded family list silently misses every model nobody has added yet, which is
+          // the whole point of reacting to the SIGNATURE instead: this path needs no name.
+          const invisibleThinking = isOutputTruncation(e) && e.emptyOutput === true;
           const retryTokens = isOutputTruncation(e) ? expandedTokenBudget(attempt.maxTokens) : null;
           if (retry === AUX_TRUNCATION_MAX_RETRIES || retryTokens === null) throw e;
+          if (invisibleThinking && attempt.disableThinking !== true) {
+            console.warn(
+              `[aux-llm] budget spent with no content and no reasoning at max_tokens=` +
+                `${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; retrying with thinking disabled`,
+            );
+            attempt = { ...attempt, disableThinking: true, maxTokens: retryTokens };
+            continue;
+          }
           console.warn(
             `[aux-llm] output truncated at max_tokens=${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; ` +
               `retrying aux with max_tokens=${retryTokens}`,
@@ -387,7 +418,7 @@ async function callOpenAICompatible(
     temperature: 0.2,
     // Disable thinking on thinking-capable models (deepseek-v4+/kimi). OpenAI-compat: the field
     // is top-level here (raw fetch; `extra_body` is an SDK-only flatten). See auxThinkingDisabled.
-    ...(auxThinkingDisabled(cfg.model) ? { thinking: { type: 'disabled' } } : {}),
+    ...(req.disableThinking === true || auxThinkingDisabled(cfg.model) ? { thinking: { type: 'disabled' } } : {}),
   };
 
   const timeoutMs = req.timeoutMs ?? auxTimeoutFor(req.maxTokens);
@@ -479,6 +510,8 @@ async function callOpenAICompatible(
       `Aux LLM output truncated (finish_reason=length, content_chars=${content?.length ?? 0}, ` +
         `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
       'output_truncated',
+      undefined,
+      (content?.length ?? 0) === 0 && reasoningChars === 0,
     );
   }
   if (typeof content !== 'string' || content.length === 0) {
@@ -518,7 +551,7 @@ async function callAnthropicCompatible(
   };
   if (req.system) body.system = req.system;
   // Disable thinking on thinking-capable models — see auxThinkingDisabled (fixes empty content).
-  if (auxThinkingDisabled(cfg.model)) body.thinking = { type: 'disabled' };
+  if (req.disableThinking === true || auxThinkingDisabled(cfg.model)) body.thinking = { type: 'disabled' };
 
   const timeoutMs = req.timeoutMs ?? auxTimeoutFor(req.maxTokens);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);

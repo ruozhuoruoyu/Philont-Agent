@@ -257,6 +257,64 @@ describe('aux-llm', () => {
       }
     });
 
+    it('a budget spent with NO content and NO reasoning is retried with thinking off, not with a bigger budget', async () => {
+      // Prod 2026-09-02: the owner switched aux to glm5.3-flash-b30t. `auxThinkingDisabled` is a list
+      // of model-name prefixes (deepseek-v4+/reasoner/kimi/moonshot) and GLM was not on it, so nothing
+      // turned thinking off; the ladder walked 256 → 512 → 1024 and every reply came back
+      // `content_chars=0, reasoning_chars=0`. Doubling a budget that something invisible is eating
+      // just buys a bigger nothing, and a hard-coded family list silently misses every model nobody
+      // has added yet — so the ladder reacts to the SIGNATURE, which needs no model name.
+      setAuxEnv(undefined, undefined, 'some-new-thinking-model-nobody-listed');
+      const fakeFetch = mockFetch((call) => {
+        const body = call.body as { thinking?: { type: string } };
+        if (body.thinking?.type === 'disabled') {
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: 'the answer' }, finish_reason: 'stop' }],
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: '' }, finish_reason: 'length' }],
+        }), { status: 200 });
+      });
+      try {
+        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 256 }), 'the answer');
+        const sent = fakeFetch.calls.map((c) => c.body as { max_tokens: number; thinking?: { type: string } });
+        assert.equal(sent.length, 2, 'one failure, then one retry — not a walk up the ladder');
+        assert.equal(sent[0].thinking, undefined, 'an unlisted model gets no thinking field on the first try');
+        assert.equal(sent[1].thinking?.type, 'disabled');
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('a truncation that DID return reasoning still walks the token ladder', async () => {
+      // The other failure wearing the same finish_reason: the model really did produce output and ran
+      // out of room. More budget is the right answer there, and must stay the answer.
+      setAuxEnv(undefined, undefined, 'some-new-thinking-model-nobody-listed');
+      const fakeFetch = mockFetch(() => new Response(JSON.stringify({
+        choices: [{ message: { content: '', reasoning_content: 'partial thought' }, finish_reason: 'length' }],
+      }), { status: 200 }));
+      try {
+        await assert.rejects(() => callAuxLLM({ user: 'q', maxTokens: 256 }));
+        const sent = fakeFetch.calls.map((c) => c.body as { max_tokens: number; thinking?: { type: string } });
+        assert.deepEqual(sent.map((b) => b.max_tokens), [256, 512, 1024]);
+        assert.ok(sent.every((b) => b.thinking === undefined), 'visible reasoning is not the invisible-thinking case');
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('a GLM model has thinking off on the FIRST call, not the second', () => {
+      setAuxEnv(undefined, undefined, 'glm5.3-flash-b30t');
+      const fakeFetch = mockFetch(() => new Response(JSON.stringify({
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      }), { status: 200 }));
+      return callAuxLLM({ user: 'q', maxTokens: 256 }).then(() => {
+        const body = fakeFetch.calls[0].body as { thinking?: { type: string } };
+        assert.equal(body.thinking?.type, 'disabled');
+      }).finally(() => fakeFetch.restore());
+    });
+
     it('retries a length-truncated response once with a larger token budget', async () => {
       setAuxEnv();
       const fakeFetch = mockFetch((call) => {
