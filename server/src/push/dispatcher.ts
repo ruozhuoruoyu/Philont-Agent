@@ -28,6 +28,9 @@ import { findPushChannel, describePushChannelMiss } from './channel.js';
 
 export type PushSeverity = 'urgent' | 'digest';
 
+/** Floor between two blocking decision cards to the same person. See PushRequest.blocking. */
+const BLOCKING_MIN_INTERVAL_MS = 5 * 60_000;
+
 export interface PushRequest {
   severity: PushSeverity;
   /** Push category (for dedup), e.g. 'autonomous_finding' / 'service_dormancy' */
@@ -41,6 +44,21 @@ export interface PushRequest {
    * Used for "push to this specific WeChat user" scenarios.
    */
   routing?: { channel: string; peer: string };
+  /**
+   * This push STOPS work and asks the owner something. It does not share the routine urgent budget.
+   *
+   * Prod 2026-09-01 23:11 delivered a routine auto-advance milestone; at 23:17 the card saying the
+   * batch had stopped as stuck — the one that needed an answer to restart anything — was dropped as
+   * `rate_limited (interval=3600000)`. Both were severity=urgent and kind=deep_explore:auto_advance,
+   * so a progress note spent the hour and the decision that followed it went unsaid. A limiter whose
+   * job is "do not chatter" must not be the thing that swallows a question; the same session then sat
+   * paused with the owner never told why, which is the failure this whole family of fixes is about.
+   *
+   * Bounded by its own short floor (BLOCKING_MIN_INTERVAL_MS) rather than by nothing, and it still
+   * respects quiet hours and 24h dedup like everything else. The natural bound is upstream anyway: a
+   * driver that pauses itself does not re-ask.
+   */
+  blocking?: boolean;
 }
 
 export interface DispatchResult {
@@ -103,6 +121,8 @@ export class PushDispatcher {
     isGloballyEnabled: () => boolean;
   };
   private dedupRing: DedupEntry[] = [];
+  /** Last blocking (decision-carrying) push per channel+peer — the floor that keeps a storm out. */
+  private readonly lastBlockingAt = new Map<string, number>();
   private readonly onSendOutcome?: (channel: string, ok: boolean) => void;
   private readonly deferredPushes?: DeferredPushStore;
 
@@ -185,7 +205,11 @@ export class PushDispatcher {
         if (sendResult.ok) {
           result.delivered += 1;
           anyDelivered = true;
-          if (req.severity === 'urgent') {
+          if (req.blocking === true) {
+            // Its own floor, and deliberately NOT the routine budget: a question that stopped the work
+            // must not make the next progress note wait an hour, nor be made to wait by one.
+            this.lastBlockingAt.set(`${t.channel}\u0000${t.peer}`, now);
+          } else if (req.severity === 'urgent') {
             this.opts.subscriptions.markUrgentSent(t.channel, t.peer, now);
           } else {
             this.opts.subscriptions.markDigestSent(t.channel, t.peer, now);
@@ -278,10 +302,16 @@ export class PushDispatcher {
       return { channel, peer, reason: 'channel_not_ready' };
     }
 
-    // Frequency rate-limit
-    const lastAt = req.severity === 'urgent' ? sub.lastUrgentAt : sub.lastDigestAt;
-    const interval =
-      req.severity === 'urgent' ? sub.urgentMinIntervalMs : sub.digestMinIntervalMs;
+    // Frequency rate-limit. A blocking decision runs on its own short floor, kept in memory: losing it
+    // on restart costs at most one extra card, and the alternative is a schema column for a counter
+    // whose only job is to stop a storm.
+    const blockingKey = `${channel}\u0000${peer}`;
+    const lastAt = req.blocking === true
+      ? (this.lastBlockingAt.get(blockingKey) ?? null)
+      : req.severity === 'urgent' ? sub.lastUrgentAt : sub.lastDigestAt;
+    const interval = req.blocking === true
+      ? BLOCKING_MIN_INTERVAL_MS
+      : req.severity === 'urgent' ? sub.urgentMinIntervalMs : sub.digestMinIntervalMs;
     if (lastAt !== null && now - lastAt < interval) {
       return {
         channel,

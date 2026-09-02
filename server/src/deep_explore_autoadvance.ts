@@ -64,8 +64,14 @@ export interface AutoAdvanceDeps {
   advanceSession: (session: ReasoningSession) => Promise<ToolResult>;
   /** Wrap the round in a turn ALS context (server's runInTurnContext) so it gets the background cap. */
   runInContext: <T>(sessionId: string, fn: () => Promise<T>) => Promise<T>;
-  /** Proactively notify the user. `important` events (stuck/solved) also push to messaging channels. */
-  notify: (text: string, opts?: { important?: boolean }) => void;
+  /**
+   * Proactively notify the user. `important` events (stuck/solved) also push to messaging channels;
+   * `blocking` marks the ones that STOPPED the work and need an answer, so the routine milestone
+   * budget cannot swallow them (prod 2026-09-01: a progress note at 23:11 spent the hour, and the
+   * "paused, stuck" card at 23:17 was dropped as rate_limited — the owner was never told why it
+   * stopped, and the session sat there).
+   */
+  notify: (text: string, opts?: { important?: boolean; blocking?: boolean }) => void;
   /**
    * Language for the pause cards. These are the agent speaking FIRST — no user message, nothing to mirror —
    * so the language has to be told. Resolved by the caller (AGENT_LANGUAGE → observed → mirror).
@@ -92,6 +98,8 @@ export interface AutoAdvanceLoop {
   stop: () => void;
   /** Grant one session another batch of rounds — the owner replied "自动推进" to the pause card. */
   rearm: (sessionId: string) => void;
+  /** Rounds one batch may run before the driver pauses to check in. */
+  roundsBudget: () => number;
   /** Why the current focused session is paused, if the pause was made by this driver. */
   pauseReason: (sessionId: string) => AutoAdvancePauseReason | null;
   /** Exposed for tests: run one tick synchronously. */
@@ -183,7 +191,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
             (deps.lang?.() ?? 'zh') === 'en'
               ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" used its ${MAX_ROUNDS}-round budget. Reply "auto advance" for another batch, or "stop".`
               : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 跑满 ${MAX_ROUNDS} 轮预算。回复"自动推进"再加一批,或"停"。`,
-            { important: true },
+            { important: true, blocking: true },
           );
           continue;
         }
@@ -209,7 +217,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
               : decision === 'switch_engine'
                 ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮没产出——换个角度/模式可能更有效。回复"继续"原路再自动跑一批、或指定新角度、或"停"。`
                 : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮无进展(卡住)。回复"继续"再自动跑一批,或换个角度重启。`,
-            { important: true },
+            { important: true, blocking: true },
           );
           continue;
         }
@@ -299,6 +307,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
       deps.reasoning.setAutoPause(sessionId, null);
       deps.reasoning.setAutoAdvance(sessionId, true);
     },
+    roundsBudget: () => MAX_ROUNDS,
     pauseReason: (sessionId: string): AutoAdvancePauseReason | null =>
       pauseReasons.get(sessionId) ?? deps.reasoning.getSession(sessionId)?.autoPauseReason ?? null,
     tickOnce,

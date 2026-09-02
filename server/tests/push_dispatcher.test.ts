@@ -429,3 +429,37 @@ test('dispatcher: later direct success removes a stale deferred copy of the same
   unregisterPushChannel(f.channel.name);
   h.close();
 });
+
+test('a blocking decision card is not spent by routine milestones, and has its own floor', async () => {
+  // Prod 2026-09-01: a routine auto-advance milestone was delivered at 23:11; the card saying the
+  // batch had STOPPED as stuck — the one that needed an answer before anything could restart — was
+  // dropped at 23:17 as `rate_limited (interval=3600000)`. Both were severity=urgent, so a progress
+  // note spent the hour and the question that followed went unsaid.
+  let now = 1_000_000;
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1', urgentMinIntervalMs: 60 * 60_000 });
+
+  await dispatcher.enqueue(URGENT_REQ); // routine milestone spends the hourly budget
+  now += 60_000;
+  const routine = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'initiative:def' });
+  assert.equal(routine.skipped[0].reason, 'rate_limited', 'routine notes still share one budget');
+
+  const decision = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'paused:1', blocking: true });
+  assert.equal(decision.delivered, 1, 'the question gets through');
+
+  // But it is not unbounded: a second decision inside the floor is held.
+  now += 60_000;
+  const storm = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'paused:2', blocking: true });
+  assert.equal(storm.delivered, 0);
+  assert.equal(storm.skipped[0].reason, 'rate_limited');
+
+  // And it did not spend the routine budget either — the two lanes stay separate.
+  now += 5 * 60_000;
+  const after = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'paused:3', blocking: true });
+  assert.equal(after.delivered, 1);
+
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});

@@ -56,3 +56,23 @@ test('set hygiene: write|execute only, deleteFile never enters, downloadFile is 
     else assert.equal(g.domain, 'local');
   }
 });
+
+test('approving deep_explore grants the local loop it is about to run', () => {
+  // Prod 2026-09-02 06:50: the owner approved deep_explore; the round it authorised hit
+  // "blocked pariGp — denied by permission matrix", fell back to reading memory, and recorded
+  // no_commit. Ten minutes later they paid a second "ok" for the same workflow. deep_explore is
+  // execute×SELF, so it fell outside `domain === 'local'` and neither approval covered the other.
+  const g = localWorkflowGrants('execute', 'self', 'deep_explore');
+  assert.deepEqual(names(g), ['downloadFile', 'leanCheck', 'moveFile', 'pariGp', 'patch', 'process', 'shell', 'writeFile', 'z3Verify']);
+});
+
+test('the widening is one-directional: a plain writeFile approval still does not start the engine', () => {
+  for (const entry of [
+    localWorkflowGrants('write', 'local', 'writeFile'),
+    localWorkflowGrants('execute', 'local', 'shell'),
+    localWorkflowGrants('write', 'network', 'downloadFile'),
+  ]) {
+    assert.ok(!entry.some((x) => x.tool === 'deep_explore'));
+  }
+  assert.ok(!LOCAL_RESEARCH_WORKFLOW.some((x) => x.tool === 'deep_explore'));
+});

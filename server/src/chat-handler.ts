@@ -1909,6 +1909,7 @@ function requestFormalAutoAdmission(s: ReasoningSession): void {
     kind: 'deep_explore:auto_admission',
     targetRef: `deep_explore:auto-admission:${s.id}`,
     text,
+    blocking: true, // it paused the episode and cannot start again without an answer
   }).catch(() => {});
   console.log(
     `[auto-advance] formal admission card raised session=${safeSessionId(s.id)} targets=${targets.size}`,
@@ -4547,9 +4548,10 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
       void pushDispatcher
         .enqueue({
           severity: 'urgent',
-          kind: 'deep_explore:auto_advance',
+          kind: opts.blocking ? 'deep_explore:auto_paused' : 'deep_explore:auto_advance',
           targetRef: `deep_explore:auto:${Date.now()}`,
           text,
+          blocking: opts.blocking === true,
         })
         .catch(() => {});
     }
@@ -8185,11 +8187,27 @@ export async function handleChatSend(
             ? `"${focus.goal.slice(0, 40)}" needs one local workflow approval before another automatic batch — the card has just been sent. Reply "approve" to start it.`
             : `「${focus.goal.slice(0, 40)}」再跑一批之前需要一次本地工作流授权，授权卡已发出。回复「同意」开始。`;
         } else {
+          // Say what the LAST batch actually did before offering another. Two reasons, both from prod
+          // 2026-09-01/02: the acknowledgement was byte-identical every time, and WeChat's 5-minute
+          // dedup window silently dropped the second one (`chunks: 0, deduped: 1`) — the owner said
+          // 继续, the batch really re-armed, and they were answered with nothing, so they said it
+          // again. And "another batch is running" is the wrong thing to say on its own when the last
+          // four rounds committed nothing to the tree; that is the fact they need in order to decide
+          // whether re-arming is even the right move.
+          const stalled = focus.noProgressRounds ?? 0;
+          const budget = deepExploreAutoAdvance.roundsBudget();
           deepExploreAutoAdvance.rearm(focus.id);
-          console.log(`[explore-control] owner rearmed ${why} pause as an automatic batch for ${focus.id}`);
+          console.log(
+            `[explore-control] owner rearmed ${why} pause as an automatic batch for ${focus.id} ` +
+            `(noProgressRounds=${stalled}, budget=${budget})`,
+          );
           reply = en
-            ? `Another automatic batch is running for "${focus.goal.slice(0, 40)}". I will only push milestones or a decision that needs you.`
-            : `已给「${focus.goal.slice(0, 40)}」重新武装一批自动推进。之后只推送里程碑，或真正需要你决策的暂停。`;
+            ? `## For User\n\nAnother automatic batch (up to ${budget} rounds) is running for ` +
+              `"${focus.goal.slice(0, 40)}"${stalled > 0 ? `, after ${stalled} round(s) that committed nothing to the tree` : ''}. ` +
+              `I will only push milestones or a decision that needs you — say 停 to stop it.`
+            : `## 给用户\n\n已给「${focus.goal.slice(0, 40)}」重新武装一批自动推进（最多 ${budget} 轮）` +
+              `${stalled > 0 ? `——上一批有 ${stalled} 轮没有向树提交任何东西` : ''}。` +
+              `之后只推里程碑，或真正需要你决策的暂停；说「停」可以随时停下。`;
         }
       } else if (ec.kind === 'stop_auto') {
         // Turn off any auto-advance, and acknowledge the pause for manual sessions too (they were never

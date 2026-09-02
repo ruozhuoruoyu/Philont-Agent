@@ -150,12 +150,25 @@ export function localWorkflowGrants(
   approvedTool: string,
 ): WorkflowGrant[] {
   // Entry: a local write/execute approval, or approving downloadFile itself (an artifact loop that
-  // STARTS with a download continues with write/run — same workflow, same one-approval contract).
+  // STARTS with a download continues with write/run — same workflow, same one-approval contract), or
+  // approving deep_explore.
+  //
+  // deep_explore is classified execute×SELF, so it fell outside `domain === 'local'` in both
+  // directions and neither approval covered the other. Prod 2026-09-02 06:50: the owner approved
+  // deep_explore, the round it authorised then hit `blocked pariGp — denied by permission matrix`,
+  // reasoned from memory instead, and recorded `no_commit`. Ten minutes later they paid a second "ok"
+  // for the same workflow. A reasoning round's whole job is write a probe → run it → record what came
+  // back; approving the engine and withholding its hands buys a dark round, not safety.
+  //
+  // Deliberately one-directional in the widening sense: this adds deep_explore as an ENTRY, and
+  // deep_explore is not added to LOCAL_RESEARCH_WORKFLOW, so approving a plain writeFile still does
+  // not start the reasoning engine.
   const isLocalWorkflow =
     approvedDomain === 'local' &&
     (approvedCapability === 'write' || approvedCapability === 'execute');
   const isDownload = approvedTool === 'downloadFile';
-  if (!isLocalWorkflow && !isDownload) return [];
+  const isDeepExplore = approvedTool === 'deep_explore';
+  if (!isLocalWorkflow && !isDownload && !isDeepExplore) return [];
   return LOCAL_RESEARCH_WORKFLOW.filter((g) => g.tool !== approvedTool);
 }
 
