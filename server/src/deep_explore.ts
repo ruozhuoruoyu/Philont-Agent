@@ -3606,6 +3606,18 @@ export function createDeepExploreTool(
     // Mechanism-side attribution: what did this round do to the node it was pinned to? Derived from the
     // two snapshots — the model's own `relation` argument is only compared against it below.
     const attribution = attributeRound(before, after, roundTarget?.id);
+    // A round that committed nothing AND called nothing is the one case where the model's own words
+    // are the only evidence of why — and they were being thrown away. Prod 2026-09-01 23:09–23:16:
+    // four background rounds in a row logged `✓ done (iter 1/40)`, meaning the sub-LLM answered in
+    // prose on its first turn and never touched a tool, and the log recorded only that nothing
+    // happened. "It stopped overnight" could not be diagnosed any further than that.
+    if (attribution.relation === 'no_commit' && result.toolCallsSpent === 0) {
+      console.warn(
+        `[deep-explore] barren round session=${safeSessionId(session.id)} target=${roundTarget?.id ?? 'none'} ` +
+        `iters=${result.itersUsed} tools=0 — the model wrote instead of working the tree: ` +
+        `"${(result.finalText ?? '').replace(/\s+/g, ' ').trim().slice(0, 300)}"`,
+      );
+    }
     const claimedRelations = takeClaimedRelations(session.id);
     if (roundTarget) {
       console.log(
