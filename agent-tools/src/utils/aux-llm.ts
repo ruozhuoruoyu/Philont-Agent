@@ -185,7 +185,6 @@ function auxThinkingDisabled(model: string): boolean {
   if (m.startsWith('deepseek-v') && !m.startsWith('deepseek-v3')) return true;
   if (m === 'deepseek-reasoner') return true;
   if (m.includes('kimi') || m.includes('moonshot')) return true;
-  if (m.includes('glm') || m.includes('zhipu') || m.includes('chatglm')) return true;
   return false;
 }
 
@@ -238,6 +237,27 @@ function expandedTokenBudget(requested: number | undefined): number | null {
     AUX_TRUNCATION_RETRY_MAX_TOKENS,
     Math.max(AUX_TRUNCATION_RETRY_MIN_TOKENS, current * 2),
   );
+}
+
+/**
+ * The budget to try when doubling is provably the wrong shape of step.
+ *
+ * Doubling assumes the last attempt was CLOSE. When a reply comes back with no content and no
+ * reasoning, the last attempt was not close to anything — and two doublings from the 256 floor reach
+ * 1024, which is nowhere near what the same endpoint answers at.
+ *
+ * Prod 2026-09-02, one endpoint, one model, one key: the health probe (a ~30-character prompt,
+ * max_tokens 256) succeeds every boot; the skill selector (~10k tokens of prompt, max_tokens 256 →
+ * 512 → 1024) came back empty every time; and the MAIN turn — a much larger prompt still, at
+ * max_tokens 16000 — worked. The input is not the problem, since the biggest input is the one that
+ * works. What the small budgets cannot hold is a thinking block whose length grows with the prompt,
+ * and `thinking: {type:'disabled'}` demonstrably does not stop it on this endpoint.
+ *
+ * So once thinking-off has been tried and the reply is still empty, go where the evidence points in
+ * one step, instead of walking a ladder that cannot arrive.
+ */
+function decisiveTokenBudget(): number {
+  return AUX_TRUNCATION_RETRY_MAX_TOKENS;
 }
 
 export function auxLLMHealth(): {
@@ -331,6 +351,17 @@ export async function callAuxLLM(request: AuxLLMRequest): Promise<string> {
           const invisibleThinking = isOutputTruncation(e) && e.emptyOutput === true;
           const retryTokens = isOutputTruncation(e) ? expandedTokenBudget(attempt.maxTokens) : null;
           if (retry === AUX_TRUNCATION_MAX_RETRIES || retryTokens === null) throw e;
+          if (invisibleThinking && attempt.disableThinking === true) {
+            const decisive = decisiveTokenBudget();
+            if ((attempt.maxTokens ?? DEFAULT_MAX_TOKENS) < decisive) {
+              console.warn(
+                `[aux-llm] still empty with thinking disabled; going straight to max_tokens=${decisive} ` +
+                  `(doubling cannot reach the budget this endpoint answers at)`,
+              );
+              attempt = { ...attempt, maxTokens: decisive };
+              continue;
+            }
+          }
           if (invisibleThinking && attempt.disableThinking !== true) {
             // SAME budget, only the generation mode changes. Raising it here was wrong on its own
             // terms — the signature says the budget was spent producing nothing, so more of it is

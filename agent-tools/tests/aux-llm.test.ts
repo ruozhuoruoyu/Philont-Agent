@@ -307,14 +307,50 @@ describe('aux-llm', () => {
       }
     });
 
-    it('a GLM model has thinking off on the FIRST call, not the second', () => {
+    it('when thinking-off does not help either, the budget jumps to one the endpoint answers at', async () => {
+      // Prod 2026-09-02, one endpoint / one model / one key: the health probe (a ~30-character prompt
+      // at max_tokens 256) succeeded every boot, the skill selector (~10k tokens of prompt at 256 →
+      // 512 → 1024) came back empty every time, and the MAIN turn — a larger prompt still, at
+      // max_tokens 16000 — worked. So the input was never the problem; the small budgets could not
+      // hold a thinking block that grows with the prompt, and thinking:{type:'disabled'} did not stop
+      // it. Two doublings from the 256 floor reach 1024 and stop, which is nowhere near 16000.
+      setAuxEnv(undefined, undefined, 'some-endpoint-that-ignores-thinking-disabled');
+      const fakeFetch = mockFetch((call) => {
+        const body = call.body as { max_tokens: number };
+        if (body.max_tokens >= 16_384) {
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: 'selected' }, finish_reason: 'stop' }],
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: '' }, finish_reason: 'length' }],
+        }), { status: 200 });
+      });
+      try {
+        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 256 }), 'selected');
+        const sent = fakeFetch.calls.map((c) => c.body as { max_tokens: number; thinking?: { type: string } });
+        assert.deepEqual(
+          sent.map((b) => b.max_tokens),
+          [256, 256, 16_384],
+          'mode first at the same budget, then one decisive step — not 256/512/1024',
+        );
+        assert.equal(sent[1].thinking?.type, 'disabled');
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('a GLM model gets no thinking field on the first call — the same decision the main path makes', () => {
+      // server/src/providers resolves glm* to OpenAICompatProfile, which sends no thinking wire at
+      // all — and on this endpoint sending it changed nothing (prod: still empty). Two layers decide
+      // "how do I talk to this model"; they should not decide it differently.
       setAuxEnv(undefined, undefined, 'glm5.3-flash-b30t');
       const fakeFetch = mockFetch(() => new Response(JSON.stringify({
         choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
       }), { status: 200 }));
       return callAuxLLM({ user: 'q', maxTokens: 256 }).then(() => {
         const body = fakeFetch.calls[0].body as { thinking?: { type: string } };
-        assert.equal(body.thinking?.type, 'disabled');
+        assert.equal(body.thinking, undefined);
       }).finally(() => fakeFetch.restore());
     });
 
