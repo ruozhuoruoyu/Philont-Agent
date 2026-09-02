@@ -1013,8 +1013,29 @@ class OpenAICompatAdapter implements LLMAdapter {
     }
 
     const url = `${this.baseUrl}${this.cfg.path}`;
+    // An EMPTY reply gets ONE retry with more room (2026-09-02).
+    //
+    // Prod, glm5.3-flash-b30t: within a single turn the model emitted tool calls fine and then
+    // returned an empty final text — twice in a row, each after 80 seconds of generating, so it was
+    // producing something the response never carried. The turn ended on the deterministic fallback
+    // ("2 次工具调用…但未能生成可用结论。请回复继续"), which asks the owner for the one word that starts
+    // the same loop again.
+    //
+    // The empty-conclusion gate does regenerate once, but with the SAME parameters — and the log
+    // shows it "stayed empty" both times, which is what re-asking an unchanged question gets. The aux
+    // path hit the identical failure and it went away the moment the budget grew (256/512/1024 all
+    // empty, 16384 fine); the final text of a long turn is exactly where a thinking block is largest,
+    // so the last call of a turn is the one most likely to run out.
+    const emptyRetryMaxTokens = (() => {
+      const raw = process.env.PHILONT_LLM_EMPTY_RETRY_MAX_TOKENS;
+      const n = raw ? parseInt(raw, 10) : NaN;
+      if (Number.isFinite(n) && n >= maxTokens && n <= 65536) return n;
+      return Math.min(65536, Math.max(maxTokens * 2, 32000));
+    })();
+    let emptyRetried = false;
     // Retry transient network failures (fetch failed / connection reset) + 5xx/429 — a failed POST
     // produced no completion, so re-issuing is safe. 4xx (except 408/429) and aborts propagate.
+    for (;;) {
     const resp = await sendWithTransientRetry(async () => {
       const r = await fetch(url, {
         method: 'POST',
@@ -1142,7 +1163,19 @@ class OpenAICompatAdapter implements LLMAdapter {
       };
     }
 
+    if (!text.trim() && !emptyRetried) {
+      emptyRetried = true;
+      console.warn(
+        `[llm-adapter] ${this.cfg.name} returned an empty reply (no text, no tool calls) at ` +
+          `max_tokens=${body.max_tokens}; retrying once at ${emptyRetryMaxTokens} with thinking disabled`,
+      );
+      body.max_tokens = emptyRetryMaxTokens;
+      body.thinking = { type: 'disabled' };
+      continue;
+    }
+
     return { type: 'text', content: text };
+    }
   }
 }
 
