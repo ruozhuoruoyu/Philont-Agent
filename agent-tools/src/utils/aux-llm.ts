@@ -198,6 +198,19 @@ let consecutiveAuxFailures = 0;
 let auxCircuitOpenUntil = 0;
 const AUX_CIRCUIT_FAILURE_THRESHOLD = 3;
 const AUX_CIRCUIT_OPEN_MS = 5 * 60_000;
+/**
+ * Floor under any caller's max_tokens.
+ *
+ * Callers ask for a one-word verdict and reasonably write `maxTokens: 4`. But max_tokens is a budget
+ * for what the SERVER generates, not a promise about what it returns: prod 2026-09-02 shows this
+ * endpoint truncating at max_tokens 4, 8 and 96 with `content_chars=0, reasoning_chars=0` — the
+ * budget was spent before a single character came back. Every one of those calls then paid for the
+ * truncation-retry ladder to discover what the floor already knows.
+ *
+ * The floor costs nothing: a model asked for one word still answers in one word. It only stops us
+ * from handing it a budget too small to answer in.
+ */
+const AUX_MIN_MAX_TOKENS = 256;
 const AUX_TRUNCATION_RETRY_MIN_TOKENS = 512;
 const AUX_TRUNCATION_RETRY_MAX_TOKENS = 16_384;
 const AUX_TRUNCATION_MAX_RETRIES = 2;
@@ -258,7 +271,12 @@ export async function probeAuxLLM(signal?: AbortSignal): Promise<{ ok: boolean; 
   }
 }
 
-export async function callAuxLLM(req: AuxLLMRequest): Promise<string> {
+export async function callAuxLLM(request: AuxLLMRequest): Promise<string> {
+  // See AUX_MIN_MAX_TOKENS: a budget too small to answer in is not a smaller answer, it is no answer.
+  const req: AuxLLMRequest =
+    request.maxTokens !== undefined && request.maxTokens < AUX_MIN_MAX_TOKENS
+      ? { ...request, maxTokens: AUX_MIN_MAX_TOKENS }
+      : request;
   const envConfig = readAuxLLMEnv();
   auxCallCount++;
   if (!envConfig) {

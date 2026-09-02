@@ -176,6 +176,8 @@ const DEFAULT_MAX_ITERS = 8;
 const PREVIEW_MAX = 200;
 const TOOL_RESULT_MAX = 16_000;
 const REPEATED_FAILURE_LIMIT = 3;
+/** How many completely empty LLM replies to re-ask before reporting the run as empty. */
+const EMPTY_RESPONSE_RETRIES = 2;
 
 /**
  * No-progress early exit (2026-07-15). The loop otherwise runs its FULL iteration budget whenever the LLM
@@ -276,6 +278,7 @@ export async function runMiniAgentLoop(
   const toolCallHistory: MiniLoopToolCallRecord[] = [];
   let llmTokensSpent = 0;
   let toolCallsSpent = 0;
+  let emptyResponses = 0;
   let unproductiveRounds = 0;
   /** Rounds in which EVERY tool call failed, spent against this loop's repair budget (see below). */
   let failureOnlyRounds = 0;
@@ -330,6 +333,40 @@ export async function runMiniAgentLoop(
     if (response.type === 'text') {
       if (response.tokensUsed === undefined) {
         llmTokensSpent += estimateTokens(response.content);
+      }
+      // An EMPTY response is not an answer (2026-09-02).
+      //
+      // Prod: three deep_explore rounds in a row logged `✓ done (iter 1/40)` with zero tool calls and
+      // an empty finalText — the provider returned no content at all (a reasoning model spending its
+      // whole output budget on reasoning tokens: the same turn shows the main LLM twice empty after 6
+      // and 14 tool calls, and the aux ladder truncating at max_tokens 4 / 8 / 96 / 512 / 1024 with
+      // `content_chars=0`). This branch accepted that as a completed round, so a round that never
+      // began was reported as one that finished and committed nothing.
+      //
+      // The post-cap synthesis below already required `.trim()`; the main path did not. Ask again —
+      // an empty response is usually transient — and if it stays empty, say so instead of returning
+      // silence dressed as a result.
+      if (!response.content.trim()) {
+        emptyResponses++;
+        if (emptyResponses <= EMPTY_RESPONSE_RETRIES) {
+          onStatus?.(`⚠ empty LLM response (iter ${i + 1}/${maxIters}) — asking again`);
+          messages.push({
+            role: 'user',
+            content:
+              'Your last reply was completely empty — no text and no tool call, so nothing happened. ' +
+              'Take ONE concrete action now: call a tool, or state your conclusion in a sentence.',
+          });
+          continue;
+        }
+        return {
+          finalText: '',
+          toolCallHistory,
+          itersUsed: i + 1,
+          hitCap: false,
+          llmTokensSpent,
+          toolCallsSpent,
+          error: 'empty_llm_response',
+        };
       }
       onStatus?.(`✓ done (iter ${i + 1}/${maxIters})`);
       return {

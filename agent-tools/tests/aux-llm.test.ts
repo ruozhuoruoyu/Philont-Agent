@@ -240,7 +240,7 @@ describe('aux-llm', () => {
       );
       try {
         await assert.rejects(
-          () => callAuxLLM({ user: 'q', maxTokens: 200 }),
+          () => callAuxLLM({ user: 'q', maxTokens: 256 }),
           (e: unknown) => {
             const err = e as AuxLLMError;
             assert.equal(err.kind, 'output_truncated');
@@ -250,7 +250,7 @@ describe('aux-llm', () => {
         );
         assert.deepEqual(
           fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
-          [200, 512, 1024],
+          [256, 512, 1024],
         );
       } finally {
         fakeFetch.restore();
@@ -261,7 +261,7 @@ describe('aux-llm', () => {
       setAuxEnv();
       const fakeFetch = mockFetch((call) => {
         const maxTokens = (call.body as { max_tokens: number }).max_tokens;
-        if (maxTokens === 200) {
+        if (maxTokens === 256) {
           return new Response(JSON.stringify({
             choices: [{
               message: { content: '', reasoning_content: '' },
@@ -272,10 +272,10 @@ describe('aux-llm', () => {
         return makeOpenAIResponse('selected');
       });
       try {
-        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 200 }), 'selected');
+        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 256 }), 'selected');
         assert.deepEqual(
           fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
-          [200, 512],
+          [256, 512],
         );
         assert.equal(auxLLMHealth().circuitOpen, false);
       } finally {
@@ -295,10 +295,10 @@ describe('aux-llm', () => {
         return makeOpenAIResponse('{"complete":true}');
       });
       try {
-        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 96, requireComplete: true }), '{"complete":true}');
+        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 256, requireComplete: true }), '{"complete":true}');
         assert.deepEqual(
           fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
-          [96, 512, 1024],
+          [256, 512, 1024],
         );
       } finally {
         fakeFetch.restore();
@@ -510,10 +510,10 @@ describe('aux-llm', () => {
         return makeAnthropicResponse('{"complete":true}');
       });
       try {
-        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 96, requireComplete: true }), '{"complete":true}');
+        assert.equal(await callAuxLLM({ user: 'json', maxTokens: 256, requireComplete: true }), '{"complete":true}');
         assert.deepEqual(
           fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
-          [96, 512, 1024],
+          [256, 512, 1024],
         );
       } finally {
         fakeFetch.restore();
@@ -668,4 +668,29 @@ describe('aux-llm', () => {
       );
     });
   });
+});
+
+it('a max_tokens too small to answer in is raised to the floor', async () => {
+  // Prod 2026-09-02: this endpoint truncated at max_tokens 4, 8 and 96 with
+  // `content_chars=0, reasoning_chars=0` — the budget was gone before a character came back, and each
+  // call then paid for the retry ladder to rediscover it. Callers write `maxTokens: 4` for a one-word
+  // verdict, which is a reasonable thing to want and an unreasonable budget to grant.
+  const seen: Array<number | undefined> = [];
+  registerMainLLM(async (req) => {
+    seen.push(req.maxTokens);
+    return 'yes';
+  });
+  const prev = process.env.AUX_LLM_BASE_URL;
+  delete process.env.AUX_LLM_BASE_URL; // force the registered main-LLM path
+  try {
+    await callAuxLLM({ system: 's', user: 'u', maxTokens: 4 });
+    await callAuxLLM({ system: 's', user: 'u', maxTokens: 8 });
+    await callAuxLLM({ system: 's', user: 'u', maxTokens: 2048 });
+    assert.deepEqual(seen, [256, 256, 2048], 'raised to the floor, never lowered');
+    const untouched = await callAuxLLM({ system: 's', user: 'u' });
+    assert.equal(untouched, 'yes');
+    assert.equal(seen[3], undefined, 'an unset budget stays unset — the default is elsewhere');
+  } finally {
+    if (prev !== undefined) process.env.AUX_LLM_BASE_URL = prev;
+  }
 });

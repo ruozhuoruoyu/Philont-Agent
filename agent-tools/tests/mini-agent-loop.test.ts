@@ -491,3 +491,38 @@ test('no-progress: the repair budget is a total, so interleaving cannot make the
   });
   assert.ok(r.toolCallsSpent < 20, `alternating empty/failed rounds must still stop (spent ${r.toolCallsSpent})`);
 });
+
+test('an empty LLM reply is re-asked, not accepted as a finished run', async () => {
+  // Prod 2026-09-02: three deep_explore rounds in a row logged `✓ done (iter 1/40)` with zero tool
+  // calls and an empty finalText. The provider had returned no content at all, and this loop reported
+  // it as a completed round — so a round that never began looked like one that finished having
+  // decided to commit nothing.
+  const llm = stubLLM([textResponse(''), textResponse('   '), textResponse('the real answer')]);
+  const statuses: string[] = [];
+  const r = await runMiniAgentLoop({
+    systemPrompt: 's',
+    userMessage: 'u',
+    llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: async () => ({ ok: true, output: '' }),
+    onStatus: (t) => statuses.push(t),
+  });
+  assert.equal(r.finalText, 'the real answer');
+  assert.equal(r.itersUsed, 3);
+  assert.equal(r.error, undefined);
+  assert.equal(statuses.filter((s) => s.includes('empty LLM response')).length, 2);
+});
+
+test('an LLM that only ever returns empty reports it, instead of silence dressed as a result', async () => {
+  const llm = stubLLM([textResponse(''), textResponse(''), textResponse('')]);
+  const r = await runMiniAgentLoop({
+    systemPrompt: 's',
+    userMessage: 'u',
+    llm,
+    toolDefs: NO_TOOLS,
+    toolRunner: async () => ({ ok: true, output: '' }),
+  });
+  assert.equal(r.error, 'empty_llm_response');
+  assert.equal(r.finalText, '');
+  assert.equal(r.hitCap, false, 'this is not a cap; the model said nothing');
+});

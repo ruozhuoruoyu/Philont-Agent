@@ -148,9 +148,20 @@ function subTaskTextResp(text: string): MiniLoopLLMResponse {
   return { type: 'text', content: text, tokensUsed: 100 };
 }
 
-function subTaskFailResp(): MiniLoopLLMResponse {
-  // 通过返回空文本模拟"任务失败"路径(收尾文本为空)
-  return { type: 'text', content: '', tokensUsed: 50 };
+/**
+ * A failing sub-task, simulated the way production fails one: the sub-loop ends with no final text.
+ *
+ * Since 2026-09-02 an empty reply is RE-ASKED before the loop gives up (a provider returning no
+ * content at all was being read as "the model finished and chose to say nothing"), so a failure now
+ * takes EMPTY_RESPONSE_RETRIES + 1 empty replies. planAndExecute still marks it failed — either on
+ * `error: 'empty_llm_response'` or on the empty finalText — so what this test asserts is unchanged.
+ */
+function subTaskFailResp(): MiniLoopLLMResponse[] {
+  return [
+    { type: 'text', content: '', tokensUsed: 50 },
+    { type: 'text', content: '', tokensUsed: 50 },
+    { type: 'text', content: '', tokensUsed: 50 },
+  ];
 }
 
 beforeEach(() => {
@@ -204,7 +215,7 @@ test('dep-aware skip:st-2 失败 → st-3 (deps=[2]) 自动 skipped, st-4 (deps=
       ],
     }),
     subTaskTextResp('did a'),
-    subTaskFailResp(), // st-2 fail
+    ...subTaskFailResp(), // st-2 fail (empty replies, re-asked then given up on)
     // st-3 不会调 LLM(skipped)
     subTaskTextResp('did d'),
   ]);
