@@ -332,11 +332,15 @@ export async function callAuxLLM(request: AuxLLMRequest): Promise<string> {
           const retryTokens = isOutputTruncation(e) ? expandedTokenBudget(attempt.maxTokens) : null;
           if (retry === AUX_TRUNCATION_MAX_RETRIES || retryTokens === null) throw e;
           if (invisibleThinking && attempt.disableThinking !== true) {
+            // SAME budget, only the generation mode changes. Raising it here was wrong on its own
+            // terms — the signature says the budget was spent producing nothing, so more of it is
+            // not indicated — and prod 2026-09-02 21:07 shows the retry then failing again at the
+            // NEXT rung up, which is what the ladder was going to try anyway. One variable at a time.
             console.warn(
               `[aux-llm] budget spent with no content and no reasoning at max_tokens=` +
-                `${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; retrying with thinking disabled`,
+                `${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; retrying with thinking disabled (same budget)`,
             );
-            attempt = { ...attempt, disableThinking: true, maxTokens: retryTokens };
+            attempt = { ...attempt, disableThinking: true };
             continue;
           }
           console.warn(
@@ -398,7 +402,26 @@ interface OpenAIChatResponse {
     message?: { role?: string; content?: string | null; reasoning_content?: string | null };
     finish_reason?: string;
   }>;
+  /**
+   * Never parsed until 2026-09-02, and its absence is why the empty-reply diagnosis took three
+   * attempts. `finish_reason=length` with nothing returned has at least three causes that look
+   * identical from outside — tokens spent on a thinking block we cannot see, a prompt that filled the
+   * context so there was no room left to generate in, or a proxy dropping the body — and they are told
+   * apart by exactly these numbers. Reporting a failure without them is asking the next reader to
+   * guess the same way.
+   */
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   error?: { message?: string; type?: string };
+}
+
+/** `prompt=N completion=M` for an error message; empty when the provider reported no usage. */
+function renderUsage(usage: OpenAIChatResponse['usage']): string {
+  if (!usage) return ', usage=not-reported';
+  const parts: string[] = [];
+  if (usage.prompt_tokens !== undefined) parts.push(`prompt=${usage.prompt_tokens}`);
+  if (usage.completion_tokens !== undefined) parts.push(`completion=${usage.completion_tokens}`);
+  if (usage.total_tokens !== undefined) parts.push(`total=${usage.total_tokens}`);
+  return parts.length ? `, ${parts.join(' ')}` : ', usage=empty';
 }
 
 async function callOpenAICompatible(
@@ -508,7 +531,8 @@ async function callOpenAICompatible(
     const reasoningChars = choice?.message?.reasoning_content?.length ?? 0;
     throw new AuxLLMError(
       `Aux LLM output truncated (finish_reason=length, content_chars=${content?.length ?? 0}, ` +
-        `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
+        `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS}` +
+        `${renderUsage(json.usage)})`,
       'output_truncated',
       undefined,
       (content?.length ?? 0) === 0 && reasoningChars === 0,
@@ -518,8 +542,11 @@ async function callOpenAICompatible(
     const reasoningChars = choice?.message?.reasoning_content?.length ?? 0;
     throw new AuxLLMError(
       `Aux LLM returned empty content (finish_reason=${finishReason}, ` +
-        `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
+        `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS}` +
+        `${renderUsage(json.usage)})`,
       finishReason === 'length' ? 'output_truncated' : 'invalid_response',
+      undefined,
+      reasoningChars === 0,
     );
   }
   return content;

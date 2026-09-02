@@ -282,6 +282,9 @@ describe('aux-llm', () => {
         assert.equal(sent.length, 2, 'one failure, then one retry — not a walk up the ladder');
         assert.equal(sent[0].thinking, undefined, 'an unlisted model gets no thinking field on the first try');
         assert.equal(sent[1].thinking?.type, 'disabled');
+        // ONE variable at a time. The signature says the budget was spent producing nothing, so more
+        // of it is not indicated — and raising it here also hides which change was the one that worked.
+        assert.equal(sent[1].max_tokens, sent[0].max_tokens, 'same budget, only the mode changed');
       } finally {
         fakeFetch.restore();
       }
@@ -320,9 +323,12 @@ describe('aux-llm', () => {
       const fakeFetch = mockFetch((call) => {
         const maxTokens = (call.body as { max_tokens: number }).max_tokens;
         if (maxTokens === 256) {
+          // Reasoning came back, so the model really did generate and run out of room — the case a
+          // bigger budget answers. (A reply with NEITHER content nor reasoning is a different
+          // failure and takes the thinking-off path; see the test above.)
           return new Response(JSON.stringify({
             choices: [{
-              message: { content: '', reasoning_content: '' },
+              message: { content: '', reasoning_content: 'partial thought' },
               finish_reason: 'length',
             }],
           }), { status: 200 });
@@ -751,4 +757,50 @@ it('a max_tokens too small to answer in is raised to the floor', async () => {
   } finally {
     if (prev !== undefined) process.env.AUX_LLM_BASE_URL = prev;
   }
+});
+
+describe('callAuxLLM — reporting enough to diagnose an empty reply', () => {
+  beforeEach(clearEnv);
+  afterEach(clearEnv);
+
+  it('an empty reply reports the provider token usage', async () => {
+    // Three failures wear the same `finish_reason=length` with nothing returned — tokens spent on an
+    // invisible thinking block, a prompt that filled the context leaving no room to generate in, or a
+    // proxy dropping the body. They are told apart by these numbers, and until 2026-09-02 the response
+    // was parsed without ever reading them, so each diagnosis was a guess. Two of mine were wrong.
+    setAuxEnv();
+    const fakeFetch = mockFetch(() => new Response(JSON.stringify({
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 31_402, completion_tokens: 0, total_tokens: 31_402 },
+    }), { status: 200 }));
+    try {
+      await assert.rejects(
+        () => callAuxLLM({ user: 'q', maxTokens: 256, fallbackToMain: false }),
+        (e: unknown) => {
+          assert.match((e as AuxLLMError).message, /prompt=31402 completion=0 total=31402/);
+          return true;
+        },
+      );
+    } finally {
+      fakeFetch.restore();
+    }
+  });
+
+  it('says so plainly when the provider reports no usage at all', async () => {
+    setAuxEnv();
+    const fakeFetch = mockFetch(() => new Response(JSON.stringify({
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+    }), { status: 200 }));
+    try {
+      await assert.rejects(
+        () => callAuxLLM({ user: 'q', maxTokens: 256, fallbackToMain: false }),
+        (e: unknown) => {
+          assert.match((e as AuxLLMError).message, /usage=not-reported/);
+          return true;
+        },
+      );
+    } finally {
+      fakeFetch.restore();
+    }
+  });
 });
