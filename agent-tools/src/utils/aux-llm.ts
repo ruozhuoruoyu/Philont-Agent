@@ -260,6 +260,7 @@ function decisiveTokenBudget(): number {
   return AUX_TRUNCATION_RETRY_MAX_TOKENS;
 }
 
+
 export function auxLLMHealth(): {
   configured: boolean;
   calls: number;
@@ -333,6 +334,18 @@ export async function callAuxLLM(request: AuxLLMRequest): Promise<string> {
         : callOpenAICompatible(envConfig, request);
       let attempt = req;
       let result: string | undefined;
+      /**
+       * Has THIS call already produced a reply with no content and no reasoning?
+       *
+       * Once it has, the doubling ladder is the wrong tool for the rest of the call, whatever the
+       * next failure looks like. Prod 2026-09-03 spent its retries the other way: attempt 1 came
+       * back 0/0, attempt 2 (thinking off) came back truncated WITH some reasoning so it doubled
+       * 2048 → 4096, and attempt 3 hit the cap and threw — `prompt=2689 completion=4096`, a 2.7k
+       * prompt against a model that generated the entire budget and returned none of it. The
+       * decisive budget was never tried, because the jump was gated on the LAST failure rather than
+       * on what this call had already shown.
+       */
+      let sawInvisibleThinking = false;
       for (let retry = 0; retry <= AUX_TRUNCATION_MAX_RETRIES; retry++) {
         try {
           result = await callConfiguredAux(attempt);
@@ -349,24 +362,23 @@ export async function callAuxLLM(request: AuxLLMRequest): Promise<string> {
           // off. A hard-coded family list silently misses every model nobody has added yet, which is
           // the whole point of reacting to the SIGNATURE instead: this path needs no name.
           const invisibleThinking = isOutputTruncation(e) && e.emptyOutput === true;
-          const retryTokens = isOutputTruncation(e) ? expandedTokenBudget(attempt.maxTokens) : null;
+          if (invisibleThinking) sawInvisibleThinking = true;
+          // ONE rule decides the next budget. Once this call has seen a reply with no content and no
+          // reasoning, doubling is the wrong step for the rest of the call whatever the next failure
+          // looks like — prod 2026-09-03 spent its three attempts the unlucky way: attempt 1 came back
+          // 0/0, attempt 2 (thinking off) came back truncated WITH some reasoning so the ladder went
+          // back to doubling 2048 → 4096, and attempt 3 hit the cap and threw. The usage line settled
+          // in one number what three days of theories had not: `prompt=2689 completion=4096` — a 2.7k
+          // prompt against a model that generated the entire budget and returned none of it.
+          const retryTokens = isOutputTruncation(e)
+            ? (sawInvisibleThinking ? decisiveTokenBudget() : expandedTokenBudget(attempt.maxTokens))
+            : null;
           if (retry === AUX_TRUNCATION_MAX_RETRIES || retryTokens === null) throw e;
-          if (invisibleThinking && attempt.disableThinking === true) {
-            const decisive = decisiveTokenBudget();
-            if ((attempt.maxTokens ?? DEFAULT_MAX_TOKENS) < decisive) {
-              console.warn(
-                `[aux-llm] still empty with thinking disabled; going straight to max_tokens=${decisive} ` +
-                  `(doubling cannot reach the budget this endpoint answers at)`,
-              );
-              attempt = { ...attempt, maxTokens: decisive };
-              continue;
-            }
-          }
+
+          // Mode first, at the SAME budget: the signature says the budget was spent producing
+          // nothing, so more of it is not indicated, and changing two things at once hides which one
+          // worked.
           if (invisibleThinking && attempt.disableThinking !== true) {
-            // SAME budget, only the generation mode changes. Raising it here was wrong on its own
-            // terms — the signature says the budget was spent producing nothing, so more of it is
-            // not indicated — and prod 2026-09-02 21:07 shows the retry then failing again at the
-            // NEXT rung up, which is what the ladder was going to try anyway. One variable at a time.
             console.warn(
               `[aux-llm] budget spent with no content and no reasoning at max_tokens=` +
                 `${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; retrying with thinking disabled (same budget)`,
@@ -374,9 +386,15 @@ export async function callAuxLLM(request: AuxLLMRequest): Promise<string> {
             attempt = { ...attempt, disableThinking: true };
             continue;
           }
+          if (retryTokens <= (attempt.maxTokens ?? DEFAULT_MAX_TOKENS)) {
+            throw e; // both levers already at their limit — say so instead of re-asking identically
+          }
           console.warn(
-            `[aux-llm] output truncated at max_tokens=${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; ` +
-              `retrying aux with max_tokens=${retryTokens}`,
+            sawInvisibleThinking
+              ? `[aux-llm] still empty with thinking disabled; going straight to max_tokens=${retryTokens} ` +
+                `(doubling cannot reach the budget this endpoint answers at)`
+              : `[aux-llm] output truncated at max_tokens=${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; ` +
+                `retrying aux with max_tokens=${retryTokens}`,
           );
           attempt = { ...attempt, maxTokens: retryTokens };
         }

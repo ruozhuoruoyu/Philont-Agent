@@ -88,3 +88,31 @@ test('a normal reply is never retried', async () => {
     }
   });
 });
+
+test('an empty reply reports the provider usage, and says so again when the retry does not help', async () => {
+  // The aux path went three rounds of wrong guesses — a token floor, invisible thinking, the context
+  // window — before `prompt=2689 completion=4096` settled it in one line. The main path was still
+  // guessing for the same reason: it never read usage.
+  await withEnv(async () => {
+    const real = globalThis.fetch;
+    const logs: string[] = [];
+    const warn = console.warn, error = console.error;
+    console.warn = (...a: unknown[]) => { logs.push(a.join(' ')); };
+    console.error = (...a: unknown[]) => { logs.push(a.join(' ')); };
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: '' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 2689, completion_tokens: 16000 },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    try {
+      await createLLMAdapter().send([{ role: 'user', content: 'go' }] as never);
+      const joined = logs.join('\n');
+      assert.match(joined, /prompt=2689 completion=16000/);
+      assert.match(joined, /finish_reason=length/);
+      assert.match(joined, /STILL empty after the retry/, 'the retry failing is on the record too');
+    } finally {
+      globalThis.fetch = real;
+      console.warn = warn;
+      console.error = error;
+    }
+  });
+});

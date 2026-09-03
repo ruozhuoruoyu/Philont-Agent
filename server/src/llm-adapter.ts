@@ -1083,6 +1083,13 @@ class OpenAICompatAdapter implements LLMAdapter {
         finish_reason?: string;
       }>;
       error?: { message?: string; code?: string | number; type?: string };
+      /**
+       * Reported so an empty reply can be diagnosed rather than theorised about. The aux path went
+       * three rounds of wrong guesses (token floor, invisible thinking, context window) before
+       * `prompt=2689 completion=4096` settled it in one line: a 2.7k prompt against a model that
+       * generated the entire budget and returned none of it.
+       */
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
       // MiniMax business-level error
       base_resp?: { status_code: number; status_msg: string };
     };
@@ -1165,13 +1172,26 @@ class OpenAICompatAdapter implements LLMAdapter {
 
     if (!text.trim() && !emptyRetried) {
       emptyRetried = true;
+      const u = data.usage;
+      const usage = u
+        ? `prompt=${u.prompt_tokens ?? '?'} completion=${u.completion_tokens ?? '?'}`
+        : 'usage=not-reported';
       console.warn(
         `[llm-adapter] ${this.cfg.name} returned an empty reply (no text, no tool calls) at ` +
-          `max_tokens=${body.max_tokens}; retrying once at ${emptyRetryMaxTokens} with thinking disabled`,
+          `max_tokens=${body.max_tokens} (${usage}, finish_reason=${data.choices?.[0]?.finish_reason ?? '?'}); ` +
+          `retrying once at ${emptyRetryMaxTokens} with thinking disabled`,
       );
       body.max_tokens = emptyRetryMaxTokens;
       body.thinking = { type: 'disabled' };
       continue;
+    }
+    if (!text.trim() && emptyRetried) {
+      const u = data.usage;
+      console.error(
+        `[llm-adapter] ${this.cfg.name} STILL empty after the retry at max_tokens=${body.max_tokens} ` +
+          `(prompt=${u?.prompt_tokens ?? '?'} completion=${u?.completion_tokens ?? '?'}, ` +
+          `finish_reason=${data.choices?.[0]?.finish_reason ?? '?'}) — a bigger budget is not the remedy here`,
+      );
     }
 
     return { type: 'text', content: text };

@@ -290,6 +290,38 @@ describe('aux-llm', () => {
       }
     });
 
+    it('once a call has shown the empty signature, a LATER truncation does not go back to doubling', async () => {
+      // Prod 2026-09-03 spent its three attempts the unlucky way: attempt 1 came back 0/0, attempt 2
+      // (thinking off) came back truncated WITH some reasoning so the ladder doubled 2048 → 4096, and
+      // attempt 3 hit the cap and threw — `prompt=2689 completion=4096`, a 2.7k prompt against a model
+      // that generated the whole budget and returned none of it. The decisive budget was never tried,
+      // because the jump was gated on the LAST failure instead of on what the call had already shown.
+      setAuxEnv(undefined, undefined, 'some-endpoint-that-thinks-a-lot');
+      const fakeFetch = mockFetch((call) => {
+        const body = call.body as { max_tokens: number; thinking?: { type: string } };
+        if (body.max_tokens >= 16_384) {
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: 'the answer' }, finish_reason: 'stop' }],
+          }), { status: 200 });
+        }
+        // First attempt: nothing at all. Later attempts: some reasoning, which used to send the
+        // ladder back to doubling.
+        const body2 = body.thinking?.type === 'disabled'
+          ? { content: '', reasoning_content: 'a partial thought' }
+          : { content: '' };
+        return new Response(JSON.stringify({
+          choices: [{ message: body2, finish_reason: 'length' }],
+        }), { status: 200 });
+      });
+      try {
+        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 2048 }), 'the answer');
+        const sent = fakeFetch.calls.map((c) => (c.body as { max_tokens: number }).max_tokens);
+        assert.deepEqual(sent, [2048, 2048, 16_384], 'not 2048 / 2048 / 4096');
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
     it('a truncation that DID return reasoning still walks the token ladder', async () => {
       // The other failure wearing the same finish_reason: the model really did produce output and ran
       // out of room. More budget is the right answer there, and must stay the answer.
