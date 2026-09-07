@@ -246,6 +246,9 @@ export function groupFailures(
     { signature: string; count: number; latestTs: number | null; toolName: string }
   >();
   for (const f of failures) {
+    // Missing optional memory is an empty lookup, not evidence that an execution plan failed.
+    if (/^(get_fact|list_facts|search_notes|search_skills|search_kb|recall_sessions)$/.test(f.toolName)
+      && /not[ _]found|no results?|未找到|empty/i.test(f.result ?? '')) continue;
     // 2026-06-07: skip exploratory-compute tools + mechanism/deliberate-rejection signatures
     // (see EXCLUDED_FROM_ROOT_CAUSE / MECHANISM_REJECTION_RE) — not task-recurring failures.
     if (EXCLUDED_FROM_ROOT_CAUSE.has(f.toolName)) continue;

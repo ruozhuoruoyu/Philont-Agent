@@ -20,13 +20,15 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { ProgressSink } from '../task_progress.js';
 
 interface TurnContext {
   sessionId: string;
+  signal?: AbortSignal;
   /** The current turn's Tier-2 progress sink (onStatus). Lets deeply-nested tools — e.g. the
    *  deep_explore sub-loop — surface milestone summaries to the user without threading the
    *  callback through the Tool interface. Undefined for turns started without one. */
-  onStatus?: (text: string) => void;
+  onStatus?: ProgressSink;
 }
 
 const als = new AsyncLocalStorage<TurnContext>();
@@ -35,7 +37,7 @@ const als = new AsyncLocalStorage<TurnContext>();
 export function runInTurnContext<T>(
   sessionId: string,
   fn: () => Promise<T>,
-  onStatus?: (text: string) => void,
+  onStatus?: ProgressSink,
 ): Promise<T> {
   return als.run({ sessionId, onStatus }, fn);
 }
@@ -45,7 +47,23 @@ export function currentSessionId(): string | null {
   return als.getStore()?.sessionId ?? null;
 }
 
+/** Keep cancellation attached to the old async chain after a new turn starts. */
+export function setCurrentTurnSignal(signal: AbortSignal): void {
+  const context = als.getStore();
+  if (context) context.signal = signal;
+}
+
+export function currentTurnSignal(): AbortSignal | undefined {
+  return als.getStore()?.signal;
+}
+
+export function assertTurnActive(): void {
+  currentTurnSignal()?.throwIfAborted();
+}
+
 /** The current turn's onStatus progress sink, or null if none is in scope. */
-export function currentTurnStatus(): ((text: string) => void) | null {
-  return als.getStore()?.onStatus ?? null;
+export function currentTurnStatus(): ProgressSink | null {
+  const context = als.getStore();
+  if (!context?.onStatus) return null;
+  return (text, meta) => { if (!context.signal?.aborted) context.onStatus?.(text, meta); };
 }

@@ -15,6 +15,12 @@ import type { Action } from '../src/types.js';
 
 // ── extractFailureSignature ────────────────────────────────────────────
 
+test('empty optional memory lookups do not fail a plan; actual lookup errors still count', () => {
+  const failures = (result: string) => [0, 1].map((timestamp) => ({ toolName: 'get_fact', result, timestamp }));
+  assert.equal(countSameRootCauseFailures(failures('Not found: project.lrc.overall_status')), 0);
+  assert.equal(countSameRootCauseFailures(failures('SQLITE_CORRUPT database is malformed')), 2);
+});
+
 test('sig: shell command not found', () => {
   const s = extractFailureSignature(
     'shell',

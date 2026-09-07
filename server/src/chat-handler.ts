@@ -188,7 +188,9 @@ import {
 // Production no longer has a runtime dependency on @agent/node; Rust kernel is kept in the repo for future untrusted-sandbox use.
 import { interruptChannelJs, type JsInterruptController } from './interrupt_channel.js';
 import { InterruptDrainer } from './interrupt_drainer.js';
-import { runInTurnContext, currentSessionId, currentTurnStatus } from './channels/turn_context.js';
+import { runInTurnContext, currentSessionId, currentTurnStatus, currentTurnSignal, setCurrentTurnSignal, assertTurnActive } from './channels/turn_context.js';
+import { exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
+import { startProgressTicker, type ProgressSink } from './task_progress.js';
 import {
   autoClassify as autoClassifyTaskMode,
   quickSignatureHash as quickTaskSignatureHash,
@@ -1881,6 +1883,12 @@ function hasFormalAutoAdmission(): boolean {
  * would sit paused forever with a card on screen that does nothing.
  */
 function requestFormalAutoAdmission(s: ReasoningSession): void {
+  if (exploreBudgetExhausted(s)) return;
+  // Reuse a live request; a later approval episode gets its own push identity.
+  const live = [...pendingFormalAutoAdmission.values()].find(
+    (p) => p.sessionId === s.id && Date.now() - p.ts <= PENDING_AUTH_TTL_MS,
+  );
+  if (live) return;
   const entry = { sessionId: s.id, goal: s.goal, ts: Date.now() };
   const owner = s.ownerSessionId;
   const targets = new Set<string>();
@@ -1907,12 +1915,26 @@ function requestFormalAutoAdmission(s: ReasoningSession): void {
   void pushDispatcher.enqueue({
     severity: 'urgent',
     kind: 'deep_explore:auto_admission',
-    targetRef: `deep_explore:auto-admission:${s.id}`,
+    targetRef: `deep_explore:auto-admission:${s.id}:${entry.ts}`,
     text,
     blocking: true, // it paused the episode and cannot start again without an answer
-  }).catch(() => {});
+  }).then((result) => {
+    console.log(`[auto-advance] formal admission delivery session=${safeSessionId(s.id)} delivered=${result.delivered} deferred=${result.deferred} failed=${result.failed}`);
+    if (webuiClients.size === 0 && result.delivered === 0 && result.deferred === 0) {
+      for (const [sid, pending] of pendingFormalAutoAdmission) {
+        if (pending.sessionId === s.id && pending.ts === entry.ts) pendingFormalAutoAdmission.delete(sid);
+      }
+    }
+  }).catch((error) => {
+    console.warn('[auto-advance] formal admission delivery failed', error);
+    if (webuiClients.size === 0) {
+      for (const [sid, pending] of pendingFormalAutoAdmission) {
+        if (pending.sessionId === s.id && pending.ts === entry.ts) pendingFormalAutoAdmission.delete(sid);
+      }
+    }
+  });
   console.log(
-    `[auto-advance] formal admission card raised session=${safeSessionId(s.id)} targets=${targets.size}`,
+    `[auto-advance] formal admission queued session=${safeSessionId(s.id)} targets=${targets.size}`,
   );
 }
 
@@ -2009,7 +2031,7 @@ const activeTurnAborters = new Map<string, AbortController>();
 
 /** Get the AbortSignal for the current turn (used for boundary checks in sendLlmWithRescue / runToolLoop). */
 function turnAbortSignal(sessionId: string): AbortSignal | undefined {
-  return activeTurnAborters.get(sessionId)?.signal;
+  return currentTurnSignal() ?? activeTurnAborters.get(sessionId)?.signal;
 }
 
 /**
@@ -2419,6 +2441,29 @@ const tools = createToolset({
   // placeholders. Credentials written by saveCredential can be referenced directly in http headers / body.
   secretStore,
 });
+
+// Fence every tool path, including repairs, with the originating turn's cancellation.
+const executeActiveTool = tools.execute.bind(tools);
+tools.execute = async (...args: Parameters<typeof tools.execute>) => {
+  assertTurnActive();
+  // Let an already-executed authorized call return its receipt, so it is not replayed on resume.
+  const result = await executeActiveTool(...args);
+  if (!currentTurnSignal()?.aborted && result.success && args[0] === 'plan_update_step' && args[1]?.status === 'done') {
+    const sid = currentSessionId();
+    const plan = sid ? memory.plans.listBySession(sid, { limit: 1 })[0] : undefined;
+    const step = plan?.steps.find((s) => s.id === args[1]?.step_id && s.status === 'done');
+    if (plan && step) {
+      try {
+        deliverDeepExploreMilestone(
+          `阶段报告：计划记录已完成 ${plan.steps.filter((s) => s.status === 'done').length}/${plan.steps.length} 步。\n` +
+          `本步：${step.description.slice(0, 220)}\n` +
+          '这是子步骤的完成记录，整项任务是否达成仍以最终验证为准。',
+        );
+      } catch (error) { console.warn('[progress] plan milestone delivery failed', error); }
+    }
+  }
+  return result;
+};
 
 // ── planAndExecute composite tool(2026-05-07)─────────────────────────────
 // Parent turn calls once → internally plans + runs sub-tasks via a mini-agent-loop → aggregates and returns.
@@ -3034,7 +3079,7 @@ function deliverDeepExploreMilestone(text: string): void {
     return;
   }
   const s = currentTurnStatus();
-  if (s) s(text);
+  if (s) s(text, { kind: 'milestone' });
 }
 
 export const DEEP_EXPLORE_VERIFY_TOOL_NAMES = new Set([
@@ -4543,17 +4588,27 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
       loadedCompass,
     ),
   notify: (text, opts) => {
-    for (const [, send] of webuiClients) send({ type: 'milestone', text });
-    if (opts?.important) {
+    const owner = opts?.ownerSessionId;
+    const directWeb = owner ? webuiClients.get(owner) : undefined;
+    if (directWeb) directWeb({ type: 'milestone', text });
+    else if (!owner || !parseDmPeerFromSessionId(owner)) {
+      for (const [, send] of webuiClients) send({ type: 'milestone', text });
+    }
+    if ((opts?.important || opts?.progress) && (!owner || parseDmPeerFromSessionId(owner))) {
       void pushDispatcher
         .enqueue({
           severity: 'urgent',
-          kind: opts.blocking ? 'deep_explore:auto_paused' : 'deep_explore:auto_advance',
-          targetRef: `deep_explore:auto:${Date.now()}`,
+          kind: opts.blocking ? 'deep_explore:auto_paused' : `deep_explore:auto_${opts.progress ?? 'advance'}`,
+          targetRef: opts.progress === 'milestone'
+            ? `deep_explore:progress:${safeSessionId(opts.sessionId ?? '')}:${createHash('sha256').update(text).digest('hex').slice(0, 16)}`
+            : `deep_explore:auto:${safeSessionId(opts.sessionId ?? '')}:${Date.now()}`,
           text,
           blocking: opts.blocking === true,
+          progress: opts.progress,
+          ...(owner && parseDmPeerFromSessionId(owner) ? { routing: parseDmPeerFromSessionId(owner)! } : {}),
         })
-        .catch(() => {});
+        .then((result) => console.log(`[auto-advance] report delivery session=${safeSessionId(opts.sessionId ?? '')} delivered=${result.delivered} deferred=${result.deferred} failed=${result.failed}`))
+        .catch((error) => console.warn('[auto-advance] report delivery failed', error));
     }
   },
 });
@@ -7257,6 +7312,7 @@ async function sendLlmWithRescue(
 ): Promise<LLMResponse> {
   // Interrupt teeth: if this turn is stopped by the user, signal is passed to the underlying LLM HTTP to cancel the in-flight call.
   const signal = turnAbortSignal(sessionId);
+  signal?.throwIfAborted();
   // 2026-06-07: send an explicit per-turn reasoning config (see mainTurnReasoning) instead of relying on the
   // provider's implicit always-on thinking; tunable via PHILONT_CHAT_REASONING.
   const reasoning = mainTurnReasoning(findLastUserText(messages));
@@ -7266,7 +7322,9 @@ async function sendLlmWithRescue(
     const ms = budgetMs();
     const startedAt = Date.now();
     try {
-      return await withTimeout(llm.send(messages, tools, { signal, reasoning }), ms, () => new LlmTimeoutError(ms));
+      const response = await withTimeout(llm.send(messages, tools, { signal, reasoning }), ms, () => new LlmTimeoutError(ms));
+      signal?.throwIfAborted();
+      return response;
     } finally {
       // How long did THIS call take? The 2026-08-04 20:19-20:39 turn burned its entire 20-minute budget
       // with zero tool calls, and the log cannot say why: there is no `[llm] timeout` line, so nothing
@@ -7997,7 +8055,7 @@ export async function handleChatSend(
    * Channel implementations include their own throttling logic (same tool not re-pushed within
    * 5s on the same channel, etc.). Not provided = no intermediate status pushed (backward-compatible).
    */
-  onStatus?: (text: string) => void,
+  onStatus?: ProgressSink,
   /**
    * 2026-05-19 three-stream separation addition: Tier 3/4 detail events (optional).
    * Tool invocation/result details + internal-drive gate / system events / auth ack / turn degradation markers.
@@ -8112,6 +8170,11 @@ export async function handleChatSend(
         }
         const en = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en';
         if (decision === 'grant') {
+          const current = memory.reasoning.getSession(pending.sessionId);
+          if (!current || exploreBudgetExhausted(current)) {
+            onDelta(current ? exploreBudgetNotice(current) : '探索已结束，未启动新批次。');
+            return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+          }
           grantFormalAutoAdmission(`formal auto-advance admission: ${userMessage.slice(0, 40)}`);
           deepExploreAutoAdvance.rearm(pending.sessionId);
           console.log(`[auto-advance] formal workflow admitted and batch rearmed session=${safeSessionId(pending.sessionId)}`);
@@ -8163,6 +8226,12 @@ export async function handleChatSend(
       const focus = focusedReasoningSession(sessionId);
       let reply: string;
 
+      if (focus && ec.kind === 'auto_advance' && exploreBudgetExhausted(focus)) {
+        memory.reasoning.setAutoAdvance(focus.id, false);
+        onDelta(exploreBudgetNotice(focus));
+        return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+      }
+
       if (ec.kind === 'resume_batch') {
         // 继续 is the most ordinary word in this system, and this branch runs before the model on every
         // turn — so it may only act when THIS driver paused THIS owner's focused session. The decision
@@ -8173,10 +8242,17 @@ export async function handleChatSend(
           pauseReason: why,
           focusIsFormal: focus?.mode === 'formal',
           hasFormalAdmission: hasFormalAutoAdmission(),
-          admissionCardPending: !!focus && [...pendingFormalAutoAdmission.values()].some((p) => p.sessionId === focus.id),
+          admissionCardPending: !!focus && [...pendingFormalAutoAdmission.values()].some(
+            (p) => p.sessionId === focus.id && Date.now() - p.ts <= PENDING_AUTH_TTL_MS,
+          ),
+          hasForegroundPlan: memory.plans.listBySession(sessionId, { limit: 1 })
+            .some((p) => p.status === 'draft' || p.status === 'executing'),
         });
         if (action === 'fall_through' || !focus) {
           reply = '';
+        } else if (exploreBudgetExhausted(focus)) {
+          memory.reasoning.setAutoAdvance(focus.id, false);
+          reply = exploreBudgetNotice(focus);
         } else if (action === 'await_card') {
           reply = en
             ? 'This batch is waiting for workflow permission, not a continue signal. Reply "approve" or "reject" to the authorization card.'
@@ -8509,7 +8585,13 @@ export async function handleChatSend(
 
   // Interrupt teeth: one new AbortController per turn. ws `chat.stop` fires abortActiveTurn
   // to trigger it, canceling in-flight LLM calls + letting runToolLoop stop early at a boundary. Deleted in finally.
-  activeTurnAborters.set(sessionId, new AbortController());
+  const turnAborter = new AbortController();
+  activeTurnAborters.set(sessionId, turnAborter);
+  setCurrentTurnSignal(turnAborter.signal);
+  const emitDelta = onDelta;
+  const emitAuth = onAuthRequest;
+  onDelta = (text) => { if (!turnAborter.signal.aborted) emitDelta(text); };
+  onAuthRequest = (request) => { if (!turnAborter.signal.aborted) emitAuth(request); };
 
   // K0: rebuild messages fresh each turn — prefer the inflight saved in pending-auth /
   // pending-question state (those carry tool_use that must have matching tool_result to resume),
@@ -9064,6 +9146,18 @@ export async function handleChatSend(
   // Helpful for locating turn boundaries during testing: start log includes user message preview + whether it resumes pending
   const turnStartedAt = Date.now();
   turnDeadlines.set(sessionId, turnStartedAt + TURN_HARD_DEADLINE_MS);
+  const stopProgress = startProgressTicker(() => {
+    if (turnAborter.signal.aborted) return;
+    const records = signalBus.inTurnRecords ?? [];
+    const plan = memory.plans.listBySession(sessionId, { limit: 1 })[0];
+    const step = plan?.steps.find((s) => s.status === 'doing');
+    const elapsed = Math.floor((Date.now() - turnStartedAt) / 60_000);
+    const failures = records.filter((r) => !r.success).length;
+    onStatus?.(`阶段状态：已运行 ${elapsed} 分钟。\n` +
+      (step ? `当前步骤：${step.description.slice(0, 180)}\n` : '当前任务仍在执行，尚未返回最终结果。\n') +
+      `已返回 ${records.length} 次工具调用，其中 ${failures} 次失败。调用成功不代表任务已完成；本报告不宣称新增成果。`,
+    { kind: 'heartbeat' });
+  });
 
   // plan_protocol_gate reads this to distinguish a terminal plan closed THIS turn (same-task follow-up →
   // auto-fast ok) from a STALE terminal plan left by a prior task (must not downgrade a new slow task).
@@ -9081,9 +9175,14 @@ export async function handleChatSend(
         signalBus, onStatus, onTrace,
       ),
       TURN_HARD_DEADLINE_MS,
-      () => new TurnDeadlineError(TURN_HARD_DEADLINE_MS),
+      () => {
+        const error = new TurnDeadlineError(TURN_HARD_DEADLINE_MS);
+        turnAborter.abort(error);
+        return error;
+      },
     );
     const dur = Date.now() - turnStartedAt;
+    stopProgress();
     const textPreview = (result.outcome as any).text
       ? `text="${String((result.outcome as any).text).slice(0, 80).replace(/\n/g, ' ')}…"`
       : '';
@@ -9401,6 +9500,7 @@ export async function handleChatSend(
     throw e;
   } finally {
     // v19 (2026-05-13): clean up the session mapping used for close-time signal queries to prevent memory leaks.
+    stopProgress();
     activeSignalBuses.delete(sessionId);
     activeSessionMessages.delete(sessionId);
     activeTurnAborters.delete(sessionId);
@@ -10952,6 +11052,8 @@ async function handleChatSendInner(
     );
   } finally {
     // v7: drive triggered this turn → collect this turn's observation feedback and feed back to drive runtime.
+    // A timed-out async chain must not close or mutate the plan belonging to a later turn.
+    assertTurnActive();
     // The Reflector will later score the outcome's effectivenessScore, merge via EWMA,
     // and adjust drive_config parameters within constitution.driveBounds.
     let observations: ReturnType<typeof collectTurnObservations> | null = null;
@@ -11519,8 +11621,9 @@ async function decideForcedDeepExploreCall(
     deepExploreForceAdvanceEnabled() &&
     // A status/count question ("how many unfinished explores?") must never be forced into an advancing
     // round — narrating the saved snapshot is the correct answer, not a stall.
-    !signalBus.userAsksExploreStatus &&
+    !signalBus.userAsksExploreStatus && !metaQuestion &&
     shouldForceDeepExploreAdvance(assistantText, {
+      advanceRequested: signalBus.intentDecision?.route === 'deep_explore',
       alreadyForced: !!signalBus.forcedDeepExploreContinue,
       deepExploreRanThisTurn,
       hasActiveSession: memory.reasoning.getMostRecentActiveSession(sessionId) != null,
@@ -11828,8 +11931,9 @@ export function userAsksExploreStatus(message: string): boolean {
  */
 export function shouldForceDeepExploreAdvance(
   text: string,
-  ctx: { alreadyForced: boolean; deepExploreRanThisTurn: boolean; hasActiveSession: boolean },
+  ctx: { alreadyForced: boolean; deepExploreRanThisTurn: boolean; hasActiveSession: boolean; advanceRequested?: boolean },
 ): boolean {
+  if (!ctx.advanceRequested) return false;
   if (ctx.alreadyForced || ctx.deepExploreRanThisTurn || !ctx.hasActiveSession) return false;
   return DEEP_EXPLORE_FABRICATION_RE.test(text);
 }
@@ -12683,6 +12787,7 @@ async function runToolLoop(
     // The approved call has returned. Persist that fact immediately; do not leave it `running` while
     // the rest of this potentially long turn continues.
     settleRunningPendingAuth(sessionId, call.id);
+    assertTurnActive();
     const originalInput = (sanitized.input ?? call.input) as Record<string, unknown>;
     const repair = await maybeMechanicalRepair({ name: call.name, input: originalInput }, result);
     result = repair.result;

@@ -8,6 +8,29 @@ const event = {
   messageId: 'm-in', fromUserId: 'owner', groupId: '', text: 'hi', contextToken: 'ctx', raw: {} as any,
 };
 
+test('real milestones precede the final reply and excess milestones survive section filtering', async () => {
+  const calls: string[] = [];
+  const outbound = new OutboundQueue(async (_to, text) => { calls.push(text); return { ok: true }; },
+    { clock: { now: () => Date.now(), sleep: async () => {} } });
+  const dispatch = makeDispatcher({
+    accountId: 'account', outbound, logger,
+    chatSend: async (_sid, _text, onDelta, _auth, status) => {
+      status?.('checking');
+      status?.('stage 1', { kind: 'milestone' });
+      status?.('stage 2', { kind: 'milestone' });
+      status?.('stage 3', { kind: 'milestone' });
+      onDelta('## For User\nfinal answer\n## Work Log\nprivate details');
+    },
+  });
+  await dispatch(event);
+  assert.equal(calls.length, 3);
+  assert.match(calls[0], /stage 1/);
+  assert.match(calls[1], /stage 2/);
+  assert.match(calls[2], /final answer/);
+  assert.match(calls[2], /stage 3/);
+  assert.doesNotMatch(calls.join('\n'), /private details|checking/);
+});
+
 test('next inbound appends one deferred notice to the normal reply in a single send and then acks', async () => {
   const calls: string[] = [];
   const sender: RawSender = async (_to, text) => {

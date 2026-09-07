@@ -37,6 +37,29 @@ function fakeStore(opts: { active: ReasoningSession[]; afterRound?: (id: string)
 
 const passthroughCtx = async <T>(_sid: string, fn: () => Promise<T>): Promise<T> => fn();
 
+test('exhausted lifetime budget neither runs twenty empty rounds nor asks for tool admission', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  const exhausted = sess({ budgetSpent: 300_614 });
+  const { store, calls } = fakeStore({ active: [exhausted], afterRound: () => exhausted });
+  let advanced = 0;
+  let admissions = 0;
+  const notes: string[] = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx,
+    advanceSession: async () => { advanced++; return { success: true, output: '' }; },
+    hasFormalAdmission: () => false,
+    requestFormalAdmission: () => { admissions++; },
+    notify: (text) => { notes.push(text); },
+  });
+  await loop.tickOnce();
+  assert.equal(advanced, 0);
+  assert.equal(admissions, 0);
+  assert.equal(loop.rearm('s'), false);
+  assert.ok(calls.setAutoAdvance.every(([, enabled]) => !enabled));
+  assert.match(notes[0], /300614\/300000/);
+  assert.doesNotMatch(notes[0], /跑满.*轮/);
+});
+
 test('auto-advance: 默认 ON; =0 才关', () => {
   const prev = process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE;
   try {
@@ -147,8 +170,8 @@ test('auto-advance: 本 episode 累积到阈值后仍会暂停', async () => {
   await loop.tickOnce();
   assert.equal(advanced, 1);
   assert.deepEqual(calls.setAutoAdvance, [['a', false]]);
-  assert.equal(notes[0].important, true);
-  assert.match(notes[0].text, /卡住|暂停/);
+  assert.equal(notes.at(-1)!.important, true);
+  assert.match(notes.at(-1)!.text, /卡住|暂停/);
   assert.equal(loop.pauseReason('a'), 'stuck');
   loop.rearm('a');
   assert.equal(loop.pauseReason('a'), null, 'continue/auto advance buys a fresh automatic batch');
@@ -172,6 +195,32 @@ test('auto-advance: 有进展(counter 归零)→ 推进 + 里程碑(非 importan
   assert.equal(advanced, 1);
   assert.equal(notes.length, 1);
   assert.equal(notes[0].important, undefined);
+});
+
+test('long background rounds report status to their owner and stop reporting after completion', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  const { store } = fakeStore({ active: [sess({ id: 'a', ownerSessionId: 'wechat:account:owner' })] });
+  let finish!: () => void;
+  const wait = new Promise<void>((resolve) => { finish = resolve; });
+  const reports: Array<{ text: string; progress?: string; owner?: string | null }> = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx,
+    advanceSession: async () => { await wait; return { success: true, output: 'internal model directives must not be sent' }; },
+    notify: (text, opts) => reports.push({ text, progress: opts?.progress, owner: opts?.ownerSessionId }),
+  });
+  const tick = loop.tickOnce();
+  t.mock.timers.tick(300_000);
+  assert.equal(reports[0].progress, 'heartbeat');
+  assert.equal(reports[0].owner, 'wechat:account:owner');
+  assert.match(reports[0].text, /尚未返回结果/);
+  finish();
+  await tick;
+  assert.equal(reports.at(-1)!.progress, 'milestone');
+  assert.doesNotMatch(reports.at(-1)!.text, /internal model directives/);
+  const count = reports.length;
+  t.mock.timers.tick(600_000);
+  assert.equal(reports.length, count);
 });
 
 test('auto-advance: rounds budget → 跑满 N 轮暂停 + 问加批', async () => {

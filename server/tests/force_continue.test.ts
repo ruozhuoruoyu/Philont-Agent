@@ -19,7 +19,14 @@ const RECITE = '## For User\n第 3 轮完成，已 settled Meta-complexity 分�
 // Ordinary substantive answer — no round/session jargon.
 const NORMAL = '## For User\nP vs NP 的核心障碍在元数学层面（相对化/自然证明/代数化三大屏障）。';
 
-const base = { alreadyForced: false, deepExploreRanThisTurn: false, hasActiveSession: true };
+const base = { alreadyForced: false, deepExploreRanThisTurn: false, hasActiveSession: true, advanceRequested: true };
+
+test('a status report or complaint cannot authorize execution through its generated answer', () => {
+  assert.equal(shouldForceDeepExploreAdvance(RECITE, { ...base, advanceRequested: false }), false);
+  assert.equal(shouldForceDeepExploreAdvance(RECITE, {
+    alreadyForced: false, deepExploreRanThisTurn: false, hasActiveSession: true,
+  }), false);
+});
 
 test('forces on recite: round jargon + no deep_explore call this turn + active session', () => {
   assert.equal(shouldForceDeepExploreAdvance(RECITE, base), true);

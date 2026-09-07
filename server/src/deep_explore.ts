@@ -133,10 +133,7 @@ const DEFAULT_MAX_ITERS = resolveDeepExploreMaxIters();
  * only shows a notice. Raising per-round iters can increase per-round token cost, so this
  * is also adjustable (env PHILONT_DEEP_EXPLORE_TOKEN_BUDGET, default 300k, min 50k).
  */
-const SESSION_TOKEN_BUDGET = (() => {
-  const n = Number(process.env.PHILONT_DEEP_EXPLORE_TOKEN_BUDGET);
-  return Number.isInteger(n) && n >= 50_000 ? n : 300_000;
-})();
+import { SESSION_TOKEN_BUDGET, exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
 
 /**
  * Mirror of chat-handler's TURN_HARD_DEADLINE_MS (20 min). Kept as a local literal to avoid a
@@ -3418,7 +3415,7 @@ export function createDeepExploreTool(
     if (session.budgetSpent >= SESSION_TOKEN_BUDGET) {
       return {
         success: true,
-        output: `This reasoning session has used ${session.budgetSpent} tokens, hitting the budget cap (${SESSION_TOKEN_BUDGET}); paused. Continue later with a fresh angle, or treat it as stuck.`,
+        output: exploreBudgetNotice(session),
       };
     }
     // Count this advancing round (cumulative, persisted) — backs the deliberate auto-answer round ceiling.
@@ -4303,6 +4300,10 @@ export function createDeepExploreTool(
         if (resolved.error) return { success: false, output: '', error: resolved.error };
         if (!session) {
           return { success: false, output: '', error: 'No in-progress reasoning session to toggle auto-advance on. Start one first.' };
+        }
+        if (action === 'auto_on' && exploreBudgetExhausted(session)) {
+          reasoning.setAutoAdvance(session.id, false);
+          return { success: false, output: '', error: exploreBudgetNotice(session) };
         }
         selectSession(owner, session, resolved.source ?? 'sole');
         reasoning.setAutoAdvance(session.id, action === 'auto_on');

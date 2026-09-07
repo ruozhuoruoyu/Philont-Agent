@@ -74,6 +74,27 @@ const DIGEST_REQ: PushRequest = {
   text: 'digest text',
 };
 
+test('task heartbeat and milestone bypass the routine hourly budget without starving each other', async () => {
+  let now = Date.now();
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1' });
+  await dispatcher.enqueue(URGENT_REQ);
+  const heartbeat = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'hb', progress: 'heartbeat' });
+  assert.equal(heartbeat.delivered, 1);
+  const milestone = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'stage1', progress: 'milestone' });
+  assert.equal(milestone.delivered, 1);
+  const held = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'stage2', progress: 'milestone' });
+  assert.equal(held.delivered, 0);
+  assert.equal(held.deferred, 1, 'rate-limited成果必须进入下次来信的待送队列');
+  assert.equal(h.deferredPushes.listPending(f.channel.name, 'p1').length, 1);
+  now += 300_000;
+  assert.equal((await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'hb2', progress: 'heartbeat' })).delivered, 1);
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
+
 // ── 全局 kill ───────────────────────────────────────────────────────────
 
 test('dispatcher: 全局 kill → skip global_disabled', async () => {

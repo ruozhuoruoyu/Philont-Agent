@@ -102,7 +102,10 @@ export function decideResumeBatch(input: {
   focusIsFormal: boolean;
   hasFormalAdmission: boolean;
   admissionCardPending: boolean;
+  /** An unfinished foreground plan owns a bare continue, ahead of an old background pause. */
+  hasForegroundPlan?: boolean;
 }): ResumeBatchAction {
+  if (input.hasForegroundPlan) return 'fall_through';
   if (!input.hasFocus || !input.pauseReason) return 'fall_through';
   if (input.focusIsFormal && !input.hasFormalAdmission) {
     return input.admissionCardPending ? 'await_card' : 'request_admission';

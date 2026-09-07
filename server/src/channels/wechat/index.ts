@@ -25,6 +25,7 @@ import {
   type WeChatCredentials,
 } from './state.js';
 import { ILinkClient } from './client.js';
+import { createProgressRelay, type ProgressSink } from '../../task_progress.js';
 import {
   ILinkGateway, superviseGatewayStart,
   pseudonymizeWeChatId,
@@ -73,7 +74,7 @@ export type ChatSendFn = (
   userMessage: string,
   onDelta: (text: string) => void,
   onAuthRequest: (req: AuthRequestPayload) => void,
-  onStatus?: (text: string) => void,
+  onStatus?: ProgressSink,
   /**
    * 2026-05-19 three-stream separation: Tier 3/4 detail event callback (optional).
    * WeChat does **not** pass this — it naturally filters out tool details / internal markers.
@@ -417,37 +418,20 @@ export function makeDispatcher(opts: {
       pendingAuthRequestId = req.requestId;
     };
 
-    // 2026-05-07 #5: intermediate status push (reduce "waiting anxiety" caused by WeChat's lack of streaming)
-    // Throttle: same text within 30s in the same turn is not re-sent; any status push must be
-    // at least 4s apart. OutboundQueue already handles chunk-level dedup + 0.3s rate-limit;
-    // this adds a semantic throttle layer to prevent the LLM calling webSearch 5 times rapidly
-    // and flooding the user.
-    const STATUS_MIN_INTERVAL_MS = 15_000;
-    const STATUS_DEDUP_WINDOW_MS = 30_000;
+    // Reserve the limited intermediate-message allowance for milestones and long-running status.
     // Hard per-turn cap. WeChat limits how many bot messages ONE inbound message may earn; a long
     // turn (59 tools + gate regens) sent 10 throttled statuses and the FINAL REPLY was rejected
     // with ret=-2 (quota) — the user saw progress then silence. The final reply must always have
     // quota left, so statuses stop after the cap regardless of throttle windows.
-    const STATUS_MAX_PER_TURN = 2;
-    const recentStatus = new Map<string, number>(); // text → last send timestamp
-    let lastStatusAt = 0;
-    let statusSentCount = 0;
-    const onStatus = (text: string) => {
-      if (!text || text.trim().length === 0) return;
-      if (statusSentCount >= STATUS_MAX_PER_TURN) return;
-      const now = Date.now();
-      // Global throttle (prevent burst)
-      if (now - lastStatusAt < STATUS_MIN_INTERVAL_MS) return;
-      // Per-text throttle (prevent same tool name flooding)
-      const lastSeen = recentStatus.get(text);
-      if (lastSeen !== undefined && now - lastSeen < STATUS_DEDUP_WINDOW_MS) return;
-      lastStatusAt = now;
-      recentStatus.set(text, now);
-      statusSentCount++;
-      void outbound.sendText(replyTo, text).catch((e) => {
-        logger.error(`onStatus relay failed: ${String(e)}`, { replyTo, text });
-      });
-    };
+    const progress = createProgressRelay({
+      send: async (text) => {
+        const result = await outbound.sendText(replyTo, renderForWeChat(text).slice(0, 900));
+        return result.chunksFailed === 0 && !result.remainder &&
+          (result.chunksSent > 0 || result.chunksDeduped > 0);
+      },
+      receipt: (kind, delivered) => logger.info('progress delivery', { kind, delivered }),
+    });
+    const onStatus = progress.offer;
 
     const turnStartedAt = Date.now();
     try {
@@ -455,6 +439,7 @@ export function makeDispatcher(opts: {
         sentAtMs: event.sentAtMs,
       });
     } catch (e) {
+      const unsent = await progress.drain();
       logger.error(`chatSend threw: ${String(e)}`, {
         sessionId: pseudonymizeWeChatId(sessionId),
         from: pseudonymizeWeChatId(event.fromUserId),
@@ -470,12 +455,16 @@ export function makeDispatcher(opts: {
         replyTo,
         (en
           ? `Sorry — something went wrong: ${truncate(String((e as any)?.message ?? e), 200)}`
-          : `抱歉,刚才出错了:${truncate(String((e as any)?.message ?? e), 200)}`) + (suspended ?? ''),
+          : `抱歉,刚才出错了:${truncate(String((e as any)?.message ?? e), 200)}`) + (suspended ?? '') +
+          (unsent.length ? `\n阶段记录：\n${unsent.slice(-2).join('\n')}` : ''),
       );
       return;
     }
 
+    const unsentProgress = await progress.drain();
     const fullText = buffer.join('').trim();
+    // Unsent milestones survive quota/failure and are included in the normal final delivery path.
+    const milestoneText = unsentProgress.slice(-2).join('\n\n');
 
     // ── flush order (2026-05-19) ───────────────────────────────────────
     // 1. Send LLM reasoning first (filtered through `## For User` + WeChat markdown conversion)
@@ -483,7 +472,7 @@ export function makeDispatcher(opts: {
     //
     // fullText empty + no pending auth = chat-handler was a pure tool-call turn; send nothing
     // fullText empty + has pending auth = send auth request directly (no reasoning prefix)
-    if (fullText.length > 0) {
+    if (fullText.length > 0 || milestoneText) {
       // Two-stage filter: LLM system prompt contracts output as `## For User` + `## Work Log`;
       // WeChat only forwards the former. If the LLM violates the contract, fallback takes
       // the last non-empty paragraph (fallback hit rate goes to metric; persistently high
@@ -491,6 +480,7 @@ export function makeDispatcher(opts: {
       const filtered = extractUserSection(fullText);
       recordFilterCall(filtered.usedSection);
       let sectioned = filtered.text || fullText; // if filter also empty → fall back to raw
+      if (milestoneText) sectioned += `\n\n阶段记录：\n${milestoneText}`;
       if (!filtered.usedSection) {
         logger.info('output_filter fallback (no `## 给用户` section)', {
           sessionId,

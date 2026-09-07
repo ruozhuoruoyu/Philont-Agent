@@ -59,6 +59,8 @@ export interface PushRequest {
    * driver that pauses itself does not re-ask.
    */
   blocking?: boolean;
+  /** Opted-in task reports have their own cadence; routine urgent notices cannot starve them. */
+  progress?: 'milestone' | 'heartbeat';
 }
 
 export interface DispatchResult {
@@ -123,6 +125,7 @@ export class PushDispatcher {
   private dedupRing: DedupEntry[] = [];
   /** Last blocking (decision-carrying) push per channel+peer — the floor that keeps a storm out. */
   private readonly lastBlockingAt = new Map<string, number>();
+  private readonly lastProgressAt = new Map<string, number>();
   private readonly onSendOutcome?: (channel: string, ok: boolean) => void;
   private readonly deferredPushes?: DeferredPushStore;
 
@@ -185,6 +188,15 @@ export class PushDispatcher {
       const skip = this.evaluateTarget(t.channel, t.peer, t.sub, req, now);
       if (skip) {
         result.skipped.push(skip);
+        if (req.progress === 'milestone' && this.deferredPushes &&
+          ['rate_limited', 'quiet_hours', 'channel_not_ready'].includes(skip.reason)) {
+          this.deferredPushes.enqueue({
+            channel: t.channel, peer: t.peer, severity: req.severity,
+            kind: req.kind, targetRef: req.targetRef, text: req.text,
+            expiresAt: now + 24 * 60 * 60_000,
+          }, now);
+          result.deferred++;
+        }
         continue;
       }
 
@@ -209,6 +221,8 @@ export class PushDispatcher {
             // Its own floor, and deliberately NOT the routine budget: a question that stopped the work
             // must not make the next progress note wait an hour, nor be made to wait by one.
             this.lastBlockingAt.set(`${t.channel}\u0000${t.peer}`, now);
+          } else if (req.progress) {
+            this.lastProgressAt.set(`${t.channel}\u0000${t.peer}\u0000${req.progress}`, now);
           } else if (req.severity === 'urgent') {
             this.opts.subscriptions.markUrgentSent(t.channel, t.peer, now);
           } else {
@@ -308,9 +322,11 @@ export class PushDispatcher {
     const blockingKey = `${channel}\u0000${peer}`;
     const lastAt = req.blocking === true
       ? (this.lastBlockingAt.get(blockingKey) ?? null)
+      : req.progress ? (this.lastProgressAt.get(`${blockingKey}\u0000${req.progress}`) ?? null)
       : req.severity === 'urgent' ? sub.lastUrgentAt : sub.lastDigestAt;
     const interval = req.blocking === true
       ? BLOCKING_MIN_INTERVAL_MS
+      : req.progress ? (req.progress === 'heartbeat' ? 5 * 60_000 : 60_000)
       : req.severity === 'urgent' ? sub.urgentMinIntervalMs : sub.digestMinIntervalMs;
     if (lastAt !== null && now - lastAt < interval) {
       return {

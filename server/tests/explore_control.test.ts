@@ -123,3 +123,12 @@ test('a stuck formal pause does not promise a batch the next tick would refuse',
     'request_admission',
   );
 });
+
+test('continue resumes the foreground plan instead of an older background pause', () => {
+  for (const pauseReason of ['auth', 'budget', 'stuck'] as const) {
+    assert.equal(decideResumeBatch({
+      hasFocus: true, pauseReason, focusIsFormal: true,
+      hasFormalAdmission: false, admissionCardPending: true, hasForegroundPlan: true,
+    }), 'fall_through');
+  }
+});

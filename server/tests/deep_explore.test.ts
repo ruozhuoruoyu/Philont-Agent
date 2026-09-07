@@ -1503,6 +1503,24 @@ test('action=list enumerates all open sessions; abandon by id closes a specific 
   mem.close();
 });
 
+test('auto_on cannot claim a new batch when the lifetime token budget is exhausted', async () => {
+  const mem = openMemoryDb(':memory:');
+  let calls = 0;
+  const { tool } = createDeepExploreTool({
+    reasoning: mem.reasoning,
+    miniLoopLLM: { async send() { calls++; return { type: 'text' as const, content: 'x' }; } },
+    subTurnToolRunner: async () => ({ ok: true, output: '' }), readOnlyToolDefs: [],
+  });
+  const { session } = mem.reasoning.createSession({ goal: 'bounded proof' });
+  mem.reasoning.addBudgetSpent(session.id, 300_614);
+  const result = await tool.execute({ action: 'auto_on', sessionId: session.id });
+  assert.equal(result.success, false);
+  assert.match(result.error ?? '', /300614\/300000/);
+  assert.equal(mem.reasoning.getSession(session.id)?.autoAdvance, false);
+  assert.equal(calls, 0);
+  mem.close();
+});
+
 test('control actions require explicit sessionId when multiple sessions are open and bind the selected session', async () => {
   const mem = openMemoryDb(':memory:');
   const selected: string[] = [];

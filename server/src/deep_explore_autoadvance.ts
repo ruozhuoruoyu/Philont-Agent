@@ -14,6 +14,8 @@
  * round. Opting into unattended scheduling is not permission to execute local tools.
  */
 import type { PhraseLang } from './channel_phrases.js';
+import { exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
+import { startProgressTicker } from './task_progress.js';
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 import type { ToolResult } from '@agent/policy';
 import {
@@ -71,7 +73,13 @@ export interface AutoAdvanceDeps {
    * "paused, stuck" card at 23:17 was dropped as rate_limited — the owner was never told why it
    * stopped, and the session sat there).
    */
-  notify: (text: string, opts?: { important?: boolean; blocking?: boolean }) => void;
+  notify: (text: string, opts?: {
+    important?: boolean; blocking?: boolean;
+    sessionId?: string; ownerSessionId?: string | null;
+    progress?: 'milestone' | 'heartbeat';
+  }) => void;
+  /** Testable cadence; production reports long rounds every five minutes. */
+  progressIntervalMs?: number;
   /**
    * Language for the pause cards. These are the agent speaking FIRST — no user message, nothing to mirror —
    * so the language has to be told. Resolved by the caller (AGENT_LANGUAGE → observed → mirror).
@@ -97,7 +105,7 @@ export interface AutoAdvanceLoop {
   start: () => void;
   stop: () => void;
   /** Grant one session another batch of rounds — the owner replied "自动推进" to the pause card. */
-  rearm: (sessionId: string) => void;
+  rearm: (sessionId: string) => boolean;
   /** Rounds one batch may run before the driver pauses to check in. */
   roundsBudget: () => number;
   /** Why the current focused session is paused, if the pause was made by this driver. */
@@ -151,6 +159,17 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
       const sessions = deps.reasoning.listAutoAdvanceSessions();
       for (const s of sessions) {
         if (stopped) break;
+        const notify = (text: string, opts?: Parameters<AutoAdvanceDeps['notify']>[1]) =>
+          deps.notify(text, { ...opts, sessionId: s.id, ownerSessionId: s.ownerSessionId });
+        if (exploreBudgetExhausted(s)) {
+          deps.reasoning.setAutoAdvance(s.id, false);
+          roundsAdvanced.delete(s.id);
+          noProgressBaselines.delete(s.id);
+          pauseReasons.set(s.id, 'budget');
+          deps.reasoning.setAutoPause(s.id, 'budget');
+          notify(exploreBudgetNotice(s), { important: true, blocking: true });
+          continue;
+        }
 
         // Scheduling consent (`auto_advance=1`) and execution consent are deliberately separate. A formal
         // background round without the local workflow lease has no verifier teeth: pariGp/z3/Lean are
@@ -187,7 +206,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           noProgressBaselines.delete(s.id);
           pauseReasons.set(s.id, 'budget');
           deps.reasoning.setAutoPause(s.id, 'budget');
-          deps.notify(
+          notify(
             (deps.lang?.() ?? 'zh') === 'en'
               ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" used its ${MAX_ROUNDS}-round budget. Reply "auto advance" for another batch, or "stop".`
               : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 跑满 ${MAX_ROUNDS} 轮预算。回复"自动推进"再加一批,或"停"。`,
@@ -209,7 +228,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           noProgressBaselines.delete(s.id);
           pauseReasons.set(s.id, 'stuck');
           deps.reasoning.setAutoPause(s.id, 'stuck');
-          deps.notify(
+          notify(
             (deps.lang?.() ?? 'zh') === 'en'
               ? decision === 'switch_engine'
                 ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" produced nothing for ${episodeNoProgress} automatic rounds — a different angle or mode may work better. Reply "continue" to run another automatic batch as-is, name a new angle, or "stop".`
@@ -224,11 +243,21 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
 
         // 3. Advance one round in a background context (system: → longer cap, no user waiting).
         let out: ToolResult | null = null;
+        const previous = new Map((deps.reasoning.getNodes?.(s.id) ?? []).map((n) => [n.id, n.status]));
+        const roundStartedAt = Date.now();
+        const stopProgress = startProgressTicker(() => {
+          const current = deps.reasoning.getSession(s.id);
+          if (stopped || !current?.autoAdvance || current.status !== 'active') return;
+          notify(`阶段状态：「${s.goal.slice(0, 60)}」本轮已运行 ${Math.floor((Date.now() - roundStartedAt) / 60_000)} 分钟。\n本轮尚未返回结果，暂无可确认的新成果；完成后会报告结果或具体阻塞。`, { progress: 'heartbeat' });
+        }, deps.progressIntervalMs);
         try {
           out = await deps.runInContext(`system:auto-advance:${s.id}`, () => deps.advanceSession(s));
         } catch (e) {
           console.warn(`[auto-advance] round failed for ${s.id}: ${String(e).slice(0, 200)}`);
+          notify(`阶段报告：「${s.goal.slice(0, 60)}」本轮执行失败，未确认新成果。将保留已有工作记录。`, { progress: 'milestone' });
           continue;
+        } finally {
+          stopProgress();
         }
         if (stopped) break;
 
@@ -240,17 +269,23 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           noProgressBaselines.delete(s.id);
           pauseReasons.delete(s.id);
           deps.reasoning.setAutoPause(s.id, null);
-          deps.notify(
+          notify(
             `✅ 自动推进结束:"${s.goal.slice(0, 50)}" 状态=${fresh?.status ?? 'closed'}。\n${(out?.output ?? '').slice(0, 600)}`,
             { important: true },
           );
         } else {
           roundsAdvanced.set(s.id, rounds + 1);
-          if (fresh.noProgressRounds === 0) {
-            // The counter reset → this round made progress → milestone (not pushed every round).
-            deps.notify(`🔬 自动推进:"${s.goal.slice(0, 40)}"\n${(out?.output ?? '').slice(0, 600)}`);
-          }
-          // else: no progress this round but not yet stuck → stay quiet (avoid spam).
+          const nodes = deps.reasoning.getNodes?.(s.id) ?? [];
+          const open = nodes.filter((n) => n.status === 'open').length;
+          const proved = nodes.filter((n) => n.status === 'proved').length;
+          const newlySettled = nodes.filter((n) => ['proved', 'refuted'].includes(n.status) && previous.get(n.id) !== n.status);
+          const next = nodes.find((n) => n.status === 'open');
+          notify(`阶段报告：「${s.goal.slice(0, 60)}」第 ${rounds + 1} 轮已返回。\n` +
+            (out.success && fresh.noProgressRounds === 0
+              ? `推理树当前记录 ${proved} 个已证节点、${open} 个开放节点；整体任务仍未完成。`
+              : `本轮未确认有效进展，连续无进展记录为 ${fresh.noProgressRounds} 轮。`) +
+            (newlySettled.length ? `\n本轮新增记录：${newlySettled.slice(0, 2).map((n) => n.claim.slice(0, 120)).join('；')}` : '') +
+            `\n下一步：${next ? next.claim.slice(0, 160) : '检查剩余开放节点和停止条件'}。`, { progress: 'milestone' });
         }
       }
     } catch (e) {
@@ -299,13 +334,18 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
      * sends the pause notice again. Granting another batch would have produced an infinite pause-and-notify
      * loop in the owner's chat. "Another batch" means another BATCH.
      */
-    rearm: (sessionId: string): void => {
-      roundsAdvanced.delete(sessionId);
+    rearm: (sessionId: string): boolean => {
       const current = deps.reasoning.getSession(sessionId);
+      if (!current || current.status !== 'active' || exploreBudgetExhausted(current)) {
+        if (current) deps.reasoning.setAutoAdvance(sessionId, false);
+        return false;
+      }
+      roundsAdvanced.delete(sessionId);
       noProgressBaselines.set(sessionId, current?.noProgressRounds ?? 0);
       pauseReasons.delete(sessionId);
       deps.reasoning.setAutoPause(sessionId, null);
       deps.reasoning.setAutoAdvance(sessionId, true);
+      return true;
     },
     roundsBudget: () => MAX_ROUNDS,
     pauseReason: (sessionId: string): AutoAdvancePauseReason | null =>
