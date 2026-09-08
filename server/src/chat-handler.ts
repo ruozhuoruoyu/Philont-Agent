@@ -8239,6 +8239,7 @@ export async function handleChatSend(
         const why = focus ? deepExploreAutoAdvance.pauseReason(focus.id) : null;
         const action = decideResumeBatch({
           hasFocus: !!focus,
+          budgetExhausted: !!focus && exploreBudgetExhausted(focus),
           pauseReason: why,
           focusIsFormal: focus?.mode === 'formal',
           hasFormalAdmission: hasFormalAutoAdmission(),

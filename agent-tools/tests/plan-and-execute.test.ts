@@ -231,7 +231,9 @@ test('dep-aware skip:st-2 失败 → st-3 (deps=[2]) 自动 skipped, st-4 (deps=
     aggregateMode: 'concat',
   });
 
-  assert.equal(r.success, true);
+  assert.equal(r.success, false);
+  assert.match(r.error ?? '', /PLAN_INCOMPLETE/);
+  assert.equal(r.data?.outcome, 'partial');
   const struct = r.output?.match(/--- detailed results ---\n([\s\S]+)/)?.[1];
   assert.ok(struct, 'should have structured block');
   const parsed = JSON.parse(struct!) as {
@@ -306,7 +308,8 @@ test('budget 耗尽:跑到一半 reserveSubTask 返回 false → 后续 skipped'
   });
 
   const r = await tool.execute({ task: 'budget test', aggregateMode: 'concat' });
-  assert.equal(r.success, true);
+  assert.equal(r.success, false);
+  assert.equal(r.data?.outcome, 'failed');
   // 解析 structured 段
   const struct = r.output?.match(/--- detailed results ---\n([\s\S]+)/)?.[1];
   const parsed = JSON.parse(struct!) as {

@@ -669,7 +669,20 @@ function blockedResult(
   output: string,
   data: Record<string, unknown>,
 ): { success: boolean; output: string; error?: string; data?: Record<string, unknown> } {
-  if (!checkpoint) return { success: true, output, data };
+  if (!checkpoint) {
+    const results = data.results as SubTaskResult[];
+    const incomplete = results.filter((r) => r.status !== 'success');
+    if (incomplete.length > 0) {
+      return {
+        success: false,
+        output,
+        error: `PLAN_INCOMPLETE — ${incomplete.length}/${results.length} sub-tasks failed or were skipped: ` +
+          incomplete.map((r) => `${r.id}: ${r.error ?? r.skippedBecauseOf ?? r.status}`).join('; '),
+        data: { ...data, outcome: results.some((r) => r.status === 'success') ? 'partial' : 'failed' },
+      };
+    }
+    return { success: true, output, data: { ...data, outcome: 'completed' } };
+  }
   return {
     success: false,
     output,

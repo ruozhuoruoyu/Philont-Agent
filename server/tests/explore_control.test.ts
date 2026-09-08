@@ -132,3 +132,13 @@ test('continue resumes the foreground plan instead of an older background pause'
     }), 'fall_through');
   }
 });
+
+test('spent background exploration cannot intercept continue without a foreground plan', () => {
+  for (const pauseReason of ['auth', 'budget', 'stuck'] as const) {
+    assert.equal(decideResumeBatch({
+      hasFocus: true, pauseReason, focusIsFormal: true,
+      hasFormalAdmission: false, admissionCardPending: true,
+      hasForegroundPlan: false, budgetExhausted: true,
+    }), 'fall_through');
+  }
+});
