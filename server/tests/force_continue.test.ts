@@ -14,6 +14,40 @@ process.env.LLM_PROVIDER = '';
 
 const { shouldForceDeepExploreAdvance, userAsksExploreStatus } = await import('../src/chat-handler.js');
 
+test('forced controller respects exhausted budget and tool block before injecting calls', async () => {
+  const { memory, decideForcedDeepExploreCall } = await import('../src/chat-handler.js');
+  const owner = 'forced-budget-regression';
+  const { session } = memory.reasoning.createSession({ goal: 'test', ownerSessionId: owner });
+  const bus = {
+    intentDecision: { route: 'deep_explore' as const, confidence: 0.9, reason: 'continue', continuous: true },
+    userMessage: '继续',
+  };
+  memory.reasoning.addBudgetSpent(session.id, 1_000_000_000);
+  for (let i = 0; i < 5; i++) {
+    assert.equal(await decideForcedDeepExploreCall(owner, '', bus, i), null);
+  }
+  const blockedOwner = 'forced-blocked-regression';
+  memory.reasoning.createSession({ goal: 'test', ownerSessionId: blockedOwner });
+  assert.equal(await decideForcedDeepExploreCall(blockedOwner, '', {
+    ...bus, blockedTools: new Set(['deep_explore']),
+  }, 6), null);
+});
+
+test('failed forced auto_on is attempted once even after records are compacted away', async () => {
+  const { memory, decideForcedDeepExploreCall } = await import('../src/chat-handler.js');
+  const owner = 'forced-auto-on-once';
+  memory.reasoning.createSession({ goal: 'test', ownerSessionId: owner });
+  const bus = {
+    intentDecision: { route: 'deep_explore' as const, confidence: 0.9, reason: 'continue', continuous: true },
+    forcedDeepExploreContinue: true,
+    inTurnRecords: [{ toolName: 'deep_explore', toolInput: { action: 'continue' }, success: true, resultText: 'round finished' }],
+  };
+  assert.equal((await decideForcedDeepExploreCall(owner, '', bus, 1))?.input.action, 'auto_on');
+  assert.equal(await decideForcedDeepExploreCall(owner, '', bus, 2), null);
+  bus.inTurnRecords = [];
+  assert.equal(await decideForcedDeepExploreCall(owner, '', bus, 3), null);
+});
+
 // Recite: deep_explore round jargon ("第 N 轮", "x 开→y 开") narrated as if just produced.
 const RECITE = '## For User\n第 3 轮完成，已 settled Meta-complexity 分支；当前 5 开→4 开，剩 4 个开放节点。';
 // Ordinary substantive answer — no round/session jargon.

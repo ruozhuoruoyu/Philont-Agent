@@ -11565,12 +11565,16 @@ function firstOpenStepId(plan: { steps: Array<{ id: string; status: string }> })
  * FINAL text: the flat-text branch, runToolLoop's natural text exit, AND runToolLoop's maxIterations
  * fallback (a flat-searching model reliably exits via that last one).
  */
-async function decideForcedDeepExploreCall(
+export async function decideForcedDeepExploreCall(
   sessionId: string,
   assistantText: string,
   signalBus: TurnSignalBus,
   idSeed: number,
 ): Promise<{ id: string; name: string; input: Record<string, unknown> } | null> {
+  // Controller-generated calls must obey the same stop conditions as model calls.
+  if (signalBus.blockedTools?.has('deep_explore')) return null;
+  const boundExplore = focusedReasoningSession(sessionId);
+  if (boundExplore && exploreBudgetExhausted(boundExplore)) return null;
   const records = signalBus.inTurnRecords ?? [];
   const deepExploreRanThisTurn = records.some(isDeepExploreAdvanceRecord);
   const activeExplore = hasOwnedActiveExploreSession(sessionId);
@@ -11604,14 +11608,21 @@ async function decideForcedDeepExploreCall(
   const autoOnRan = records.some(
     (r) => r.toolName === 'deep_explore' && String(r.toolInput?.action ?? '') === 'auto_on' && r.success,
   );
+  const autoOnAttempted = !!signalBus.forcedDeepExploreAutoOn || records.some(
+    (r) => r.toolName === 'deep_explore' && String(r.toolInput?.action ?? '') === 'auto_on',
+  );
   if (shouldForceDeepExploreAutoOn({
     decision: signalBus.intentDecision ?? null,
     advanceRanThisTurn: deepExploreRanThisTurn,
     hasActiveSession: activeExplore,
     autoOnRanThisTurn: autoOnRan,
+    autoOnAttemptedThisTurn: autoOnAttempted,
+    budgetExhausted: boundExplore != null && exploreBudgetExhausted(boundExplore),
+    toolBlocked: signalBus.blockedTools?.has('deep_explore'),
     selfReferentialMeta: metaQuestion,
     userAsksStatus: !!signalBus.userAsksExploreStatus,
   })) {
+    signalBus.forcedDeepExploreAutoOn = true;
     console.warn(`[auto-advance] session=${safeSessionId(sessionId)} continuous explore request — forcing action=auto_on`);
     return { id: `forced-de-auto-on-${idSeed}`, name: 'deep_explore', input: { action: 'auto_on' } };
   }
@@ -11758,6 +11769,8 @@ interface TurnSignalBus {
   cleanupIntent?: { targets: string[] } | null;
   /** Set once when the forced-continue mechanism has injected a real deep_explore(continue) this turn (anti-reentry). */
   forcedDeepExploreContinue?: boolean;
+  /** Attempt latch, independent of success and transcript compaction. */
+  forcedDeepExploreAutoOn?: boolean;
   /** Set once when the forced-START mechanism has injected a real deep_explore(start) this turn (anti-reentry). */
   forcedDeepExploreStart?: boolean;
   /** The user message is a meta-question about the agent itself (isSelfReferentialMetaQuestion). */
@@ -13147,6 +13160,7 @@ async function runToolLoop(
           const colonIdx = reflection.signature.indexOf(':');
           if (colonIdx > 0) {
             blockedToolAfterReflection = reflection.signature.slice(0, colonIdx);
+            (signalBus.blockedTools ??= new Set()).add(blockedToolAfterReflection);
             signalBus.inTurnToolBlockFired = true;
             console.warn(
               `[in-turn-tool-block] session=${safeSessionId(sessionId)} remaining calls to ${blockedToolAfterReflection} this turn are mechanism-layer disabled`,

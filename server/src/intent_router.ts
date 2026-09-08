@@ -173,6 +173,9 @@ export function shouldForceDeepExploreAutoOn(opts: {
   advanceRanThisTurn: boolean;
   hasActiveSession: boolean;
   autoOnRanThisTurn: boolean;
+  autoOnAttemptedThisTurn?: boolean;
+  budgetExhausted?: boolean;
+  toolBlocked?: boolean;
   selfReferentialMeta: boolean;
   userAsksStatus: boolean;
 }): boolean {
@@ -181,6 +184,9 @@ export function shouldForceDeepExploreAutoOn(opts: {
     opts.advanceRanThisTurn &&
     opts.hasActiveSession &&
     !opts.autoOnRanThisTurn &&
+    !opts.autoOnAttemptedThisTurn &&
+    !opts.budgetExhausted &&
+    !opts.toolBlocked &&
     !opts.selfReferentialMeta &&
     !opts.userAsksStatus;
 }
