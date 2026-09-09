@@ -35,6 +35,7 @@ import './boot_logging.js';
 import { corsHeaders, rejectCrossSite, describeCaller } from './http_origin.js';
 import { rejectUnauthenticatedSkillOverride } from './skill_install_boundary.js';
 import { offeredAuthWords } from './auth_intent.js';
+import { learningTrend } from './learning_stats.js';
 
 // Wall-clock watchdog — must load after the tee like everything else. See suspend_detector.
 import { startSuspendDetector } from './suspend_detector.js';
@@ -640,6 +641,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
+  // ── GET /api/autonomous/learning-trends?days=30 ─────────────────────────
+  // Durable daily snapshots, suitable for charts and restart-safe self-learning review.
+  if (req.method === 'GET' && path === '/api/autonomous/learning-trends') {
+    const days = Math.max(1, Math.min(3650, Number(url.searchParams.get('days')) || 30));
+    const now = Date.now();
+    memory.metrics.snapshotDaily(utcDateString(now));
+    sendJson(res, 200, { days, generatedAt: now, series: learningTrend(memory, days) });
+    return true;
+  }
+
   // ── GET /api/autonomous/initiatives?limit=&status=&driver= ───────────────
   if (req.method === 'GET' && path === '/api/autonomous/initiatives') {
     const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 30));
@@ -974,6 +985,15 @@ server.listen(PORT, () => {
     void runDailyHealthCheck().catch(() => {});
   }, 24 * 60 * 60 * 1000);
   healthTimer.unref?.();
+
+  // Keep the long-term learning time series current even when no chat message reaches the idle
+  // consolidator. The upsert is cheap and restart-safe; unlike the daily log stamp it captures the
+  // latest cumulative counters for the current day.
+  memory.metrics.snapshotDaily(utcDateString(Date.now()));
+  const learningSnapshotTimer = setInterval(() => {
+    memory.metrics.snapshotDaily(utcDateString(Date.now()));
+  }, 5 * 60_000);
+  learningSnapshotTimer.unref?.();
 
   // Mailbox lifetime is infrastructure, not a WeChat side effect. Run even when WECHAT_ENABLED=0,
   // and periodically thereafter so an idle/disabled channel cannot make expiry silent.

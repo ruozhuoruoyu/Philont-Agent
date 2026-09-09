@@ -83,6 +83,12 @@ interface FailureResponse {
   groups: FailureGroup[];
 }
 
+interface LearningTrendRow {
+  day: string;
+  counters: Record<string, number>;
+  effects: { routingSuccessRate: number | null; repairVerifiedRate: number | null; recurrenceAfterRule: number };
+}
+
 interface PushSubscription {
   channel: string;
   peer: string;
@@ -103,6 +109,7 @@ export class AutonomousDashboard extends LitElement {
   @state() selfhood: Selfhood | null = null;
   @state() initiatives: Initiative[] = [];
   @state() failures: FailureResponse | null = null;
+  @state() learningTrend: LearningTrendRow[] = [];
   @state() subscriptions: PushSubscription[] = [];
   @state() statusFilter: '' | Initiative['status'] = '';
   @state() driverFilter: string = '';
@@ -134,6 +141,7 @@ export class AutonomousDashboard extends LitElement {
         this.loadSelfhood(),
         this.loadInitiatives(),
         this.loadFailures(),
+        this.loadLearningTrend(),
         this.loadSubscriptions(),
       ]);
     } catch (e) {
@@ -169,6 +177,26 @@ export class AutonomousDashboard extends LitElement {
     const r = await fetch(`${API_BASE()}/failure-signatures?since-h=24&limit=30`);
     if (!r.ok) throw new Error(`failures ${r.status}`);
     this.failures = await r.json();
+  }
+
+  async loadLearningTrend() {
+    const r = await fetch(`${API_BASE()}/learning-trends?days=30`);
+    if (!r.ok) throw new Error(`learning-trends ${r.status}`);
+    const data = await r.json();
+    this.learningTrend = data.series ?? [];
+  }
+
+  renderLearningTrend() {
+    return html`
+      <div class="card">
+        <h3>${t('📈 自学习长期趋势（最近30天）', '📈 Long-term learning trend (last 30 days)')}</h3>
+        ${this.learningTrend.length === 0
+          ? html`<div class="empty">${t('尚无每日快照；系统会在自主循环/查询时记录。', 'No daily snapshots yet; snapshots are recorded during autonomous cycles or queries.')}</div>`
+          : html`<table><thead><tr><th>Day</th><th>${t('路由成功率', 'Routing success')}</th><th>${t('修复验证率', 'Repair verified')}</th><th>${t('规则后复发', 'Recurrence')}</th><th>${t('累计回合', 'Turns')}</th></tr></thead><tbody>
+              ${this.learningTrend.slice(-30).map((row) => html`<tr><td>${row.day}</td><td>${row.effects.routingSuccessRate == null ? '—' : `${Math.round(row.effects.routingSuccessRate * 100)}%`}</td><td>${row.effects.repairVerifiedRate == null ? '—' : `${Math.round(row.effects.repairVerifiedRate * 100)}%`}</td><td>${row.effects.recurrenceAfterRule}</td><td>${row.counters['turn.total'] ?? 0}</td></tr>`)}
+            </tbody></table>`}
+      </div>
+    `;
   }
 
   async loadSubscriptions() {
@@ -516,6 +544,7 @@ export class AutonomousDashboard extends LitElement {
         ${this.renderSelfhood()}
         ${this.renderInitiatives()}
         ${this.renderFailures()}
+        ${this.renderLearningTrend()}
         ${this.renderSubscriptions()}
       </div>
     `;

@@ -422,6 +422,18 @@ CREATE TABLE IF NOT EXISTS learning_metrics (
   updated_at INTEGER NOT NULL
 );
 
+-- Daily durable snapshots of the cumulative learning counters.  The counter table is useful for
+-- live instrumentation, while this table preserves a restart-safe time series for trend analysis.
+CREATE TABLE IF NOT EXISTS learning_metric_daily (
+  day        TEXT NOT NULL,
+  key        TEXT NOT NULL,
+  value      INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (day, key)
+);
+CREATE INDEX IF NOT EXISTS idx_learning_metric_daily_key_day
+  ON learning_metric_daily(key, day);
+
 -- Explicit owner→reasoning-session focus. Standalone/idempotent so deployments already at the
 -- current schema version receive it on their next open without a synthetic version bump.
 CREATE TABLE IF NOT EXISTS reasoning_session_focus (

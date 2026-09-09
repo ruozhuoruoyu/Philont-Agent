@@ -55,3 +55,17 @@ test('counters persist across reopen of the same file', () => {
     rmSync(tmp, { force: true });
   }
 });
+
+test('daily snapshots preserve cumulative counters and update in place', () => {
+  const h = openMemoryDb(':memory:');
+  h.metrics.increment('turn.total', 3);
+  h.metrics.snapshotDaily('2026-09-07');
+  h.metrics.increment('turn.total', 2);
+  h.metrics.snapshotDaily('2026-09-08');
+  h.metrics.snapshotDaily('2026-09-08');
+  const rows = h.metrics.dailySnapshots(3650);
+  assert.deepEqual(rows.map((r) => r.day), ['2026-09-07', '2026-09-08']);
+  assert.equal(rows[0]!.metrics['turn.total'], 3);
+  assert.equal(rows[1]!.metrics['turn.total'], 5);
+  h.close();
+});

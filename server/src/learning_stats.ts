@@ -159,3 +159,27 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
 
   return lines.join('\n');
 }
+
+/** Long-term, restart-safe trend rows derived from daily cumulative snapshots. */
+export function learningTrend(memory: MemoryHandle, days = 30) {
+  const keys = [
+    'turn.total', 'routing.outcome.success', 'routing.outcome.failure',
+    'learning.recurrence_after_rule.cross_turn', 'learning.recurrence_after_rule.intra_turn',
+    'learning.repair.applied', 'learning.repair.verified', 'reflect.fire',
+  ];
+  const rows = memory.metrics.dailySnapshots(days);
+  return rows.map((row) => {
+    const c = (key: string) => row.metrics[key] ?? 0;
+    const routingTotal = c('routing.outcome.success') + c('routing.outcome.failure');
+    const repairApplied = c('learning.repair.applied');
+    return {
+      day: row.day,
+      counters: Object.fromEntries(keys.map((key) => [key, c(key)])),
+      effects: {
+        routingSuccessRate: routingTotal ? c('routing.outcome.success') / routingTotal : null,
+        repairVerifiedRate: repairApplied ? c('learning.repair.verified') / repairApplied : null,
+        recurrenceAfterRule: c('learning.recurrence_after_rule.cross_turn') + c('learning.recurrence_after_rule.intra_turn'),
+      },
+    };
+  });
+}

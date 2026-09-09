@@ -18,6 +18,11 @@ export interface MetricRow {
   updatedAt: number;
 }
 
+export interface DailyMetricSnapshot {
+  day: string;
+  metrics: Record<string, number>;
+}
+
 export class MetricsStore {
   constructor(private readonly db: Database.Database) {}
 
@@ -71,5 +76,34 @@ export class MetricsStore {
     } catch {
       return [];
     }
+  }
+
+  /** Persist the current cumulative counters under a UTC day. Never throws. */
+  snapshotDaily(day: string, now: number = Date.now()): void {
+    try {
+      const rows = this.db.prepare(`SELECT key, count FROM learning_metrics WHERE key != 'stats.last_logged_ymd'`).all() as Array<{ key: string; count: number }>;
+      const stmt = this.db.prepare(
+        `INSERT INTO learning_metric_daily (day, key, value, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(day, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      );
+      const tx = this.db.transaction(() => { for (const row of rows) stmt.run(day, row.key, row.count, now); });
+      tx();
+    } catch (e) {
+      console.warn(`[metrics] snapshotDaily(${day}) failed, ignored:`, (e as Error)?.message);
+    }
+  }
+
+  /** Read daily snapshots, oldest first, with one object per day. Never throws. */
+  dailySnapshots(days = 30): DailyMetricSnapshot[] {
+    try {
+      const rows = this.db.prepare(
+        `SELECT day, key, value FROM learning_metric_daily
+         WHERE day >= date('now', ?)
+         ORDER BY day ASC, key ASC`,
+      ).all(`-${Math.max(1, Math.min(3650, Math.floor(days)))} days`) as Array<{ day: string; key: string; value: number }>;
+      const grouped = new Map<string, Record<string, number>>();
+      for (const row of rows) { if (!grouped.has(row.day)) grouped.set(row.day, {}); grouped.get(row.day)![row.key] = row.value; }
+      return [...grouped.entries()].map(([day, metrics]) => ({ day, metrics }));
+    } catch { return []; }
   }
 }

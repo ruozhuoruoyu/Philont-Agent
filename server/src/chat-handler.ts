@@ -1576,6 +1576,8 @@ const idleConsolidator = startIdleConsolidator({
     try {
       const d = new Date();
       const ymd = d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+      const day = d.toISOString().slice(0, 10);
+      memory.metrics.snapshotDaily(day);
       if (memory.metrics.get('stats.last_logged_ymd') !== ymd) {
         memory.metrics.set('stats.last_logged_ymd', ymd);
         console.log('[learning-stats]\n' + renderLearningStats(memory));
