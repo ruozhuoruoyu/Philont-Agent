@@ -214,6 +214,7 @@ import {
   shouldForceRoutedDeepExploreContinue,
   shouldPreemptWithRoutedDeepExplore,
   shouldForceDeepExploreAutoOn,
+  isDeepExploreContinuationRequest,
   buildForceStartInput,
   messageIsSelfContainedGoal,
   deepExploreRouteTier,
@@ -11646,6 +11647,11 @@ export async function decideForcedDeepExploreCall(
     toolBlocked: signalBus.blockedTools?.has('deep_explore'),
     selfReferentialMeta: metaQuestion,
     userAsksStatus: !!signalBus.userAsksExploreStatus,
+    // On an auth resume `forceMessage` is the carried goal, not the short command that triggered it;
+    // inspect both fields so the continuation intent survives the auth boundary.
+    continuationRequested:
+      isDeepExploreContinuationRequest(signalBus.userMessage ?? '') ||
+      isDeepExploreContinuationRequest(signalBus.carriedExploreGoal ?? ''),
   })) {
     signalBus.forcedDeepExploreAutoOn = true;
     console.warn(`[auto-advance] session=${safeSessionId(sessionId)} continuous explore request — forcing action=auto_on`);

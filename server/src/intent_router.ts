@@ -167,7 +167,7 @@ export function shouldPreemptWithRoutedDeepExplore(opts: {
   return !opts.proposedReasoningAdvance && shouldForceRoutedDeepExploreContinue(opts);
 }
 
-/** Continuous is a semantic router output; arm background work only after a real round proved the binding. */
+/** A semantic continuous route or explicit short continuation arms background work on a live binding. */
 export function shouldForceDeepExploreAutoOn(opts: {
   decision: IntentDecision | null;
   advanceRanThisTurn: boolean;
@@ -178,9 +178,11 @@ export function shouldForceDeepExploreAutoOn(opts: {
   toolBlocked?: boolean;
   selfReferentialMeta: boolean;
   userAsksStatus: boolean;
+  /** A short continuation command for an already-active exploration (继续/下一步/继续证明…). */
+  continuationRequested?: boolean;
 }): boolean {
   return opts.decision?.route === 'deep_explore' &&
-    opts.decision.continuous === true &&
+    (opts.decision.continuous === true || opts.continuationRequested === true) &&
     opts.hasActiveSession &&
     !opts.autoOnRanThisTurn &&
     !opts.autoOnAttemptedThisTurn &&
@@ -188,6 +190,13 @@ export function shouldForceDeepExploreAutoOn(opts: {
     !opts.toolBlocked &&
     !opts.selfReferentialMeta &&
     !opts.userAsksStatus;
+}
+
+/** Deterministic continuation vocabulary. Only applies to an already-active deep_explore session. */
+export function isDeepExploreContinuationRequest(message: string): boolean {
+  const s = (message ?? '').trim().replace(/[。！？，,!?.\s]+$/g, '');
+  if (!s || s.length > 80) return false;
+  return /^(?:继续|下一步|继续下一步|继续下一轮|resume|continue|继续(?:推进|证明|修|攻|跑|做|研究|LRC证明)|(?:推进|证明|修|攻)下去)$/i.test(s);
 }
 
 // ── Deterministic cleanup/cancel override (mechanism, not aux) ─────────────────────────────────────
