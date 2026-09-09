@@ -1335,6 +1335,7 @@ function migrateV43ToV44(db: Database.Database): void {
 /** v45: restart-durable auto-advance pause/admission state. */
 function migrateV44ToV45(db: Database.Database): void {
   addColumnIfMissing(db, 'reasoning_sessions', 'auto_pause_reason', 'TEXT');
+  addColumnIfMissing(db, 'reasoning_sessions', 'auto_workflow_approved', 'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing(db, 'reasoning_sessions', 'auto_pause_at', 'INTEGER');
 }
 

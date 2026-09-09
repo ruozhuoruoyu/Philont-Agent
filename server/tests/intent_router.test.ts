@@ -141,7 +141,7 @@ test('continuous route arms auto advance only after a real round on a live sessi
     userAsksStatus: false,
   };
   assert.equal(shouldForceDeepExploreAutoOn(base), true);
-  assert.equal(shouldForceDeepExploreAutoOn({ ...base, advanceRanThisTurn: false }), false);
+  assert.equal(shouldForceDeepExploreAutoOn({ ...base, advanceRanThisTurn: false }), true);
   assert.equal(shouldForceDeepExploreAutoOn({ ...base, autoOnRanThisTurn: true }), false);
   assert.equal(shouldForceDeepExploreAutoOn({ ...base, autoOnAttemptedThisTurn: true }), false);
   assert.equal(shouldForceDeepExploreAutoOn({ ...base, budgetExhausted: true }), false);

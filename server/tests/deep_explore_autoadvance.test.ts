@@ -223,7 +223,7 @@ test('long background rounds report status to their owner and stop reporting aft
   assert.equal(reports.length, count);
 });
 
-test('auto-advance: rounds budget → 跑满 N 轮暂停 + 问加批', async () => {
+test('auto-advance: batch boundary continues without asking the owner again', async () => {
   process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
   let advanced = 0;
   const notes: Array<{ text: string; important?: boolean }> = [];
@@ -239,10 +239,10 @@ test('auto-advance: rounds budget → 跑满 N 轮暂停 + 问加批', async () 
   });
   await loop.tickOnce(); // advance 1
   await loop.tickOnce(); // advance 2 (= MAX_ROUNDS)
-  await loop.tickOnce(); // budget hit → pause, no 3rd advance
-  assert.equal(advanced, 2, 'advanced exactly the budget (MAX_ROUNDS=2)');
-  assert.deepEqual(calls.setAutoAdvance, [['a', false]]);
-  assert.match(notes[notes.length - 1].text, /预算/);
+  await loop.tickOnce(); // new batch, same task consent
+  assert.equal(advanced, 3);
+  assert.deepEqual(calls.setAutoAdvance, []);
+  assert.ok(notes.every((n) => !/回复.*再加一批/.test(n.text)));
 });
 
 test('auto-advance: 解出/闭合 → 停止 + important 通知', async () => {

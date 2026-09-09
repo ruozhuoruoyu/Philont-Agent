@@ -181,7 +181,6 @@ export function shouldForceDeepExploreAutoOn(opts: {
 }): boolean {
   return opts.decision?.route === 'deep_explore' &&
     opts.decision.continuous === true &&
-    opts.advanceRanThisTurn &&
     opts.hasActiveSession &&
     !opts.autoOnRanThisTurn &&
     !opts.autoOnAttemptedThisTurn &&

@@ -3980,7 +3980,7 @@ export function createDeepExploreTool(
       '**Use this whenever the user asks HOW MANY explorations are open / to LIST them — never guess the count or assume there is only one; there are often several.**\n' +
       'action="finalize": produce a wrap-up report of the whole tree so far (established lemmas, refuted/dead-end branches, most promising open directions), without advancing. ' +
       'Use this to give the user a conclusion when they ask to wrap up / for results, or for an open-ended problem that will not converge to a clean "solved" on its own.\n' +
-      'action="auto_on": hand the session off — a background ticker advances it round by round with NO further user message and reports milestones, stopping automatically on solved / stuck / round budget. **Offer this the moment the user sounds tired of typing "continue", or asks the exploration to run on its own / keep going by itself / not interrupt them.** action="auto_off" hands it back.\n' +
+      'action="auto_on": hand the session off — a background ticker advances it continuously across batches with NO further user message and reports milestones, stopping on solved / stuck / total token budget or revoked permission. Use when the user requests autonomous continuous execution; do not require a foreground reasoning round first. Formal work needs one task-scoped workflow approval. action="auto_off" stops it and revokes that workflow approval.\n' +
       'action="abandon": CLOSE a session for good (it stops being resumable). Pass sessionId (id/prefix from action=list) when more than one is open. Use when the user asks to close/drop/stop an exploration — finalize alone does NOT close anything.',
     schema: {
       type: 'object',
@@ -4306,6 +4306,7 @@ export function createDeepExploreTool(
           return { success: false, output: '', error: exploreBudgetNotice(session) };
         }
         selectSession(owner, session, resolved.source ?? 'sole');
+        if (action === 'auto_off') reasoning.setAutoWorkflowApproved(session.id, false);
         reasoning.setAutoAdvance(session.id, action === 'auto_on');
         return {
           success: true,

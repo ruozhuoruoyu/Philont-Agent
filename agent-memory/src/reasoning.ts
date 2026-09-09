@@ -51,6 +51,8 @@ export type ReasoningNodeStatus = 'open' | 'proved' | 'refuted' | 'dead_end' | '
 export type ReasoningSettleBasis = 'empirical' | 'preferential';
 
 export interface ReasoningSession {
+  /** Explicit task-scoped background workflow consent; never inferred from a temporary grant. */
+  autoWorkflowApproved?: boolean;
   id: string;
   goal: string;
   assumptions: string[];
@@ -125,6 +127,7 @@ interface SessionRow {
   no_progress_rounds: number;
   auto_advance: number;
   auto_pause_reason: string | null;
+  auto_workflow_approved: number;
   auto_pause_at: number | null;
   followup_asked_at: number | null;
   mode: string | null;
@@ -168,6 +171,7 @@ function rowToSession(r: SessionRow): ReasoningSession {
     budgetSpent: r.budget_spent,
     noProgressRounds: r.no_progress_rounds ?? 0,
     autoAdvance: !!r.auto_advance,
+    autoWorkflowApproved: !!r.auto_workflow_approved,
     autoPauseReason: (
       r.auto_pause_reason === 'stuck' || r.auto_pause_reason === 'budget' || r.auto_pause_reason === 'auth'
         ? r.auto_pause_reason
@@ -655,6 +659,11 @@ export class ReasoningStore {
         `UPDATE reasoning_sessions SET auto_advance = ?, updated_at = ? WHERE id = ?`,
       )
       .run(on ? 1 : 0, Date.now(), id);
+  }
+
+  setAutoWorkflowApproved(id: string, approved: boolean): void {
+    this.db.prepare('UPDATE reasoning_sessions SET auto_workflow_approved = ? WHERE id = ?')
+      .run(approved ? 1 : 0, id);
   }
 
   setAutoPause(id: string, reason: 'stuck' | 'budget' | 'auth' | null, at: number | null = Date.now()): void {

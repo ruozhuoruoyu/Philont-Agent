@@ -185,6 +185,8 @@ function formatFailure(error: any, durationMs: number, requestedTimeout: number,
     : '';
   const cause = stderr
     ? `stderr: ${stderr}`
+    : killed || signal
+      ? '(process was terminated before successful completion; no stderr output; partial output is not a successful verification)'
     : exitCode === null && !signal
       ? `exception: ${error?.message ?? String(error)}`
       : noErrorText;

@@ -190,6 +190,7 @@ import { interruptChannelJs, type JsInterruptController } from './interrupt_chan
 import { InterruptDrainer } from './interrupt_drainer.js';
 import { runInTurnContext, currentSessionId, currentTurnStatus, currentTurnSignal, setCurrentTurnSignal, assertTurnActive } from './channels/turn_context.js';
 import { exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
+import { shellTimeoutRetryRejection } from './shell_timeout_retry.js';
 import { startProgressTicker, type ProgressSink } from './task_progress.js';
 import {
   autoClassify as autoClassifyTaskMode,
@@ -1868,8 +1869,8 @@ const pendingFormalAutoAdmission = new Map<string, { sessionId: string; goal: st
 
 const FORMAL_AUTO_WORKFLOW = LOCAL_RESEARCH_WORKFLOW.filter((g) => g.tool !== 'downloadFile');
 
-function hasFormalAutoAdmission(): boolean {
-  return FORMAL_AUTO_WORKFLOW.every((g) => globalGrants.isGranted(g.tool));
+function hasFormalAutoAdmission(session?: ReasoningSession): boolean {
+  return session?.autoWorkflowApproved === true;
 }
 
 /**
@@ -1906,11 +1907,11 @@ function requestFormalAutoAdmission(s: ReasoningSession): void {
   const en = resolvePhraseLang({ channel: owner ?? '', userLocale: readUserLanguage() }) === 'en';
   const text = en
     ? `🔐 Formal auto-advance is paused before its first local proof round for "${s.goal.slice(0, 50)}". ` +
-      `It needs one workflow approval for local write/shell/Lean/PARI/Z3 tools (about ${Math.round(WORKFLOW_GRANT_TTL_MS / 60_000)} minutes). ` +
-      `Reply "approve" to start the batch, or "reject" to leave it paused.`
+      `Approve local write/shell/Lean/PARI/Z3 for this task's background rounds until completion or stop, including across restarts. Existing safety checks and the total token cap remain. ` +
+      `Reply "approve" to run continuously, or "reject" to leave it paused.`
     : `🔐 形式化自动推进已在首个本地验证回合前暂停:「${s.goal.slice(0, 50)}」。` +
-      `需要一次工作流授权，用于本地写入/shell/Lean/PARI/Z3（约 ${Math.round(WORKFLOW_GRANT_TTL_MS / 60_000)} 分钟）。` +
-      `回复「同意」开始这一批，或「拒绝」保持暂停。`;
+      `请授权此任务后台持续使用本地写入/shell/Lean/PARI/Z3，直至完成或停止，重启后仍有效；原安全校验和累计 token 上限保留。` +
+      `回复「同意」持续执行，或「拒绝」保持暂停。`;
   for (const [, send] of webuiClients) send({ type: 'milestone', text });
   void pushDispatcher.enqueue({
     severity: 'urgent',
@@ -2857,6 +2858,22 @@ const miniLoopLLM: MiniLoopLLMClient = {
  */
 let subLoopChecker: ReturnType<typeof createToolChecker> | null = null;
 function getSubLoopChecker() {
+  // Durable consent belongs ONLY to this exact background task, never to foreground calls,
+  // another exploration, or the global grant store. Validators still run normally.
+  const context = currentSessionId() ?? '';
+  if (context.startsWith('system:auto-advance:')) {
+    const session = memory.reasoning.getSession(context.slice('system:auto-advance:'.length));
+    const scopedGrants = new GrantStore();
+    if (session?.status === 'active' && session.autoAdvance && session.autoWorkflowApproved && !exploreBudgetExhausted(session)) {
+      for (const g of FORMAL_AUTO_WORKFLOW) {
+        scopedGrants.grant({ toolName: g.tool, capability: g.capability, domain: g.domain,
+          reason: `task-scoped formal workflow: ${session.id}`, ttlMs: WORKFLOW_GRANT_TTL_MS });
+      }
+    }
+    return createToolChecker({ permissions, audit: internalAudit,
+      classifyTool: (name, params) => tools.classify(name, params),
+      grantStore: scopedGrants, validatorChain: conservativeValidatorChain });
+  }
   // Lazy: `permissions` and `conservativeValidatorChain` are defined below this point.
   subLoopChecker ??= createToolChecker({
     permissions,
@@ -4569,6 +4586,7 @@ export function autonomySelfhoodStatus() {
 // PHILONT_DEEP_EXPLORE_AUTO_ADVANCE gates the whole loop, and each session is opt-in via
 // deep_explore action=auto_on. When off, the loop never arms → zero behaviour change.
 export const deepExploreAutoAdvance = createAutoAdvanceLoop({
+  isOwnerBusy: (s) => !!s.ownerSessionId && activeSignalBuses.has(s.ownerSessionId),
   lang: () => resolvePhraseLang({ userLocale: readUserLanguage() }),
   reasoning: memory.reasoning,
   advanceSession: (s) =>
@@ -4576,7 +4594,7 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
       ? deepExploreAdvanceSession(s)
       : Promise.resolve({ success: false, output: '', error: 'deep_explore disabled' }),
   runInContext: runInTurnContext,
-  hasFormalAdmission: () => hasFormalAutoAdmission(),
+  hasFormalAdmission: (s) => hasFormalAutoAdmission(s),
   requestFormalAdmission: (s) => requestFormalAutoAdmission(s),
   // WS1 (selfhood_closure): trait-tuned stuck threshold — competitiveness earned from lived
   // history buys more no-progress rounds before the loop declares stuck.
@@ -8175,13 +8193,14 @@ export async function handleChatSend(
             onDelta(current ? exploreBudgetNotice(current) : '探索已结束，未启动新批次。');
             return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
           }
-          grantFormalAutoAdmission(`formal auto-advance admission: ${userMessage.slice(0, 40)}`);
+          memory.reasoning.setAutoWorkflowApproved(current.id, true);
           deepExploreAutoAdvance.rearm(pending.sessionId);
           console.log(`[auto-advance] formal workflow admitted and batch rearmed session=${safeSessionId(pending.sessionId)}`);
           onDelta(en
-            ? `Approved once for the local formal workflow. I am starting an automatic batch for "${pending.goal.slice(0, 40)}"; milestones are push-only, not questions.`
-            : `已一次性授权本地形式化工作流。现在开始自动跑「${pending.goal.slice(0, 40)}」这一批；里程碑只推送，不要求回复。`);
+            ? `Task-scoped workflow approved. "${pending.goal.slice(0, 40)}" will continue automatically across batches and restarts within its total budget; milestones need no reply. Say stop to pause.`
+            : `已授权此任务的本地形式化工作流。「${pending.goal.slice(0, 40)}」将在累计预算内跨批次持续执行，重启后可恢复；阶段报告无需回复。说「停」可暂停。`);
         } else {
+          memory.reasoning.setAutoWorkflowApproved(pending.sessionId, false);
           memory.reasoning.setAutoAdvance(pending.sessionId, false);
           console.log(`[auto-advance] formal workflow admission rejected session=${safeSessionId(pending.sessionId)}`);
           onDelta(en ? 'Understood. Formal auto-advance remains paused.' : '好的，形式化自动推进保持暂停。');
@@ -8242,7 +8261,7 @@ export async function handleChatSend(
           budgetExhausted: !!focus && exploreBudgetExhausted(focus),
           pauseReason: why,
           focusIsFormal: focus?.mode === 'formal',
-          hasFormalAdmission: hasFormalAutoAdmission(),
+          hasFormalAdmission: hasFormalAutoAdmission(focus ?? undefined),
           admissionCardPending: !!focus && [...pendingFormalAutoAdmission.values()].some(
             (p) => p.sessionId === focus.id && Date.now() - p.ts <= PENDING_AUTH_TTL_MS,
           ),
@@ -8289,7 +8308,10 @@ export async function handleChatSend(
       } else if (ec.kind === 'stop_auto') {
         // Turn off any auto-advance, and acknowledge the pause for manual sessions too (they were never
         // going to advance without "继续", so this is an honest ack, not a state change).
-        for (const x of autoOn) memory.reasoning.setAutoAdvance(x.id, false);
+        for (const x of openSessions) {
+          memory.reasoning.setAutoWorkflowApproved(x.id, false);
+          memory.reasoning.setAutoAdvance(x.id, false);
+        }
         console.log(
           `[explore-control] owner paused exploration (auto-off ${autoOn.length} of ${openSessions.length} open)`,
         );
@@ -12924,7 +12946,7 @@ async function runToolLoop(
       toolName: call.name,
       success: result.success,
       resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
-      toolInput: call.name === 'http' || call.name === 'deep_explore' ? actualInput : undefined,
+      toolInput: call.name === 'http' || call.name === 'deep_explore' || call.name === 'shell' ? actualInput : undefined,
     });
     rememberFormalVerificationEvidence(sessionId, call.name, actualInput, result);
     // WS5: a successful use_skill makes that skill the turn's active linked skill, so the
@@ -13132,7 +13154,7 @@ async function runToolLoop(
         // tools → deadlock (prod 2026-06-17). For mechanical errors: give the fix-it reminder, skip the gates.
         const mechanicalFailure = isMechanicalFailure(reflection.signature);
         if (mechanicalFailure) memory.metrics.increment('inturn.mechanical');
-        if (mechanicalFailure && reflection.signature) {
+        if (mechanicalFailure && reflection.signature && reflection.signature !== 'shell:timeout') {
           const colonIdx = reflection.signature.indexOf(':');
           if (colonIdx > 0) {
             mechanicalRetryTool = reflection.signature.slice(0, colonIdx);
@@ -14301,6 +14323,12 @@ async function runToolLoop(
       // 2026-05-11: in-turn-reflection upgraded — once triggered, remaining calls to **the same tool** within this turn
       // are short-circuited by the mechanism layer (intercepted before PolicyGate). toolName from the signature head determines which.
       // Graceful degradation: if parsing fails → blockedToolAfterReflection stays null; normal flow unaffected.
+      const timeoutRetryRejection = call.name === 'shell' ? shellTimeoutRetryRejection(call.input, inTurnRecords) : null;
+      if (timeoutRetryRejection) {
+        nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: timeoutRetryRejection });
+        totalToolCallsThisTurn++;
+        continue;
+      }
       if (blockedToolAfterReflection !== null && call.name === blockedToolAfterReflection) {
         const reason =
           `[in-turn-reflection blocked] This turn has detected ≥ 2 same-root-cause failures from ${call.name}; the mechanism layer has disabled this tool until the next user turn.\n` +
@@ -14684,7 +14712,7 @@ async function runToolLoop(
         toolName: call.name,
         success: result.success,
         resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
-        toolInput: call.name === 'http' || call.name === 'deep_explore' ? actualInput2 : undefined,
+        toolInput: call.name === 'http' || call.name === 'deep_explore' || call.name === 'shell' ? actualInput2 : undefined,
       });
       rememberFormalVerificationEvidence(sessionId, call.name, actualInput2, result);
       if (result.success && mechanicalRetryTool === call.name) {

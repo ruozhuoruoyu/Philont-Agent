@@ -61,6 +61,8 @@ export function autoAdvanceEnabled(): boolean {
 }
 
 export interface AutoAdvanceDeps {
+  /** Foreground and background must not edit the same task concurrently. */
+  isOwnerBusy?: (session: ReasoningSession) => boolean;
   reasoning: ReasoningStore;
   /** Advance a specific session by one round (deep_explore's advanceSession). */
   advanceSession: (session: ReasoningSession) => Promise<ToolResult>;
@@ -159,6 +161,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
       const sessions = deps.reasoning.listAutoAdvanceSessions();
       for (const s of sessions) {
         if (stopped) break;
+        if (deps.isOwnerBusy?.(s)) continue;
         const notify = (text: string, opts?: Parameters<AutoAdvanceDeps['notify']>[1]) =>
           deps.notify(text, { ...opts, sessionId: s.id, ownerSessionId: s.ownerSessionId });
         if (exploreBudgetExhausted(s)) {
@@ -199,20 +202,13 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
         );
 
         // 1. Per-loop ROUNDS budget — pause + ask (cost checkpoint, not a silent kill).
-        const rounds = roundsAdvanced.get(s.id) ?? 0;
+        let rounds = roundsAdvanced.get(s.id) ?? 0;
         if (rounds >= MAX_ROUNDS) {
-          deps.reasoning.setAutoAdvance(s.id, false);
-          roundsAdvanced.delete(s.id);
-          noProgressBaselines.delete(s.id);
-          pauseReasons.set(s.id, 'budget');
-          deps.reasoning.setAutoPause(s.id, 'budget');
-          notify(
-            (deps.lang?.() ?? 'zh') === 'en'
-              ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" used its ${MAX_ROUNDS}-round budget. Reply "auto advance" for another batch, or "stop".`
-              : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 跑满 ${MAX_ROUNDS} 轮预算。回复"自动推进"再加一批,或"停"。`,
-            { important: true, blocking: true },
-          );
-          continue;
+          // A batch boundary is not new consent. Keep the stagnation history and lifetime cap:
+          // neither sending a report nor renewing a batch counts as progress.
+          rounds = 0;
+          roundsAdvanced.set(s.id, 0);
+          console.log(`[auto-advance] batch renewed session=${s.id}; lifetime budget and stagnation checks retained`);
         }
 
         // 2. Direction (S3): decide BEFORE spending another round. Use only the trailing flat run in

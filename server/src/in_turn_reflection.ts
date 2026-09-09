@@ -192,6 +192,7 @@ function buildReflectionReminder(signature: string, count: number): string {
  */
 export function isMechanicalFailure(signature: string | undefined): boolean {
   if (!signature) return false;
+  if (signature === 'shell:timeout') return true;
   // ANY failure of a local compute tool is mechanical BY DEFINITION: the tool is a calculator —
   // every error is a script bug or a resource limit, and the recovery is always fix-and-rerun,
   // never research/plan/switch-direction. Prod 2026-07-09: `pariGp:gp-other` (generic gp error)
