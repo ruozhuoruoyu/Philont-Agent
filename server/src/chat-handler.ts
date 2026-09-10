@@ -1877,6 +1877,29 @@ const globalGrants = new GrantStore();
  */
 const pendingFormalAutoAdmission = new Map<string, { sessionId: string; goal: string; ts: number }>();
 
+/**
+ * A card is answerable only in a conversation it actually reached.
+ *
+ * Prod 2026-09-10 23:13:58: the admission card was rate_limited on WeChat (delivered=0) but a web-ui
+ * client was connected, so the card stayed registered under the WeChat conversation too — and the
+ * owner's next "OK" on WeChat, meant for the tool-auth prompt they could see, was consumed by a card
+ * they never saw. Whatever the dispatcher skipped for a (channel, peer) is un-registered for that
+ * conversation; the card can be re-raised, and 继续 does re-raise it.
+ */
+function retireUndeliveredCard(
+  pending: Map<string, { sessionId: string; ts: number }>,
+  sessionId: string,
+  ts: number,
+  skipped: ReadonlyArray<{ channel: string; peer: string }>,
+): void {
+  for (const skip of skipped) {
+    const sid = reconstructDmSessionId(skip.channel, skip.peer);
+    if (!sid) continue;
+    const p = pending.get(sid);
+    if (p && p.sessionId === sessionId && p.ts === ts) pending.delete(sid);
+  }
+}
+
 const FORMAL_AUTO_WORKFLOW = LOCAL_RESEARCH_WORKFLOW.filter((g) => g.tool !== 'downloadFile');
 
 function hasFormalAutoAdmission(session?: ReasoningSession): boolean {
@@ -1936,6 +1959,7 @@ function requestFormalAutoAdmission(s: ReasoningSession): void {
         if (pending.sessionId === s.id && pending.ts === entry.ts) pendingFormalAutoAdmission.delete(sid);
       }
     }
+    retireUndeliveredCard(pendingFormalAutoAdmission, s.id, entry.ts, result.skipped);
   }).catch((error) => {
     console.warn('[auto-advance] formal admission delivery failed', error);
     if (webuiClients.size === 0) {
@@ -2008,6 +2032,7 @@ function requestBudgetExtension(s: ReasoningSession): void {
         if (pending.sessionId === s.id && pending.ts === entry.ts) pendingBudgetExtension.delete(sid);
       }
     }
+    retireUndeliveredCard(pendingBudgetExtension, s.id, entry.ts, result.skipped);
   }).catch((error) => {
     console.warn('[auto-advance] budget extension delivery failed', error);
     if (webuiClients.size === 0) {
@@ -8345,11 +8370,14 @@ export async function handleChatSend(
             `[auto-advance] budget extended session=${safeSessionId(current.id)} +${EXPLORE_BUDGET_GRANT_TOKENS} ` +
               `→ ${after.budgetSpent}/${exploreBudgetCeiling(after)} rearmed=${rearmed}`,
           );
+          const needsAdmission = rearmed && current.mode === 'formal' && !hasFormalAutoAdmission(current);
           onDelta(forUser(en, en
             ? `Granted ${EXPLORE_BUDGET_GRANT_TOKENS} more tokens to "${current.goal.slice(0, 40)}" (now ${after.budgetSpent}/${exploreBudgetCeiling(after)}). ` +
-              (rearmed ? 'Auto-advance is running again; milestones need no reply.' : 'Say "continue" to advance it.')
+              (needsAdmission ? 'One more thing: its local proof workflow needs approval before the background rounds start — that card follows.'
+                : rearmed ? 'Auto-advance is running again; milestones need no reply.' : 'Say "continue" to advance it.')
             : `已给「${current.goal.slice(0, 40)}」追加 ${EXPLORE_BUDGET_GRANT_TOKENS} token（现在 ${after.budgetSpent}/${exploreBudgetCeiling(after)}）。` +
-              (rearmed ? '自动推进已恢复，阶段报告无需回复。' : '回「继续」即可推进。')));
+              (needsAdmission ? '后台轮次开始前还需要一次本地工作流授权，授权卡随后发出。'
+                : rearmed ? '自动推进已恢复，阶段报告无需回复。' : '回「继续」即可推进。')));
         } else {
           memory.reasoning.setAutoAdvance(current.id, false);
           console.log(`[auto-advance] budget extension declined session=${safeSessionId(current.id)}`);

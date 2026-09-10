@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { initSchema, getSchemaVersion, SCHEMA_VERSION } from '../src/schema.js';
+import { initSchema, getSchemaVersion, SCHEMA_VERSION, reconcileColumnsWithDdl } from '../src/schema.js';
 import {
   DEFAULT_CONSTITUTION_VALUES,
   LEGACY_DEFAULT_CONSTITUTION_VALUES_V42,
@@ -40,7 +40,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 46);
+  assert.equal(SCHEMA_VERSION, 47);
   assert.ok(tableExists(db, 'deferred_pushes'), 'v42: deferred push mailbox must exist');
   assert.ok(hasColumn(db, 'reasoning_sessions', 'budget_granted'), 'v46: owner-granted budget must exist');
 
@@ -477,7 +477,7 @@ test('migration v36 → v37: reasoning_sessions gets followup_asked_at, existing
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 46);
+  assert.equal(SCHEMA_VERSION, 47);
   assert.ok(hasColumn(db, 'reasoning_sessions', 'followup_asked_at'), 'v37 must add followup_asked_at');
   const row = db.prepare(`SELECT goal, followup_asked_at FROM reasoning_sessions WHERE id = 'rs-old'`).get() as
     { goal: string; followup_asked_at: number | null };
@@ -503,7 +503,7 @@ test('migration v37 → v38: reasoning_nodes gets check_criterion, existing node
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 46);
+  assert.equal(SCHEMA_VERSION, 47);
   assert.ok(hasColumn(db, 'reasoning_nodes', 'check_criterion'), 'v38 must add check_criterion');
   const row = db.prepare(`SELECT claim, check_criterion FROM reasoning_nodes WHERE id = 'rn-old'`).get() as
     { claim: string; check_criterion: string | null };
@@ -530,7 +530,7 @@ test('migration v38 → v39: memory_skills gets from_disk, backfilled to 0', () 
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 46);
+  assert.equal(SCHEMA_VERSION, 47);
   assert.ok(hasColumn(db, 'memory_skills', 'from_disk'), 'v39 must add from_disk');
   const row = db.prepare(`SELECT name, from_disk FROM memory_skills WHERE id = 'sk-old'`).get() as
     { name: string; from_disk: number };
@@ -627,4 +627,34 @@ test('migration v42 → v43: never overwrites an owner-authored constitution', (
     .get() as { constitution_values: string; intent: string };
   assert.equal(row.constitution_values, ownerAuthored);
   assert.equal(row.intent, 'my explicitly chosen root intent');
+});
+
+test('v47 repairs a v45 that was edited after it shipped', () => {
+  // Prod 2026-09-10: `auto_workflow_approved` was appended to migrateV44ToV45 eight days after v45 was
+  // stamped on the production DB, so that DB had auto_pause_reason (original v45) but not the late
+  // column — and the owner's 同意 died on `SqliteError: no such column`.
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.exec(`ALTER TABLE reasoning_sessions DROP COLUMN auto_workflow_approved;`);
+  db.prepare(`UPDATE memory_meta SET value = '46' WHERE key = 'schema_version'`).run();
+  assert.ok(!hasColumn(db, 'reasoning_sessions', 'auto_workflow_approved'), 'degraded state must really lack the column');
+  assert.ok(hasColumn(db, 'reasoning_sessions', 'auto_pause_reason'), 'the ORIGINAL v45 columns are present — that is the shape');
+  initSchema(db);
+  assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
+  assert.ok(hasColumn(db, 'reasoning_sessions', 'auto_workflow_approved'), 'v47 must add the column the edited v45 never did');
+});
+
+test('a column the DDL declares but no walked migration added is healed at boot, and said so', () => {
+  // The general form of the v45 defect. A database already stamped at the CURRENT version (so no
+  // migration will run) that is missing a DDL column must still come up whole.
+  const db = new Database(':memory:');
+  initSchema(db);
+  db.exec(`ALTER TABLE reasoning_sessions DROP COLUMN budget_granted;`);
+  assert.ok(!hasColumn(db, 'reasoning_sessions', 'budget_granted'));
+  initSchema(db); // version already current → migrations skipped → only the reconcile can fix this
+  assert.ok(hasColumn(db, 'reasoning_sessions', 'budget_granted'), 'the DDL is the truth; the live table must match it');
+  // And it is honest about what it cannot do: a NOT NULL column without a DEFAULT is reported, not faked.
+  const out = reconcileColumnsWithDdl(db, `CREATE TABLE IF NOT EXISTS reasoning_sessions (\n  ghost_col INTEGER NOT NULL,\n  soft_col TEXT\n);`);
+  assert.deepEqual(out, ['reasoning_sessions.soft_col']);
+  assert.ok(!hasColumn(db, 'reasoning_sessions', 'ghost_col'));
 });

@@ -220,7 +220,10 @@ export class PushDispatcher {
           if (req.blocking === true) {
             // Its own floor, and deliberately NOT the routine budget: a question that stopped the work
             // must not make the next progress note wait an hour, nor be made to wait by one.
-            this.lastBlockingAt.set(`${t.channel}\u0000${t.peer}`, now);
+            // Keyed by KIND as well: prod 2026-09-10 23:13 the owner answered a budget card, the grant
+            // re-armed the driver, the driver asked for workflow admission 59s later — and that second,
+            // consequent card was rate_limited by the first. A storm is many of the SAME question.
+            this.lastBlockingAt.set(`${t.channel}\u0000${t.peer}\u0000${req.kind}`, now);
           } else if (req.progress) {
             this.lastProgressAt.set(`${t.channel}\u0000${t.peer}\u0000${req.progress}`, now);
           } else if (req.severity === 'urgent') {
@@ -321,7 +324,7 @@ export class PushDispatcher {
     // whose only job is to stop a storm.
     const blockingKey = `${channel}\u0000${peer}`;
     const lastAt = req.blocking === true
-      ? (this.lastBlockingAt.get(blockingKey) ?? null)
+      ? (this.lastBlockingAt.get(`${blockingKey}\u0000${req.kind}`) ?? null)
       : req.progress ? (this.lastProgressAt.get(`${blockingKey}\u0000${req.progress}`) ?? null)
       : req.severity === 'urgent' ? sub.lastUrgentAt : sub.lastDigestAt;
     const interval = req.blocking === true

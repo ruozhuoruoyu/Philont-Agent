@@ -484,3 +484,25 @@ test('a blocking decision card is not spent by routine milestones, and has its o
   unregisterPushChannel(f.channel.name);
   h.close();
 });
+
+test('a consequent blocking card of another KIND is not rate-limited by the one it followed', async () => {
+  // Prod 2026-09-10 23:13: budget card delivered at :12:59, owner answered, the grant re-armed the
+  // driver, and the driver's admission card 59s later was `rate_limited (interval=300000)` by the
+  // budget card. Storm protection is for many of the SAME question; a different question that the
+  // owner's own answer caused must go through.
+  let now = Date.now();
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1' });
+  const budget = await dispatcher.enqueue({ ...URGENT_REQ, kind: 'deep_explore:budget_extension', targetRef: 'b:1', blocking: true });
+  assert.equal(budget.delivered, 1);
+  now += 59_000;
+  const admission = await dispatcher.enqueue({ ...URGENT_REQ, kind: 'deep_explore:auto_admission', targetRef: 'a:1', blocking: true });
+  assert.equal(admission.delivered, 1, 'a different blocking question 59s later must reach the owner');
+  const budgetAgain = await dispatcher.enqueue({ ...URGENT_REQ, kind: 'deep_explore:budget_extension', targetRef: 'b:2', blocking: true });
+  assert.equal(budgetAgain.delivered, 0, 'the SAME kind inside the floor is still held — that is the storm the floor exists for');
+  assert.equal(budgetAgain.skipped[0]?.reason, 'rate_limited');
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});

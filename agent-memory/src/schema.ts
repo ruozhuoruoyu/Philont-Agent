@@ -20,7 +20,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
 } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 46;
+export const SCHEMA_VERSION = 47;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -1359,6 +1359,56 @@ function migrateV45ToV46(db: Database.Database): void {
   addColumnIfMissing(db, 'reasoning_sessions', 'budget_granted', 'INTEGER NOT NULL DEFAULT 0');
 }
 
+/**
+ * v47: repair v45. `auto_workflow_approved` was added to migrateV44ToV45 on 2026-09-09, eight days after
+ * v45 shipped (2026-09-01) — so every database that had already been stamped 45 skipped it, and on
+ * 2026-09-10 production answered the owner's 同意 with `SqliteError: no such column: auto_workflow_approved`
+ * while `auto_pause_reason` from the same function was there. A shipped migration is history; a
+ * column added later needs its own version. This one re-runs the whole v45 set, idempotently, and
+ * reconcileColumnsWithDdl below makes the class structurally self-healing from here on.
+ */
+function migrateV46ToV47(db: Database.Database): void {
+  migrateV44ToV45(db);
+}
+
+/**
+ * The CREATE TABLE text is the truth about which columns exist; the migrations are the path that was
+ * walked to get there. When a shipped migration is edited after databases have walked it, the two
+ * disagree silently until a write hits the missing column in production. So after the migrations run,
+ * every column the DDL declares is checked against the live table and added if absent — and said so.
+ *
+ * Only additions that SQLite can perform on a populated table are attempted (nullable, or with a
+ * DEFAULT); a NOT NULL column without a default cannot be self-healed and is reported instead.
+ */
+export function reconcileColumnsWithDdl(db: Database.Database, ddl: string): string[] {
+  const healed: string[] = [];
+  const tableRe = /CREATE TABLE IF NOT EXISTS\s+([a-z_]+)\s*\(([\s\S]*?)\);/g;
+  for (const m of ddl.matchAll(tableRe)) {
+    const table = m[1];
+    if (!tableExists(db, table)) continue;
+    for (const raw of m[2].split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('--')) continue;
+      const col = /^([a-z_]+)\s+(TEXT|INTEGER|REAL|BLOB)\b(.*?),?\s*$/.exec(line);
+      if (!col) continue;
+      const [, name, type, rest] = col;
+      if (hasColumn(db, table, name)) continue;
+      const decl = `${type} ${rest.replace(/--.*$/, '').trim()}`.trim();
+      if (/PRIMARY KEY/i.test(decl)) continue;
+      if (/NOT NULL/i.test(decl) && !/DEFAULT/i.test(decl)) {
+        console.warn(`[schema] ${table}.${name} is declared in the DDL but missing live and cannot be added without a DEFAULT — it needs a migration`);
+        continue;
+      }
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+      healed.push(`${table}.${name}`);
+    }
+  }
+  if (healed.length) {
+    console.warn(`[schema] healed ${healed.length} column(s) the DDL declares but a walked migration never added: ${healed.join(', ')}`);
+  }
+  return healed;
+}
+
 function migrateV39ToV40(db: Database.Database): void {
   addColumnIfMissing(db, 'memory_raw_messages', 'origin_session_id', 'TEXT');
 }
@@ -1647,6 +1697,10 @@ export function initSchema(db: Database.Database): void {
   if (current < 46) {
     migrateV45ToV46(db);
   }
+  if (current < 47) {
+    migrateV46ToV47(db);
+  }
+  reconcileColumnsWithDdl(db, DDL_BASE);
 
   // 3) Finally run partial indexes that depend on v3 new columns
   db.exec(DDL_V3_DEPENDENT);

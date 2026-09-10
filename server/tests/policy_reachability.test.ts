@@ -567,3 +567,20 @@ test('every pre-model owner reply carries the channel envelope', () => {
   const helper = chatHandler.slice(chatHandler.indexOf('function forUser('), chatHandler.indexOf('function forUser(') + 200);
   assert.match(helper, /## For User/); assert.match(helper, /## 给用户/);
 });
+
+/**
+ * A card is answerable only in a conversation it reached. Prod 2026-09-10 23:14:12: an admission card
+ * the dispatcher had skipped on WeChat stayed registered under the WeChat conversation (a web-ui client
+ * was connected), and the owner's "OK" — meant for the tool-auth prompt they could see — was consumed
+ * by it. Both card raisers must hand the dispatcher's skips to retireUndeliveredCard.
+ */
+test('both cards un-register themselves where the dispatcher skipped them', () => {
+  for (const fn of ['requestBudgetExtension', 'requestFormalAutoAdmission']) {
+    const body = chatHandler.slice(chatHandler.indexOf(`function ${fn}(`), chatHandler.indexOf(`function ${fn}(`) + 4000);
+    assert.match(body, /retireUndeliveredCard\(pending(?:BudgetExtension|FormalAutoAdmission), s\.id, entry\.ts, result\.skipped\)/,
+      `${fn} must un-register the card for every (channel, peer) the dispatcher skipped`);
+  }
+  const helper = chatHandler.slice(chatHandler.indexOf('function retireUndeliveredCard('), chatHandler.indexOf('function retireUndeliveredCard(') + 900);
+  assert.match(helper, /reconstructDmSessionId\(skip\.channel, skip\.peer\)/, 'the skip must be mapped to the conversation it names');
+  assert.match(helper, /p\.sessionId === sessionId && p\.ts === ts/, 'only THIS card is retired, never a newer one');
+});
