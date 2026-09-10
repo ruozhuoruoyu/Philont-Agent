@@ -169,3 +169,64 @@ test('mechanical repair kill switch prevents the unattended tool run and skill o
   assert.deepEqual({ transition: out.transition, reason: out.reason, runs, outcomes },
     { transition: 'not-attempted', reason: 'disabled', runs: 0, outcomes: 0 });
 });
+
+test('a skill term must match a whole token, never a substring of one', () => {
+  // Production 2026-09-09: `serialize-lean-build-and-check` was validated against
+  // `pariGp:gp-precheck-nested-braces`, because `check` is a substring of `precheck` and `and` is a
+  // substring of `command`. Neither says the skill applies to the failure.
+  const substringOnly = selectDraftFixture({
+    drafts: [skill({ name: 'serialize-lean-build-and-check', whenToUse: '', triggerKeywords: [] })],
+    failures: [{
+      toolName: 'pariGp', input: { script: 'x' }, recordedAt: 10,
+      errorText: 'gp-precheck: nested braces are not allowed in this command',
+    }],
+    eligibleTools: new Set(['pariGp']), signatureOf: () => 'pariGp:gp-precheck-nested-braces',
+    attemptFor: () => null,
+  });
+  assert.equal(substringOnly, null, 'check⊂precheck and and⊂command are not applicability evidence');
+  const wholeToken = selectDraftFixture({
+    drafts: [skill({ name: 'serialize-lean-build-and-check', whenToUse: '', triggerKeywords: [] })],
+    failures: [{
+      toolName: 'pariGp', input: { script: 'x' }, recordedAt: 10,
+      errorText: 'gp-precheck failed: serialize step rejected',
+    }],
+    eligibleTools: new Set(['pariGp']), signatureOf: () => 'pariGp:gp-precheck-nested-braces',
+    attemptFor: () => null,
+  });
+  assert.equal(wholeToken?.skill.name, 'serialize-lean-build-and-check',
+    'the same term as a whole token IS evidence');
+});
+
+test('English function words are never applicability evidence', () => {
+  // `avoid-concurrent-lean-builds` says "do NOT start a second build"; the PARI error says
+  // "are NOT allowed". That shared word is grammar, not applicability.
+  const functionWordOnly = selectDraftFixture({
+    drafts: [skill({ name: 'avoid-x', whenToUse: 'do not start it', triggerKeywords: [] })],
+    failures: [{
+      toolName: 'pariGp', input: { script: 'x' }, recordedAt: 10,
+      errorText: 'braces are not allowed',
+    }],
+    eligibleTools: new Set(['pariGp']), signatureOf: () => 'pariGp:gp-precheck-nested-braces',
+    attemptFor: () => null,
+  });
+  assert.equal(functionWordOnly, null);
+});
+
+test('a term that saturates the failure corpus describes the corpus, not the skill', () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({
+    toolName: 'leanCheck', input: { code: `c${i}` }, recordedAt: 10 + i,
+    errorText: 'olean artifact missing for this module',
+  }));
+  const draft = [skill({ name: 'rebuild-olean', whenToUse: '', triggerKeywords: [] })];
+  const saturated = selectDraftFixture({
+    drafts: draft, failures: many(10), eligibleTools: new Set(['leanCheck']),
+    signatureOf: () => 'leanCheck:lean-error', attemptFor: () => null,
+  });
+  assert.equal(saturated, null, 'olean is in every failure — that is distribution, not applicability');
+  const tooFewToRead = selectDraftFixture({
+    drafts: draft, failures: many(4), eligibleTools: new Set(['leanCheck']),
+    signatureOf: () => 'leanCheck:lean-error', attemptFor: () => null,
+  });
+  assert.equal(tooFewToRead?.skill.name, 'rebuild-olean',
+    'below the corpus floor there is no distribution to read; the filter must stay out of the way');
+});

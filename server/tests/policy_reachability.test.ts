@@ -47,12 +47,15 @@ const BARE_EXECUTE_EXCEPTIONS: Array<{ contains: string; why: string }> = [
     why: 'askUserQuestion schema validation only; the call itself was already checked in the loop',
   },
   {
-    contains: 'result = await tools.execute(call.name, sanitized.input);',
-    why: 'main tool loop, after checker() decided this call',
+    contains: '? withBudgetNotice(await tools.execute(call.name, fitted.input), fitted.notice)',
+    why:
+      'main tool loop, after checker() decided this call; fitToolCallToTurn may narrow the wall-clock ' +
+      'timeout to what the turn has left, and puts that REWRITTEN input back through checker() before ' +
+      'it is used (see the turn-budget test below)',
   },
   {
-    contains: 'result = await tools.execute(call.name, sanitized2.input);',
-    why: 'main tool loop second iteration, after checker() decided this call',
+    contains: '? withBudgetNotice(await tools.execute(call.name, fitted2.input), fitted2.notice)',
+    why: 'main tool loop second iteration, same path and same re-check as the site above',
   },
   {
     contains: 'return tools.execute(call.name, input);',
@@ -474,5 +477,26 @@ test('recency answers existence and nothing else', () => {
 test('the recency allowlist stays honest: every entry still exists', () => {
   for (const e of RECENCY_EXISTENCE_CHECKS) {
     assert.ok(chatHandler.includes(e.contains), `stale entry — the call site is gone: ${e.contains}`);
+  }
+});
+
+/**
+ * The turn-budget clamp rewrites an approved call's arguments. A rewrite is a different call than the
+ * one that was approved — the rule mechanical repair already follows — so the narrowed input has to go
+ * back through the checker before it runs. This asserts the wire, not the arithmetic: the arithmetic is
+ * tested in tool_time_budget.test.ts.
+ */
+test('the turn-budget clamp re-checks the call it rewrote', () => {
+  const fit = chatHandler.slice(
+    chatHandler.indexOf('async function fitToolCallToTurn('),
+    chatHandler.indexOf('function withBudgetNotice('),
+  );
+  assert.ok(fit.length > 0, 'the scan itself must not silently match nothing');
+  assert.match(fit, /isSafeToRerun\(rewritten\)/,
+    'the narrowed input must be re-authorized, not assumed safe because it is narrower');
+  for (const site of ['fitted', 'fitted2']) {
+    const call = chatHandler.slice(chatHandler.indexOf(`const ${site} = await fitToolCallToTurn(`));
+    assert.match(call.slice(0, 600), /checker\(\{ toolName: call\.name, approval: 'never'/,
+      `${site} must pass the real checker, not a lambda that says yes`);
   }
 });

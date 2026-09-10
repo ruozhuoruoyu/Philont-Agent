@@ -258,6 +258,7 @@ export const shellTool: Tool = {
     '      regular pip/npm install / large PDF parsing:               600000 (10 min)',
     '      short tasks (ls / stat / cat, etc.):                       you may pass 30000 to avoid hangs',
     '  - After a timeout, **never retry with the same value** — the hint in the error gives the reference thresholds; pick a larger one.',
+    '  - A foreground call cannot outlive the turn that is waiting for it: the timeout you pass is capped at what the turn has left, and you are told when that happened. Work that needs longer belongs in process(action:"spawn"), which survives the turn.',
     'Call contract: returns { success, output, error }; when success=false, output is stdout (possibly empty) and error contains exitCode/signal/stderr/durationMs.',
     'Do not claim the command succeeded when success=false — the LLM must read the success field, not guess.',
   ].join('\n'),

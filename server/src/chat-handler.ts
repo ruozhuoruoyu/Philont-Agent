@@ -290,6 +290,14 @@ import {
   type InTurnToolRecord,
 } from './in_turn_reflection.js';
 import {
+  planToolTimeBudget,
+  readRequestedTimeoutMs,
+  toolTakesForegroundTimeout,
+  clampNotice,
+  noRoomError,
+  FOREGROUND_TOOL_FLOOR_MS,
+} from './tool_time_budget.js';
+import {
   attemptMechanicalRepair,
   classifyRecurrence,
   readRepairStats,
@@ -7271,6 +7279,65 @@ export function hasRoomForTimeoutRetry(remainingMs: number): boolean {
   return remainingMs - LLM_BUDGET_SAFETY_MS >= LLM_BUDGET_FLOOR_MS;
 }
 
+/**
+ * Fit one foreground tool call into what the turn actually has left. See tool_time_budget.ts.
+ *
+ * Applies only to tools whose own schema advertises a wall-clock `timeout`; a readFile with twenty
+ * seconds left is not the problem this solves and must not be blocked by it.
+ */
+async function fitToolCallToTurn(
+  registry: { get(name: string): { schema: Record<string, unknown> } | null },
+  sessionId: string,
+  name: string,
+  input: Record<string, unknown>,
+  isSafeToRerun: (rewritten: Record<string, unknown>) => Promise<boolean>,
+): Promise<{ run: false; error: string } | { run: true; input: Record<string, unknown>; notice?: string }> {
+  const schema = registry.get(name)?.schema;
+  if (!toolTakesForegroundTimeout(schema)) return { run: true, input };
+  const budget = planToolTimeBudget({
+    requestedMs: readRequestedTimeoutMs(input),
+    remainingMs: turnRemainingMs(sessionId),
+    headroomMs: TURN_WRAPUP_HEADROOM_MS,
+  });
+  if (budget.kind === 'no-room') {
+    console.warn(
+      `[turn-budget] session=${safeSessionId(sessionId)} ${name} NOT RUN — ` +
+        `${Math.round(budget.availableMs / 1000)}s of working time left, foreground needs ` +
+        `${Math.round(FOREGROUND_TOOL_FLOOR_MS / 1000)}s`,
+    );
+    return { run: false, error: noRoomError(name, budget.availableMs) };
+  }
+  if (budget.kind === 'clamped') {
+    // A REWRITE IS A DIFFERENT CALL THAN THE ONE THAT WAS APPROVED — the same rule attemptMechanicalRepair
+    // follows. Narrowing a wall-clock bound cannot widen a capability, but "cannot" is an argument and the
+    // checker is a fact, so the narrowed call goes back through it. If the checker somehow refuses, the
+    // ORIGINAL call still stands approved and runs unclamped: inventing a denial the policy did not make
+    // would be a worse failure than the deadline this guards against.
+    const rewritten = { ...input, timeout: budget.timeoutMs };
+    if (!(await isSafeToRerun(rewritten))) {
+      console.warn(
+        `[turn-budget] session=${safeSessionId(sessionId)} ${name} timeout NOT clamped — the checker ` +
+          `refused the narrowed call; running the approved one as-is`,
+      );
+      return { run: true, input };
+    }
+    console.warn(
+      `[turn-budget] session=${safeSessionId(sessionId)} ${name} timeout ${budget.requestedMs}ms → ` +
+        `${budget.timeoutMs}ms (all the turn has left)`,
+    );
+    return { run: true, input: rewritten, notice: clampNotice(budget) };
+  }
+  return { run: true, input };
+}
+
+/** Append the turn-budget notice to whichever side of the result the model will read. */
+function withBudgetNotice(result: ToolResult, notice: string | undefined): ToolResult {
+  if (!notice) return result;
+  return result.error
+    ? { ...result, error: result.error + notice }
+    : { ...result, output: (result.output ?? '') + notice };
+}
+
 export class TurnDeadlineError extends Error {
   constructor(ms: number) {
     super(`turn exceeded ${ms}ms hard deadline`);
@@ -12825,7 +12892,14 @@ async function runToolLoop(
         result = { success: true, output: DEEP_EXPLORE_ONE_ROUND_MSG, duration: 0 };
       } else {
         if (isDeepExploreAdvance(call)) deepExploreAdvancesThisTurn++;
-        result = await tools.execute(call.name, sanitized.input);
+        const fitted = await fitToolCallToTurn(
+          tools, sessionId, call.name, (sanitized.input ?? {}) as Record<string, unknown>,
+          async (rewritten) =>
+            (await checker({ toolName: call.name, approval: 'never', params: JSON.stringify(rewritten) })) === null,
+        );
+        result = fitted.run
+          ? withBudgetNotice(await tools.execute(call.name, fitted.input), fitted.notice)
+          : { success: false, output: '', error: fitted.error, duration: 0 };
       }
     }
     // The approved call has returned. Persist that fact immediately; do not leave it `running` while
@@ -14674,7 +14748,14 @@ async function runToolLoop(
           result = { success: true, output: DEEP_EXPLORE_ONE_ROUND_MSG, duration: 0 };
         } else {
           if (isDeepExploreAdvance(call)) deepExploreAdvancesThisTurn++;
-          result = await tools.execute(call.name, sanitized2.input);
+          const fitted2 = await fitToolCallToTurn(
+            tools, sessionId, call.name, (sanitized2.input ?? {}) as Record<string, unknown>,
+            async (rewritten) =>
+              (await checker({ toolName: call.name, approval: 'never', params: JSON.stringify(rewritten) })) === null,
+          );
+          result = fitted2.run
+            ? withBudgetNotice(await tools.execute(call.name, fitted2.input), fitted2.notice)
+            : { success: false, output: '', error: fitted2.error, duration: 0 };
         }
       }
       settleRunningPendingAuth(sessionId, call.id);

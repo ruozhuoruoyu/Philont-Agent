@@ -45,16 +45,50 @@ export interface DraftFixture {
 const GENERIC_TERMS = new Set([
   'fix', 'repair', 'avoid', 'use', 'when', 'error', 'failed', 'failure', 'tool', 'code',
   'could', 'prove', 'goal', 'helper',
+  // English function words. Unlike tool or model names this is a CLOSED class — it does not grow as
+  // philont grows — and every entry is a word that can only ever be distribution evidence. Production
+  // 2026-09-09: `avoid-concurrent-lean-builds` was validated against `pariGp:gp-precheck-nested-braces`
+  // because the skill says "do NOT start a second build" and the PARI error says "are NOT allowed".
+  'and', 'or', 'not', 'but', 'the', 'this', 'that', 'these', 'those', 'an', 'in', 'on', 'at', 'to',
+  'of', 'for', 'from', 'with', 'without', 'by', 'as', 'is', 'are', 'was', 'were', 'be', 'been', 'do',
+  'does', 'did', 'it', 'its', 'if', 'then', 'than', 'else', 'while', 'before', 'after', 'during',
+  'all', 'any', 'some', 'each', 'one', 'two', 'both', 'more', 'most', 'other', 'same', 'so', 'up',
+  'out', 'over', 'under', 'again', 'only', 'just', 'very', 'can', 'will', 'would', 'should', 'must',
+  'may', 'might', 'no', 'nor', 'into', 'about', 'between', 'because', 'you', 'your', 'we', 'they',
+  'them', 'has', 'have', 'had', 'been', 'being', 'there', 'here', 'what', 'which', 'who', 'how',
 ]);
 
-function terms(skill: Skill): string[] {
+/**
+ * A term present in at least this share of the failure corpus describes the corpus, not the skill.
+ *
+ * Same principle the tool-name filter already applies, read off the data instead of off one name: a word
+ * that matches most of what the ledger holds cannot be evidence that THIS skill applies to THIS failure.
+ * It is what killed the 2026-09-09 window, where `avoid-concurrent-lean-builds` was validated against
+ * `pariGp:gp-precheck-nested-braces` on the word `not`.
+ */
+const CORPUS_GENERIC_SHARE = 0.5;
+/** Below this many failures there is no distribution to read, so the frequency filter stays out of the way. */
+const MIN_CORPUS_FOR_FREQUENCY = 8;
+
+interface SkillTerms {
+  /** Latin/digit tokens. Matched whole — see matchesHaystack. */
+  tokens: string[];
+  /** CJK bigrams. Han has no word boundaries, so these are matched as substrings. */
+  cjk: string[];
+}
+
+function terms(skill: Skill): SkillTerms {
   const text = [skill.name, skill.whenToUse, ...skill.triggerKeywords].filter(Boolean).join(' ');
   const base = [...tokenize(text)].filter((term) => term.length >= 2 && !GENERIC_TERMS.has(term));
   // planTokenize intentionally exposes CJK characters for recall. Applicability needs phrases instead:
   // individual common characters are dangerously easy to match in an unrelated failure.
   const cjkBigrams = [...text.matchAll(/[\p{Script=Han}]{2,}/gu)]
     .flatMap(([run]) => Array.from({ length: run.length - 1 }, (_, i) => run.slice(i, i + 2)));
-  return [...new Set([...base, ...cjkBigrams])];
+  const han = /[\p{Script=Han}]/u;
+  return {
+    tokens: [...new Set(base)].filter((t) => !han.test(t)),
+    cjk: [...new Set(cjkBigrams)],
+  };
 }
 
 export function draftFixtureKey(skill: Skill, failure: LedgerFailure, signature: string): string {
@@ -89,21 +123,39 @@ export function selectDraftFixture(input: {
 }): DraftFixture | null {
   const now = input.now ?? Date.now();
   let best: { fixture: DraftFixture; score: number } | null = null;
+  // One pass over the corpus: the haystack a term is matched against, and the distribution a term is
+  // judged generic by, are the same text and are read once.
+  const corpus = input.failures
+    .filter((failure) => input.eligibleTools.has(failure.toolName) && failure.errorText.trim())
+    .map((failure) => {
+      const signature = input.signatureOf(failure.toolName, failure.errorText);
+      const raw = `${failure.toolName} ${signature} ${failure.errorText}`.toLowerCase();
+      return { failure, signature, raw, tokens: tokenize(raw) };
+    });
+  const corpusDf = new Map<string, number>();
+  for (const entry of corpus) for (const token of entry.tokens) {
+    corpusDf.set(token, (corpusDf.get(token) ?? 0) + 1);
+  }
+  const corpusGeneric = (term: string): boolean =>
+    corpus.length >= MIN_CORPUS_FOR_FREQUENCY
+    && (corpusDf.get(term) ?? 0) >= corpus.length * CORPUS_GENERIC_SHARE;
   for (const skill of input.drafts) {
     if (skill.maturity !== 'draft' || skill.useCount !== 0) continue;
     const needles = terms(skill);
-    if (needles.length === 0) continue;
-    for (const failure of input.failures) {
-      if (!input.eligibleTools.has(failure.toolName) || !failure.errorText.trim()) continue;
-      const signature = input.signatureOf(failure.toolName, failure.errorText);
-      const haystack = `${failure.toolName} ${signature} ${failure.errorText}`.toLowerCase();
+    if (needles.tokens.length + needles.cjk.length === 0) continue;
+    for (const { failure, signature, raw, tokens } of corpus) {
       // A term the tool is named after matches every failure that tool ever produced: distribution
       // evidence, not applicability evidence. Derived, so no tool name is written down here.
       const toolName = failure.toolName.toLowerCase();
-      const applicable = needles.filter((term) => !toolName.includes(term));
-      if (applicable.length === 0) continue;
-      const matched = applicable.filter((term) => haystack.includes(term));
-      const score = matched.length;
+      // A latin term must match a WHOLE token of the failure text. Containment made `check` match
+      // `gp-precheck` and `and` match `command`, which is how a Lean build-ordering skill came to be
+      // validated against a PARI brace error. Han has no word boundaries, so CJK bigrams stay
+      // substring matches — they already carry the two-character guard instead.
+      const applicable = needles.tokens.filter((term) => !toolName.includes(term) && !corpusGeneric(term));
+      const applicableCjk = needles.cjk.filter((term) => !toolName.includes(term));
+      if (applicable.length + applicableCjk.length === 0) continue;
+      const score = applicable.filter((term) => tokens.has(term)).length
+        + applicableCjk.filter((term) => raw.includes(term)).length;
       const skillText = `${skill.whenToUse} ${skill.actionTemplate} ${skill.description}`.toLowerCase();
       const explicitlyNamesSignature = skillText.includes(signature.toLowerCase());
       // One match on a term that survived both filters is applicability evidence, and one is enough.
