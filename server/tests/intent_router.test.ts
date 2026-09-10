@@ -17,7 +17,6 @@ import {
   shouldForceRoutedDeepExploreContinue,
   shouldPreemptWithRoutedDeepExplore,
   shouldForceDeepExploreAutoOn,
-  isDeepExploreContinuationRequest,
   buildForceStartInput,
   messageIsSelfContainedGoal,
   type IntentDecision,
@@ -147,19 +146,16 @@ test('continuous route arms auto advance only after a real round on a live sessi
   assert.equal(shouldForceDeepExploreAutoOn({ ...base, autoOnAttemptedThisTurn: true }), false);
   assert.equal(shouldForceDeepExploreAutoOn({ ...base, budgetExhausted: true }), false);
   assert.equal(shouldForceDeepExploreAutoOn({ ...base, toolBlocked: true }), false);
-  assert.equal(shouldForceDeepExploreAutoOn({ ...base, decision: { route: 'deep_explore', confidence: 0.7, continuous: false }, continuationRequested: true }), true);
+  // State, not vocabulary: a session whose admission card the owner already answered re-arms on any
+  // deep_explore-routed turn, whatever word they used (推进 / 继续 / 按你的思路推进 all landed in prod).
+  assert.equal(shouldForceDeepExploreAutoOn({ ...base, decision: { route: 'deep_explore', confidence: 0.7, continuous: false }, sessionCommitted: true }), true);
+  assert.equal(shouldForceDeepExploreAutoOn({ ...base, decision: { route: 'deep_explore', confidence: 0.7, continuous: false }, sessionCommitted: false }), false);
+  assert.equal(shouldForceDeepExploreAutoOn({ ...base, decision: { route: 'direct', confidence: 0.9 } as IntentDecision, sessionCommitted: true }), false,
+    'commitment is not a route: a status question on a committed session must not start a batch');
   assert.equal(shouldForceDeepExploreAutoOn({
     ...base,
     decision: { ...base.decision, continuous: false },
   }), false);
-});
-
-test('deep explore continuation vocabulary opts an active session into auto_on', () => {
-  assert.equal(isDeepExploreContinuationRequest('继续下一步'), true);
-  assert.equal(isDeepExploreContinuationRequest('继续LRC证明'), true);
-  assert.equal(isDeepExploreContinuationRequest('继续'), true);
-  assert.equal(isDeepExploreContinuationRequest('状态怎么样'), false);
-  assert.equal(isDeepExploreContinuationRequest('请分析一下这个证明为什么失败以及下一步方案'), false);
 });
 
 test('classifyIntent: uses injected caller; routes a research turn to deep_explore', async () => {

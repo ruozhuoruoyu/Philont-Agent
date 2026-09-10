@@ -99,6 +99,13 @@ export interface AutoAdvanceDeps {
   hasFormalAdmission?: (session: ReasoningSession) => boolean;
   /** Register and deliver one approval request. The loop pauses until the owner answers it. */
   requestFormalAdmission?: (session: ReasoningSession) => void;
+  /**
+   * Register and deliver one budget card. Same lifecycle as the admission card: the loop disarms until
+   * the owner answers. When absent the driver falls back to a plain blocking notice — which is what it
+   * did until 2026-09-10, when that notice turned out to fire exactly once per session, ever: the same
+   * branch that sent it also cleared the flag that would ever bring the session back to this branch.
+   */
+  requestBudgetExtension?: (session: ReasoningSession) => void;
 }
 
 export type AutoAdvancePauseReason = 'stuck' | 'budget' | 'auth';
@@ -170,7 +177,8 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           noProgressBaselines.delete(s.id);
           pauseReasons.set(s.id, 'budget');
           deps.reasoning.setAutoPause(s.id, 'budget');
-          notify(exploreBudgetNotice(s), { important: true, blocking: true });
+          if (deps.requestBudgetExtension) deps.requestBudgetExtension(s);
+          else notify(exploreBudgetNotice(s, deps.lang?.() ?? 'zh'), { important: true, blocking: true });
           continue;
         }
 

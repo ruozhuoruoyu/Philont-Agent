@@ -93,8 +93,12 @@ export function resolveExploreTarget<T extends { id: string; goal: string }>(
  *                      OUTLIVED its card (it is persisted; the card is not): after a restart or a TTL
  *                      lapse, telling the owner to answer a card that no longer exists is a dead end
  *                      no word gets them out of. Raise it again instead.
+ *   'request_budget' — the session has spent its ceiling. Until 2026-09-10 this was 'fall_through':
+ *                      the owner said 继续, the driver said nothing, the model did hand work in the
+ *                      foreground, and the tree never advanced again — the notice that a budget was
+ *                      needed went to the model, never to the person who could grant one.
  */
-export type ResumeBatchAction = 'fall_through' | 'rearm' | 'await_card' | 'request_admission';
+export type ResumeBatchAction = 'fall_through' | 'rearm' | 'await_card' | 'request_admission' | 'request_budget';
 
 export function decideResumeBatch(input: {
   hasFocus: boolean;
@@ -107,8 +111,11 @@ export function decideResumeBatch(input: {
   /** A spent background session cannot claim a foreground continuation. */
   budgetExhausted?: boolean;
 }): ResumeBatchAction {
-  if (input.hasForegroundPlan || input.budgetExhausted) return 'fall_through';
-  if (!input.hasFocus || !input.pauseReason) return 'fall_through';
+  if (input.hasForegroundPlan || !input.hasFocus) return 'fall_through';
+  // A spent ceiling is a question for the owner, not a reason to go quiet. Checked before the pause
+  // reason: a session can be spent without this driver ever having paused it (the foreground spent it).
+  if (input.budgetExhausted) return 'request_budget';
+  if (!input.pauseReason) return 'fall_through';
   if (input.focusIsFormal && !input.hasFormalAdmission) {
     return input.admissionCardPending ? 'await_card' : 'request_admission';
   }

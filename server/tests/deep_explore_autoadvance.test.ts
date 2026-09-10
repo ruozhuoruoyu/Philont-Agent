@@ -14,7 +14,7 @@ const { createAutoAdvanceLoop, autoAdvanceEnabled, episodeNoProgressRounds } = a
 function sess(over: Partial<ReasoningSession>): ReasoningSession {
   return {
     id: 's', goal: 'G', assumptions: [], status: 'active', ownerSessionId: 'u',
-    rootNodeId: null, budgetSpent: 0, noProgressRounds: 0, autoAdvance: true,
+    rootNodeId: null, budgetSpent: 0, budgetGranted: 0, noProgressRounds: 0, autoAdvance: true,
     autoPauseReason: null, autoPauseAt: null, mode: 'formal',
     createdAt: 0, updatedAt: 0, ...over,
   };
@@ -58,6 +58,46 @@ test('exhausted lifetime budget neither runs twenty empty rounds nor asks for to
   assert.ok(calls.setAutoAdvance.every(([, enabled]) => !enabled));
   assert.match(notes[0], /300614\/300000/);
   assert.doesNotMatch(notes[0], /跑满.*轮/);
+});
+
+test('a spent session raises the budget card and disarms; a granted one runs', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  // Until 2026-09-10 this branch sent one notice and cleared auto_advance — so it could never fire
+  // again for the same session. The card path replaces the notice; the disarm stays (a card is the
+  // owner's decision, and the loop must not spend while it is unanswered).
+  const exhausted = sess({ budgetSpent: 300_614 });
+  const { store, calls } = fakeStore({ active: [exhausted], afterRound: () => exhausted });
+  const cards: string[] = [];
+  const notes: string[] = [];
+  let advanced = 0;
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx,
+    advanceSession: async () => { advanced++; return { success: true, output: '' }; },
+    hasFormalAdmission: () => true,
+    requestBudgetExtension: (s) => { cards.push(s.id); },
+    notify: (text) => { notes.push(text); },
+  });
+  await loop.tickOnce();
+  assert.deepEqual(cards, ['s'], 'the budget card is the owner-facing path, not a fire-once notice');
+  assert.equal(notes.length, 0, 'the card replaces the notice; the owner is not told twice');
+  assert.equal(advanced, 0);
+  assert.ok(calls.setAutoAdvance.some(([, enabled]) => enabled === false));
+
+  // The owner's 同意 lands as budgetGranted; the same numbers are no longer exhausted.
+  const granted = sess({ budgetSpent: 300_614, budgetGranted: 300_000 });
+  const g = fakeStore({ active: [granted], afterRound: () => granted });
+  let advanced2 = 0;
+  const loop2 = createAutoAdvanceLoop({
+    reasoning: g.store, runInContext: passthroughCtx,
+    advanceSession: async () => { advanced2++; return { success: true, output: '' }; },
+    hasFormalAdmission: () => true,
+    requestBudgetExtension: (s) => { cards.push(`again:${s.id}`); },
+    notify: () => {},
+  });
+  await loop2.tickOnce();
+  assert.equal(cards.length, 1, 'a granted session is not asked again');
+  assert.equal(advanced2, 1, 'the grant reaches the round runner');
+  assert.equal(loop2.rearm('s'), true);
 });
 
 test('auto-advance: 默认 ON; =0 才关', () => {

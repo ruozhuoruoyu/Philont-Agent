@@ -62,6 +62,11 @@ export interface ReasoningSession {
   rootNodeId: string | null;
   /** Cumulative LLM token cost across turns (single-turn loop gate is PlanBudgetTracker; this is the running total) */
   budgetSpent: number;
+  /**
+   * Tokens the owner granted on top of the lifetime ceiling, in answer to a budget card. Kept apart from
+   * budgetSpent so the ledger still says what was spent and what was allowed, separately.
+   */
+  budgetGranted: number;
   /** Consecutive rounds that made NO net tree progress (reset on any progress). Drives stuck handling. */
   noProgressRounds: number;
   /** Per-session opt-in: when true, the background loop auto-advances this session round-by-round. */
@@ -124,6 +129,7 @@ interface SessionRow {
   owner_session_id: string | null;
   root_node_id: string | null;
   budget_spent: number;
+  budget_granted: number | null;
   no_progress_rounds: number;
   auto_advance: number;
   auto_pause_reason: string | null;
@@ -169,6 +175,7 @@ function rowToSession(r: SessionRow): ReasoningSession {
     ownerSessionId: r.owner_session_id ?? null,
     rootNodeId: r.root_node_id,
     budgetSpent: r.budget_spent,
+    budgetGranted: r.budget_granted ?? 0,
     noProgressRounds: r.no_progress_rounds ?? 0,
     autoAdvance: !!r.auto_advance,
     autoWorkflowApproved: !!r.auto_workflow_approved,
@@ -559,6 +566,15 @@ export class ReasoningStore {
     this.db
       .prepare<[number, number, string]>(
         `UPDATE reasoning_sessions SET budget_spent = budget_spent + ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(Math.max(0, Math.floor(tokens)), Date.now(), id);
+  }
+
+  /** The owner answered a budget card: raise this session's ceiling by `tokens`. Additive, like spend. */
+  grantBudget(id: string, tokens: number): void {
+    this.db
+      .prepare<[number, number, string]>(
+        `UPDATE reasoning_sessions SET budget_granted = budget_granted + ?, updated_at = ? WHERE id = ?`,
       )
       .run(Math.max(0, Math.floor(tokens)), Date.now(), id);
   }

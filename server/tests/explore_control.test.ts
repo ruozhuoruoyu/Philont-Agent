@@ -133,12 +133,37 @@ test('continue resumes the foreground plan instead of an older background pause'
   }
 });
 
-test('spent background exploration cannot intercept continue without a foreground plan', () => {
+test('a spent focused exploration answers continue with the budget question, whatever paused it', () => {
+  // This used to assert 'fall_through' — "a spent background session cannot claim a foreground
+  // continuation". Prod 2026-09-03..10 showed what that silence costs: the owner said 继续 fifteen
+  // times to the session bound to this very conversation, and nothing ever told them it was spent.
+  // A card is not an interception — it runs no round and consumes the word only for the question the
+  // word walked into. The hijack guards that matter stay: hasFocus (bound to THIS conversation) and a
+  // foreground plan, which still owns the word outright.
   for (const pauseReason of ['auth', 'budget', 'stuck'] as const) {
     assert.equal(decideResumeBatch({
       hasFocus: true, pauseReason, focusIsFormal: true,
       hasFormalAdmission: false, admissionCardPending: true,
       hasForegroundPlan: false, budgetExhausted: true,
-    }), 'fall_through');
+    }), 'request_budget');
   }
+});
+
+test('a spent ceiling is a question for the owner, never silence', () => {
+  // Prod 2026-09-03..10: the owner typed 继续 fifteen times into a session that had spent its budget.
+  // This returned fall_through every time; the model did foreground hand-work; the tree never moved.
+  const base = {
+    hasFocus: true, pauseReason: null, focusIsFormal: true,
+    hasFormalAdmission: true, admissionCardPending: false, budgetExhausted: true,
+  };
+  assert.equal(decideResumeBatch(base), 'request_budget',
+    'spent in the foreground — no driver pause — still asks; the ceiling is the fact that matters');
+  assert.equal(decideResumeBatch({ ...base, pauseReason: 'budget' }), 'request_budget');
+  assert.equal(decideResumeBatch({ ...base, pauseReason: 'auth', hasFormalAdmission: false }), 'request_budget',
+    'a spent session must not be sent to the admission card: a workflow it cannot run is not the question');
+  // Still not ours when nothing is focused or a foreground plan owns the word.
+  assert.equal(decideResumeBatch({ ...base, hasFocus: false }), 'fall_through');
+  assert.equal(decideResumeBatch({ ...base, hasForegroundPlan: true }), 'fall_through');
+  // And once the owner granted more, the old 'budget' pause is just a pause: one word, one batch.
+  assert.equal(decideResumeBatch({ ...base, budgetExhausted: false, pauseReason: 'budget' }), 'rearm');
 });

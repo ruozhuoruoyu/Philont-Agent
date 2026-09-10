@@ -170,3 +170,16 @@ test('the formal auto-advance admission card offers words the grant matcher answ
   assert.equal(classifyGrantReply('approve'), 'grant');
   assert.equal(classifyGrantReply('reject'), 'deny');
 });
+
+test('the budget card offers words the grant matcher answers, in both languages', () => {
+  // Raised by the auto-advance driver or by a 继续 that landed on a spent session; answered wherever
+  // the owner is. Its predecessor told the owner to "adjust the budget" — an action that did not exist.
+  const src = readFileSync(new URL('../src/explore_budget.ts', import.meta.url), 'utf8');
+  const start = src.indexOf('export function exploreBudgetNotice');
+  assert.ok(start > 0, 'the budget card function still exists');
+  const card = src.slice(start);
+  for (const word of ['同意', '拒绝', 'approve', 'reject']) {
+    assert.ok(card.includes(word), `the card offers "${word}"`);
+    assert.ok(classifyGrantReply(word) !== null, `we printed "${word}" — we must listen for it`);
+  }
+});

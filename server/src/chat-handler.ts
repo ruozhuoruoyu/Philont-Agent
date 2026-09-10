@@ -189,7 +189,7 @@ import {
 import { interruptChannelJs, type JsInterruptController } from './interrupt_channel.js';
 import { InterruptDrainer } from './interrupt_drainer.js';
 import { runInTurnContext, currentSessionId, currentTurnStatus, currentTurnSignal, setCurrentTurnSignal, assertTurnActive } from './channels/turn_context.js';
-import { exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
+import { EXPLORE_BUDGET_GRANT_TOKENS, exploreBudgetCeiling, exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
 import { shellTimeoutRetryRejection } from './shell_timeout_retry.js';
 import { startProgressTicker, type ProgressSink } from './task_progress.js';
 import {
@@ -214,7 +214,6 @@ import {
   shouldForceRoutedDeepExploreContinue,
   shouldPreemptWithRoutedDeepExplore,
   shouldForceDeepExploreAutoOn,
-  isDeepExploreContinuationRequest,
   buildForceStartInput,
   messageIsSelfContainedGoal,
   deepExploreRouteTier,
@@ -1947,6 +1946,67 @@ function requestFormalAutoAdmission(s: ReasoningSession): void {
   });
   console.log(
     `[auto-advance] formal admission queued session=${safeSessionId(s.id)} targets=${targets.size}`,
+  );
+}
+
+/**
+ * The budget card: the one way past a spent lifetime ceiling.
+ *
+ * Same lifecycle as the admission card above, for the same reason — it is raised by a background driver
+ * (or by the owner's own 继续 landing on a spent session) and answered in whatever conversation the owner
+ * is sitting in. Until 2026-09-10 there was no card: the driver sent one blocking notice, cleared the
+ * flag that would ever bring it back to that branch, and the notice itself said "需要明确调整预算后才能
+ * 恢复" — an action that existed nowhere. The owner's main proof sat spent for a week.
+ */
+const pendingBudgetExtension = new Map<string, { sessionId: string; goal: string; ts: number }>();
+
+function requestBudgetExtension(s: ReasoningSession): void {
+  if (!exploreBudgetExhausted(s)) return;
+  const live = [...pendingBudgetExtension.values()].find(
+    (p) => p.sessionId === s.id && Date.now() - p.ts <= PENDING_AUTH_TTL_MS,
+  );
+  if (live) return;
+  const entry = { sessionId: s.id, goal: s.goal, ts: Date.now() };
+  const owner = s.ownerSessionId;
+  const targets = new Set<string>();
+  if (owner) targets.add(owner);
+  for (const sub of memory.pushSubscriptions.listActive()) {
+    const sid = reconstructDmSessionId(sub.channel, sub.peer);
+    if (sid) targets.add(sid);
+  }
+  for (const [sid] of webuiClients) targets.add(sid);
+  if (targets.size === 0) {
+    console.warn(`[auto-advance] budget extension has nobody to ask: session=${safeSessionId(s.id)}`);
+    return;
+  }
+  for (const sid of targets) pendingBudgetExtension.set(sid, { ...entry });
+  const lang = resolvePhraseLang({ channel: owner ?? '', userLocale: readUserLanguage() });
+  const text = exploreBudgetNotice(s, lang === 'en' ? 'en' : 'zh');
+  for (const [, send] of webuiClients) send({ type: 'milestone', text });
+  void pushDispatcher.enqueue({
+    severity: 'urgent',
+    kind: 'deep_explore:budget_extension',
+    // A re-raised card is a new question; a constant ref would be swallowed by the 24h kind+ref dedup.
+    targetRef: `deep_explore:budget-extension:${s.id}:${entry.ts}`,
+    text,
+    blocking: true, // the session cannot run another round without an answer
+  }).then((result) => {
+    console.log(`[auto-advance] budget extension delivery session=${safeSessionId(s.id)} delivered=${result.delivered} deferred=${result.deferred} failed=${result.failed}`);
+    if (webuiClients.size === 0 && result.delivered === 0 && result.deferred === 0) {
+      for (const [sid, pending] of pendingBudgetExtension) {
+        if (pending.sessionId === s.id && pending.ts === entry.ts) pendingBudgetExtension.delete(sid);
+      }
+    }
+  }).catch((error) => {
+    console.warn('[auto-advance] budget extension delivery failed', error);
+    if (webuiClients.size === 0) {
+      for (const [sid, pending] of pendingBudgetExtension) {
+        if (pending.sessionId === s.id && pending.ts === entry.ts) pendingBudgetExtension.delete(sid);
+      }
+    }
+  });
+  console.log(
+    `[auto-advance] budget extension card raised session=${safeSessionId(s.id)} spent=${s.budgetSpent} ceiling=${exploreBudgetCeiling(s)} targets=${targets.size}`,
   );
 }
 
@@ -4607,6 +4667,7 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
   runInContext: runInTurnContext,
   hasFormalAdmission: (s) => hasFormalAutoAdmission(s),
   requestFormalAdmission: (s) => requestFormalAutoAdmission(s),
+  requestBudgetExtension: (s) => requestBudgetExtension(s),
   // WS1 (selfhood_closure): trait-tuned stuck threshold — competitiveness earned from lived
   // history buys more no-progress rounds before the loop declares stuck.
   traits: () =>
@@ -8241,6 +8302,52 @@ export async function handleChatSend(
     }
   }
 
+  // The budget card is answered here, before the model, with the words it printed. One answer retires
+  // every copy of the card; a grant raises the ceiling and re-arms the driver only if the driver (or the
+  // owner's earlier commitment) is what was waiting — a ceiling spent in the foreground gets its budget
+  // back and a 继续, not a background episode nobody asked for.
+  {
+    const pending = pendingBudgetExtension.get(sessionId);
+    if (pending) {
+      const expired = Date.now() - pending.ts > PENDING_AUTH_TTL_MS;
+      if (expired) pendingBudgetExtension.delete(sessionId);
+      const decision = expired ? null : classifyGrantReply(userMessage);
+      if (decision) {
+        for (const [sid, p] of [...pendingBudgetExtension]) {
+          if (p.sessionId === pending.sessionId) pendingBudgetExtension.delete(sid);
+        }
+        const en = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en';
+        const current = memory.reasoning.getSession(pending.sessionId);
+        if (!current || current.status !== 'active') {
+          onDelta(en ? 'That exploration is no longer open.' : '那个探索已经不在进行中了。');
+          return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+        }
+        if (decision === 'grant') {
+          memory.reasoning.grantBudget(current.id, EXPLORE_BUDGET_GRANT_TOKENS);
+          const after = memory.reasoning.getSession(current.id) ?? current;
+          const driverWasWaiting = current.autoPauseReason === 'budget' || current.autoWorkflowApproved === true;
+          const rearmed = driverWasWaiting && deepExploreAutoAdvance.rearm(current.id);
+          console.log(
+            `[auto-advance] budget extended session=${safeSessionId(current.id)} +${EXPLORE_BUDGET_GRANT_TOKENS} ` +
+              `→ ${after.budgetSpent}/${exploreBudgetCeiling(after)} rearmed=${rearmed}`,
+          );
+          onDelta(en
+            ? `Granted ${EXPLORE_BUDGET_GRANT_TOKENS} more tokens to "${current.goal.slice(0, 40)}" (now ${after.budgetSpent}/${exploreBudgetCeiling(after)}). ` +
+              (rearmed ? 'Auto-advance is running again; milestones need no reply.' : 'Say "continue" to advance it.')
+            : `已给「${current.goal.slice(0, 40)}」追加 ${EXPLORE_BUDGET_GRANT_TOKENS} token（现在 ${after.budgetSpent}/${exploreBudgetCeiling(after)}）。` +
+              (rearmed ? '自动推进已恢复，阶段报告无需回复。' : '回「继续」即可推进。'));
+        } else {
+          memory.reasoning.setAutoAdvance(current.id, false);
+          console.log(`[auto-advance] budget extension declined session=${safeSessionId(current.id)}`);
+          onDelta(en
+            ? `Understood — "${current.goal.slice(0, 40)}" stays paused at its budget; nothing proved is lost.`
+            : `好的，「${current.goal.slice(0, 40)}」保持暂停在预算上限；已证明的部分不会丢。`);
+        }
+        return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
+      }
+    }
+  }
+
   // A background formal episode has no suspended foreground call, so its admission decision is consumed
   // here rather than by pendingAuth. The explicit card is the authority; auto_on by itself never grants
   // shell/write/verifier capabilities.
@@ -8260,7 +8367,8 @@ export async function handleChatSend(
         if (decision === 'grant') {
           const current = memory.reasoning.getSession(pending.sessionId);
           if (!current || exploreBudgetExhausted(current)) {
-            onDelta(current ? exploreBudgetNotice(current) : '探索已结束，未启动新批次。');
+            if (current) requestBudgetExtension(current);
+            onDelta(current ? exploreBudgetNotice(current, en ? 'en' : 'zh') : '探索已结束，未启动新批次。');
             return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
           }
           memory.reasoning.setAutoWorkflowApproved(current.id, true);
@@ -8317,7 +8425,8 @@ export async function handleChatSend(
 
       if (focus && ec.kind === 'auto_advance' && exploreBudgetExhausted(focus)) {
         memory.reasoning.setAutoAdvance(focus.id, false);
-        onDelta(exploreBudgetNotice(focus));
+        requestBudgetExtension(focus);
+        onDelta(exploreBudgetNotice(focus, en ? 'en' : 'zh'));
         return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
       }
 
@@ -8340,9 +8449,10 @@ export async function handleChatSend(
         });
         if (action === 'fall_through' || !focus) {
           reply = '';
-        } else if (exploreBudgetExhausted(focus)) {
+        } else if (action === 'request_budget') {
           memory.reasoning.setAutoAdvance(focus.id, false);
-          reply = exploreBudgetNotice(focus);
+          requestBudgetExtension(focus);
+          reply = exploreBudgetNotice(focus, en ? 'en' : 'zh');
         } else if (action === 'await_card') {
           reply = en
             ? 'This batch is waiting for workflow permission, not a continue signal. Reply "approve" or "reject" to the authorization card.'
@@ -11667,7 +11777,13 @@ export async function decideForcedDeepExploreCall(
   // Controller-generated calls must obey the same stop conditions as model calls.
   if (signalBus.blockedTools?.has('deep_explore')) return null;
   const boundExplore = focusedReasoningSession(sessionId);
-  if (boundExplore && exploreBudgetExhausted(boundExplore)) return null;
+  if (boundExplore && exploreBudgetExhausted(boundExplore)) {
+    // A spent session cannot be forced forward — but until 2026-09-10 this was a silent null, and every
+    // 继续 the owner typed for a week ended here with nothing said. The question belongs to the owner:
+    // raise the card when the turn was actually trying to advance this tree.
+    if (signalBus.intentDecision?.route === 'deep_explore') requestBudgetExtension(boundExplore);
+    return null;
+  }
   const records = signalBus.inTurnRecords ?? [];
   const deepExploreRanThisTurn = records.some(isDeepExploreAdvanceRecord);
   const activeExplore = hasOwnedActiveExploreSession(sessionId);
@@ -11714,11 +11830,9 @@ export async function decideForcedDeepExploreCall(
     toolBlocked: signalBus.blockedTools?.has('deep_explore'),
     selfReferentialMeta: metaQuestion,
     userAsksStatus: !!signalBus.userAsksExploreStatus,
-    // On an auth resume `forceMessage` is the carried goal, not the short command that triggered it;
-    // inspect both fields so the continuation intent survives the auth boundary.
-    continuationRequested:
-      isDeepExploreContinuationRequest(signalBus.userMessage ?? '') ||
-      isDeepExploreContinuationRequest(signalBus.carriedExploreGoal ?? ''),
+    // State, not vocabulary: the owner answered this session's admission card earlier; that consent is
+    // recorded on the session and is the evidence a bare 推进 / 继续 needs.
+    sessionCommitted: boundExplore?.autoWorkflowApproved === true,
   })) {
     signalBus.forcedDeepExploreAutoOn = true;
     console.warn(`[auto-advance] session=${safeSessionId(sessionId)} continuous explore request — forcing action=auto_on`);

@@ -87,6 +87,14 @@ test('setSessionStatus 收敛后退出 listActiveSessions;addBudgetSpent 累积'
   mem.reasoning.addBudgetSpent(session.id, 1000);
   mem.reasoning.addBudgetSpent(session.id, 500);
   assert.equal(mem.reasoning.getSession(session.id)!.budgetSpent, 1500);
+  // v46: spend and grant are separate columns, both additive — the ledger says what was spent AND what
+  // the owner allowed, and neither number can be lowered by the other.
+  assert.equal(mem.reasoning.getSession(session.id)!.budgetGranted, 0);
+  mem.reasoning.grantBudget(session.id, 300_000);
+  mem.reasoning.grantBudget(session.id, -50);
+  const after = mem.reasoning.getSession(session.id)!;
+  assert.equal(after.budgetGranted, 300_000);
+  assert.equal(after.budgetSpent, 1500, 'a grant does not touch spend');
 
   mem.reasoning.setSessionStatus(session.id, 'solved');
   assert.equal(mem.reasoning.getSession(session.id)!.status, 'solved');

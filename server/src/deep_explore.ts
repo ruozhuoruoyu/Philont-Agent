@@ -133,7 +133,7 @@ const DEFAULT_MAX_ITERS = resolveDeepExploreMaxIters();
  * only shows a notice. Raising per-round iters can increase per-round token cost, so this
  * is also adjustable (env PHILONT_DEEP_EXPLORE_TOKEN_BUDGET, default 300k, min 50k).
  */
-import { SESSION_TOKEN_BUDGET, exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
+import { SESSION_TOKEN_BUDGET, exploreBudgetCeiling, exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
 
 /**
  * Mirror of chat-handler's TURN_HARD_DEADLINE_MS (20 min). Kept as a local literal to avoid a
@@ -1931,7 +1931,7 @@ function renderFinalReport(session: ReasoningSession, nodes: ReasoningNode[], st
   lines.push(
     `Tree: ${nodes.length} nodes — proved ${proved.length} / open ${frontier.length} / ` +
       `refuted ${refuted.length} / dead ends ${dead.length}. ` +
-      `Budget spent: ${session.budgetSpent}/${SESSION_TOKEN_BUDGET} tokens.`,
+      `Budget spent: ${session.budgetSpent}/${exploreBudgetCeiling(session)} tokens.`,
   );
   // How much of what is still open can be checked by anything. Reported as a number rather than left to be
   // noticed: a session grinding on a frontier where nothing is decidable is the failure the engine could
@@ -2176,7 +2176,7 @@ function renderDeliberateReport(session: ReasoningSession, nodes: ReasoningNode[
   lines.push(`Question: ${session.goal}`);
   lines.push(
     `Tree: ${nodes.length} nodes — established ${settled.length} / open ${frontier.length} / ` +
-      `ruled out ${ruledOut.length}. Budget spent: ${session.budgetSpent}/${SESSION_TOKEN_BUDGET} tokens.`,
+      `ruled out ${ruledOut.length}. Budget spent: ${session.budgetSpent}/${exploreBudgetCeiling(session)} tokens.`,
   );
   if (settled.length) {
     lines.push('\n## ✓ Established (evidence-backed)');
@@ -3412,7 +3412,7 @@ export function createDeepExploreTool(
   }
 
   async function runRoundExclusive(session: ReasoningSession): Promise<ToolResult> {
-    if (session.budgetSpent >= SESSION_TOKEN_BUDGET) {
+    if (exploreBudgetExhausted(session)) {
       return {
         success: true,
         output: exploreBudgetNotice(session),
@@ -3757,11 +3757,8 @@ export function createDeepExploreTool(
   // selection (generative, not selecting from a frontier); "stuck" is redefined as saturation (no NET
   // new viable candidate). Profile-driven so both domains share one body.
   async function runDivergeRound(session: ReasoningSession, seed: string): Promise<ToolResult> {
-    if (session.budgetSpent >= SESSION_TOKEN_BUDGET) {
-      return {
-        success: true,
-        output: `This session has used ${session.budgetSpent} tokens, hitting the budget cap (${SESSION_TOKEN_BUDGET}); paused.`,
-      };
+    if (exploreBudgetExhausted(session)) {
+      return { success: true, output: exploreBudgetNotice(session) };
     }
     const profile = PROFILES[session.mode] ?? FORMAL_PROFILE;
     const rt = PROFILE_RT[profile.id];

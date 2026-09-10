@@ -527,3 +527,25 @@ test('the in-turn tool block enforces itself instead of repeating advice', () =>
   assert.ok(loopStart > -1 && loopStart < guardAt && guardAt < llmCallAt,
     'the guard must sit inside the tool loop and above its LLM call, so enforcing costs nothing');
 });
+
+/**
+ * A spent budget used to end in three silent places: the forced-continue decision returned null, the
+ * driver notified once and disarmed itself, and no code path could raise the ceiling. These assert the
+ * three wires that replace that — the arithmetic has its own tests in explore_budget.test.ts.
+ */
+test('a spent budget reaches the owner as a card, and the owner\'s answer reaches the ledger', () => {
+  const decide = chatHandler.slice(
+    chatHandler.indexOf('export async function decideForcedDeepExploreCall('),
+    chatHandler.indexOf('export async function decideForcedDeepExploreCall(') + 1600,
+  );
+  assert.match(decide, /exploreBudgetExhausted\(boundExplore\)\) \{[\s\S]{0,600}requestBudgetExtension\(boundExplore\)/,
+    'the spent branch must raise the card before returning null, not return null alone');
+  const answer = chatHandler.slice(chatHandler.indexOf('const pending = pendingBudgetExtension.get(sessionId);'));
+  assert.match(answer.slice(0, 2500), /memory\.reasoning\.grantBudget\(current\.id, EXPLORE_BUDGET_GRANT_TOKENS\)/,
+    'a grant must write budget_granted — the only thing that can reopen the session');
+  assert.match(answer.slice(0, 2500), /deepExploreAutoAdvance\.rearm\(current\.id\)/,
+    'a grant must re-arm the driver that was waiting on it');
+  const deps = chatHandler.slice(chatHandler.indexOf('export const deepExploreAutoAdvance = createAutoAdvanceLoop({'));
+  assert.match(deps.slice(0, 1200), /requestBudgetExtension: \(s\) => requestBudgetExtension\(s\)/,
+    'the driver must be handed the card, or it falls back to the fire-once notice');
+});

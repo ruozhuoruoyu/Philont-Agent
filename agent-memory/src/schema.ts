@@ -20,7 +20,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
 } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 45;
+export const SCHEMA_VERSION = 46;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -1075,6 +1075,9 @@ function migrateV24ToV25(db: Database.Database): void {
       frontier_target_node_id TEXT,
       auto_pause_reason TEXT,
       auto_pause_at INTEGER,
+      -- v46: tokens the OWNER granted on top of the lifetime ceiling. budget_spent only ever grows and
+      -- nothing could raise the ceiling per session, so a session that crossed it was dead for good.
+      budget_granted    INTEGER NOT NULL DEFAULT 0,
       created_at        INTEGER NOT NULL,
       updated_at        INTEGER NOT NULL
     );
@@ -1349,6 +1352,11 @@ function migrateV44ToV45(db: Database.Database): void {
   addColumnIfMissing(db, 'reasoning_sessions', 'auto_pause_reason', 'TEXT');
   addColumnIfMissing(db, 'reasoning_sessions', 'auto_workflow_approved', 'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing(db, 'reasoning_sessions', 'auto_pause_at', 'INTEGER');
+}
+
+/** v46: owner-granted budget on top of the lifetime ceiling (see reasoning_sessions.budget_granted). */
+function migrateV45ToV46(db: Database.Database): void {
+  addColumnIfMissing(db, 'reasoning_sessions', 'budget_granted', 'INTEGER NOT NULL DEFAULT 0');
 }
 
 function migrateV39ToV40(db: Database.Database): void {
@@ -1635,6 +1643,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 45) {
     migrateV44ToV45(db);
+  }
+  if (current < 46) {
+    migrateV45ToV46(db);
   }
 
   // 3) Finally run partial indexes that depend on v3 new columns
