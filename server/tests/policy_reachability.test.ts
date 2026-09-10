@@ -549,3 +549,21 @@ test('a spent budget reaches the owner as a card, and the owner\'s answer reache
   assert.match(deps.slice(0, 1200), /requestBudgetExtension: \(s\) => requestBudgetExtension\(s\)/,
     'the driver must be handed the card, or it falls back to the fire-once notice');
 });
+
+/**
+ * Replies sent to the owner BEFORE the model (card answers, spent-budget notices) must carry the same
+ * channel envelope the model's replies carry. Prod 2026-09-03 11:17:21: the admission-grant reply had
+ * none and WeChat logged an output_filter fallback. Every direct reply in the two card blocks and the
+ * explore-control branch now goes through forUser(); this pins that.
+ */
+test('every pre-model owner reply carries the channel envelope', () => {
+  const from = chatHandler.indexOf('const pending = pendingBudgetExtension.get(sessionId);');
+  const to = chatHandler.indexOf("// '/autonomy' status command");
+  assert.ok(from > 0 && to > from, 'the pre-model reply region still exists');
+  const region = chatHandler.slice(from, to);
+  const bare = [...region.matchAll(/onDelta\((?!forUser\(|reply\))/g)].map((m) => region.slice(m.index!, m.index! + 60));
+  assert.deepEqual(bare, [], 'a direct onDelta without the envelope reaches WeChat only via the fallback path');
+  assert.doesNotMatch(region, /reply = exploreBudgetNotice\(/, 'the budget notice must be enveloped too');
+  const helper = chatHandler.slice(chatHandler.indexOf('function forUser('), chatHandler.indexOf('function forUser(') + 200);
+  assert.match(helper, /## For User/); assert.match(helper, /## 给用户/);
+});

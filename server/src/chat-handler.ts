@@ -1960,6 +1960,17 @@ function requestFormalAutoAdmission(s: ReasoningSession): void {
  */
 const pendingBudgetExtension = new Map<string, { sessionId: string; goal: string; ts: number }>();
 
+/**
+ * Every reply that reaches the owner directly (before the model) must carry the channel envelope the
+ * model's own replies carry, or WeChat logs `output_filter fallback (no \`## 给用户\` section)` and ships
+ * the raw text on the fallback path. Prod 2026-09-03 11:17:21: the admission-grant reply, 54 chars,
+ * no envelope. The fallback delivered it, so nothing was lost — but the contract exists so that what
+ * is user-facing is marked as such at the source, not rescued at the channel.
+ */
+function forUser(en: boolean, text: string): string {
+  return `${en ? '## For User' : '## 给用户'}\n\n${text}`;
+}
+
 function requestBudgetExtension(s: ReasoningSession): void {
   if (!exploreBudgetExhausted(s)) return;
   const live = [...pendingBudgetExtension.values()].find(
@@ -8322,7 +8333,7 @@ export async function handleChatSend(
         const en = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en';
         const current = memory.reasoning.getSession(pending.sessionId);
         if (!current || current.status !== 'active') {
-          onDelta(en ? 'That exploration is no longer open.' : '那个探索已经不在进行中了。');
+          onDelta(forUser(en, en ? 'That exploration is no longer open.' : '那个探索已经不在进行中了。'));
           return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
         }
         if (decision === 'grant') {
@@ -8334,17 +8345,17 @@ export async function handleChatSend(
             `[auto-advance] budget extended session=${safeSessionId(current.id)} +${EXPLORE_BUDGET_GRANT_TOKENS} ` +
               `→ ${after.budgetSpent}/${exploreBudgetCeiling(after)} rearmed=${rearmed}`,
           );
-          onDelta(en
+          onDelta(forUser(en, en
             ? `Granted ${EXPLORE_BUDGET_GRANT_TOKENS} more tokens to "${current.goal.slice(0, 40)}" (now ${after.budgetSpent}/${exploreBudgetCeiling(after)}). ` +
               (rearmed ? 'Auto-advance is running again; milestones need no reply.' : 'Say "continue" to advance it.')
             : `已给「${current.goal.slice(0, 40)}」追加 ${EXPLORE_BUDGET_GRANT_TOKENS} token（现在 ${after.budgetSpent}/${exploreBudgetCeiling(after)}）。` +
-              (rearmed ? '自动推进已恢复，阶段报告无需回复。' : '回「继续」即可推进。'));
+              (rearmed ? '自动推进已恢复，阶段报告无需回复。' : '回「继续」即可推进。')));
         } else {
           memory.reasoning.setAutoAdvance(current.id, false);
           console.log(`[auto-advance] budget extension declined session=${safeSessionId(current.id)}`);
-          onDelta(en
+          onDelta(forUser(en, en
             ? `Understood — "${current.goal.slice(0, 40)}" stays paused at its budget; nothing proved is lost.`
-            : `好的，「${current.goal.slice(0, 40)}」保持暂停在预算上限；已证明的部分不会丢。`);
+            : `好的，「${current.goal.slice(0, 40)}」保持暂停在预算上限；已证明的部分不会丢。`));
         }
         return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
       }
@@ -8371,20 +8382,20 @@ export async function handleChatSend(
           const current = memory.reasoning.getSession(pending.sessionId);
           if (!current || exploreBudgetExhausted(current)) {
             if (current) requestBudgetExtension(current);
-            onDelta(current ? exploreBudgetNotice(current, en ? 'en' : 'zh') : '探索已结束，未启动新批次。');
+            onDelta(forUser(en, current ? exploreBudgetNotice(current, en ? 'en' : 'zh') : '探索已结束，未启动新批次。'));
             return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
           }
           memory.reasoning.setAutoWorkflowApproved(current.id, true);
           deepExploreAutoAdvance.rearm(pending.sessionId);
           console.log(`[auto-advance] formal workflow admitted and batch rearmed session=${safeSessionId(pending.sessionId)}`);
-          onDelta(en
+          onDelta(forUser(en, en
             ? `Task-scoped workflow approved. "${pending.goal.slice(0, 40)}" will continue automatically across batches and restarts within its total budget; milestones need no reply. Say stop to pause.`
-            : `已授权此任务的本地形式化工作流。「${pending.goal.slice(0, 40)}」将在累计预算内跨批次持续执行，重启后可恢复；阶段报告无需回复。说「停」可暂停。`);
+            : `已授权此任务的本地形式化工作流。「${pending.goal.slice(0, 40)}」将在累计预算内跨批次持续执行，重启后可恢复；阶段报告无需回复。说「停」可暂停。`));
         } else {
           memory.reasoning.setAutoWorkflowApproved(pending.sessionId, false);
           memory.reasoning.setAutoAdvance(pending.sessionId, false);
           console.log(`[auto-advance] formal workflow admission rejected session=${safeSessionId(pending.sessionId)}`);
-          onDelta(en ? 'Understood. Formal auto-advance remains paused.' : '好的，形式化自动推进保持暂停。');
+          onDelta(forUser(en, en ? 'Understood. Formal auto-advance remains paused.' : '好的，形式化自动推进保持暂停。'));
         }
         return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
       }
@@ -8429,7 +8440,7 @@ export async function handleChatSend(
       if (focus && ec.kind === 'auto_advance' && exploreBudgetExhausted(focus)) {
         memory.reasoning.setAutoAdvance(focus.id, false);
         requestBudgetExtension(focus);
-        onDelta(exploreBudgetNotice(focus, en ? 'en' : 'zh'));
+        onDelta(forUser(en, exploreBudgetNotice(focus, en ? 'en' : 'zh')));
         return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
       }
 
@@ -8455,7 +8466,7 @@ export async function handleChatSend(
         } else if (action === 'request_budget') {
           memory.reasoning.setAutoAdvance(focus.id, false);
           requestBudgetExtension(focus);
-          reply = exploreBudgetNotice(focus, en ? 'en' : 'zh');
+          reply = forUser(en, exploreBudgetNotice(focus, en ? 'en' : 'zh'));
         } else if (action === 'await_card') {
           reply = en
             ? 'This batch is waiting for workflow permission, not a continue signal. Reply "approve" or "reject" to the authorization card.'
