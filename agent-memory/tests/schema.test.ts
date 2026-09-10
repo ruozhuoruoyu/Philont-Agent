@@ -7,9 +7,10 @@
  */
 
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { initSchema, getSchemaVersion, SCHEMA_VERSION, reconcileColumnsWithDdl } from '../src/schema.js';
+import { initSchema, getSchemaVersion, SCHEMA_VERSION, reconcileColumnsWithDdl, ALL_TABLE_DDL } from '../src/schema.js';
 import {
   DEFAULT_CONSTITUTION_VALUES,
   LEGACY_DEFAULT_CONSTITUTION_VALUES_V42,
@@ -657,4 +658,18 @@ test('a column the DDL declares but no walked migration added is healed at boot,
   const out = reconcileColumnsWithDdl(db, `CREATE TABLE IF NOT EXISTS reasoning_sessions (\n  ghost_col INTEGER NOT NULL,\n  soft_col TEXT\n);`);
   assert.deepEqual(out, ['reasoning_sessions.soft_col']);
   assert.ok(!hasColumn(db, 'reasoning_sessions', 'ghost_col'));
+});
+
+test('every table the module creates is visible to the reconcile', () => {
+  // The reconcile can only heal what it can see. reasoning_sessions is created inside a migration,
+  // not in DDL_BASE — and the first version of the reconcile read only DDL_BASE, so the exact table
+  // the v45 defect lived in was the one it could not see. This scans the SOURCE for every CREATE TABLE
+  // and checks each one is in the list the reconcile reads.
+  const src = readFileSync(new URL('../../src/schema.ts', import.meta.url), 'utf8').replace(/^\s*(?:\*|\/\/).*$/gm, '');
+  const declared = [...src.matchAll(/CREATE TABLE IF NOT EXISTS\s+([a-z_]+)/g)].map((m) => m[1]);
+  assert.ok(declared.length >= 25, `the scan itself must not silently match nothing (got ${declared.length})`);
+  const visible = new Set([...ALL_TABLE_DDL.join('\n').matchAll(/CREATE TABLE IF NOT EXISTS\s+([a-z_]+)/g)].map((m) => m[1]));
+  const invisible = declared.filter((t) => !visible.has(t));
+  assert.deepEqual(invisible, [], 'a table created in a migration must be listed in ALL_TABLE_DDL or the reconcile cannot heal it');
+  assert.ok(visible.has('reasoning_sessions'));
 });

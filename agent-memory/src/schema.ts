@@ -453,6 +453,218 @@ CREATE TABLE IF NOT EXISTS memory_meta (
 `;
 
 // Partial indexes that depend on v3 new columns — must run after migration
+/** Hoisted from its migration so reconcileColumnsWithDdl can see the table; the migration still executes it. */
+const DDL_TABLE_ROUTING_RULES = `
+    CREATE TABLE IF NOT EXISTS routing_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_signature TEXT NOT NULL,
+      trigger_condition TEXT NOT NULL,
+      prefer_skill TEXT,
+      avoid_skills TEXT,
+      carveout TEXT NOT NULL,
+      evidence TEXT NOT NULL,
+      confidence TEXT NOT NULL DEFAULT 'provisional',
+      success_count INTEGER NOT NULL DEFAULT 0,
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      consecutive_successes INTEGER NOT NULL DEFAULT 0,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      context_keywords TEXT,
+      reflection_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rr_signature ON routing_rules(task_signature);
+    CREATE INDEX IF NOT EXISTS idx_rr_confidence ON routing_rules(confidence);
+    CREATE INDEX IF NOT EXISTS idx_rr_prefer_skill ON routing_rules(prefer_skill);
+`;
+
+/** Hoisted from its migration so reconcileColumnsWithDdl can see the table; the migration still executes it. */
+const DDL_TABLE_MEMORY_INITIATIVES = `
+    CREATE TABLE IF NOT EXISTS memory_initiatives (
+      id                TEXT PRIMARY KEY,
+      kind              TEXT NOT NULL,
+      driver            TEXT NOT NULL,
+      target_ref        TEXT NOT NULL,
+      rationale         TEXT NOT NULL,
+      utility           REAL NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'pending',
+      budget_estimate   INTEGER NOT NULL,
+      budget_actual     INTEGER,
+      outcome_summary   TEXT,
+      outcome_refs      TEXT,
+      error             TEXT,
+      created_at        INTEGER NOT NULL,
+      started_at        INTEGER,
+      completed_at      INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_initiatives_status
+      ON memory_initiatives(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_initiatives_driver
+      ON memory_initiatives(driver, completed_at);
+    CREATE INDEX IF NOT EXISTS idx_initiatives_target_recent
+      ON memory_initiatives(target_ref, completed_at)
+      WHERE status = 'done';
+
+    CREATE TABLE IF NOT EXISTS autonomous_budget (
+      user_id           TEXT NOT NULL,
+      date              TEXT NOT NULL,
+      llm_tokens_used   INTEGER NOT NULL DEFAULT 0,
+      tool_calls_used   INTEGER NOT NULL DEFAULT 0,
+      initiatives_run   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, date)
+    );
+`;
+
+/** Hoisted from its migration so reconcileColumnsWithDdl can see the table; the migration still executes it. */
+const DDL_TABLE_PUSH_SUBSCRIPTIONS = `
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      channel                 TEXT NOT NULL,
+      peer                    TEXT NOT NULL,
+      enabled                 INTEGER NOT NULL DEFAULT 1,
+      quiet_start_hour        INTEGER,
+      quiet_end_hour          INTEGER,
+      timezone                TEXT,
+      digest_min_interval_ms  INTEGER NOT NULL DEFAULT 14400000,
+      urgent_min_interval_ms  INTEGER NOT NULL DEFAULT 3600000,
+      last_digest_at          INTEGER,
+      last_urgent_at          INTEGER,
+      created_at              INTEGER NOT NULL,
+      updated_at              INTEGER NOT NULL,
+      PRIMARY KEY (channel, peer)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_push_sub_enabled
+      ON push_subscriptions(enabled, channel)
+      WHERE enabled = 1;
+`;
+
+/** Hoisted from its migration so reconcileColumnsWithDdl can see the table; the migration still executes it. */
+const DDL_TABLE_MEMORY_PLANS = `
+    CREATE TABLE IF NOT EXISTS memory_plans (
+      id                   TEXT PRIMARY KEY,
+      session_id           TEXT NOT NULL,
+      task_signature       TEXT,
+      steps_json           TEXT NOT NULL DEFAULT '[]',
+      status               TEXT NOT NULL DEFAULT 'draft',
+      review_history_json  TEXT NOT NULL DEFAULT '[]',
+      guide_ref            TEXT,
+      outcome_summary      TEXT,
+      created_at           INTEGER NOT NULL,
+      updated_at           INTEGER NOT NULL,
+      completed_at         INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_plans_session ON memory_plans(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_plans_signature ON memory_plans(task_signature, created_at)
+      WHERE task_signature IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_plans_status ON memory_plans(status, updated_at);
+`;
+
+/** Hoisted from its migration so reconcileColumnsWithDdl can see the table; the migration still executes it. */
+const DDL_TABLE_REASONING_SESSIONS = `
+    CREATE TABLE IF NOT EXISTS reasoning_sessions (
+      id                TEXT PRIMARY KEY,
+      goal              TEXT NOT NULL,
+      assumptions_json  TEXT,
+      status            TEXT NOT NULL DEFAULT 'active',
+      owner_session_id  TEXT,
+      root_node_id      TEXT,
+      budget_spent      INTEGER NOT NULL DEFAULT 0,
+      no_progress_rounds INTEGER NOT NULL DEFAULT 0,
+      auto_advance      INTEGER NOT NULL DEFAULT 0,
+      mode              TEXT NOT NULL DEFAULT 'formal',
+      phase             TEXT NOT NULL DEFAULT 'converge',
+      diverge_idle_rounds INTEGER NOT NULL DEFAULT 0,
+      rounds_run        INTEGER NOT NULL DEFAULT 0,
+      -- v37: when the followup loop last ASKED the owner about this idle session. Persisted (not in-memory)
+      -- so the "asked once, then quiet for the grace period → auto-archive" lifecycle survives a server
+      -- restart. Without this the in-memory ask log was cleared on every restart, so a stalled/unproven
+      -- exploration was re-asked forever and never auto-abandoned (it just nagged the owner each restart).
+      followup_asked_at INTEGER,
+      frontier_version TEXT,
+      frontier_target_node_id TEXT,
+      auto_pause_reason TEXT,
+      auto_pause_at INTEGER,
+      -- v46: tokens the OWNER granted on top of the lifetime ceiling. budget_spent only ever grows and
+      -- nothing could raise the ceiling per session, so a session that crossed it was dead for good.
+      budget_granted    INTEGER NOT NULL DEFAULT 0,
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_reasoning_sessions_status
+      ON reasoning_sessions(status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS reasoning_nodes (
+      id                   TEXT PRIMARY KEY,
+      session_id           TEXT NOT NULL,
+      parent_id            TEXT,
+      claim                TEXT NOT NULL,
+      kind                 TEXT NOT NULL,
+      status               TEXT NOT NULL DEFAULT 'open',
+      result               TEXT,
+      approaches_tried_json TEXT,
+      evidence_refs_json   TEXT,
+      depth                INTEGER NOT NULL DEFAULT 0,
+      check_criterion      TEXT,
+      created_at           INTEGER NOT NULL,
+      updated_at           INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_reasoning_nodes_session
+      ON reasoning_nodes(session_id, status);
+`;
+
+/** Hoisted from its migration so reconcileColumnsWithDdl can see the table; the migration still executes it. */
+const DDL_TABLE_DEFERRED_PUSHES = `
+    CREATE TABLE IF NOT EXISTS deferred_pushes (
+      id         TEXT PRIMARY KEY,
+      channel    TEXT NOT NULL,
+      peer       TEXT NOT NULL,
+      severity   TEXT NOT NULL CHECK(severity IN ('urgent','digest')),
+      kind       TEXT NOT NULL,
+      target_ref TEXT NOT NULL,
+      text       TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      UNIQUE(channel, peer, kind, target_ref)
+    );
+    CREATE INDEX IF NOT EXISTS idx_deferred_push_peer
+      ON deferred_pushes(channel, peer, expires_at);
+`;
+
+/** Hoisted from its migration so reconcileColumnsWithDdl can see the table; the migration still executes it. */
+const DDL_TABLE_CONFIG_RULES = `
+    CREATE TABLE IF NOT EXISTS config_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      key TEXT,
+      value_json TEXT NOT NULL,
+      source TEXT NOT NULL,
+      confidence TEXT NOT NULL DEFAULT 'provisional',
+      evidence TEXT,
+      audit_ref TEXT,
+      success_count INTEGER NOT NULL DEFAULT 0,
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      consecutive_successes INTEGER NOT NULL DEFAULT 0,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_config_rules_scope_active
+      ON config_rules(scope, confidence)
+      WHERE confidence NOT IN ('retired', 'disputed');
+    CREATE INDEX IF NOT EXISTS idx_config_rules_scope_all
+      ON config_rules(scope, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_config_rules_decay
+      ON config_rules(updated_at)
+      WHERE confidence != 'retired';
+`;
+
 const DDL_V3_DEPENDENT = `
 CREATE INDEX IF NOT EXISTS idx_notes_active ON memory_notes(importance DESC)
   WHERE forgotten_at IS NULL;
@@ -733,30 +945,7 @@ function migrateV10ToV11(db: Database.Database): void {
  *   - reflection_id: traces back to the reflection event that generated this rule
  */
 function migrateV11ToV12(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS routing_rules (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      task_signature TEXT NOT NULL,
-      trigger_condition TEXT NOT NULL,
-      prefer_skill TEXT,
-      avoid_skills TEXT,
-      carveout TEXT NOT NULL,
-      evidence TEXT NOT NULL,
-      confidence TEXT NOT NULL DEFAULT 'provisional',
-      success_count INTEGER NOT NULL DEFAULT 0,
-      failure_count INTEGER NOT NULL DEFAULT 0,
-      consecutive_successes INTEGER NOT NULL DEFAULT 0,
-      consecutive_failures INTEGER NOT NULL DEFAULT 0,
-      context_keywords TEXT,
-      reflection_id TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_rr_signature ON routing_rules(task_signature);
-    CREATE INDEX IF NOT EXISTS idx_rr_confidence ON routing_rules(confidence);
-    CREATE INDEX IF NOT EXISTS idx_rr_prefer_skill ON routing_rules(prefer_skill);
-  `);
+  db.exec(DDL_TABLE_ROUTING_RULES);
 }
 
 /**
@@ -773,42 +962,7 @@ function migrateV11ToV12(db: Database.Database): void {
  * Upgrading old DBs: CREATE TABLE only, does not modify existing data.
  */
 function migrateV12ToV13(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS memory_initiatives (
-      id                TEXT PRIMARY KEY,
-      kind              TEXT NOT NULL,
-      driver            TEXT NOT NULL,
-      target_ref        TEXT NOT NULL,
-      rationale         TEXT NOT NULL,
-      utility           REAL NOT NULL,
-      status            TEXT NOT NULL DEFAULT 'pending',
-      budget_estimate   INTEGER NOT NULL,
-      budget_actual     INTEGER,
-      outcome_summary   TEXT,
-      outcome_refs      TEXT,
-      error             TEXT,
-      created_at        INTEGER NOT NULL,
-      started_at        INTEGER,
-      completed_at      INTEGER
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_initiatives_status
-      ON memory_initiatives(status, created_at);
-    CREATE INDEX IF NOT EXISTS idx_initiatives_driver
-      ON memory_initiatives(driver, completed_at);
-    CREATE INDEX IF NOT EXISTS idx_initiatives_target_recent
-      ON memory_initiatives(target_ref, completed_at)
-      WHERE status = 'done';
-
-    CREATE TABLE IF NOT EXISTS autonomous_budget (
-      user_id           TEXT NOT NULL,
-      date              TEXT NOT NULL,
-      llm_tokens_used   INTEGER NOT NULL DEFAULT 0,
-      tool_calls_used   INTEGER NOT NULL DEFAULT 0,
-      initiatives_run   INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (user_id, date)
-    );
-  `);
+  db.exec(DDL_TABLE_MEMORY_INITIATIVES);
 }
 
 /**
@@ -824,27 +978,7 @@ function migrateV12ToV13(db: Database.Database): void {
  * Global kill switch uses environment variable PHILONT_PUSH_ENABLED=0, not stored in table.
  */
 function migrateV13ToV14(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS push_subscriptions (
-      channel                 TEXT NOT NULL,
-      peer                    TEXT NOT NULL,
-      enabled                 INTEGER NOT NULL DEFAULT 1,
-      quiet_start_hour        INTEGER,
-      quiet_end_hour          INTEGER,
-      timezone                TEXT,
-      digest_min_interval_ms  INTEGER NOT NULL DEFAULT 14400000,
-      urgent_min_interval_ms  INTEGER NOT NULL DEFAULT 3600000,
-      last_digest_at          INTEGER,
-      last_urgent_at          INTEGER,
-      created_at              INTEGER NOT NULL,
-      updated_at              INTEGER NOT NULL,
-      PRIMARY KEY (channel, peer)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_push_sub_enabled
-      ON push_subscriptions(enabled, channel)
-      WHERE enabled = 1;
-  `);
+  db.exec(DDL_TABLE_PUSH_SUBSCRIPTIONS);
 }
 
 /**
@@ -912,26 +1046,7 @@ function migrateV15ToV16(db: Database.Database): void {
  *   - listByStatus: filters 'executing' / 'reviewed' active plans during reflection
  */
 function migrateV16ToV17(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS memory_plans (
-      id                   TEXT PRIMARY KEY,
-      session_id           TEXT NOT NULL,
-      task_signature       TEXT,
-      steps_json           TEXT NOT NULL DEFAULT '[]',
-      status               TEXT NOT NULL DEFAULT 'draft',
-      review_history_json  TEXT NOT NULL DEFAULT '[]',
-      guide_ref            TEXT,
-      outcome_summary      TEXT,
-      created_at           INTEGER NOT NULL,
-      updated_at           INTEGER NOT NULL,
-      completed_at         INTEGER
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_plans_session ON memory_plans(session_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_plans_signature ON memory_plans(task_signature, created_at)
-      WHERE task_signature IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_plans_status ON memory_plans(status, updated_at);
-  `);
+  db.exec(DDL_TABLE_MEMORY_PLANS);
 }
 
 /**
@@ -1051,59 +1166,7 @@ function migrateV23ToV24(db: Database.Database): void {
  * tools are not registered but tables are still created (harmless empty tables).
  */
 function migrateV24ToV25(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS reasoning_sessions (
-      id                TEXT PRIMARY KEY,
-      goal              TEXT NOT NULL,
-      assumptions_json  TEXT,
-      status            TEXT NOT NULL DEFAULT 'active',
-      owner_session_id  TEXT,
-      root_node_id      TEXT,
-      budget_spent      INTEGER NOT NULL DEFAULT 0,
-      no_progress_rounds INTEGER NOT NULL DEFAULT 0,
-      auto_advance      INTEGER NOT NULL DEFAULT 0,
-      mode              TEXT NOT NULL DEFAULT 'formal',
-      phase             TEXT NOT NULL DEFAULT 'converge',
-      diverge_idle_rounds INTEGER NOT NULL DEFAULT 0,
-      rounds_run        INTEGER NOT NULL DEFAULT 0,
-      -- v37: when the followup loop last ASKED the owner about this idle session. Persisted (not in-memory)
-      -- so the "asked once, then quiet for the grace period → auto-archive" lifecycle survives a server
-      -- restart. Without this the in-memory ask log was cleared on every restart, so a stalled/unproven
-      -- exploration was re-asked forever and never auto-abandoned (it just nagged the owner each restart).
-      followup_asked_at INTEGER,
-      frontier_version TEXT,
-      frontier_target_node_id TEXT,
-      auto_pause_reason TEXT,
-      auto_pause_at INTEGER,
-      -- v46: tokens the OWNER granted on top of the lifetime ceiling. budget_spent only ever grows and
-      -- nothing could raise the ceiling per session, so a session that crossed it was dead for good.
-      budget_granted    INTEGER NOT NULL DEFAULT 0,
-      created_at        INTEGER NOT NULL,
-      updated_at        INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_reasoning_sessions_status
-      ON reasoning_sessions(status, updated_at);
-
-    CREATE TABLE IF NOT EXISTS reasoning_nodes (
-      id                   TEXT PRIMARY KEY,
-      session_id           TEXT NOT NULL,
-      parent_id            TEXT,
-      claim                TEXT NOT NULL,
-      kind                 TEXT NOT NULL,
-      status               TEXT NOT NULL DEFAULT 'open',
-      result               TEXT,
-      approaches_tried_json TEXT,
-      evidence_refs_json   TEXT,
-      depth                INTEGER NOT NULL DEFAULT 0,
-      check_criterion      TEXT,
-      created_at           INTEGER NOT NULL,
-      updated_at           INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_reasoning_nodes_session
-      ON reasoning_nodes(session_id, status);
-  `);
+  db.exec(DDL_TABLE_REASONING_SESSIONS);
 }
 
 /**
@@ -1301,23 +1364,7 @@ function migrateV40ToV41(db: Database.Database): void {
 
 /** v42: proactive sends rejected by a conversational channel survive until its next inbound turn. */
 function migrateV41ToV42(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS deferred_pushes (
-      id         TEXT PRIMARY KEY,
-      channel    TEXT NOT NULL,
-      peer       TEXT NOT NULL,
-      severity   TEXT NOT NULL CHECK(severity IN ('urgent','digest')),
-      kind       TEXT NOT NULL,
-      target_ref TEXT NOT NULL,
-      text       TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL,
-      UNIQUE(channel, peer, kind, target_ref)
-    );
-    CREATE INDEX IF NOT EXISTS idx_deferred_push_peer
-      ON deferred_pushes(channel, peer, expires_at);
-  `);
+  db.exec(DDL_TABLE_DEFERRED_PUSHES);
 }
 
 /** v43: update only the untouched factory identity; owner-authored/ratified constitutions are sacred. */
@@ -1380,6 +1427,12 @@ function migrateV46ToV47(db: Database.Database): void {
  * Only additions that SQLite can perform on a populated table are attempted (nullable, or with a
  * DEFAULT); a NOT NULL column without a default cannot be self-healed and is reported instead.
  */
+/**
+ * Every CREATE TABLE text this module owns. A table created inside a migration and never listed here
+ * would be invisible to the reconcile — schema.test scans the source for exactly that.
+ */
+export const ALL_TABLE_DDL: readonly string[] = [DDL_BASE, DDL_V3_DEPENDENT, DDL_TABLE_ROUTING_RULES, DDL_TABLE_MEMORY_INITIATIVES, DDL_TABLE_PUSH_SUBSCRIPTIONS, DDL_TABLE_MEMORY_PLANS, DDL_TABLE_REASONING_SESSIONS, DDL_TABLE_DEFERRED_PUSHES, DDL_TABLE_CONFIG_RULES];
+
 export function reconcileColumnsWithDdl(db: Database.Database, ddl: string): string[] {
   const healed: string[] = [];
   const tableRe = /CREATE TABLE IF NOT EXISTS\s+([a-z_]+)\s*\(([\s\S]*?)\);/g;
@@ -1439,33 +1492,7 @@ function migrateV19ToV20(db: Database.Database): void {
 }
 
 function migrateV17ToV18(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS config_rules (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      scope TEXT NOT NULL,
-      key TEXT,
-      value_json TEXT NOT NULL,
-      source TEXT NOT NULL,
-      confidence TEXT NOT NULL DEFAULT 'provisional',
-      evidence TEXT,
-      audit_ref TEXT,
-      success_count INTEGER NOT NULL DEFAULT 0,
-      failure_count INTEGER NOT NULL DEFAULT 0,
-      consecutive_successes INTEGER NOT NULL DEFAULT 0,
-      consecutive_failures INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_config_rules_scope_active
-      ON config_rules(scope, confidence)
-      WHERE confidence NOT IN ('retired', 'disputed');
-    CREATE INDEX IF NOT EXISTS idx_config_rules_scope_all
-      ON config_rules(scope, updated_at);
-    CREATE INDEX IF NOT EXISTS idx_config_rules_decay
-      ON config_rules(updated_at)
-      WHERE confidence != 'retired';
-  `);
+  db.exec(DDL_TABLE_CONFIG_RULES);
 }
 
 /**
@@ -1700,7 +1727,7 @@ export function initSchema(db: Database.Database): void {
   if (current < 47) {
     migrateV46ToV47(db);
   }
-  reconcileColumnsWithDdl(db, DDL_BASE);
+  reconcileColumnsWithDdl(db, ALL_TABLE_DDL.join('\n'));
 
   // 3) Finally run partial indexes that depend on v3 new columns
   db.exec(DDL_V3_DEPENDENT);
