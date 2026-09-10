@@ -41,6 +41,18 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
       `  routing rule injected in ${get('routing.inject.turns')}/${turns} turns (${pct(get('routing.inject.turns'), turns)}); ` +
         `rules shown total=${get('routing.inject.rules')}`,
     );
+    // `frontier_shadow` compares the NAIVE frontier order (depth/creation) with the value-scored UCB
+    // pick. "disagree" means the scorer overrode the naive order — the scorer doing its job — not that
+    // the model and the tree disagree about anything. Read raw, 144:7 looks like a defect; it was read
+    // that way twice in one week. Say what it means where it is shown.
+    const fsAgree = get('deep_explore.frontier_shadow.agree');
+    const fsDisagree = get('deep_explore.frontier_shadow.disagree');
+    if (fsAgree + fsDisagree > 0) {
+      lines.push(
+        `  value-guided frontier overrode the naive order in ${fsDisagree} of ${fsAgree + fsDisagree} scored rounds ` +
+          `(${pct(fsDisagree, fsAgree + fsDisagree)}) — that is the scorer working, not a disagreement about the tree`,
+      );
+    }
     const ro = get('routing.outcome.success') + get('routing.outcome.failure');
     lines.push(
       `  routing outcomes recorded: success=${get('routing.outcome.success')} failure=${get('routing.outcome.failure')} (success ${pct(get('routing.outcome.success'), ro)})`,

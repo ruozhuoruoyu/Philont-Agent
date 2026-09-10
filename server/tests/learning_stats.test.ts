@@ -68,3 +68,15 @@ test('a mechanism saying stop is not a failure signature', () => {
   assert.match(rejectionLine, /deep_explore:other:rejected_by_in_turn_reflection×5/);
   h.close();
 });
+
+test('the frontier shadow counter is rendered with what it means', () => {
+  // Raw, `frontier_shadow disagree=144 agree=7` reads as the model and the tree disagreeing 95% of the
+  // time. It is the value scorer overriding the naive frontier order — its job. The report has to say so.
+  const h = openMemoryDb(':memory:');
+  h.metrics.increment('deep_explore.frontier_shadow.agree', 1);
+  h.metrics.increment('deep_explore.frontier_shadow.disagree', 3);
+  const out = renderLearningStats(h);
+  assert.match(out, /value-guided frontier overrode the naive order in 3 of 4 scored rounds/);
+  assert.match(out, /not a disagreement about the tree/);
+  h.close();
+});

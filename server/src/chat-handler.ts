@@ -3351,6 +3351,9 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
       if (armed) memory.metrics.increment('deep_explore.auto_advance.armed_from_ask');
       return armed;
     },
+    // agree = the value scorer picked the same node the naive depth/creation order would have.
+    // disagree = it overrode that order, which is what value guidance exists to do. Not a model-vs-tree
+    // signal; learning_stats renders it with that reading so the raw counter is not misread as a defect.
     onFrontierRankingShadow: ({ agreed }) => {
       memory.metrics.increment(`deep_explore.frontier_shadow.${agreed ? 'agree' : 'disagree'}`);
     },
