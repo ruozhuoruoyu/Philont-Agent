@@ -306,35 +306,37 @@ export class SessionReflector {
         `so it is updated instead of minting a synonym. Different wording is not a new skill.\n` +
         existingSkills.map((s) => `- ${s.name}: ${s.description}`).join('\n')
       : '';
-    const prompt = buildReflectPrompt(dialogue, actions) + existingCatalog;
-    const { text, tokensUsed } = await this.llm.complete(prompt);
-
-    const specs = parseSkills(text);
-    const created: Skill[] = [];
-    let updated = 0;
-
     // Creation-side bound on the untested pool. The store's own design metric is "creation rate <=
     // measurement rate", and while that is violated, minting is not free: the cap has to evict a draft to
     // make room, and once the declined pool is empty the only thing left to evict is another hypothesis
     // nobody has tried either. Refusing to mint is strictly better than trading one untried draft for
     // another. Updates and merges into EXISTING skills are unaffected — those add evidence, not volume.
+    //
+    // Decided BEFORE the model is asked, and told to the model. Until 2026-09-10 this ran after the
+    // call: prod logged "not minting 22 new draft(s): 44 untested draft(s) already at cap 40" — the
+    // model had written twenty-two skills, every one discarded unread, and on 06:53 that same output
+    // ran the aux ladder to 16384 tokens and truncated (content_chars=62112), which failed the whole
+    // reflection including the updates it would have kept. Generating what you have already decided
+    // to throw away is the waste; saying so up front is what removes it.
     let untested = this.skills.untestedDraftCount();
-    let mintingBlocked = untested >= MAX_DRAFT_SKILLS;
-    if (mintingBlocked && specs.length > 0) {
+    if (untested >= MAX_DRAFT_SKILLS) {
       // Try to break the deadlock: prune declined drafts first (the idle tick may not have run since
-      // the last reflection, so pruneDraftsToCap at line ~393 may be stale).
-      const pruned = this.skills.pruneDraftsToCap(MAX_DRAFT_SKILLS);
-      if (pruned > 0) {
-        untested = this.skills.untestedDraftCount();
-        mintingBlocked = untested >= MAX_DRAFT_SKILLS;
-      }
-      // Capacity pressure is not negative evidence. If the failed pool is empty, keep the existing
-      // untested hypotheses and pause minting instead of rotating one untried draft into another.
+      // the last reflection, so the end-of-cycle pruneDraftsToCap may be stale). Capacity pressure is
+      // not negative evidence: if the declined pool is empty nothing is evicted and minting pauses.
+      if (this.skills.pruneDraftsToCap(MAX_DRAFT_SKILLS) > 0) untested = this.skills.untestedDraftCount();
     }
-    if (mintingBlocked && specs.length > 0) {
+    const headroom = Math.max(0, MAX_DRAFT_SKILLS - untested);
+    const mintingBlocked = headroom === 0;
+    const prompt = buildReflectPrompt(dialogue, actions) + existingCatalog + draftCapacityClause(untested, headroom);
+    const { text, tokensUsed } = await this.llm.complete(prompt);
+
+    const specs = parseSkills(text);
+    const created: Skill[] = [];
+    let updated = 0;
+    if (mintingBlocked && specs.some((spec) => !this.skills.getByName(spec.name))) {
       console.log(
-        `[reflector] not minting ${specs.length} new draft(s): ${untested} untested draft(s) already at cap ${MAX_DRAFT_SKILLS} — ` +
-        `the bottleneck is offering them, not generating more (existing skills are still updated)`,
+        `[reflector] not minting new draft(s): ${untested} untested draft(s) already at cap ${MAX_DRAFT_SKILLS} — ` +
+        `the model was told and proposed new names anyway; existing skills are still updated`,
       );
     }
 
@@ -393,8 +395,9 @@ export class SessionReflector {
                 note: `merged near-duplicate "${spec.name}" → "${dup.skill.name}" (jaccard ${dup.jaccard.toFixed(2)})`,
               });
             }
-          } else if (mintingBlocked) {
-            // Nothing to do: the hypothesis is dropped rather than displacing an untried one.
+          } else if (mintingBlocked || created.length >= headroom) {
+            // Nothing to do: the hypothesis is dropped rather than displacing an untried one. The
+            // headroom is the number the model was told; anything past it is the model not listening.
           } else {
             const skill = this.skills.createSkill({
               name: spec.name,
@@ -444,6 +447,22 @@ export class SessionReflector {
 
 /** How many existing skills the dedup hint may name. Bounds the prompt; see the warning at its use. */
 const CATALOG_HINT_LIMIT = 200;
+
+/**
+ * Tell the model how much room the untested draft pool has BEFORE it writes. A full pool means updates
+ * only; otherwise the count is a hard bound on new names. Both shrink the reply to what will be kept.
+ */
+function draftCapacityClause(untested: number, headroom: number): string {
+  if (headroom <= 0) {
+    return `\n\n## Draft capacity — FULL (${untested}/${MAX_DRAFT_SKILLS} untested drafts)\n` +
+      `Do NOT propose any new skill name this cycle; a new name will be discarded unread. ` +
+      `Return only entries whose \`name\` is an EXISTING catalog name above (an update with better evidence), ` +
+      `or the empty array [] if nothing existing needs updating.`;
+  }
+  return `\n\n## Draft capacity — ${headroom} new skill(s) at most (${untested}/${MAX_DRAFT_SKILLS} untested drafts)\n` +
+    `Prefer updating an existing catalog name over minting. If you do propose new names, return no more than ` +
+    `${headroom}, ranked by how often the pattern will recur; anything past that will be discarded unread.`;
+}
 
 /** Max retained `draft` skills (reflection churn cap). env PHILONT_MAX_DRAFT_SKILLS, default 40, min 5. */
 const MAX_DRAFT_SKILLS = (() => {
