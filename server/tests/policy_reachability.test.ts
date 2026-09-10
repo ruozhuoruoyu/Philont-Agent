@@ -500,3 +500,30 @@ test('the turn-budget clamp re-checks the call it rewrote', () => {
       `${site} must pass the real checker, not a lambda that says yes`);
   }
 });
+
+/**
+ * The in-turn tool block tells the model a tool is disabled and then has to make that true. It could
+ * not: nothing counted the calls that came after it, so `deep_explore:other:rejected_by_in_turn_reflection`
+ * reached 120 in one week — every one an LLM round trip and a tool slot taken from the turn that was
+ * supposed to be writing the owner a reply. This asserts the wire; the report split has its own test.
+ */
+test('the in-turn tool block enforces itself instead of repeating advice', () => {
+  const site = chatHandler.slice(
+    chatHandler.indexOf('[in-turn-reflection blocked]'),
+    chatHandler.indexOf('[in-turn-reflection blocked]') + 1500,
+  );
+  assert.ok(site.length > 0, 'the scan itself must not silently match nothing');
+  assert.match(site, /blockedToolRejections\+\+/, 'the rejections after a block must be counted');
+  assert.match(site, /blockedToolStop = call\.name/, 'reaching the cap must record the stop');
+
+  // And the stop has to be acted on BEFORE the next LLM call, or the enforcement costs a round trip.
+  const guard = chatHandler.slice(chatHandler.indexOf('if (blockedToolStop) {'));
+  assert.match(guard.slice(0, 800), /break;/, 'the guard must leave the tool loop');
+  // The loop's LLM call is the first one AFTER the guard; an earlier sendLlmWithRescue belongs to
+  // the flat-text branch, a different function.
+  const guardAt = chatHandler.indexOf('if (blockedToolStop) {');
+  const loopStart = chatHandler.lastIndexOf('for (let i = startIteration + 1; i < effectiveMax; i++) {', guardAt);
+  const llmCallAt = chatHandler.indexOf('response = await sendLlmWithRescue(', guardAt);
+  assert.ok(loopStart > -1 && loopStart < guardAt && guardAt < llmCallAt,
+    'the guard must sit inside the tool loop and above its LLM call, so enforcing costs nothing');
+});

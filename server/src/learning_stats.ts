@@ -8,7 +8,7 @@
  *
  * Pure reader: no writes, no LLM. Safe to call anytime; every section is independently try/caught.
  */
-import { extractFailureSignature } from '@agent/memory';
+import { extractFailureSignature, isMechanismRejectionSignature } from '@agent/memory';
 import type { MemoryHandle } from '@agent/memory';
 
 function pct(n: number, d: number): string {
@@ -144,15 +144,24 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
     const calls = countBy(rows, (r) => r.toolName);
     lines.push('-- action log (derived) --');
     lines.push(`  search_skills calls=${calls['search_skills'] ?? 0} · use_skill calls=${calls['useSkill'] ?? calls['use_skill'] ?? 0} (does the agent pull learned skills?)`);
-    const failSigs = countBy(
-      rows.filter((r) => r.success === 0),
-      (r) => extractFailureSignature(r.toolName, r.result),
-    );
+    // A mechanism's deliberate stop is not a task failure — groupFailures has excluded these since
+    // 2026-06-09 and this reader never did, so on 2026-09-10 the top reported defect in the whole
+    // system was `deep_explore:other:rejected_by_in_turn_reflection×120`: a control working. They are
+    // still counted, on their own line, because "the model kept calling a tool the mechanism had just
+    // disabled, 120 times in a week" is worth knowing — it is just not a wall the agent ran into.
+    const allSigs = rows
+      .filter((r) => r.success === 0)
+      .map((r) => extractFailureSignature(r.toolName, r.result));
+    const failSigs = countBy(allSigs.filter((s) => !isMechanismRejectionSignature(s)), (s) => s);
+    const rejectionSigs = countBy(allSigs.filter((s) => isMechanismRejectionSignature(s)), (s) => s);
     const topFails = Object.entries(failSigs)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8);
     lines.push(`  top failure signatures: ${topFails.map(([s, n]) => `${s}×${n}`).join(', ') || '(none)'}`);
     lines.push(`    ^ a compute signature (pariGp:/leanCheck:/z3Verify:) still topping this AFTER the error-visibility fixes = the case where a learning subsystem might earn its keep`);
+    const topRejections = Object.entries(rejectionSigs).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    lines.push(`  mechanism rejections (NOT failures — a control said stop): ${topRejections.map(([s, n]) => `${s}×${n}`).join(', ') || '(none)'}`);
+    lines.push(`    ^ a large count here means the model kept calling a tool a mechanism had already disabled — the block is being read as advice`);
   } catch (e) {
     lines.push(`  [action log error: ${(e as Error)?.message}]`);
   }

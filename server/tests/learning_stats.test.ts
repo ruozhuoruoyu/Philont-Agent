@@ -38,3 +38,33 @@ test('reflects counters and a routing rule', () => {
   assert.match(out, /total=1/);
   h.close();
 });
+
+test('a mechanism saying stop is not a failure signature', () => {
+  // Production 2026-09-10: the first line of the system's own health readout was
+  // `deep_explore:other:rejected_by_in_turn_reflection×120` — a control working as designed, reported
+  // as philont's largest defect, above every real wall. groupFailures had excluded these since
+  // 2026-06-09; this reader never applied the same rule.
+  const h = openMemoryDb(':memory:');
+  for (let i = 0; i < 5; i++) {
+    h.actions.log({
+      sessionId: 'global', toolName: 'deep_explore', params: {},
+      result: 'rejected_by_in_turn_reflection', success: false,
+    });
+  }
+  for (let i = 0; i < 2; i++) {
+    h.actions.log({
+      sessionId: 'global', toolName: 'leanCheck', params: {},
+      result: 'unsolved goals', success: false,
+    });
+  }
+  const out = renderLearningStats(h);
+  const topLine = out.split('\n').find((l) => l.includes('top failure signatures'))!;
+  assert.ok(topLine, 'the report must still have a top-failure line');
+  assert.doesNotMatch(topLine, /rejected_by_/,
+    'a deliberate mechanism stop must not outrank the real walls it is reported above');
+  assert.match(topLine, /leanCheck:lean-unsolved×2/, 'the real failure is still counted');
+  // Not hidden — 5 calls into a tool a mechanism had already disabled is worth knowing.
+  const rejectionLine = out.split('\n').find((l) => l.includes('mechanism rejections'))!;
+  assert.match(rejectionLine, /deep_explore:other:rejected_by_in_turn_reflection×5/);
+  h.close();
+});

@@ -205,6 +205,20 @@ const EXCLUDED_FROM_ROOT_CAUSE = new Set<string>(['pariGp', 'z3Verify', 'leanChe
 // — so it never matched, and these rejections leaked into the trigger as noise. Match the real marker.
 const MECHANISM_REJECTION_RE = /:other:rejected_by_/i;
 
+/**
+ * Is this signature a mechanism's deliberate stop rather than a task failure?
+ *
+ * groupFailures has filtered these since 2026-06-09, but the learning-stats report counted its own
+ * failure signatures straight off memory_actions and never applied the same rule — so on 2026-09-10
+ * the FIRST line of the system's own health readout was
+ * `deep_explore:other:rejected_by_in_turn_reflection×120`: the top reported defect in philont was a
+ * control working exactly as designed. Two readers of one ledger disagreeing about what counts as a
+ * failure is the same split that has bitten every other pair of "produce here, match there" sites.
+ */
+export function isMechanismRejectionSignature(signature: string): boolean {
+  return MECHANISM_REJECTION_RE.test(signature);
+}
+
 export interface FailureCounted {
   signature: string;
   count: number;

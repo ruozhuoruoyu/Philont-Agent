@@ -53,6 +53,7 @@ export {
   extractFailureSignature,
   countSameRootCauseFailures,
   groupFailures,
+  isMechanismRejectionSignature,
 } from './failure_signatures.js';
 export type { FailureCounted } from './failure_signatures.js';
 export { SkillStore, scoreSkill } from './skills.js';

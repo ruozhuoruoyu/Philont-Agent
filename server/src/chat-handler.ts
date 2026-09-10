@@ -13117,6 +13117,23 @@ async function runToolLoop(
   // Trigger logic: reflection.signature looks like `<toolName>:<errorClass>` → extract toolName
   // as the block list for the remainder of this turn. Auto-cleared on the next user turn (variable is turn-local).
   let blockedToolAfterReflection: string | null = null;
+  /**
+   * A mechanism that says stop must eventually enforce stop.
+   *
+   * The in-turn tool block tells the model "the mechanism layer has disabled this tool until the next
+   * user turn" and then lets it call the tool again, and again, with nothing counting. On 2026-09-10 the
+   * single largest entry in the system's own failure ledger was
+   * `deep_explore:other:rejected_by_in_turn_reflection×120` — 120 calls in a week into a tool that had
+   * already been disabled, each one costing an LLM round trip and a tool slot out of the turn that is
+   * trying to write the owner a reply. The block was advice with an unbounded retry budget.
+   *
+   * Two rejections are the model reading the message; a third is fixation. At that point the turn stops
+   * calling tools and goes to the same graceful wrap-up the clock guard uses — the owner gets a report
+   * instead of the turn being spent saying no.
+   */
+  const BLOCKED_TOOL_REJECTION_CAP = Number(process.env.PHILONT_BLOCKED_TOOL_REJECTION_CAP ?? 3);
+  let blockedToolRejections = 0;
+  let blockedToolStop: string | null = null;
   // Mechanical syntax failures need one fix-and-retry, but not an unlimited loop. Production's top
   // signature was pariGp brace syntax (38 occurrences); after the 2x reminder allow exactly one retry.
   let mechanicalRetryTool: string | null = null;
@@ -13148,6 +13165,21 @@ async function runToolLoop(
     // Clock teeth. Running out of time and running out of iterations are the same situation, and until
     // now only one of them had a graceful exit: the cap fell through to a forced summary, the clock threw
     // TurnDeadlineError and discarded the turn. Leave the loop with headroom and take the same exit.
+    // The block said stop and was ignored BLOCKED_TOOL_REJECTION_CAP times. Enforce it here, before the
+    // next LLM call, so the enforcement itself costs nothing.
+    if (blockedToolStop) {
+      outOfTime = true;
+      memory.metrics.increment('inturn.blocked_tool_stop');
+      console.warn(
+        `[in-turn-tool-block] session=${safeSessionId(sessionId)} stopping the tool loop — ` +
+          `${blockedToolRejections} calls to the disabled ${blockedToolStop} this turn; writing the reply instead`,
+      );
+      onTrace?.({
+        kind: 'loop-control', tier: 4,
+        text: `工具 ${blockedToolStop} 已被机制禁用,仍被调用 ${blockedToolRejections} 次,停止调工具改为收尾汇报`,
+      });
+      break;
+    }
     const turnAgeMs = Date.now() - (signalBus.turnStartedAt ?? Date.now());
     if (turnAgeMs > TURN_HARD_DEADLINE_MS - TURN_WRAPUP_HEADROOM_MS) {
       outOfTime = true;
@@ -14418,8 +14450,13 @@ async function runToolLoop(
           `  (a) Use store_note(importance=high) to record the root cause you identified (wrong auth? wrong endpoint? credential stored with prefix?), so the user sees it next turn\n` +
           `  (b) Use other tools (list_facts / get_fact / listCredentialNames / search_skills) to gather diagnostic information\n` +
           `  (c) Use the ## For User section to tell the user the blocker and what you need, then close out this turn`;
+        blockedToolRejections++;
+        if (BLOCKED_TOOL_REJECTION_CAP > 0 && blockedToolRejections >= BLOCKED_TOOL_REJECTION_CAP) {
+          blockedToolStop = call.name;
+        }
         console.warn(
-          `[in-turn-tool-block] session=${safeSessionId(sessionId)} rejected ${call.name} (mechanism-layer disabled after in-turn-reflection)`,
+          `[in-turn-tool-block] session=${safeSessionId(sessionId)} rejected ${call.name} ` +
+            `(mechanism-layer disabled after in-turn-reflection; ${blockedToolRejections} rejection(s) this turn)`,
         );
         nextResults.push({
           type: 'tool_result',
@@ -14864,9 +14901,11 @@ async function runToolLoop(
   onStatus?.(summarizingPhrase(statusLang));
   onTrace?.({
     kind: 'loop-control', tier: 4,
-    text: outOfTime
-      ? 'Out of time for this turn, forcing a summary'
-      : `Reached the ${effectiveMax}-round tool limit, forcing a summary`,
+    text: blockedToolStop
+      ? `${blockedToolStop} is mechanism-disabled and kept being called, forcing a summary`
+      : outOfTime
+        ? 'Out of time for this turn, forcing a summary'
+        : `Reached the ${effectiveMax}-round tool limit, forcing a summary`,
     meta: { iteration: effectiveMax },
   });
 
@@ -14896,7 +14935,12 @@ async function runToolLoop(
   try {
     pushGateDirective(
       messages,
-        (outOfTime
+        (blockedToolStop
+          ? `[drive blocked-tool wrap-up] The mechanism layer disabled ${blockedToolStop} earlier this turn after repeated ` +
+            `same-root-cause failures, and you called it ${blockedToolRejections} more times anyway. No more tool calls. ` +
+            `Tell the user plainly what wall ${blockedToolStop} hit, what you did establish before it, and what you need ` +
+            `from them to get past it — do NOT describe the block itself as progress.`
+        : outOfTime
           ? `[drive time-budget wrap-up] This turn has used its whole time budget (${Math.round(TURN_HARD_DEADLINE_MS / 60_000)} min) ` +
             `after ${totalToolCallsThisTurn} tool calls, and there is only enough left for this one reply. ` +
             `Say plainly that you ran out of time, and report what you ACTUALLY established — not what you intended to do.`
