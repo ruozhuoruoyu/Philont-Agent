@@ -572,3 +572,23 @@ test('getBySkill: uses idx_actions_skill, not a full table scan (real-deployment
   assert.ok(usesIndex, `expected idx_actions_skill in query plan, got: ${JSON.stringify(plan)}`);
   h.close();
 });
+
+test('an endpoint outage is the infrastructure, not the agent hitting a wall', () => {
+  // Prod 2026-09-12: two round_not_run results in one turn would otherwise cluster as same_root_cause
+  // and disable deep_explore for the turn — the moment the endpoint came back, the tool would be gone.
+  assert.equal(
+    extractFailureSignature('deep_explore', 'round_not_run: the model endpoint did not answer this round (API 429)'),
+    'deep_explore:endpoint-down',
+  );
+  assert.equal(
+    extractFailureSignature('deep_explore', 'OpenAI-compatible API 429: {"error":{"code":"rate_limit_exceeded"}}'),
+    'deep_explore:endpoint-down',
+  );
+  assert.equal(
+    extractFailureSignature('shell', 'LLM endpoint is not responding (4 consecutive failures, down 30s).'),
+    'shell:endpoint-down',
+  );
+  const ts = Date.now();
+  const outage = [1, 2, 3].map(() => ({ toolName: 'deep_explore', result: 'round_not_run: API 429', timestamp: ts }));
+  assert.equal(countSameRootCauseFailures(outage), 0, 'three outages are zero walls');
+});

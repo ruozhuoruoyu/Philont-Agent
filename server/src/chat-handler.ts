@@ -2929,7 +2929,16 @@ const miniLoopLLM: MiniLoopLLMClient = {
     // to its own timeout and overrunning the parent turn's 20-min hard deadline.
     // 2026-06-07: also forward per-scenario reasoning so deep_explore rounds / skeptics can
     // request explicit max/high thinking effort (runMiniAgentLoop threads opts.reasoning here).
-    const resp = await llm.send(adjusted, toolDefsForSub, { signal: opts?.signal, reasoning: opts?.reasoning });
+    // The foreground clamps every call to the adaptive per-call timeout; this path never did, so a
+    // hung connection ran until the ROUND deadline. Prod 2026-09-12 11:12:50 → 11:25:52: one `fetch
+    // failed` attempt took thirteen minutes to fail, the round's whole budget, and came back as a
+    // "barren round". Same clock here; the caller's abort signal still wins.
+    const ms = llmCallBudgetMs(Number.POSITIVE_INFINITY);
+    const resp = await withTimeout(
+      llm.send(adjusted, toolDefsForSub, { signal: opts?.signal, reasoning: opts?.reasoning }),
+      ms,
+      () => new LlmTimeoutError(ms),
+    );
     // LLMResponse and MiniLoopLLMResponse are structurally isomorphic
     return resp as unknown as MiniLoopLLMResponse;
   },

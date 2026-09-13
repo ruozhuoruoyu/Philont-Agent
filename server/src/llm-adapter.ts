@@ -526,7 +526,14 @@ async function sendWithTransientRetry<T>(fn: () => Promise<T>, signal?: AbortSig
         llmBreaker.recordFailure(e);
         throw e;
       }
-      const backoffMs = Math.min(8000, 500 * 2 ** attempt) + (attempt * 113) % 250; // deterministic jitter
+      // A 429 says "later"; 8.5s of total patience is not later. Prod 2026-09-12 10:53: five attempts
+      // in 9s, then the owner's turn died with the raw 429 as its reply. Honour Retry-After when the
+      // endpoint sends one; otherwise give a rate limit a floor that can actually clear.
+      const status = (e as { status?: number })?.status;
+      const retryAfterMs = (e as { retryAfterMs?: number })?.retryAfterMs;
+      const backoffMs = status === 429
+        ? Math.min(60_000, Math.max(retryAfterMs ?? 0, 5_000 * 2 ** attempt))
+        : Math.min(8000, 500 * 2 ** attempt) + (attempt * 113) % 250; // deterministic jitter
       console.warn(
         `[llm-adapter] transient error (attempt ${attempt + 1}/${LLM_MAX_RETRIES + 1}), retrying in ${backoffMs}ms: ${(e as Error)?.message ?? e}`,
       );
@@ -1048,8 +1055,10 @@ class OpenAICompatAdapter implements LLMAdapter {
       });
       if (!r.ok && (r.status === 408 || r.status === 429 || (r.status >= 500 && r.status < 600))) {
         const t = await r.text().catch(() => '');
-        const err = new Error(`${this.cfg.name} API ${r.status}: ${t.slice(0, 300)}`) as Error & { status?: number };
+        const err = new Error(`${this.cfg.name} API ${r.status}: ${t.slice(0, 300)}`) as Error & { status?: number; retryAfterMs?: number };
         err.status = r.status; // makes isTransientLlmError retry it
+        const ra = Number(r.headers.get('retry-after'));
+        if (Number.isFinite(ra) && ra > 0) err.retryAfterMs = ra * 1000;
         throw err;
       }
       return r;

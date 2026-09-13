@@ -302,3 +302,34 @@ test('auto-advance: 解出/闭合 → 停止 + important 通知', async () => {
   assert.deepEqual(calls.setAutoAdvance, [['a', false]]);
   assert.equal(notes[0].important, true);
 });
+
+test('a round the endpoint never answered is held, not scored as stagnation', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  // Prod 2026-09-12 10:54:12 → 10:55:40: breaker open, two "rounds" with itersUsed=0, session declared
+  // stuck and the owner handed a blocking "回复继续" card 90 seconds into an outage.
+  const live = sess({ budgetSpent: 0, noProgressRounds: 0 });
+  const { store, calls } = fakeStore({ active: [live], afterRound: () => live });
+  let advanced = 0;
+  const notes: Array<{ text: string; opts: any }> = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx,
+    advanceSession: async () => {
+      advanced++;
+      return { success: false, output: '', error: 'round_not_run: 429', data: { notRun: true, reason: 'API 429' } };
+    },
+    hasFormalAdmission: () => true,
+    notify: (text, opts) => { notes.push({ text, opts }); },
+  });
+  await loop.tickOnce();
+  assert.equal(advanced, 1);
+  assert.ok(!calls.setAutoAdvance.some(([, on]) => on === false), 'an outage must not disarm the session');
+  assert.ok(!notes.some((n) => n.opts?.blocking), 'no stuck card for an outage');
+  assert.ok(!notes.some((n) => /本轮执行失败|连续无进展/.test(n.text)), 'not reported as a failed or stagnant round');
+  const held = notes.filter((n) => /端点|endpoint/.test(n.text));
+  assert.equal(held.length, 1, 'said once, on the heartbeat lane');
+  assert.equal(held[0].opts?.progress, 'heartbeat');
+  // Inside the backoff the session is not even attempted; nothing is said again.
+  await loop.tickOnce();
+  assert.equal(advanced, 1, 'held sessions are skipped, not retried every 30s');
+  assert.equal(notes.filter((n) => /端点|endpoint/.test(n.text)).length, 1);
+});

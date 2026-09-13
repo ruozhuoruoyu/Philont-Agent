@@ -396,6 +396,19 @@ export type TargetRelation =
   /** The round ended with the tree exactly as it found it — the shape prod logged as `tree_delta=0`. */
   | 'no_commit';
 
+/**
+ * Did this round never get a single model answer? `llm_error` with zero iterations is the endpoint
+ * refusing or failing (429, breaker open, fetch failed); `aborted` with zero iterations is the round
+ * deadline cutting a call that hung the whole budget — also the endpoint. A round where the model
+ * answered at least once and then produced nothing is a real round and is judged as one.
+ */
+export function roundNotRun(result: { itersUsed: number; error?: string }): { reason: string } | null {
+  if (result.itersUsed > 0 || !result.error) return null;
+  if (result.error.startsWith('llm_error:')) return { reason: result.error.slice('llm_error:'.length).trim() };
+  if (result.error === 'aborted') return { reason: 'the first model call did not return before the round deadline' };
+  return null;
+}
+
 export interface RoundAttribution {
   targetNodeId: string | null;
   relation: TargetRelation;
@@ -3418,9 +3431,6 @@ export function createDeepExploreTool(
         output: exploreBudgetNotice(session),
       };
     }
-    // Count this advancing round (cumulative, persisted) — backs the deliberate auto-answer round ceiling.
-    // Incremented for both diverge and converge rounds so the ceiling reflects total babysitting rounds.
-    const roundsRun = reasoning.incrementRoundsRun(session.id);
     // Resolve the reasoning profile (formal proof vs general evidence-based deliberation) from the session.
     const profile = PROFILES[session.mode] ?? FORMAL_PROFILE;
     const rt = PROFILE_RT[profile.id];
@@ -3579,6 +3589,31 @@ export function createDeepExploreTool(
       clearTimeout(warnTimer);
     }
 
+    // A round the endpoint never answered did not happen. Prod 2026-09-12 10:54–10:55: the main
+    // endpoint was returning 429 and the breaker had opened; two "rounds" came back with itersUsed=0,
+    // were logged as "the model wrote instead of working the tree", counted as no-progress, and 90
+    // seconds after the outage began the session was declared stuck and the owner got a blocking
+    // "回复继续" card. Then it happened again all afternoon on `fetch failed`. An outage is not the
+    // model's choice and must not be charged to the model: no attribution, no stuck counter, no UCB
+    // visit, no milestone — the caller is told the round did not run and can back off.
+    const notRun = roundNotRun(result);
+    if (notRun) {
+      console.warn(
+        `[deep-explore] round NOT RUN session=${safeSessionId(session.id)} target=${roundTarget?.id ?? 'none'} — ` +
+        `the endpoint never answered (${notRun.reason.slice(0, 160)}); nothing is charged to the model`,
+      );
+      return {
+        success: false,
+        output: '',
+        error: `round_not_run: the model endpoint did not answer this round (${notRun.reason.slice(0, 200)}). ` +
+          `The tree is unchanged; this is not a stuck round and not the model's doing. It will be retried automatically.`,
+        data: { notRun: true, reason: notRun.reason },
+      };
+    }
+
+    // Count this advancing round (cumulative, persisted) — backs the deliberate auto-answer round ceiling.
+    // Charged only now, past the not-run exit: a round the endpoint never answered is not a round.
+    const roundsRun = reasoning.incrementRoundsRun(session.id);
     // Accumulate cross-turn budget (mini-loop only gives the total on return; batch-commit).
     reasoning.addBudgetSpent(session.id, result.llmTokensSpent);
 

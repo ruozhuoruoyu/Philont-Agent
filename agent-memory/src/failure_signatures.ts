@@ -52,6 +52,12 @@ export function extractFailureSignature(
   if (tool === 'process' && /\[process-orphaned\]|process handle unavailable in this runtime/.test(lower)) {
     return `${tool}:orphaned`;
   }
+  // The model endpoint did not answer (429, breaker open, a round that never got a first reply). That
+  // is the infrastructure, not the agent hitting a wall: it must not cluster into same_root_cause,
+  // where two of them in a turn would disable the tool the agent needs the moment the endpoint is back.
+  if (/round_not_run:|llm endpoint is not responding|rate_limit_exceeded|too many requests/.test(lower)) {
+    return `${tool}:endpoint-down`;
+  }
 
   // 0. Tool-specific taxonomies take precedence over the generic patterns below — otherwise a
   //    pariGp/z3 error whose text happens to contain a 3-digit number / "timeout" / etc. gets
@@ -204,6 +210,8 @@ const EXCLUDED_FROM_ROOT_CAUSE = new Set<string>(['pariGp', 'z3Verify', 'leanChe
 // `rejected_by_` marker never produces) and named `in_turn_tool_block` (real marker is `in_turn_reflection`)
 // — so it never matched, and these rejections leaked into the trigger as noise. Match the real marker.
 const MECHANISM_REJECTION_RE = /:other:rejected_by_/i;
+/** The endpoint, not the agent — see extractFailureSignature. Excluded from root-cause clustering. */
+const ENDPOINT_DOWN_RE = /:endpoint-down$/;
 
 /**
  * Is this signature a mechanism's deliberate stop rather than a task failure?
@@ -268,6 +276,7 @@ export function groupFailures(
     if (EXCLUDED_FROM_ROOT_CAUSE.has(f.toolName)) continue;
     const sig = extractFailureSignature(f.toolName, f.result);
     if (MECHANISM_REJECTION_RE.test(sig)) continue;
+    if (ENDPOINT_DOWN_RE.test(sig)) continue;
     if (sig === 'process:orphaned') continue;
     // A compute run launched via the generic shell/process tool normalizes to a
     // pariGp:/leanCheck:/z3Verify: signature (extractFailureSignature §0b). Exclude it from

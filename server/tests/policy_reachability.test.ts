@@ -584,3 +584,14 @@ test('both cards un-register themselves where the dispatcher skipped them', () =
   assert.match(helper, /reconstructDmSessionId\(skip\.channel, skip\.peer\)/, 'the skip must be mapped to the conversation it names');
   assert.match(helper, /p\.sessionId === sessionId && p\.ts === ts/, 'only THIS card is retired, never a newer one');
 });
+
+/**
+ * The background mini-loop's LLM call must carry the same per-call clock the foreground has. Prod
+ * 2026-09-12 11:12:50 → 11:25:52: one `fetch failed` attempt took thirteen minutes to fail — the whole
+ * round budget — because this path forwarded only the round's abort signal and no timeout of its own.
+ */
+test('the background mini-loop LLM call is bounded by the per-call clock', () => {
+  const site = chatHandler.slice(chatHandler.indexOf('const miniLoopLLM: MiniLoopLLMClient = {'), chatHandler.indexOf('const miniLoopLLM: MiniLoopLLMClient = {') + 2200);
+  assert.match(site, /withTimeout\(\s*llm\.send\(adjusted, toolDefsForSub/, 'llm.send must be raced against the clock');
+  assert.match(site, /llmCallBudgetMs\(Number\.POSITIVE_INFINITY\)/, 'the adaptive per-call budget, not an ad-hoc constant');
+});

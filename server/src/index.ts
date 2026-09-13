@@ -793,6 +793,22 @@ const wss = new WebSocketServer({ server });
 wss.on('connection', (ws) => {
   const sessionId = Math.random().toString(36).slice(2);
   console.log('Client connected, session:', sessionId);
+  // Prod 2026-09-12 13:59 → 20:00: a client reconnected every ~60s, hundreds of times, and the log could
+  // not say why — "disconnected" carried no close code. Log the code and reason, and answer the
+  // client's liveness question ourselves: ping every 30s and drop a socket that does not pong, so an
+  // idle-timeout somewhere on the path cannot keep recycling a healthy connection.
+  let alive = true;
+  ws.on('pong', () => { alive = true; });
+  const keepalive = setInterval(() => {
+    if (ws.readyState !== ws.OPEN) return;
+    if (!alive) {
+      console.warn(`[ws] session ${safeSessionId(sessionId)} missed a pong — terminating`);
+      ws.terminate();
+      return;
+    }
+    alive = false;
+    try { ws.ping(); } catch { /* closing */ }
+  }, 30_000);
 
   // Wrap ws.send: silently drops the send if the connection is already closed / send throws.
   const safeSend = (payload: object): void => {
@@ -927,8 +943,9 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
-    console.log('Client disconnected, session:', sessionId);
+  ws.on('close', (code: number, reason: Buffer) => {
+    clearInterval(keepalive);
+    console.log(`Client disconnected, session: ${safeSessionId(sessionId)} code=${code}${reason?.length ? ` reason=${reason.toString().slice(0, 80)}` : ''}`);
     reminderEmitter.off('reminder', onReminder);
     unregisterWebui();
     // Trigger extraction on WS close: write facts/skills to Layer 2 / Layer 3;

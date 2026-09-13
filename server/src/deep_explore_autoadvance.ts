@@ -60,6 +60,12 @@ export function autoAdvanceEnabled(): boolean {
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
+/** How long to hold a session after the endpoint failed to answer its round. */
+const ENDPOINT_BACKOFF_MS = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_ENDPOINT_BACKOFF_MS);
+  return Number.isFinite(n) && n >= 10_000 ? n : 5 * 60_000;
+})();
+
 export interface AutoAdvanceDeps {
   /** Foreground and background must not edit the same task concurrently. */
   isOwnerBusy?: (session: ReasoningSession) => boolean;
@@ -160,6 +166,11 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
     }
   }
 
+  /** Sessions whose last round the endpoint never answered, held until this time. */
+  const endpointBackoffUntil = new Map<string, number>();
+  /** One notice per outage per session, cleared by the next round that actually runs. */
+  const endpointNoticeSent = new Set<string>();
+
   async function tickOnce(): Promise<void> {
     if (stopped || running) return;
     running = true;
@@ -169,6 +180,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
       for (const s of sessions) {
         if (stopped) break;
         if (deps.isOwnerBusy?.(s)) continue;
+        if ((endpointBackoffUntil.get(s.id) ?? 0) > Date.now()) continue;
         const notify = (text: string, opts?: Parameters<AutoAdvanceDeps['notify']>[1]) =>
           deps.notify(text, { ...opts, sessionId: s.id, ownerSessionId: s.ownerSessionId });
         if (exploreBudgetExhausted(s)) {
@@ -264,6 +276,29 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           stopProgress();
         }
         if (stopped) break;
+
+        // The endpoint did not answer: nothing about the tree or the model is learned, so nothing is
+        // scored. Hold this session for a while and say so once, on the heartbeat lane — not the
+        // "本轮执行失败" milestone every fifteen minutes, and never the stuck card.
+        if (out?.data?.notRun === true) {
+          const until = Date.now() + ENDPOINT_BACKOFF_MS;
+          endpointBackoffUntil.set(s.id, until);
+          console.warn(
+            `[auto-advance] endpoint did not answer for ${s.id}; holding this session ${Math.round(ENDPOINT_BACKOFF_MS / 60_000)}min ` +
+              `(${String(out.data?.reason ?? '').slice(0, 120)})`,
+          );
+          if (!endpointNoticeSent.has(s.id)) {
+            endpointNoticeSent.add(s.id);
+            notify(
+              (deps.lang?.() ?? 'zh') === 'en'
+                ? `The model endpoint is not answering, so automatic rounds for "${s.goal.slice(0, 50)}" are on hold. Nothing was lost; they resume on their own when it recovers.`
+                : `模型端点暂时无响应，「${s.goal.slice(0, 50)}」的自动推进先挂起。已有工作不受影响，端点恢复后会自动继续。`,
+              { progress: 'heartbeat' },
+            );
+          }
+          continue;
+        }
+        endpointNoticeSent.delete(s.id);
 
         const fresh = deps.reasoning.getSession(s.id);
         if (!fresh || fresh.status !== 'active') {
