@@ -516,6 +516,7 @@ async function sendWithTransientRetry<T>(fn: () => Promise<T>, signal?: AbortSig
   llmBreaker.assertClosed();
   for (let attempt = 0; attempt <= LLM_MAX_RETRIES; attempt++) {
     if (signal?.aborted) throw new Error('aborted');
+    const attemptStartedAt = Date.now();
     try {
       const out = await fn();
       llmBreaker.recordSuccess();
@@ -534,8 +535,12 @@ async function sendWithTransientRetry<T>(fn: () => Promise<T>, signal?: AbortSig
       const backoffMs = status === 429
         ? Math.min(60_000, Math.max(retryAfterMs ?? 0, 5_000 * 2 ** attempt))
         : Math.min(8000, 500 * 2 ** attempt) + (attempt * 113) % 250; // deterministic jitter
+      // How long the attempt lived before failing is the diagnosis. Prod 2026-09-13: every `fetch
+      // failed` came 5m05s ± 2s after its attempt began — a 300s gateway timeout on the far side, not
+      // a network blip — and the log could not say so because it only recorded the failure.
       console.warn(
-        `[llm-adapter] transient error (attempt ${attempt + 1}/${LLM_MAX_RETRIES + 1}), retrying in ${backoffMs}ms: ${(e as Error)?.message ?? e}`,
+        `[llm-adapter] transient error (attempt ${attempt + 1}/${LLM_MAX_RETRIES + 1}, took ${Math.round((Date.now() - attemptStartedAt) / 1000)}s), ` +
+          `retrying in ${backoffMs}ms: ${(e as Error)?.message ?? e}`,
       );
       await new Promise((r) => setTimeout(r, backoffMs));
     }

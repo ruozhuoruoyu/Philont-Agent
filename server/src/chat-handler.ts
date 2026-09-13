@@ -2933,14 +2933,28 @@ const miniLoopLLM: MiniLoopLLMClient = {
     // hung connection ran until the ROUND deadline. Prod 2026-09-12 11:12:50 → 11:25:52: one `fetch
     // failed` attempt took thirteen minutes to fail, the round's whole budget, and came back as a
     // "barren round". Same clock here; the caller's abort signal still wins.
+    // And the timeout ABORTS the call rather than merely stopping the wait. Prod 2026-09-13 18:06:09:
+    // the round was declared not-run at 7.3min, but the adapter's transient-retry loop kept the
+    // orphaned request alive underneath — attempts 2/3/4 at 18:08, 18:14, 18:19, each hanging five
+    // minutes against an endpoint that was already not answering, overlapping the next round's own
+    // calls. An abort signal is the only thing that reaches the fetch and the retry loop both.
     const ms = llmCallBudgetMs(Number.POSITIVE_INFINITY);
-    const resp = await withTimeout(
-      llm.send(adjusted, toolDefsForSub, { signal: opts?.signal, reasoning: opts?.reasoning }),
-      ms,
-      () => new LlmTimeoutError(ms),
-    );
-    // LLMResponse and MiniLoopLLMResponse are structurally isomorphic
-    return resp as unknown as MiniLoopLLMResponse;
+    const ctrl = new AbortController();
+    const forward = () => ctrl.abort();
+    opts?.signal?.addEventListener('abort', forward, { once: true });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, ms);
+    try {
+      const resp = await llm.send(adjusted, toolDefsForSub, { signal: ctrl.signal, reasoning: opts?.reasoning });
+      // LLMResponse and MiniLoopLLMResponse are structurally isomorphic
+      return resp as unknown as MiniLoopLLMResponse;
+    } catch (e) {
+      if (timedOut && !opts?.signal?.aborted) throw new LlmTimeoutError(ms);
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      opts?.signal?.removeEventListener('abort', forward);
+    }
   },
 };
 

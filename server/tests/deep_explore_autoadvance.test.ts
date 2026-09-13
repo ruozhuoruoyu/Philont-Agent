@@ -326,10 +326,40 @@ test('a round the endpoint never answered is held, not scored as stagnation', as
   assert.ok(!notes.some((n) => n.opts?.blocking), 'no stuck card for an outage');
   assert.ok(!notes.some((n) => /本轮执行失败|连续无进展/.test(n.text)), 'not reported as a failed or stagnant round');
   const held = notes.filter((n) => /端点|endpoint/.test(n.text));
-  assert.equal(held.length, 1, 'said once, on the heartbeat lane');
-  assert.equal(held[0].opts?.progress, 'heartbeat');
+  assert.equal(held.length, 1, 'said once, on the milestone lane');
+  assert.equal(held[0].opts?.progress, 'milestone', 'the heartbeat lane is what the round\'s own heartbeats saturate');
   // Inside the backoff the session is not even attempted; nothing is said again.
   await loop.tickOnce();
   assert.equal(advanced, 1, 'held sessions are skipped, not retried every 30s');
   assert.equal(notes.filter((n) => /端点|endpoint/.test(n.text)).length, 1);
+});
+
+test('consecutive outages double the hold and are escalated once, as an important notice', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  // Prod 2026-09-13 18:06 → 21:06: thirteen not-run rounds twelve minutes apart, each a 7-minute hung
+  // call plus a heartbeat to the owner, and the one explanatory notice rate-limited by those heartbeats.
+  let now = 1_000_000;
+  const live = sess({ budgetSpent: 0, noProgressRounds: 0 });
+  const { store, calls } = fakeStore({ active: [live], afterRound: () => live });
+  let advanced = 0;
+  const notes: Array<{ text: string; opts: any }> = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx, now: () => now,
+    advanceSession: async () => { advanced++; return { success: false, output: '', error: 'round_not_run: 300s', data: { notRun: true, reason: 'timeout' } }; },
+    hasFormalAdmission: () => true,
+    notify: (text, opts) => { notes.push({ text, opts }); },
+  });
+  const FIVE = 5 * 60_000;
+  await loop.tickOnce();                       // strike 1 → hold 5min, milestone notice
+  assert.equal(advanced, 1);
+  now += FIVE - 1; await loop.tickOnce(); assert.equal(advanced, 1, 'inside the first hold');
+  now += 2;        await loop.tickOnce(); assert.equal(advanced, 2, 'strike 2 → hold doubles to 10min');
+  now += FIVE + 1; await loop.tickOnce(); assert.equal(advanced, 2, '5min is no longer enough');
+  now += FIVE;     await loop.tickOnce(); assert.equal(advanced, 3, 'strike 3');
+  const important = notes.filter((n) => n.opts?.important === true);
+  assert.equal(important.length, 1, 'the third strike is said once, so it arrives');
+  assert.match(important[0].text, /3|three/);
+  assert.ok(!notes.some((n) => n.opts?.blocking), 'still no card: there is nothing for the owner to decide');
+  assert.ok(!calls.setAutoAdvance.some(([, on]) => on === false), 'still armed');
+  assert.equal(notes.filter((n) => /端点|endpoint/.test(n.text)).length, 2, 'first strike + escalation, nothing in between');
 });

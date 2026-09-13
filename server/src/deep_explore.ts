@@ -2753,7 +2753,10 @@ export async function scoreFrontierValues(opts: {
     );
     const text = resp.type === 'text' ? resp.content : '';
     return { assessments: parseAssessments(text, validIds), tokensSpent: resp.tokensUsed ?? 0 };
-  } catch {
+  } catch (e) {
+    // Swallowed on purpose (scoring is advisory), but said: on 2026-09-13 the log could not tell
+    // whether the small scoring call was answered while the big round call was not.
+    console.warn(`[deep-explore] frontier scoring skipped: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
     return { assessments: new Map(), tokensSpent: 0 };
   }
 }

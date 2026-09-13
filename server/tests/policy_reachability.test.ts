@@ -591,7 +591,12 @@ test('both cards un-register themselves where the dispatcher skipped them', () =
  * round budget — because this path forwarded only the round's abort signal and no timeout of its own.
  */
 test('the background mini-loop LLM call is bounded by the per-call clock', () => {
-  const site = chatHandler.slice(chatHandler.indexOf('const miniLoopLLM: MiniLoopLLMClient = {'), chatHandler.indexOf('const miniLoopLLM: MiniLoopLLMClient = {') + 2200);
-  assert.match(site, /withTimeout\(\s*llm\.send\(adjusted, toolDefsForSub/, 'llm.send must be raced against the clock');
+  const site = chatHandler.slice(chatHandler.indexOf('const miniLoopLLM: MiniLoopLLMClient = {'), chatHandler.indexOf('const miniLoopLLM: MiniLoopLLMClient = {') + 3000);
   assert.match(site, /llmCallBudgetMs\(Number\.POSITIVE_INFINITY\)/, 'the adaptive per-call budget, not an ad-hoc constant');
+  // And the clock does not merely stop the wait: it aborts the call. Prod 2026-09-13: the round was
+  // declared not-run at 7.3min while the adapter's retry loop kept the orphaned request alive underneath
+  // for another twenty minutes, overlapping the next round. Only an abort reaches the fetch AND the loop.
+  assert.match(site, /setTimeout\(\(\) => \{ timedOut = true; ctrl\.abort\(\); \}, ms\)/, 'the timer must abort, not just reject');
+  assert.match(site, /signal: ctrl\.signal/, 'the adapter must receive the abortable signal, not the raw caller signal');
+  assert.match(site, /addEventListener\('abort', forward/, "the caller's own abort still has to propagate");
 });
