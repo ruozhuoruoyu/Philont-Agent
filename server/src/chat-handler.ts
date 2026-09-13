@@ -9417,7 +9417,10 @@ export async function handleChatSend(
   const stopProgress = startProgressTicker(() => {
     if (turnAborter.signal.aborted) return;
     const records = signalBus.inTurnRecords ?? [];
-    const plan = memory.plans.listBySession(sessionId, { limit: 1 })[0];
+    // Only a LIVE plan has a current step. Prod 2026-09-13 17:49: the heartbeat cited "读取当前
+    // Region3Sum.lean …" as the current step — a plan auto-closed as failed four days earlier.
+    const plan = memory.plans.listBySession(sessionId, { limit: 3 })
+      .find((p) => p.status === 'draft' || p.status === 'executing');
     const step = plan?.steps.find((s) => s.status === 'doing');
     const elapsed = Math.floor((Date.now() - turnStartedAt) / 60_000);
     const failures = records.filter((r) => !r.success).length;

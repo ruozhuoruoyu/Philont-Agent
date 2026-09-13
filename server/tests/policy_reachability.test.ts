@@ -600,3 +600,16 @@ test('the background mini-loop LLM call is bounded by the per-call clock', () =>
   assert.match(site, /signal: ctrl\.signal/, 'the adapter must receive the abortable signal, not the raw caller signal');
   assert.match(site, /addEventListener\('abort', forward/, "the caller's own abort still has to propagate");
 });
+
+/**
+ * Two heartbeat facts the owner read on 2026-09-13 that were false: a "current step" taken from a plan
+ * auto-closed as failed four days earlier, and "121 个开放节点" where deep_explore(status) said 68 for
+ * the same tree — two definitions of "open" behind one word.
+ */
+test('heartbeats read a live plan and one meaning of open', () => {
+  const turnHb = chatHandler.slice(chatHandler.indexOf('const stopProgress = startProgressTicker(() => {'), chatHandler.indexOf('const stopProgress = startProgressTicker(() => {') + 900);
+  assert.match(turnHb, /\.find\(\(p\) => p\.status === 'draft' \|\| p\.status === 'executing'\)/, 'only a live plan has a current step');
+  const aa = readFileSync(new URL('../src/deep_explore_autoadvance.ts', import.meta.url), 'utf8');
+  assert.match(aa, /const open = computeFrontier\(nodes\)\.length;/, 'the milestone must count open the way status does');
+  assert.match(aa, /const retryingAfterOutage = \(endpointStrikes\.get\(s\.id\) \?\? 0\) > 0;/, 'a retry after an outage must not arm the heartbeat ticker');
+});

@@ -363,3 +363,29 @@ test('consecutive outages double the hold and are escalated once, as an importan
   assert.ok(!calls.setAutoAdvance.some(([, on]) => on === false), 'still armed');
   assert.equal(notes.filter((n) => /端点|endpoint/.test(n.text)).length, 2, 'first strike + escalation, nothing in between');
 });
+
+test('a retry after an outage is not narrated minute by minute', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  // Prod 2026-09-13 17:59 → 18:54: eight "本轮已运行 5/10 分钟" heartbeats for four rounds that all timed
+  // out, while the notice that explained it was rate-limited by them.
+  let now = 1_000_000;
+  const live = sess({ budgetSpent: 0, noProgressRounds: 0 });
+  const { store } = fakeStore({ active: [live], afterRound: () => live });
+  const notes: string[] = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx, now: () => now, progressIntervalMs: 5,
+    advanceSession: async () => {
+      await new Promise((r) => setTimeout(r, 30)); // long enough for the ticker to fire if it is armed
+      return { success: false, output: '', error: 'round_not_run: 300s', data: { notRun: true, reason: 'timeout' } };
+    },
+    hasFormalAdmission: () => true,
+    notify: (text) => { notes.push(text); },
+  });
+  const heartbeats = () => notes.filter((t) => /本轮已运行/.test(t)).length;
+  await loop.tickOnce();                 // first round: nothing known yet → heartbeats are legitimate
+  const afterFirst = heartbeats();
+  assert.ok(afterFirst >= 1, 'the ticker is armed on an ordinary round');
+  now += 5 * 60_000 + 1; await loop.tickOnce();   // strike 2: a retry after an outage
+  now += 10 * 60_000 + 1; await loop.tickOnce();  // strike 3
+  assert.equal(heartbeats(), afterFirst, 'no minute-by-minute narration of a retry expected to fail');
+});

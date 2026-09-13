@@ -106,7 +106,12 @@ export async function serviceDriverTick(
   }
 
   // 2. Done initiatives produced since the last assistant message
-  const findings = opts.initiatives.listRecentDone(lastAsst.timestamp, 5);
+  // A finding is an initiative that WROTE something — a fact, a note, a pursuit. Prod 2026-09-13 17:43:
+  // "这段时间我自己做了 5 件事", and all five read "本轮未调用任何工具，无新证据可整理 … 标记为待重试".
+  // Five things not done, presented as accomplishments. Refs are what the store keeps of the work.
+  const findings = opts.initiatives.listRecentDone(lastAsst.timestamp, 20)
+    .filter((f) => initiativeDidWork(f))
+    .slice(0, 5);
   if (findings.length < minFindings) {
     return {
       triggered: false,
@@ -139,6 +144,13 @@ export async function serviceDriverTick(
     dispatchDelivered: result.delivered,
     dispatchSkipped: result.skipped.length,
   };
+}
+
+/** Did this initiative leave anything behind? Empty refs mean it ran and wrote nothing. */
+export function initiativeDidWork(f: Pick<Initiative, 'outcomeRefs'>): boolean {
+  const r = f.outcomeRefs;
+  if (!r) return false;
+  return (r.facts?.length ?? 0) + (r.notes?.length ?? 0) + (r.pursuits?.length ?? 0) > 0;
 }
 
 /**

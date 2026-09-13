@@ -15,6 +15,7 @@
  */
 import type { PhraseLang } from './channel_phrases.js';
 import { exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
+import { computeFrontier } from './deep_explore.js';
 import { startProgressTicker } from './task_progress.js';
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 import type { ToolResult } from '@agent/policy';
@@ -270,7 +271,11 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
         let out: ToolResult | null = null;
         const previous = new Map((deps.reasoning.getNodes?.(s.id) ?? []).map((n) => [n.id, n.status]));
         const roundStartedAt = Date.now();
-        const stopProgress = startProgressTicker(() => {
+        // A retry after an outage is expected to fail again; narrating its minutes tells the owner
+        // nothing. Prod 2026-09-13 17:59 → 18:54: eight "本轮已运行 5/10 分钟" heartbeats for four rounds
+        // that all timed out, while the one notice that explained it was rate-limited by them.
+        const retryingAfterOutage = (endpointStrikes.get(s.id) ?? 0) > 0;
+        const stopProgress = retryingAfterOutage ? () => {} : startProgressTicker(() => {
           const current = deps.reasoning.getSession(s.id);
           if (stopped || !current?.autoAdvance || current.status !== 'active') return;
           notify(`阶段状态：「${s.goal.slice(0, 60)}」本轮已运行 ${Math.floor((Date.now() - roundStartedAt) / 60_000)} 分钟。\n本轮尚未返回结果，暂无可确认的新成果；完成后会报告结果或具体阻塞。`, { progress: 'heartbeat' });
@@ -338,7 +343,9 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
         } else {
           roundsAdvanced.set(s.id, rounds + 1);
           const nodes = deps.reasoning.getNodes?.(s.id) ?? [];
-          const open = nodes.filter((n) => n.status === 'open').length;
+          // "open" must mean what deep_explore(status) means by it — the frontier. The owner saw
+          // "121 个开放节点" from this line and "open 68" from status for the same tree, same day.
+          const open = computeFrontier(nodes).length;
           const proved = nodes.filter((n) => n.status === 'proved').length;
           const newlySettled = nodes.filter((n) => ['proved', 'refuted'].includes(n.status) && previous.get(n.id) !== n.status);
           const next = nodes.find((n) => n.status === 'open');

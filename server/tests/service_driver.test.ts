@@ -64,6 +64,7 @@ function insertDoneInitiative(
   doneAt: number,
   driver = 'gap',
   kind = 'fact_gap',
+  refs: { facts: string[]; notes: string[]; pursuits: string[] } = { facts: ['f-1'], notes: [], pursuits: [] },
 ) {
   // 通过 InitiativeStore 创建 + mark done,但 markDone 用 Date.now,所以
   // 我们直接 SQL 注入精确时间
@@ -73,9 +74,9 @@ function insertDoneInitiative(
      (id, kind, driver, target_ref, rationale, utility, status,
       budget_estimate, outcome_summary, outcome_refs,
       created_at, started_at, completed_at)
-     VALUES (?, ?, ?, ?, ?, 0.7, 'done', 1000, '查了 X', '{"facts":[],"notes":[],"pursuits":[]}',
+     VALUES (?, ?, ?, ?, ?, 0.7, 'done', 1000, '查了 X', ?,
              ?, ?, ?)`,
-  ).run(id, kind, driver, `t:${id}`, 'r', doneAt - 100, doneAt - 50, doneAt);
+  ).run(id, kind, driver, `t:${id}`, 'r', JSON.stringify(refs), doneAt - 100, doneAt - 50, doneAt);
 }
 
 // ── 触发条件 ────────────────────────────────────────────────────────────
@@ -292,4 +293,24 @@ test('renderCheckInText: 超过 3 条显示 "还有 N 条"', () => {
   }));
   const t = renderCheckInText(30, findings);
   assert.match(t, /还有 2 条/);
+});
+
+test('service: an initiative that wrote nothing is not a finding', async () => {
+  // Prod 2026-09-13 17:43: "这段时间我自己做了 5 件事" — every one "本轮未调用任何工具，无新证据可整理".
+  const { h, dispatcher } = setup();
+  const now = Date.now();
+  pushAssistant(h, now - 30 * 3600_000);
+  const nothing = { facts: [], notes: [], pursuits: [] };
+  insertDoneInitiative(h, now - 5 * 3600_000, 'gap', 'fact_gap', nothing);
+  insertDoneInitiative(h, now - 4 * 3600_000, 'gap', 'fact_gap', nothing);
+  insertDoneInitiative(h, now - 3 * 3600_000, 'curiosity', 'promote_goal_loop', nothing);
+  const { InitiativeStore } = await import('../../agent-memory/src/index.js');
+  const r = await serviceDriverTick({ raw: h.raw, initiatives: new InitiativeStore(h.db), dispatcher, now: () => now });
+  assert.equal(r.triggered, false);
+  assert.equal(r.reason, 'no_findings', 'five things not done are zero things done');
+  // One that did write is still reported — and only that one.
+  insertDoneInitiative(h, now - 2 * 3600_000, 'curiosity', 'promote_goal_loop', { facts: [], notes: [], pursuits: ['p-1'] });
+  const r2 = await serviceDriverTick({ raw: h.raw, initiatives: new InitiativeStore(h.db), dispatcher, now: () => now, minFindings: 1 } as any);
+  assert.equal(r2.findings, 1);
+  h.close();
 });
