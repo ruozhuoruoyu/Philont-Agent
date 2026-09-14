@@ -17,6 +17,11 @@ import {
   withNoProgressStop,
   reasoningTreeVersion,
   makeReasoningToolRunner,
+  openAncestorCount,
+  assemblyReady,
+  describeTargetDebt,
+  SPLIT_DEBT_LIMIT,
+  ASSEMBLY_BONUS,
   DEEP_EXPLORE_RESEARCH_ALLOW,
   collectComputeLessons,
   parseSkepticVerdict,
@@ -1809,4 +1814,81 @@ test('the auto hand-off is offered to the owner after a few hand-cranked rounds,
     /Reply 自动/,
     'the English text still offers the word that is matched, not a translation of it',
   );
+});
+
+// ── Split debt: the tree must get shorter, not only deeper ─────────────────────────────────
+// Prod 2026-09-13/14 (LRC): 110 → 136 proved in a day, open frontier flat at 67–71, targets at depth
+// 32 → 39. Every round split its target and proved the easy children; nothing ever had to close.
+
+function chain(len: number, opts: { closeTop?: boolean } = {}): ReasoningNode[] {
+  const out: ReasoningNode[] = [node({ id: 'n0', parentId: null, depth: 0, status: opts.closeTop ? 'proved' : 'open' })];
+  for (let i = 1; i <= len; i++) out.push(node({ id: `n${i}`, parentId: `n${i - 1}`, depth: i }));
+  return out;
+}
+
+test('openAncestorCount counts open ancestors only', () => {
+  const nodes = chain(5);
+  assert.equal(openAncestorCount(nodes, 'n5'), 5);
+  assert.equal(openAncestorCount(nodes, 'n0'), 0);
+  const withProvedTop = chain(5, { closeTop: true });
+  assert.equal(openAncestorCount(withProvedTop, 'n5'), 4, 'a settled ancestor is not debt');
+});
+
+test('reason_decompose is refused under too many open ancestors; the leaf must close', async () => {
+  const mem = openMemoryDb(':memory:');
+  const { session, rootNode } = mem.reasoning.createSession({ goal: 'G' });
+  let parent = rootNode;
+  for (let i = 0; i < SPLIT_DEBT_LIMIT; i++) {
+    [parent] = mem.reasoning.addNodes(session.id, parent.id, [{ claim: `level ${i + 1}`, kind: 'subgoal' }]);
+  }
+  const run = makeReasoningToolRunner(mem.reasoning, session.id, noopDelegate);
+  const refused = await run('reason_decompose', { parentNodeId: parent.id, subClaims: [{ claim: 'deeper', kind: 'lemma' }] });
+  assert.equal(refused.ok, false);
+  assert.match(refused.error!, /Split debt/);
+  assert.match(refused.error!, /dead end here returns its parent to the frontier/);
+  assert.equal(mem.reasoning.getNodes(session.id).length, SPLIT_DEBT_LIMIT + 1, 'nothing was added');
+  // One level up (debt = limit - 1) is still allowed.
+  const upper = mem.reasoning.getNode(session.id, parent.parentId!)!;
+  const allowed = await run('reason_decompose', { parentNodeId: upper.id, subClaims: [{ claim: 'sibling', kind: 'lemma' }] });
+  assert.equal(allowed.ok, true);
+  // Closing the leaf is what the refusal asks for, and it is accepted.
+  const closed = await run('reason_record', { nodeId: parent.id, status: 'dead_end', approach: 'tried the direct bound' });
+  assert.equal(closed.ok, true);
+  mem.close();
+});
+
+test('a node whose children all settled ranks first and the round is told to decide it', () => {
+  const parent = node({ id: 'p', value: 0.4, visits: 3, depth: 3, parentId: 'root' });
+  const c1 = node({ id: 'c1', parentId: 'p', status: 'proved', depth: 4 });
+  const c2 = node({ id: 'c2', parentId: 'p', status: 'dead_end', depth: 4 });
+  const easyLeaf = node({ id: 'leaf', value: 0.8, visits: 0, depth: 9, parentId: 'root' });
+  const root = node({ id: 'root', parentId: null });
+  const all = [root, parent, c1, c2, easyLeaf];
+  assert.deepEqual(assemblyReady(parent, all), { proved: 1, failed: 1 });
+  assert.equal(assemblyReady(easyLeaf, all), null, 'a leaf with no children has nothing to assemble');
+  const ranked = rankFrontier([easyLeaf, parent], all, 0.7, 0);
+  assert.equal(ranked[0].id, 'p', `closable parent outranks the easy leaf (bonus ${ASSEMBLY_BONUS})`);
+  const text = describeTargetDebt(parent, all);
+  assert.match(text, /All 2 children of this node are settled \(1 proved, 1 refuted\/dead_end\)/);
+  assert.match(text, /Decide THIS node now/);
+});
+
+test('the round prompt says whether the target may still be split', () => {
+  const nodes = chain(SPLIT_DEBT_LIMIT + 2);
+  const deep = nodes[nodes.length - 1];
+  assert.match(describeTargetDebt(deep, nodes), /reason_decompose is REFUSED for it this round/);
+  const shallow = nodes[2];
+  const t = describeTargetDebt(shallow, nodes);
+  assert.match(t, new RegExp(`may be decomposed ${SPLIT_DEBT_LIMIT - 2} more level`));
+  assert.doesNotMatch(t, /REFUSED/);
+});
+
+test('the scorer is told each subgoal\'s chain and which ones are closable', () => {
+  const all = chain(3);
+  const prompt = buildScorerPrompt('G', [], [all[3]], all);
+  assert.match(prompt, /under 3 open ancestors/);
+  assert.match(prompt, /Splitting deep leaves further is not progress/);
+  const parent = node({ id: 'p', parentId: 'n0', depth: 1 });
+  const kid = node({ id: 'k', parentId: 'p', status: 'proved', depth: 2 });
+  assert.match(buildScorerPrompt('G', [], [parent], [...all, parent, kid]), /all 1 children settled — closable now/);
 });

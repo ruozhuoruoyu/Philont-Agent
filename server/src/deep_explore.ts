@@ -254,6 +254,72 @@ export function buildStuckDirective(noProgressRounds: number): string {
  * → every commit counts → identical to legacy (safe no-op).
  */
 const STRICT_PROGRESS = process.env.PHILONT_DEEP_EXPLORE_STRICT_PROGRESS !== '0';
+/**
+ * Split debt: how many OPEN ancestors a node may sit under before reason_decompose is refused for it.
+ * Prod 2026-09-13/14 (LRC, session d88d106e): 110 → 136 proved nodes in a day, open frontier flat at
+ * 67–71, round targets at depth 32 → 39. Every round split its target (reduces_target = target progress,
+ * substantive when the target's value ≥ 0.35 — and the scorer gives deep leaves 0.85–0.9), proved the
+ * easy children, and left the hard one as next round's deeper target. Nothing ever forced a leaf to
+ * close or die, so nothing ever bubbled back toward the root. Past this many unclosed ancestors a round
+ * must prove, refute, or dead_end the target; a dead end returns its parent to the frontier, which is
+ * the only way the tree gets shorter. env PHILONT_DEEP_EXPLORE_SPLIT_DEBT, default 8, range [1,64].
+ */
+export const SPLIT_DEBT_LIMIT = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_SPLIT_DEBT);
+  return Number.isInteger(n) && n >= 1 && n <= 64 ? n : 8;
+})();
+
+/**
+ * Priority added to a frontier node whose children have ALL settled: closing it shrinks the tree. A tier,
+ * not a nudge — it must beat a fresh high-value leaf's exploration term (UCB tops out near 1 + c·sqrt(ln N)),
+ * because closing an assembled parent is one commit and the only move that shortens the chain.
+ */
+export const ASSEMBLY_BONUS = 10;
+
+/** The one paragraph that tells the round whether it may split the target or must close it. */
+export function describeTargetDebt(target: ReasoningNode, allNodes: ReasoningNode[]): string {
+  const debt = openAncestorCount(allNodes, target.id);
+  const ready = assemblyReady(target, allNodes);
+  const parts: string[] = [];
+  if (ready) {
+    parts.push(
+      `All ${ready.proved + ready.failed} children of this node are settled (${ready.proved} proved, ${ready.failed} refuted/dead_end). ` +
+        `Decide THIS node now: reason_record it proved citing the children, or dead_end if the split was not sufficient.`,
+    );
+  }
+  parts.push(
+    debt >= SPLIT_DEBT_LIMIT
+      ? `Split debt: this node hangs from ${debt} open ancestors (limit ${SPLIT_DEBT_LIMIT}); reason_decompose is REFUSED for it this round. ` +
+          `Prove it, refute it, or record dead_end with what was tried — a dead end returns its parent to the frontier.`
+      : `Split debt: this node hangs from ${debt} open ancestors; it may be decomposed ${SPLIT_DEBT_LIMIT - debt} more level(s) before the chain must start closing. Prefer closing to splitting.`,
+  );
+  return parts.join('\n');
+}
+
+/** Number of ancestors of `nodeId` that are still open — the unclosed chain it hangs from. */
+export function openAncestorCount(nodes: ReasoningNode[], nodeId: string): number {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  let cur = byId.get(nodeId);
+  let count = 0;
+  const seen = new Set<string>();
+  while (cur && cur.parentId && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    cur = byId.get(cur.parentId);
+    if (cur && cur.status === 'open') count += 1;
+  }
+  return count;
+}
+
+/** A node with at least one child and no open child: its verdict can be assembled from the children now. */
+export function assemblyReady(node: ReasoningNode, allNodes: ReasoningNode[]): { proved: number; failed: number } | null {
+  const children = allNodes.filter((n) => n.parentId === node.id);
+  if (children.length === 0 || children.some((c) => c.status === 'open')) return null;
+  return {
+    proved: children.filter((c) => c.status === 'proved').length,
+    failed: children.filter((c) => c.status !== 'proved').length,
+  };
+}
+
 /** Value at/above which a proved/decomposed node counts as substantive (not trivial). env PHILONT_DEEP_EXPLORE_SUBSTANTIVE_VALUE, default 0.35, range [0,1]. */
 const SUBSTANTIVE_VALUE = (() => {
   const n = Number(process.env.PHILONT_DEEP_EXPLORE_SUBSTANTIVE_VALUE);
@@ -1268,7 +1334,10 @@ export function rankFrontier(
   const scored = frontier.map((n, i) => ({
     n,
     i,
-    score: computeUCB(n.value, n.visits, totalVisits, c) + noveltyW * computeNovelty(n, allNodes),
+    // A node whose children all settled is one commit from closing; closing it is how the frontier
+    // moves toward the root instead of away from it.
+    score: computeUCB(n.value, n.visits, totalVisits, c) + noveltyW * computeNovelty(n, allNodes) +
+      (assemblyReady(n, allNodes) ? ASSEMBLY_BONUS : 0),
   }));
   // Bucket by technique (null technique goes into a '∅' bucket).
   const buckets = new Map<string, typeof scored>();
@@ -2633,19 +2702,27 @@ export function buildScorerPrompt(
   goal: string,
   assumptions: string[],
   frontier: ReasoningNode[],
+  allNodes: ReasoningNode[] = frontier,
 ): string {
   const lines: string[] = [];
   lines.push('You are the "value estimator" for a reasoning-tree search. Below are the open subgoals on the tree while cracking a root proposition.');
   lines.push('Give each subgoal a score in 0~1 measuring the payoff of "attacking it right now":');
   lines.push('  score ≈ importance to the root proposition (how much proving it advances the root) × current tractability (is there a ready idea/tool to make progress now).');
   lines.push('High = both pivotal and currently workable; low = either irrelevant to the root, or no foothold right now.');
+  lines.push('Each subgoal is annotated with the number of OPEN ancestors it hangs from. A leaf under a long unclosed chain is far from the root: reward it only if closing it lets a parent close (its siblings are settled), not for being easy. Splitting deep leaves further is not progress.');
   lines.push('When several open subgoals are RIVAL / mutually-exclusive candidate answers, also reward DISCRIMINATION: prefer the one whose resolution would split the field — confirm or eliminate the most alternatives at once — over one merely important in isolation (strong inference: run the test that kills the most rival hypotheses).');
   lines.push('');
   lines.push(`## Root proposition\n${goal}`);
   if (assumptions.length) lines.push(`## Known assumptions\n${assumptions.map((a) => `- ${a}`).join('\n')}`);
   lines.push('');
   lines.push('## Subgoals to score');
-  for (const n of frontier) lines.push(`- [${n.id}] (${KIND_LABEL[n.kind]}) ${n.claim}`);
+  for (const n of frontier) {
+    const ready = assemblyReady(n, allNodes);
+    lines.push(
+      `- [${n.id}] (${KIND_LABEL[n.kind]}; depth ${n.depth}; under ${openAncestorCount(allNodes, n.id)} open ancestors` +
+        (ready ? `; all ${ready.proved + ready.failed} children settled — closable now` : '') + `) ${n.claim}`,
+    );
+  }
   lines.push('');
   lines.push('## Also tag each subgoal with a "technique" (the main method most likely to attack it), choosing one of:');
   lines.push(`  ${TECHNIQUE_TAXONOMY.join(' / ')}`);
@@ -2734,12 +2811,14 @@ export async function scoreFrontierValues(opts: {
   goal: string;
   assumptions: string[];
   frontier: ReasoningNode[];
+  /** The whole tree, for ancestor chains; defaults to the frontier alone (no chain information). */
+  allNodes?: ReasoningNode[];
   abortSignal?: AbortSignal;
 }): Promise<{ assessments: Map<string, NodeAssessment>; tokensSpent: number }> {
   if (opts.frontier.length === 0 || opts.abortSignal?.aborted) {
     return { assessments: new Map(), tokensSpent: 0 };
   }
-  const sys = buildScorerPrompt(opts.goal, opts.assumptions, opts.frontier);
+  const sys = buildScorerPrompt(opts.goal, opts.assumptions, opts.frontier, opts.allNodes ?? opts.frontier);
   const validIds = new Set(opts.frontier.map((n) => n.id));
   try {
     const resp = await opts.llm.send(
@@ -2824,6 +2903,18 @@ export function makeReasoningToolRunner(
       }
       const offTarget = rejectOffTarget(parentNodeId);
       if (offTarget) return offTarget;
+      const debt = openAncestorCount(reasoning.getNodes(sessionId), parentNodeId);
+      if (debt >= SPLIT_DEBT_LIMIT) {
+        return {
+          ok: false,
+          output: '',
+          error:
+            `Split debt: [${parentNodeId}] already sits under ${debt} open ancestors, none of them closed. ` +
+            `Decomposing it again is refused (limit ${SPLIT_DEBT_LIMIT}). Close it instead: reason_record it as ` +
+            `proved (with evidence), refuted, or dead_end stating what was tried — a dead end here returns its ` +
+            `parent to the frontier, which is the only way this chain gets shorter.`,
+        };
+      }
       try {
         const created = reasoning.addNodes(sessionId, parentNodeId, subClaims);
         // Critical: echo newly created node ids; without this the sub-LLM has no ids to
@@ -3468,6 +3559,7 @@ export function createDeepExploreTool(
           goal: session.goal,
           assumptions: session.assumptions,
           frontier: frontier0,
+          allNodes: before0,
           abortSignal: ctrl.signal,
         });
         if (assessments.size) {
@@ -3535,7 +3627,8 @@ export function createDeepExploreTool(
       (roundTarget
         ? `\n\n## Mechanism-pinned target for THIS round\n[${roundTarget.id}] ${roundTarget.claim}\n` +
           `All reason_decompose/reason_record writes are restricted to this node's subtree. ` +
-          `Work it to a real tree change before touching another frontier branch.`
+          `Work it to a real tree change before touching another frontier branch.\n` +
+          describeTargetDebt(roundTarget, before)
         : '') +
       reconciliationPrompt;
     const userMessage =

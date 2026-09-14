@@ -655,3 +655,14 @@ test('owner-facing text is on the record, heartbeats stay off the messaging chan
   assert.match(deepExplore, /^export \{ computeFrontier \};/m);
   assert.doesNotMatch(deepExplore, /export function computeFrontier/);
 });
+
+/**
+ * Split debt (2026-09-14): the scorer must see the whole tree, or every subgoal reads as "under 0 open
+ * ancestors" and the depth annotation is a lie.
+ */
+test('the frontier scorer is handed the whole tree, not just the frontier', () => {
+  const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
+  assert.match(deepExplore, /frontier: frontier0,\s*allNodes: before0,/);
+  assert.match(deepExplore, /buildScorerPrompt\(opts\.goal, opts\.assumptions, opts\.frontier, opts\.allNodes \?\? opts\.frontier\)/);
+  assert.match(deepExplore, /describeTargetDebt\(roundTarget, before\)/, 'the round prompt carries the debt');
+});
