@@ -389,3 +389,68 @@ test('a retry after an outage is not narrated minute by minute', async () => {
   now += 10 * 60_000 + 1; await loop.tickOnce();  // strike 3
   assert.equal(heartbeats(), afterFirst, 'no minute-by-minute narration of a retry expected to fail');
 });
+
+function nodesFixture() {
+  const mk = (id: string, parentId: string | null, status: string, claim: string, value: number | null) =>
+    ({ id, parentId, status, claim, value, depth: parentId ? 1 : 0 }) as any;
+  return [
+    mk('root', null, 'open', 'G', null),
+    mk('t', 'root', 'open', 'the pinned target', 0.4),
+    mk('v', 'root', 'open', 'the most valuable leaf', 0.9),
+    mk('done', 'root', 'proved', 'settled earlier', 0.5),
+  ];
+}
+
+test('a milestone names the pinned target as the next step, never the root goal', async () => {
+  // Every milestone the owner read on 2026-09-13/14 ended "下一步：写严格证明，我来跑lean" — the goal.
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  const live = sess({ frontierTargetNodeId: 't' } as any);
+  const { store } = fakeStore({ active: [live], afterRound: () => live });
+  (store as any).getNodes = () => nodesFixture();
+  const notes: string[] = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx,
+    advanceSession: async () => ({ success: true, output: '' }),
+    hasFormalAdmission: () => true,
+    notify: (text) => { notes.push(text); },
+  });
+  await loop.tickOnce();
+  const milestone = notes.find((t) => /第 1 轮已返回/.test(t))!;
+  assert.match(milestone, /下一步：the pinned target/);
+  assert.doesNotMatch(milestone, /下一步：G。/);
+  // Without a pinned target, the most valuable frontier node.
+  const unpinned = sess({ frontierTargetNodeId: null } as any);
+  const { store: store2 } = fakeStore({ active: [unpinned], afterRound: () => unpinned });
+  (store2 as any).getNodes = () => nodesFixture();
+  const notes2: string[] = [];
+  const loop2 = createAutoAdvanceLoop({
+    reasoning: store2, runInContext: passthroughCtx,
+    advanceSession: async () => ({ success: true, output: '' }),
+    hasFormalAdmission: () => true,
+    notify: (text) => { notes2.push(text); },
+  });
+  await loop2.tickOnce();
+  assert.match(notes2.find((t) => /第 1 轮已返回/.test(t))!, /下一步：the most valuable leaf/);
+});
+
+test('a round that recorded a lemma but did not advance the target says so, not "no progress"', async () => {
+  // Prod 2026-09-13 23:26: "本轮未确认有效进展 … 本轮新增记录：ARITHMETIC LEMMA" read as a contradiction.
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  const before = nodesFixture().map((n) => (n.id === 'done' ? { ...n, status: 'open' } : n));
+  let phase = 0;
+  const after = sess({ noProgressRounds: 1 });
+  const { store } = fakeStore({ active: [sess({})], afterRound: () => after });
+  (store as any).getNodes = () => (phase++ === 0 ? before : nodesFixture());
+  const notes: string[] = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx,
+    advanceSession: async () => ({ success: true, output: '' }),
+    hasFormalAdmission: () => true,
+    notify: (text) => { notes.push(text); },
+  });
+  await loop.tickOnce();
+  const milestone = notes.find((t) => /第 1 轮已返回/.test(t))!;
+  assert.match(milestone, /本轮有新记录（见下），但未推进当前目标节点；连续 1 轮无实质进展/);
+  assert.match(milestone, /本轮新增记录：settled earlier/);
+  assert.doesNotMatch(milestone, /本轮未确认有效进展/);
+});

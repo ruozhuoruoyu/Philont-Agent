@@ -1995,6 +1995,26 @@ function forUser(en: boolean, text: string): string {
   return `${en ? '## For User' : '## 给用户'}\n\n${text}`;
 }
 
+/**
+ * What the owner was told outside a model turn — a pre-model reply, a delivered proactive notice — must
+ * be on the timeline the model reads next turn. Prod 2026-09-13 23:26 → 23:30: the pause card said
+ * "连续 2 轮没产出", the owner asked "没产出是为啥？", and the model, which had never seen the card,
+ * explained a Lean compile failure from its own turn instead.
+ */
+function recordOwnerFacing(sessionId: string, text: string): void {
+  memory.raw.appendMessage({
+    sessionId: GLOBAL_TIMELINE_SESSION_ID, role: 'assistant', content: text, originSessionId: sessionId,
+  });
+}
+
+/** A reply produced before (instead of) the model: deliver it AND record it. */
+function sayBeforeModel(sessionId: string, onDelta: (chunk: string) => void, text: string): void {
+  onDelta(text);
+  recordOwnerFacing(sessionId, text);
+}
+
+const PROACTIVE_NOTICE_TAG = '[proactive notice, delivered to the owner]';
+
 function requestBudgetExtension(s: ReasoningSession): void {
   if (!exploreBudgetExhausted(s)) return;
   const live = [...pendingBudgetExtension.values()].find(
@@ -4742,11 +4762,16 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
   notify: (text, opts) => {
     const owner = opts?.ownerSessionId;
     const directWeb = owner ? webuiClients.get(owner) : undefined;
-    if (directWeb) directWeb({ type: 'milestone', text });
+    // A heartbeat is not on the record: it says nothing the owner can later ask about.
+    const remember = () => { if (owner && opts?.progress !== 'heartbeat') recordOwnerFacing(owner, `${PROACTIVE_NOTICE_TAG} ${text}`); };
+    if (directWeb) { directWeb({ type: 'milestone', text }); remember(); }
     else if (!owner || !parseDmPeerFromSessionId(owner)) {
       for (const [, send] of webuiClients) send({ type: 'milestone', text });
     }
-    if ((opts?.important || opts?.progress) && (!owner || parseDmPeerFromSessionId(owner))) {
+    // Milestones and important notices reach the messaging channel; heartbeats stay on the web stream.
+    // The rearm reply promises "之后只推里程碑", and the channel meters messages per inbound: on
+    // 2026-09-14 six "本轮已运行 5/10 分钟" spent the allowance the morning's four milestones needed.
+    if ((opts?.important || opts?.progress === 'milestone') && (!owner || parseDmPeerFromSessionId(owner))) {
       void pushDispatcher
         .enqueue({
           severity: 'urgent',
@@ -4759,7 +4784,10 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
           progress: opts.progress,
           ...(owner && parseDmPeerFromSessionId(owner) ? { routing: parseDmPeerFromSessionId(owner)! } : {}),
         })
-        .then((result) => console.log(`[auto-advance] report delivery session=${safeSessionId(opts.sessionId ?? '')} delivered=${result.delivered} deferred=${result.deferred} failed=${result.failed}`))
+        .then((result) => {
+          console.log(`[auto-advance] report delivery session=${safeSessionId(opts.sessionId ?? '')} delivered=${result.delivered} deferred=${result.deferred} failed=${result.failed}`);
+          if (result.delivered > 0) remember();
+        })
         .catch((error) => console.warn('[auto-advance] report delivery failed', error));
     }
   },
@@ -4784,9 +4812,11 @@ export const deepExploreFollowUp = createFollowUpLoop({
           targetRef: `deep_explore:followup:${owner}`,
           text,
         })
+        .then((result) => { if (result.delivered > 0) recordOwnerFacing(owner, `${PROACTIVE_NOTICE_TAG} ${text}`); })
         .catch(() => {});
     } else {
       for (const [, send] of webuiClients) send({ type: 'milestone', text });
+      if (owner) recordOwnerFacing(owner, `${PROACTIVE_NOTICE_TAG} ${text}`);
     }
   },
 });
@@ -8381,7 +8411,7 @@ export async function handleChatSend(
         const en = resolvePhraseLang({ channel: sessionId, userLocale: readUserLanguage() }) === 'en';
         const current = memory.reasoning.getSession(pending.sessionId);
         if (!current || current.status !== 'active') {
-          onDelta(forUser(en, en ? 'That exploration is no longer open.' : '那个探索已经不在进行中了。'));
+          sayBeforeModel(sessionId, onDelta, forUser(en, en ? 'That exploration is no longer open.' : '那个探索已经不在进行中了。'));
           return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
         }
         if (decision === 'grant') {
@@ -8394,7 +8424,7 @@ export async function handleChatSend(
               `→ ${after.budgetSpent}/${exploreBudgetCeiling(after)} rearmed=${rearmed}`,
           );
           const needsAdmission = rearmed && current.mode === 'formal' && !hasFormalAutoAdmission(current);
-          onDelta(forUser(en, en
+          sayBeforeModel(sessionId, onDelta, forUser(en, en
             ? `Granted ${EXPLORE_BUDGET_GRANT_TOKENS} more tokens to "${current.goal.slice(0, 40)}" (now ${after.budgetSpent}/${exploreBudgetCeiling(after)}). ` +
               (needsAdmission ? 'One more thing: its local proof workflow needs approval before the background rounds start — that card follows.'
                 : rearmed ? 'Auto-advance is running again; milestones need no reply.' : 'Say "continue" to advance it.')
@@ -8404,7 +8434,7 @@ export async function handleChatSend(
         } else {
           memory.reasoning.setAutoAdvance(current.id, false);
           console.log(`[auto-advance] budget extension declined session=${safeSessionId(current.id)}`);
-          onDelta(forUser(en, en
+          sayBeforeModel(sessionId, onDelta, forUser(en, en
             ? `Understood — "${current.goal.slice(0, 40)}" stays paused at its budget; nothing proved is lost.`
             : `好的，「${current.goal.slice(0, 40)}」保持暂停在预算上限；已证明的部分不会丢。`));
         }
@@ -8433,20 +8463,20 @@ export async function handleChatSend(
           const current = memory.reasoning.getSession(pending.sessionId);
           if (!current || exploreBudgetExhausted(current)) {
             if (current) requestBudgetExtension(current);
-            onDelta(forUser(en, current ? exploreBudgetNotice(current, en ? 'en' : 'zh') : '探索已结束，未启动新批次。'));
+            sayBeforeModel(sessionId, onDelta, forUser(en, current ? exploreBudgetNotice(current, en ? 'en' : 'zh') : '探索已结束，未启动新批次。'));
             return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
           }
           memory.reasoning.setAutoWorkflowApproved(current.id, true);
           deepExploreAutoAdvance.rearm(pending.sessionId);
           console.log(`[auto-advance] formal workflow admitted and batch rearmed session=${safeSessionId(pending.sessionId)}`);
-          onDelta(forUser(en, en
+          sayBeforeModel(sessionId, onDelta, forUser(en, en
             ? `Task-scoped workflow approved. "${pending.goal.slice(0, 40)}" will continue automatically across batches and restarts within its total budget; milestones need no reply. Say stop to pause.`
             : `已授权此任务的本地形式化工作流。「${pending.goal.slice(0, 40)}」将在累计预算内跨批次持续执行，重启后可恢复；阶段报告无需回复。说「停」可暂停。`));
         } else {
           memory.reasoning.setAutoWorkflowApproved(pending.sessionId, false);
           memory.reasoning.setAutoAdvance(pending.sessionId, false);
           console.log(`[auto-advance] formal workflow admission rejected session=${safeSessionId(pending.sessionId)}`);
-          onDelta(forUser(en, en ? 'Understood. Formal auto-advance remains paused.' : '好的，形式化自动推进保持暂停。'));
+          sayBeforeModel(sessionId, onDelta, forUser(en, en ? 'Understood. Formal auto-advance remains paused.' : '好的，形式化自动推进保持暂停。'));
         }
         return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
       }
@@ -8491,7 +8521,7 @@ export async function handleChatSend(
       if (focus && ec.kind === 'auto_advance' && exploreBudgetExhausted(focus)) {
         memory.reasoning.setAutoAdvance(focus.id, false);
         requestBudgetExtension(focus);
-        onDelta(forUser(en, exploreBudgetNotice(focus, en ? 'en' : 'zh')));
+        sayBeforeModel(sessionId, onDelta, forUser(en, exploreBudgetNotice(focus, en ? 'en' : 'zh')));
         return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
       }
 
@@ -8604,7 +8634,7 @@ export async function handleChatSend(
         }
       }
       if (reply) {
-        onDelta(reply);
+        sayBeforeModel(sessionId, onDelta, reply);
         return { outcome: { outcomeType: 'response' }, auditEvents: 0 };
       }
     }
@@ -9424,9 +9454,17 @@ export async function handleChatSend(
     const step = plan?.steps.find((s) => s.status === 'doing');
     const elapsed = Math.floor((Date.now() - turnStartedAt) / 60_000);
     const failures = records.filter((r) => !r.success).length;
+    // Prod 2026-09-13 22:58: "已返回 0 次工具调用" while the turn had been inside deep_explore for
+    // five minutes. The tool being waited on is the one fact a heartbeat with no returns can carry.
+    const inflight = signalBus.inflightTool;
+    const waiting = inflight
+      ? `正在执行 ${inflight.name}（已 ${Math.floor((Date.now() - inflight.startedAt) / 60_000)} 分钟），尚未返回。\n`
+      : '当前任务仍在执行，尚未返回最终结果。\n';
     onStatus?.(`阶段状态：已运行 ${elapsed} 分钟。\n` +
-      (step ? `当前步骤：${step.description.slice(0, 180)}\n` : '当前任务仍在执行，尚未返回最终结果。\n') +
-      `已返回 ${records.length} 次工具调用，其中 ${failures} 次失败。调用成功不代表任务已完成；本报告不宣称新增成果。`,
+      (step ? `当前步骤：${step.description.slice(0, 180)}\n` : waiting) +
+      (records.length
+        ? `已返回 ${records.length} 次工具调用，其中 ${failures} 次失败。调用成功不代表任务已完成；本报告不宣称新增成果。`
+        : '本报告不宣称新增成果。'),
     { kind: 'heartbeat' });
   });
 
@@ -11077,6 +11115,7 @@ async function handleChatSendInner(
       }
     }
 
+    signalBus.inflightTool = null;
     const response = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
 
     if (response.type === 'text') {
@@ -12114,6 +12153,8 @@ interface TurnSignalBus {
    * Multiple runToolLoop calls within a single turn (auth resume / question resume) share the same array.
    */
   inTurnRecords?: InTurnToolRecord[];
+  /** The tool call being executed right now, for the turn heartbeat. Set at dispatch, cleared on return. */
+  inflightTool?: { name: string; startedAt: number } | null;
   /**
    * 2026-07-01: the honesty gate on a ZERO-tool-call first response has run this turn (cap 1 regen). The
    * runToolLoop gate only sees post-tool-call text; a model that answers immediately with a fabricated
@@ -13024,6 +13065,7 @@ async function runToolLoop(
     // log's `writeFile({})` (nine minutes of the owner's time spent approving a call that could never
     // work) is invisible without knowing the call had no fields. Structure, not content.
     console.log(`[tool] ${call.name} ${summarizeToolInputForLog(call.input)}`);
+    signalBus.inflightTool = { name: call.name, startedAt: Date.now() };
     // 2026-05-19 three-stream separation: tool call details → Tier 3 onTrace; semantic progress → Tier 2 onStatus
     onTrace?.({
       kind: 'tool-invocation', tier: 3,
@@ -13689,6 +13731,7 @@ async function runToolLoop(
 
     let response: LLMResponse;
     try {
+      signalBus.inflightTool = null;
       response = await sendLlmWithRescue(messages, toolDefs, sessionId, onTrace);
     } catch (e) {
       // A call that timed out with no turn budget left for another attempt is not an error to hand the

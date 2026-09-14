@@ -260,7 +260,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
                 ? `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" produced nothing for ${episodeNoProgress} automatic rounds — a different angle or mode may work better. Reply "continue" to run another automatic batch as-is, name a new angle, or "stop".`
                 : `⏸ Auto-advance paused: "${s.goal.slice(0, 50)}" has made no progress for ${episodeNoProgress} automatic rounds (stuck). Reply "continue" to run another automatic batch, or restart from a new angle.`
               : decision === 'switch_engine'
-                ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮没产出——换个角度/模式可能更有效。回复"继续"原路再自动跑一批、或指定新角度、或"停"。`
+                ? `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮没有实质进展（可能有记录，但没推进目标节点）——换个角度/模式可能更有效。回复"继续"原路再自动跑一批、或指定新角度、或"停"。`
                 : `⏸ 自动推进已暂停:"${s.goal.slice(0, 50)}" 自动执行连续 ${episodeNoProgress} 轮无进展(卡住)。回复"继续"再自动跑一批,或换个角度重启。`,
             { important: true, blocking: true },
           );
@@ -345,14 +345,24 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           const nodes = deps.reasoning.getNodes?.(s.id) ?? [];
           // "open" must mean what deep_explore(status) means by it — the frontier. The owner saw
           // "121 个开放节点" from this line and "open 68" from status for the same tree, same day.
-          const open = computeFrontier(nodes).length;
+          const frontier = computeFrontier(nodes);
+          const open = frontier.length;
           const proved = nodes.filter((n) => n.status === 'proved').length;
           const newlySettled = nodes.filter((n) => ['proved', 'refuted'].includes(n.status) && previous.get(n.id) !== n.status);
-          const next = nodes.find((n) => n.status === 'open');
+          // The next step is the pinned frontier target if it is still open, else the most valuable
+          // frontier node — never "the first open node", which is the root: every milestone the owner
+          // read on 2026-09-13/14 ended "下一步：写严格证明，我来跑lean", the goal itself.
+          const next = frontier.find((n) => n.id === fresh.frontierTargetNodeId)
+            ?? [...frontier].sort((a, b) => (b.value ?? -1) - (a.value ?? -1))[0];
           notify(`阶段报告：「${s.goal.slice(0, 60)}」第 ${rounds + 1} 轮已返回。\n` +
             (out.success && fresh.noProgressRounds === 0
               ? `推理树当前记录 ${proved} 个已证节点、${open} 个开放节点；整体任务仍未完成。`
-              : `本轮未确认有效进展，连续无进展记录为 ${fresh.noProgressRounds} 轮。`) +
+              : newlySettled.length
+                // A round can record a lemma and still not move the pinned target (Tooth B). Saying
+                // "未确认有效进展" over a fresh record read as a contradiction — the owner asked
+                // "没产出是为啥？" and the model, unable to see this card, answered about something else.
+                ? `本轮有新记录（见下），但未推进当前目标节点；连续 ${fresh.noProgressRounds} 轮无实质进展。`
+                : `本轮未确认有效进展，连续无进展记录为 ${fresh.noProgressRounds} 轮。`) +
             (newlySettled.length ? `\n本轮新增记录：${newlySettled.slice(0, 2).map((n) => n.claim.slice(0, 120)).join('；')}` : '') +
             `\n下一步：${next ? next.claim.slice(0, 160) : '检查剩余开放节点和停止条件'}。`, { progress: 'milestone' });
         }

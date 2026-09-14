@@ -107,7 +107,7 @@ export type {
   ConfigRuleChangeEvent,
 } from './config_rules.js';
 export { PushSubscriptionStore } from './push_subscriptions.js';
-export { ReasoningStore, ReasoningNodeNotFoundError } from './reasoning.js';
+export { ReasoningStore, ReasoningNodeNotFoundError, computeFrontier } from './reasoning.js';
 export type {
   ReasoningSession,
   ReasoningSessionMode,

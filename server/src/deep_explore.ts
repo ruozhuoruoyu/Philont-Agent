@@ -94,6 +94,7 @@ import {
   findPriorMatch,
   renderRepeatNote,
   type PriorMatch,
+  computeFrontier,
 } from '@agent/memory';
 import { currentSessionId } from './channels/turn_context.js';
 import { decidePhaseTransition, goalNeedsDecision, classifyGoal, looksDeductive } from './phase_gate.js';
@@ -1211,11 +1212,7 @@ export const DEEP_EXPLORE_RESEARCH_ALLOW: ReadonlySet<string> = new Set([
  * re-decompose it (a different approach) or reason_record it as a dead_end. judgeConvergence only
  * declares "stuck" when there is genuinely nothing actionable left.
  */
-export function computeFrontier(nodes: ReasoningNode[]): ReasoningNode[] {
-  const hasOpenChild = new Set<string>();
-  for (const n of nodes) if (n.parentId && n.status === 'open') hasOpenChild.add(n.parentId);
-  return nodes.filter((n) => n.status === 'open' && !hasOpenChild.has(n.id));
-}
+export { computeFrontier };
 
 /** List of currently valid open node ids (echoed to the LLM when reason_record gets a wrong id, enabling self-correction). */
 export function formatOpenIds(nodes: ReasoningNode[]): string {

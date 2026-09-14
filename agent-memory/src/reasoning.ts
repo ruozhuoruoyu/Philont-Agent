@@ -230,6 +230,19 @@ export class ReasoningNodeNotFoundError extends Error {
   }
 }
 
+/**
+ * The frontier: open nodes with no OPEN child. An open node whose children all settled (proved /
+ * refuted / dead_end) is back on the frontier — it needs a different decomposition or a dead-end
+ * verdict. deep_explore switched to this rule on 2026-06-08; summarizeSession kept the old one
+ * (open with no child at all), so the follow-up card said "65 个开放节点" the same night status said 67.
+ * One definition, here, for every reader.
+ */
+export function computeFrontier(nodes: ReasoningNode[]): ReasoningNode[] {
+  const hasOpenChild = new Set<string>();
+  for (const n of nodes) if (n.parentId && n.status === 'open') hasOpenChild.add(n.parentId);
+  return nodes.filter((n) => n.status === 'open' && !hasOpenChild.has(n.id));
+}
+
 export class ReasoningStore {
   constructor(private readonly db: Database.Database) {}
 
@@ -409,9 +422,7 @@ export class ReasoningStore {
     const session = this.getSession(sessionId);
     if (!session) return null;
     const nodes = this.getNodes(sessionId);
-    const hasChild = new Set<string>();
-    for (const n of nodes) if (n.parentId) hasChild.add(n.parentId);
-    const openFrontierCount = nodes.filter((n) => n.status === 'open' && !hasChild.has(n.id)).length;
+    const openFrontierCount = computeFrontier(nodes).length;
     const provedCount = nodes.filter((n) => n.status === 'proved').length;
     const deadCount = nodes.filter((n) => n.status === 'dead_end').length;
     return { status: session.status, openFrontierCount, provedCount, deadCount };

@@ -610,7 +610,7 @@ test('heartbeats read a live plan and one meaning of open', () => {
   const turnHb = chatHandler.slice(chatHandler.indexOf('const stopProgress = startProgressTicker(() => {'), chatHandler.indexOf('const stopProgress = startProgressTicker(() => {') + 900);
   assert.match(turnHb, /\.find\(\(p\) => p\.status === 'draft' \|\| p\.status === 'executing'\)/, 'only a live plan has a current step');
   const aa = readFileSync(new URL('../src/deep_explore_autoadvance.ts', import.meta.url), 'utf8');
-  assert.match(aa, /const open = computeFrontier\(nodes\)\.length;/, 'the milestone must count open the way status does');
+  assert.match(aa, /const frontier = computeFrontier\(nodes\);\s*const open = frontier\.length;/, 'the milestone must count open the way status does');
   assert.match(aa, /const retryingAfterOutage = \(endpointStrikes\.get\(s\.id\) \?\? 0\) > 0;/, 'a retry after an outage must not arm the heartbeat ticker');
 });
 
@@ -630,4 +630,28 @@ test('the WeChat send ledger is fed on send, refusal and inbound, and read by th
   assert.match(chatHandler, /kind: opts\.blocking \? 'deep_explore:auto_paused' : `deep_explore:auto_\$\{opts\.progress \?\? 'advance'\}`/);
   const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   assert.match(index, /discardKind\('deep_explore:auto_heartbeat'\)/);
+});
+
+/**
+ * What the owner reads must be what the model can see, and what the channel carries must be what the
+ * owner was promised. Prod 2026-09-13/14, the WeChat side of the log.
+ */
+test('owner-facing text is on the record, heartbeats stay off the messaging channel, one frontier rule', () => {
+  // Pre-model replies and delivered proactive notices reach the timeline the next turn reads.
+  assert.equal((chatHandler.match(/sayBeforeModel\(sessionId, onDelta, forUser\(en, /g) ?? []).length, 7, 'every pre-model reply is recorded');
+  assert.match(chatHandler, /if \(reply\) \{\s*sayBeforeModel\(sessionId, onDelta, reply\);/, 'the explore-control reply too');
+  assert.match(chatHandler, /if \(result\.delivered > 0\) remember\(\);/, 'a delivered auto-advance notice is remembered');
+  assert.match(chatHandler, /if \(result\.delivered > 0\) recordOwnerFacing\(owner, `\$\{PROACTIVE_NOTICE_TAG\} \$\{text\}`\)/, 'a delivered follow-up too');
+  // Heartbeats never reach the messaging channel from auto-advance; milestones and important notices do.
+  assert.match(chatHandler, /if \(\(opts\?\.important \|\| opts\?\.progress === 'milestone'\) && \(!owner \|\| parseDmPeerFromSessionId\(owner\)\)\)/);
+  // The turn heartbeat names the tool it is waiting on; the marker is cleared whenever the loop returns to the model.
+  assert.match(chatHandler, /signalBus\.inflightTool = \{ name: call\.name, startedAt: Date\.now\(\) \};/);
+  assert.ok((chatHandler.match(/signalBus\.inflightTool = null;\s*const response = await sendLlmWithRescue\(/g) ?? []).length >= 1);
+  assert.match(chatHandler, /正在执行 \$\{inflight\.name\}/);
+  // One frontier rule: the store owns it, deep_explore re-exports it, summarizeSession uses it.
+  const reasoning = readFileSync(new URL('../../agent-memory/src/reasoning.ts', import.meta.url), 'utf8');
+  assert.match(reasoning, /const openFrontierCount = computeFrontier\(nodes\)\.length;/);
+  const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
+  assert.match(deepExplore, /^export \{ computeFrontier \};/m);
+  assert.doesNotMatch(deepExplore, /export function computeFrontier/);
 });
