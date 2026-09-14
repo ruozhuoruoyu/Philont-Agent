@@ -613,3 +613,21 @@ test('heartbeats read a live plan and one meaning of open', () => {
   assert.match(aa, /const open = computeFrontier\(nodes\)\.length;/, 'the milestone must count open the way status does');
   assert.match(aa, /const retryingAfterOutage = \(endpointStrikes\.get\(s\.id\) \?\? 0\) > 0;/, 'a retry after an outage must not arm the heartbeat ticker');
 });
+
+/**
+ * The iLink allowance is a ledger of messages per inbound, kept by the WeChat channel and read by the
+ * dispatcher. Three call sites make it true; any one missing makes the ledger silently wrong.
+ */
+test('the WeChat send ledger is fed on send, refusal and inbound, and read by the dispatcher', () => {
+  const wechat = readFileSync(new URL('../src/channels/wechat/index.ts', import.meta.url), 'utf8');
+  assert.match(wechat, /if \(r\.ret === 0\) \{\s*allowance\.onSent\(to\);/, 'an accepted message spends one');
+  assert.match(wechat, /if \(r\.ret === -2\) allowance\.onRefused\(to\);/, 'a refusal teaches the total');
+  assert.match(wechat, /allowance\?\.onInbound\(event\.groupId \|\| event\.fromUserId\);\s*if \(!event\.text\)/, 'every inbound refills, before the text check');
+  assert.match(wechat, /allowance: \(peer\) => allowance\.view\(peer\),/, 'the push channel exposes the ledger');
+  const dispatcher = readFileSync(new URL('../src/push/dispatcher.ts', import.meta.url), 'utf8');
+  assert.match(dispatcher, /if \(req\.progress === 'heartbeat'\) \{\s*const a = lookupChannel\.allowance\?\.\(peer\)/, 'the dispatcher reads it for heartbeats');
+  // The purge literal must be the kind chat-handler produces for a heartbeat.
+  assert.match(chatHandler, /kind: opts\.blocking \? 'deep_explore:auto_paused' : `deep_explore:auto_\$\{opts\.progress \?\? 'advance'\}`/);
+  const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.match(index, /discardKind\('deep_explore:auto_heartbeat'\)/);
+});

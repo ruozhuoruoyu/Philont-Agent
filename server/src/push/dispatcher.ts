@@ -30,6 +30,13 @@ export type PushSeverity = 'urgent' | 'digest';
 
 /** Floor between two blocking decision cards to the same person. See PushRequest.blocking. */
 const BLOCKING_MIN_INTERVAL_MS = 5 * 60_000;
+/**
+ * Messages of a metered peer's allowance kept for content. Prod 2026-09-14 06:31 → 07:18: the owner's
+ * "继续" bought ten messages; six went to "本轮已运行 5/10 分钟" heartbeats and the four milestones that
+ * carried the morning's proofs all bounced with prepare failed. A heartbeat is not sent into the last
+ * few; a milestone always may be.
+ */
+export const HEARTBEAT_ALLOWANCE_RESERVE = 3;
 
 export interface PushRequest {
   severity: PushSeverity;
@@ -86,6 +93,7 @@ export interface SkipReason {
     | 'no_active_subscription'
     | 'rate_limited'
     | 'quiet_hours'
+    | 'allowance_reserved'
     | 'duplicate';
   detail?: string;
 }
@@ -235,7 +243,10 @@ export class PushDispatcher {
           if (stale) this.deferredPushes?.markDelivered(stale.id);
         } else {
           if (sendResult.partiallyDelivered) result.partiallyDelivered += 1;
-          if (sendResult.retry === 'next_inbound' && this.deferredPushes) {
+          // A heartbeat is about now. Delivered with the owner's next reply — prod 2026-09-13 23:13,
+          // three "本轮已运行 5 分钟" from the previous evening under "此前未能送达的待办通知" — it is false.
+          const deferrable = req.progress !== 'heartbeat';
+          if (sendResult.retry === 'next_inbound' && this.deferredPushes && deferrable) {
             this.deferredPushes.enqueue({
               channel: t.channel, peer: t.peer, severity: req.severity,
               kind: req.kind, targetRef: req.targetRef,
@@ -248,7 +259,7 @@ export class PushDispatcher {
           }
           this.opts.logger.warn(
             `[push] ${t.channel}:${t.peer} pushText returned failure` +
-              (sendResult.retry === 'next_inbound' && this.deferredPushes ? ' — deferred to next inbound' : '') +
+              (sendResult.retry === 'next_inbound' && this.deferredPushes && deferrable ? ' — deferred to next inbound' : '') +
               `: ${sendResult.error ?? 'unknown'}`,
           );
         }
@@ -317,6 +328,14 @@ export class PushDispatcher {
     }
     if (!lookupChannel.isReady()) {
       return { channel, peer, reason: 'channel_not_ready' };
+    }
+
+    // Cheap talk yields to content when the peer's allowance runs low (HEARTBEAT_ALLOWANCE_RESERVE).
+    if (req.progress === 'heartbeat') {
+      const a = lookupChannel.allowance?.(peer) ?? null;
+      if (a && a.remaining <= HEARTBEAT_ALLOWANCE_RESERVE) {
+        return { channel, peer, reason: 'allowance_reserved', detail: `remaining=${a.remaining}/${a.total}` };
+      }
     }
 
     // Frequency rate-limit. A blocking decision runs on its own short floor, kept in memory: losing it

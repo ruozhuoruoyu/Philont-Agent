@@ -1015,6 +1015,12 @@ server.listen(PORT, () => {
   // Mailbox lifetime is infrastructure, not a WeChat side effect. Run even when WECHAT_ENABLED=0,
   // and periodically thereafter so an idle/disabled channel cannot make expiry silent.
   maintainDeferredPushes(memory.deferredPushes, memory.metrics);
+  // Heartbeats stopped being deferrable on 2026-09-14 (a "本轮已运行 5 分钟" delivered hours later is
+  // false); rows enqueued before that would otherwise ride along with the owner's replies for 72h.
+  {
+    const purged = memory.deferredPushes.discardKind('deep_explore:auto_heartbeat');
+    if (purged > 0) console.log(`[push] discarded ${purged} deferred heartbeat(s) — heartbeats are no longer deferred`);
+  }
   const deferredPushMaintenanceTimer = setInterval(() => {
     maintainDeferredPushes(memory.deferredPushes, memory.metrics);
   }, 60 * 60_000);

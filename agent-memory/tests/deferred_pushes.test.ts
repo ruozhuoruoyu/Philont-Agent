@@ -67,3 +67,17 @@ test('an ordinary write never deletes an expired row, and never hands it out eit
   assert.equal(h.deferredPushes.count(), 1);
   h.close();
 });
+
+test('a kind that stopped being deferrable can be discarded wholesale', () => {
+  const h = openMemoryDb(':memory:');
+  h.deferredPushes.enqueue({ channel: 'wechat', peer: 'owner', severity: 'urgent', kind: 'deep_explore:auto_heartbeat',
+    targetRef: 'a', text: '本轮已运行 5 分钟', expiresAt: 90_000 }, 1_000);
+  h.deferredPushes.enqueue({ channel: 'wechat', peer: 'owner', severity: 'urgent', kind: 'deep_explore:auto_heartbeat',
+    targetRef: 'b', text: '本轮已运行 10 分钟', expiresAt: 90_000 }, 2_000);
+  h.deferredPushes.enqueue({ channel: 'wechat', peer: 'owner', severity: 'urgent', kind: 'deep_explore:auto_milestone',
+    targetRef: 'c', text: 'proved 1', expiresAt: 90_000 }, 3_000);
+  assert.equal(h.deferredPushes.discardKind('deep_explore:auto_heartbeat'), 2);
+  assert.equal(h.deferredPushes.count(), 1, 'the milestone is still owed');
+  assert.equal(h.deferredPushes.listPending('wechat', 'owner', 3, 4_000)[0]?.kind, 'deep_explore:auto_milestone');
+  h.close();
+});

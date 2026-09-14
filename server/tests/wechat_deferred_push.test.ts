@@ -117,3 +117,15 @@ test('bounded batching appends at most three notices and marks truncation explic
   assert.match(calls[0], /通知内容已截断|notice truncated/);
   assert.deepEqual(acked, ['u1'], 'the item that did not fit remains pending');
 });
+
+test('every inbound refills the peer allowance, text or not', async () => {
+  const refilled: string[] = [];
+  const dispatch = makeDispatcher({
+    accountId: 'account', outbound: new OutboundQueue(async () => ({ ok: true })), logger,
+    chatSend: async (_sid, _text, onDelta) => { onDelta('## For User\nok'); },
+    allowance: { onInbound: (peer) => { refilled.push(peer); } },
+  });
+  await dispatch(event);
+  await dispatch({ ...event, text: '' } as any);
+  assert.deepEqual(refilled, ['owner', 'owner'], 'a media-only inbound is an inbound too');
+});

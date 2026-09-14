@@ -20,10 +20,11 @@
 
 import {
   readCredentials,
-  readPeerToken,
+  readPeerToken, loadPeerAllowance, savePeerAllowance,
   resolveDefaultAccountId,
   type WeChatCredentials,
 } from './state.js';
+import { OutboundAllowance } from './allowance.js';
 import { ILinkClient } from './client.js';
 import { createProgressRelay, type ProgressSink } from '../../task_progress.js';
 import {
@@ -134,6 +135,13 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
   // **Log visibility**: log before and after sending so that even if it hangs, the log shows
   // exactly which step it is stuck at.
   const SEND_HARD_TIMEOUT_MS = 25_000;
+  // What iLink meters is messages per inbound, not time (see allowance.ts). Every accepted message —
+  // reply, milestone, heartbeat, chunk — is one of the peer's ten; the dispatcher reads the remainder
+  // so that cheap talk yields to content when the ledger runs low.
+  const allowance = new OutboundAllowance({
+    load: () => loadPeerAllowance(creds.accountId),
+    save: (map) => savePeerAllowance(creds.accountId, map),
+  });
   const rawSender: RawSender = async (to, text) => {
     const startedAt = Date.now();
     const safeTo = pseudonymizeWeChatId(to);
@@ -167,9 +175,14 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
       }
       const dur = Date.now() - startedAt;
       if (r.ret === 0) {
-        logger.info('outbound sender ok', { to: safeTo, durationMs: dur, messageId: pseudonymizeWeChatId(r.message_id) });
+        allowance.onSent(to);
+        const a = allowance.view(to);
+        logger.info('outbound sender ok', {
+          to: safeTo, durationMs: dur, messageId: pseudonymizeWeChatId(r.message_id), allowance: `${a.remaining}/${a.total}`,
+        });
         return { ok: true, messageId: r.message_id };
       }
+      if (r.ret === -2) allowance.onRefused(to);
       // -14 token expired: not handled here; the gateway's long-poll will also catch it
       logger.warn(`sendText ret=${r.ret} errmsg=${r.errmsg ?? ''}`, { to: safeTo, durationMs: dur });
       return { ok: false, ...(r.ret === -2 ? { retry: 'next_inbound' as const } : {}), code: r.ret };
@@ -187,6 +200,7 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
     outbound,
     logger,
     deferredPushes: opts.deferredPushes,
+    allowance,
     onAuthDelivered: opts.onAuthDelivered,
     onAuthDeliveryFailed: opts.onAuthDeliveryFailed,
   });
@@ -230,6 +244,7 @@ export async function startWeChatGateway(opts: MountOptions): Promise<ILinkGatew
     // into a dead connection during network flaps). Not-ready => dispatcher skips with
     // channel_not_ready and the finding still reaches the user via next-turn injection.
     isReady: () => gw.isHealthy(),
+    allowance: (peer) => allowance.view(peer),
     async pushText(peer, text) {
       try {
         const r = await outbound.sendText(peer, text);
@@ -315,10 +330,12 @@ export function makeDispatcher(opts: {
   outbound: OutboundQueue;
   logger: GatewayLogger;
   deferredPushes?: MountOptions['deferredPushes'];
+  /** The per-inbound send ledger: an inbound message from the peer refills it. */
+  allowance?: { onInbound(peer: string): void };
   onAuthDelivered?: MountOptions['onAuthDelivered'];
   onAuthDeliveryFailed?: MountOptions['onAuthDeliveryFailed'];
 }): (e: InboundEvent) => Promise<void> {
-  const { accountId, chatSend, outbound, logger, deferredPushes, onAuthDelivered, onAuthDeliveryFailed } = opts;
+  const { accountId, chatSend, outbound, logger, deferredPushes, allowance, onAuthDelivered, onAuthDeliveryFailed } = opts;
 
   // Quota-suspended reply tails, keyed by replyTo. WeChat caps bot messages per inbound message
   // (sendText ret=-2); when a reply's tail is rejected, it is parked here and delivered at the
@@ -361,6 +378,8 @@ export function makeDispatcher(opts: {
   };
 
   return async (event: InboundEvent) => {
+    // Any inbound refills the peer's allowance, text or not — before the early return below.
+    allowance?.onInbound(event.groupId || event.fromUserId);
     if (!event.text) {
       logger.info('inbound has no text content (媒体?), 跳过', {
         from: event.fromUserId,

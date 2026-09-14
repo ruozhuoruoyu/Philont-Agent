@@ -39,6 +39,13 @@ export interface PushChannel {
    * Implementations should not throw — report failures via ok=false + error string.
    */
   pushText(peer: string, text: string): Promise<PushTextResult>;
+
+  /**
+   * How many more messages the platform will accept for this peer before the peer writes again, when
+   * the channel meters that (WeChat iLink: ~10 per inbound, learned from refusals). The dispatcher
+   * spends the tail of it on content, not on heartbeats. Absent or null = unmetered.
+   */
+  allowance?(peer: string): { remaining: number; total: number; sentSince: number } | null;
 }
 
 export interface PushTextResult {

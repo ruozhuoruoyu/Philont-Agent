@@ -118,6 +118,11 @@ export class DeferredPushStore {
     return rows.map(rowToPush);
   }
 
+  /** Drop every pending row of one kind — for kinds that stopped being deferrable. */
+  discardKind(kind: string): number {
+    return this.db.prepare(`DELETE FROM deferred_pushes WHERE kind=?`).run(kind).changes;
+  }
+
   markDelivered(id: string): boolean {
     return this.db.prepare(`DELETE FROM deferred_pushes WHERE id=?`).run(id).changes > 0;
   }

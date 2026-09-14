@@ -333,6 +333,31 @@ export function writePeerToken(accountId: string, peerId: string, token: string)
   try { chmodSync(path, 0o600); } catch { /* windows */ }
 }
 
+// ── Per-peer outbound allowance ledger (see allowance.ts) ─────────────────────────────────────────
+// Persisted next to the token cache because a restart mid-window must not forget how many of the
+// peer's messages are already spent (prod 2026-09-13 22:39 → 22:49 restarted with six on the ledger).
+
+const PEER_ALLOWANCE_FILE = '.peer-allowance.json';
+
+export function loadPeerAllowance(accountId: string): Record<string, { total: number; sentSince: number; updatedAt: number }> {
+  try {
+    const path = join(getAccountDir(accountId), PEER_ALLOWANCE_FILE);
+    if (!existsSync(path)) return {};
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, { total: number; sentSince: number; updatedAt: number }> : {};
+  } catch {
+    return {}; // a corrupted ledger is relearned from live traffic; never fatal
+  }
+}
+
+export function savePeerAllowance(accountId: string, map: Record<string, { total: number; sentSince: number; updatedAt: number }>): void {
+  const dir = getAccountDir(accountId);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, PEER_ALLOWANCE_FILE);
+  writeFileSync(path, JSON.stringify(map), 'utf8');
+  try { chmodSync(path, 0o600); } catch { /* windows */ }
+}
+
 export function readPeerToken(accountId: string, peerId: string): string | null {
   try {
     const path = join(getAccountDir(accountId), PEER_TOKENS_FILE);

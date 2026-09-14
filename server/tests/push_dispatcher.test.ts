@@ -506,3 +506,59 @@ test('a consequent blocking card of another KIND is not rate-limited by the one 
   unregisterPushChannel(f.channel.name);
   h.close();
 });
+
+test('a heartbeat yields the tail of a metered allowance to content', async () => {
+  // Prod 2026-09-14 06:31 → 07:18: ten messages bought by "继续", six spent on "本轮已运行 5 分钟",
+  // and the four milestones that carried the morning's proofs all bounced.
+  let now = Date.now();
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  let remaining = 4;
+  f.channel.allowance = () => ({ remaining, total: 10, sentSince: 10 - remaining });
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1' });
+  const hb = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'hb1', progress: 'heartbeat' });
+  assert.equal(hb.delivered, 1, 'four left: a heartbeat may still go');
+  remaining = 3; now += 300_000;
+  const held = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'hb2', progress: 'heartbeat' });
+  assert.equal(held.delivered, 0);
+  assert.equal(held.skipped[0]?.reason, 'allowance_reserved');
+  assert.equal(held.deferred, 0, 'a heartbeat held back is not a heartbeat owed');
+  const milestone = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'stage1', progress: 'milestone' });
+  assert.equal(milestone.delivered, 1, 'the reserve is for exactly this');
+  remaining = 0; now += 300_000;
+  const gone = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'hb3', progress: 'heartbeat' });
+  assert.equal(gone.skipped[0]?.reason, 'allowance_reserved');
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
+
+test('an unmetered channel never reserves', async () => {
+  const { h, dispatcher } = setup();
+  const f = fakeChannel();
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1' });
+  assert.equal((await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'hb', progress: 'heartbeat' })).delivered, 1);
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
+
+test('a refused heartbeat is dropped, not deferred to the next inbound', async () => {
+  // Prod 2026-09-13 23:13: three "本轮已运行 5 分钟" from the previous evening arrived under
+  // "此前未能送达的待办通知". A heartbeat delivered later is false.
+  let now = Date.now();
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  f.setReturn({ ok: false, retry: 'next_inbound', code: -2, error: 'prepare failed' });
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1' });
+  const hb = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'hb', progress: 'heartbeat' });
+  assert.equal(hb.deferred, 0);
+  assert.equal(hb.failed, 1);
+  assert.equal(h.deferredPushes.count(), 0, 'nothing owed');
+  now += 300_000;
+  const ms = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'stage1', progress: 'milestone' });
+  assert.equal(ms.deferred, 1, 'a milestone carries content and is still owed');
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
