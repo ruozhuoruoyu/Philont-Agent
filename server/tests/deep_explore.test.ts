@@ -18,6 +18,8 @@ import {
   reasoningTreeVersion,
   makeReasoningToolRunner,
   openAncestorCount,
+  chainProgress,
+  describeChainProgress,
   assemblyReady,
   describeTargetDebt,
   SPLIT_DEBT_LIMIT,
@@ -1891,4 +1893,26 @@ test('the scorer is told each subgoal\'s chain and which ones are closable', () 
   const parent = node({ id: 'p', parentId: 'n0', depth: 1 });
   const kid = node({ id: 'k', parentId: 'p', status: 'proved', depth: 2 });
   assert.match(buildScorerPrompt('G', [], [parent], [...all, parent, kid]), /all 1 children settled — closable now/);
+});
+
+// ── Mainline metric: did the root → target chain get shorter ────────────────────────────────
+test('chainProgress counts the path to the root and what closed on it this round', () => {
+  const nodes = chain(4);
+  nodes[2] = { ...nodes[2], status: 'proved' };
+  nodes[4] = { ...nodes[4], status: 'dead_end' };
+  const previous = new Map(chain(4).map((n) => [n.id, n.status]));
+  const cp = chainProgress(nodes, previous, 'n4')!;
+  assert.equal(cp.chainLength, 5, 'root plus four levels');
+  assert.equal(cp.chainOpen, 3);
+  assert.deepEqual(cp.closedThisRound.map((n) => n.id), ['n4', 'n2']);
+  assert.match(describeChainProgress(cp), /主线：根到本轮目标共 5 个节点，仍有 3 个未闭合；本轮闭合 2 个/);
+  assert.match(describeChainProgress(cp, 'en'), /Mainline: 5 nodes .* 3 still open; 2 closed this round/);
+  // Work elsewhere in the tree does not count — only the chain.
+  const side = [...chain(4), node({ id: 'side', parentId: 'n0', depth: 1, status: 'proved' })];
+  const prev2 = new Map([...chain(4).map((n) => [n.id, n.status] as const), ['side', 'open' as const]]);
+  const cp2 = chainProgress(side, prev2, 'n4')!;
+  assert.equal(cp2.closedThisRound.length, 0);
+  assert.match(describeChainProgress(cp2), /本轮链上无节点闭合/);
+  assert.equal(chainProgress(nodes, previous, null), null);
+  assert.equal(chainProgress(nodes, previous, 'ghost'), null);
 });

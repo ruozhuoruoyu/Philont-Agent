@@ -95,6 +95,7 @@ import {
   renderRepeatNote,
   type PriorMatch,
   computeFrontier,
+  type ReasoningNodeStatus,
 } from '@agent/memory';
 import { currentSessionId } from './channels/turn_context.js';
 import { decidePhaseTransition, goalNeedsDecision, classifyGoal, looksDeductive } from './phase_gate.js';
@@ -294,6 +295,54 @@ export function describeTargetDebt(target: ReasoningNode, allNodes: ReasoningNod
       : `Split debt: this node hangs from ${debt} open ancestors; it may be decomposed ${SPLIT_DEBT_LIMIT - debt} more level(s) before the chain must start closing. Prefer closing to splitting.`,
   );
   return parts.join('\n');
+}
+
+/**
+ * The mainline metric: the path root → target, and what closed on it this round. Every other counter
+ * (proved, reduces_target, substantive) can rise forever while the root gets no closer; this one cannot.
+ */
+export interface ChainProgress {
+  /** Nodes on the path root → target, target included. */
+  chainLength: number;
+  /** Of those, still open now. */
+  chainOpen: number;
+  /** Of those, open before this round and settled now. */
+  closedThisRound: ReasoningNode[];
+}
+
+export function chainProgress(
+  after: ReasoningNode[],
+  previousStatus: ReadonlyMap<string, ReasoningNodeStatus>,
+  targetId: string | null | undefined,
+): ChainProgress | null {
+  if (!targetId) return null;
+  const byId = new Map(after.map((n) => [n.id, n]));
+  const path: ReasoningNode[] = [];
+  const seen = new Set<string>();
+  let cur = byId.get(targetId);
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    path.push(cur);
+    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+  }
+  if (path.length === 0) return null;
+  return {
+    chainLength: path.length,
+    chainOpen: path.filter((n) => n.status === 'open').length,
+    closedThisRound: path.filter((n) => previousStatus.get(n.id) === 'open' && n.status !== 'open'),
+  };
+}
+
+/** One line for the owner or the model: did the mainline get shorter. */
+export function describeChainProgress(cp: ChainProgress | null, lang: 'zh' | 'en' = 'zh'): string {
+  if (!cp) return '';
+  const k = cp.closedThisRound.length;
+  const names = k ? cp.closedThisRound.slice(0, 2).map((n) => n.claim.slice(0, 60)).join(lang === 'en' ? '; ' : '；') : '';
+  return lang === 'en'
+    ? `Mainline: ${cp.chainLength} nodes from the root to this round's target, ${cp.chainOpen} still open; ` +
+      (k ? `${k} closed this round (${names}).` : 'none closed this round.')
+    : `主线：根到本轮目标共 ${cp.chainLength} 个节点，仍有 ${cp.chainOpen} 个未闭合；` +
+      (k ? `本轮闭合 ${k} 个（${names}）。` : '本轮链上无节点闭合。');
 }
 
 /** Number of ancestors of `nodeId` that are still open — the unclosed chain it hangs from. */
@@ -3826,6 +3875,9 @@ export function createDeepExploreTool(
     // is deferred until a signal that does not misfire on those cases. The pure gate keeps the branch.
 
     const text = renderProgressText(summary, result.hitCap, status, profile.settledVerb);
+    const chainLine = roundTarget
+      ? `\n${describeChainProgress(chainProgress(after, new Map(before.map((n) => [n.id, n.status])), roundTarget.id), 'en')}`
+      : '';
     // Count only the rounds the OWNER cranked: a background round is not evidence they are the ticker.
     if (!session.autoAdvance) {
       sessionManualRounds.set(session.id, (sessionManualRounds.get(session.id) ?? 0) + 1);
@@ -3875,7 +3927,7 @@ export function createDeepExploreTool(
       : '';
     return {
       success: true,
-      output: `${text}${tail}${churnNote}${stuckNote}${attributionLine}\n${renderSessionSubject(session.goal, session.id, session.mode, session.autoAdvance)}`,
+      output: `${text}${chainLine}${tail}${churnNote}${stuckNote}${attributionLine}\n${renderSessionSubject(session.goal, session.id, session.mode, session.autoAdvance)}`,
     };
   }
 
@@ -4376,11 +4428,18 @@ export function createDeepExploreTool(
           owner ?? '',
           frontier.map((node) => node.claim),
         ) ?? [];
+        // The pinned target and the chain it hangs from — not "the first five leaves", which printed the
+        // same stale census node for days while rounds worked at depth 32–39.
+        const target = session.frontierTargetNodeId ? nodes.find((n) => n.id === session.frontierTargetNodeId) : undefined;
+        const chain = target ? chainProgress(nodes, new Map(), target.id) : null;
         return {
           success: true,
           output:
             `Reasoning session "${session.goal}" (${session.id}): proved ${proved} / open ${frontier.length} / dead ends ${dead}.` +
-            (frontier.length ? `\nCurrent frontier: ${frontier.slice(0, 5).map((n) => n.claim).join(' / ')}` : '') +
+            (target
+              ? `\nCurrent target: [${target.id}] ${target.claim.slice(0, 200)} (depth ${target.depth}; chain to root ${chain?.chainLength ?? '?'} nodes, ${chain?.chainOpen ?? '?'} open)`
+              : '') +
+            (frontier.length ? `\nOther frontier leaves: ${frontier.filter((n) => n.id !== target?.id).slice(0, 4).map((n) => n.claim.slice(0, 120)).join(' / ')}` : '') +
             (externalEvidence.length
               ? `\nExternal verified work awaiting explicit tree reconciliation: ${externalEvidence.slice(0, 5).join(' / ')}`
               : ''),

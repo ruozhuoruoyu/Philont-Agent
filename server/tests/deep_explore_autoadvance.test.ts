@@ -454,3 +454,25 @@ test('a round that recorded a lemma but did not advance the target says so, not 
   assert.match(milestone, /本轮新增记录：settled earlier/);
   assert.doesNotMatch(milestone, /本轮未确认有效进展/);
 });
+
+test('a milestone carries the mainline metric: the chain to the target and what closed on it', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  const mk = (id: string, parentId: string | null, status: string, claim: string, depth: number) =>
+    ({ id, parentId, status, claim, value: 0.5, depth }) as any;
+  const before = [mk('root', null, 'open', 'G', 0), mk('a', 'root', 'open', 'A', 1), mk('t', 'a', 'open', 'T', 2), mk('x', 'root', 'open', 'X', 1)];
+  const after = [mk('root', null, 'open', 'G', 0), mk('a', 'root', 'open', 'A', 1), mk('t', 'a', 'proved', 'T', 2), mk('x', 'root', 'proved', 'X', 1)];
+  let phase = 0;
+  const live = sess({ frontierTargetNodeId: 't' } as any);
+  const { store } = fakeStore({ active: [live], afterRound: () => live });
+  (store as any).getNodes = () => (phase++ === 0 ? before : after);
+  const notes: string[] = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx,
+    advanceSession: async () => ({ success: true, output: '' }),
+    hasFormalAdmission: () => true,
+    notify: (text) => { notes.push(text); },
+  });
+  await loop.tickOnce();
+  const milestone = notes.find((t) => /第 1 轮已返回/.test(t))!;
+  assert.match(milestone, /主线：根到本轮目标共 3 个节点，仍有 2 个未闭合；本轮闭合 1 个（T）/, 'X closed too, but X is not on the chain');
+});

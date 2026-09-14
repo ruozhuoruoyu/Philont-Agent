@@ -15,7 +15,7 @@
  */
 import type { PhraseLang } from './channel_phrases.js';
 import { exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
-import { computeFrontier } from './deep_explore.js';
+import { computeFrontier, chainProgress, describeChainProgress } from './deep_explore.js';
 import { startProgressTicker } from './task_progress.js';
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 import type { ToolResult } from '@agent/policy';
@@ -364,6 +364,8 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
                 ? `本轮有新记录（见下），但未推进当前目标节点；连续 ${fresh.noProgressRounds} 轮无实质进展。`
                 : `本轮未确认有效进展，连续无进展记录为 ${fresh.noProgressRounds} 轮。`) +
             (newlySettled.length ? `\n本轮新增记录：${newlySettled.slice(0, 2).map((n) => n.claim.slice(0, 120)).join('；')}` : '') +
+            // The one number that cannot be gamed by splitting: did the root → target chain get shorter.
+            (fresh.frontierTargetNodeId ? `\n${describeChainProgress(chainProgress(nodes, previous, fresh.frontierTargetNodeId))}` : '') +
             `\n下一步：${next ? next.claim.slice(0, 160) : '检查剩余开放节点和停止条件'}。`, { progress: 'milestone' });
         }
       }

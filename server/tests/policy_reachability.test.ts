@@ -666,3 +666,11 @@ test('the frontier scorer is handed the whole tree, not just the frontier', () =
   assert.match(deepExplore, /buildScorerPrompt\(opts\.goal, opts\.assumptions, opts\.frontier, opts\.allNodes \?\? opts\.frontier\)/);
   assert.match(deepExplore, /describeTargetDebt\(roundTarget, before\)/, 'the round prompt carries the debt');
 });
+
+test('the mainline metric reaches the round output, the status line and the milestone', () => {
+  const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
+  assert.match(deepExplore, /output: `\$\{text\}\$\{chainLine\}/, 'the round output carries the chain line');
+  assert.match(deepExplore, /Current target: \[\$\{target\.id\}\]/, 'status names the pinned target, not the first leaf');
+  const aa = readFileSync(new URL('../src/deep_explore_autoadvance.ts', import.meta.url), 'utf8');
+  assert.match(aa, /describeChainProgress\(chainProgress\(nodes, previous, fresh\.frontierTargetNodeId\)\)/);
+});
