@@ -684,3 +684,12 @@ test('a timeout is retried with less thinking, not with the same request; a proa
   assert.match(deepExplore, /noteRoundOutcomeForEffort\(session\.id, notRun\.reason\)/);
   assert.match(chatHandler, /priorAssistant\?\.includes\(PROACTIVE_NOTICE_TAG\) \? PROACTIVE_QUESTION_BINDING_TTL_MS : SHORT_ANSWER_BINDING_TTL_MS/);
 });
+
+test('the Anthropic path retries a thinking-only reply with less thinking; rounds carry relation and claims', () => {
+  const adapter = readFileSync(new URL('../src/llm-adapter.ts', import.meta.url), 'utf8');
+  assert.match(adapter, /const retryPlan = thinkingOnlyAtCap\(response\) \? planThinkingOnlyRetry\(effReasoning, maxTokens\) : null;/);
+  assert.match(adapter, /response = await dispatch\(buildParams\(wire2, retryPlan\.maxTokens\), retryPlan\.maxTokens\);/);
+  const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
+  assert.match(deepExplore, /data: \{ notRun: true, reason: notRun\.reason, rejected: isRejectedRequest\(notRun\.reason\) \}/);
+  assert.match(deepExplore, /data: \{ relation: attribution\.relation, claimed: claimedRelations \}/);
+});

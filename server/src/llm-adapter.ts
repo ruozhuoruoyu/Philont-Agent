@@ -414,6 +414,27 @@ export function isFarSideTimeout(e: unknown, tookMs: number): boolean {
   return /timed out|timeout|fetch failed|terminated|premature close|socket hang up|econnreset/i.test(`${err.message ?? ''} ${err.code ?? ''}`);
 }
 
+/**
+ * The Anthropic-protocol twin of the OpenAI path's empty-reply retry. Prod 2026-09-15 22:13 → 22:41: three
+ * of four round calls came back stop_reason=max_tokens with a single thinking block and no text
+ * (usage out=16000 = the cap); each cost five minutes and the whole output budget, the mini-loop "asked
+ * again" with the same parameters, and both rounds ended no_commit. A response that is all thinking at
+ * the cap is not an answer the model chose; it is a budget the thinking ate. Less thinking, more room.
+ */
+export function thinkingOnlyAtCap(r: { stop_reason?: string | null; content: ReadonlyArray<{ type: string }> }): boolean {
+  return r.stop_reason === 'max_tokens' && r.content.length > 0 &&
+    r.content.every((c) => c.type === 'thinking' || c.type === 'redacted_thinking');
+}
+
+export function planThinkingOnlyRetry(
+  reasoning: ReasoningConfig | undefined,
+  maxTokens: number,
+): { reasoning: ReasoningConfig; maxTokens: number } | null {
+  if (reasoning?.enabled === false) return null; // thinking was off; this is some other failure
+  const lower = stepDownEffort(reasoning) ?? { enabled: false };
+  return { reasoning: lower, maxTokens: Math.min(65536, Math.max(maxTokens, 256) * 2) };
+}
+
 /** Read the marker sendWithTransientRetry leaves on a far-side timeout it refused to repeat. */
 export function errorIsFarSideTimeout(e: unknown): boolean {
   return !!(e as { farSideTimeout?: boolean } | null)?.farSideTimeout;
@@ -672,13 +693,14 @@ class AnthropicAdapter implements LLMAdapter {
       // `output_config` and `thinking:{type:'disabled'}` (DeepSeek extension) are not in
       // the Anthropic SDK's typed surface, so a typed literal would not compile. The shape
       // is correct on the wire; we keep the cast localized with this comment.
-      const createParams: Record<string, unknown> = {
+      const buildParams = (w: typeof wire, mt: number): Record<string, unknown> => ({
         model: this.model,
-        max_tokens: maxTokens,
+        max_tokens: mt,
         messages: safeMessages,
         ...(anthropicTools?.length ? { tools: anthropicTools } : {}),
-        ...(wire.anthropicParams ?? {}),
-      };
+        ...(w.anthropicParams ?? {}),
+      });
+      const createParams = buildParams(wire, maxTokens);
       // 2026-06-07: the SDK refuses a NON-streaming request whose max_tokens implies a
       // >10-min completion: it throws "Streaming is required …" locally (before sending) when
       //   (60*60*1000 * max_tokens) / 128000 > 600000ms  ⇔  max_tokens > 21333.
@@ -686,18 +708,29 @@ class AnthropicAdapter implements LLMAdapter {
       // every turn. Above the threshold, stream and reassemble via finalMessage() — same
       // Anthropic.Message shape, so all downstream handling (content blocks, stop_reason,
       // usage, thinking-block echo) is unchanged. Small requests keep the non-streaming path.
-      response = await sendWithTransientRetry<Anthropic.Message>(
+      const dispatch = (params: Record<string, unknown>, mt: number) => sendWithTransientRetry<Anthropic.Message>(
         async () =>
-          maxTokens > NONSTREAMING_MAX_TOKENS
+          mt > NONSTREAMING_MAX_TOKENS
             ? await this.client.messages
-                .stream(createParams as unknown as Anthropic.MessageStreamParams, { signal: opts?.signal })
+                .stream(params as unknown as Anthropic.MessageStreamParams, { signal: opts?.signal })
                 .finalMessage()
             : await this.client.messages.create(
-                createParams as unknown as Anthropic.MessageCreateParamsNonStreaming,
+                params as unknown as Anthropic.MessageCreateParamsNonStreaming,
                 { signal: opts?.signal },
               ),
         opts?.signal,
       );
+      response = await dispatch(createParams, maxTokens);
+      const retryPlan = thinkingOnlyAtCap(response) ? planThinkingOnlyRetry(effReasoning, maxTokens) : null;
+      if (retryPlan) {
+        console.warn(
+          `[llm-adapter] anthropic: thinking consumed the whole ${maxTokens}-token budget with no text ` +
+            `(stop_reason=max_tokens); retrying once at effort=${retryPlan.reasoning.enabled === false ? 'off' : retryPlan.reasoning.effort} ` +
+            `max_tokens=${retryPlan.maxTokens}`,
+        );
+        const wire2 = this.profile.buildReasoningWire(this.model, retryPlan.reasoning);
+        response = await dispatch(buildParams(wire2, retryPlan.maxTokens), retryPlan.maxTokens);
+      }
     } catch (e: unknown) {
       // 400 + "too large" / "context length exceeded" → normalise to ContextTooLargeError
       // so the upper layer can trigger emergency eviction + retry

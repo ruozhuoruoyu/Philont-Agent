@@ -18,6 +18,7 @@ import {
   reasoningTreeVersion,
   makeReasoningToolRunner,
   openAncestorCount,
+  isRejectedRequest,
   roundReasoning,
   noteRoundOutcomeForEffort,
   _resetRoundEffortForTest,
@@ -1930,4 +1931,12 @@ test('a far-side timeout steps the session round effort down; other outages leav
   assert.equal(roundReasoning('s-eff').effort, first!.effort);
   assert.equal(roundReasoning('other').effort, initial, 'per session');
   _resetRoundEffortForTest();
+});
+
+test('isRejectedRequest: a 400 invalid request is refused, not down; 408/429/5xx are not', () => {
+  assert.equal(isRejectedRequest('400 {"error":{"type":"invalid_request_error","message":"DeepSeek V4.1 reasoning_effort must be low/medium/high"}}'), true);
+  assert.equal(isRejectedRequest('OpenAI-compatible API 503: unavailable'), false);
+  assert.equal(isRejectedRequest('429 rate_limit_error'), false);
+  assert.equal(isRejectedRequest('408 Request timed out'), false);
+  assert.equal(isRejectedRequest('LLM call exceeded 439600ms timeout'), false);
 });

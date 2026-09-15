@@ -309,7 +309,18 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
               `${Math.round(holdMs / 60_000)}min (${String(out.data?.reason ?? '').slice(0, 120)})`,
           );
           const en = (deps.lang?.() ?? 'zh') === 'en';
-          if (strikes === 1) {
+          const rejected = out.data?.rejected === true;
+          if (rejected && strikes === 1) {
+            // Not an outage: the endpoint refused the request. Waiting heals nothing; the owner must see the
+            // actual message once, as important, instead of "暂时无响应" three times.
+            const detail = String(out.data?.reason ?? '').replace(/\s+/g, ' ').slice(0, 240);
+            notify(
+              en
+                ? `⚠️ The model endpoint REJECTED the request for "${s.goal.slice(0, 50)}" (not an outage): ${detail}. Automatic rounds are on hold; the model/parameter configuration needs a look.`
+                : `⚠️ 模型端点拒绝了「${s.goal.slice(0, 50)}」的推进请求（不是故障，是请求参数被拒）：${detail}。自动推进先挂起，需要检查模型/参数配置。`,
+              { important: true },
+            );
+          } else if (strikes === 1) {
             notify(
               en
                 ? `The model endpoint is not answering, so automatic rounds for "${s.goal.slice(0, 50)}" are on hold. Nothing was lost; they resume on their own when it recovers.`
@@ -364,6 +375,11 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
                 ? `本轮有新记录（见下），但未推进当前目标节点；连续 ${fresh.noProgressRounds} 轮无实质进展。`
                 : `本轮未确认有效进展，连续无进展记录为 ${fresh.noProgressRounds} 轮。`) +
             (newlySettled.length ? `\n本轮新增记录：${newlySettled.slice(0, 2).map((n) => n.claim.slice(0, 120)).join('；')}` : '') +
+            // Prod 2026-09-15 14:45 → 15:14: two rounds on the depth-2 target, the model claimed proves_target
+            // both times, the tree recorded nothing — the verifier refused the proof. The owner read "no progress".
+            (Array.isArray(out.data?.claimed) && (out.data.claimed as string[]).includes('proves_target') && out.data?.relation === 'no_commit'
+              ? `\n本轮模型宣称已证明目标，但没有通过验证或未提交到树上；按未推进计。`
+              : '') +
             // The one number that cannot be gamed by splitting: did the root → target chain get shorter.
             (fresh.frontierTargetNodeId ? `\n${describeChainProgress(chainProgress(nodes, previous, fresh.frontierTargetNodeId))}` : '') +
             `\n下一步：${next ? next.claim.slice(0, 160) : '检查剩余开放节点和停止条件'}。`, { progress: 'milestone' });

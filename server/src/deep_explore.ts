@@ -519,6 +519,15 @@ export type TargetRelation =
  * deadline cutting a call that hung the whole budget — also the endpoint. A round where the model
  * answered at least once and then produced nothing is a real round and is judged as one.
  */
+/**
+ * A 4xx "invalid request" is our request being refused, not the endpoint being down. Prod 2026-09-15
+ * 17:16: `400 … DeepSeek V4.1 reasoning_effort must be l…` was reported to the owner as "模型端点暂时无响应"
+ * and backed off like an outage; nothing about it would have healed by waiting.
+ */
+export function isRejectedRequest(reason: string): boolean {
+  return /\b4(?:00|22)\b|invalid_request|invalid request parameters/i.test(reason) && !/\b(?:408|429)\b/.test(reason);
+}
+
 export function roundNotRun(result: { itersUsed: number; error?: string }): { reason: string } | null {
   if (result.itersUsed > 0 || !result.error) return null;
   if (result.error.startsWith('llm_error:')) return { reason: result.error.slice('llm_error:'.length).trim() };
@@ -3762,7 +3771,7 @@ export function createDeepExploreTool(
     if (notRun) {
       console.warn(
         `[deep-explore] round NOT RUN session=${safeSessionId(session.id)} target=${roundTarget?.id ?? 'none'} — ` +
-        `the endpoint never answered (${notRun.reason.slice(0, 160)}); nothing is charged to the model`,
+        `the endpoint never answered (${notRun.reason.slice(0, 400)}); nothing is charged to the model`,
       );
       const lower = noteRoundOutcomeForEffort(session.id, notRun.reason);
       if (lower) {
@@ -3771,9 +3780,9 @@ export function createDeepExploreTool(
       return {
         success: false,
         output: '',
-        error: `round_not_run: the model endpoint did not answer this round (${notRun.reason.slice(0, 200)}). ` +
+        error: `round_not_run: the model endpoint did not answer this round (${notRun.reason.slice(0, 400)}). ` +
           `The tree is unchanged; this is not a stuck round and not the model's doing. It will be retried automatically.`,
-        data: { notRun: true, reason: notRun.reason },
+        data: { notRun: true, reason: notRun.reason, rejected: isRejectedRequest(notRun.reason) },
       };
     }
 
@@ -3952,6 +3961,8 @@ export function createDeepExploreTool(
     return {
       success: true,
       output: `${text}${chainLine}${tail}${churnNote}${stuckNote}${attributionLine}\n${renderSessionSubject(session.goal, session.id, session.mode, session.autoAdvance)}`,
+      // What the round did to its target vs what the model said it did — the milestone reads both.
+      data: { relation: attribution.relation, claimed: claimedRelations },
     };
   }
 

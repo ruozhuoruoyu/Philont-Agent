@@ -13,7 +13,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { repairToolResultPairing, isTransientLlmError, isFarSideTimeout, stepDownEffort, sendWithTransientRetry, errorIsFarSideTimeout, llmBreaker } from '../src/llm-adapter.js';
+import { repairToolResultPairing, isTransientLlmError, isFarSideTimeout, stepDownEffort, sendWithTransientRetry, errorIsFarSideTimeout, llmBreaker, thinkingOnlyAtCap, planThinkingOnlyRetry } from '../src/llm-adapter.js';
 import { mock } from 'node:test';
 import type { NativeMessage } from '../src/llm-adapter.js';
 
@@ -236,4 +236,21 @@ test('sendWithTransientRetry refuses to repeat a far-side timeout and marks the 
     mock.timers.reset();
     llmBreaker.reset();
   }
+});
+
+// ── Thinking ate the whole budget (Anthropic protocol) ─────────────────────────────────────────
+// Prod 2026-09-15 22:13 → 22:41: stop_reason=max_tokens, content=[thinking], usage out=16000, three times.
+
+test('thinkingOnlyAtCap: all-thinking at the cap is the budget, not an answer', () => {
+  assert.equal(thinkingOnlyAtCap({ stop_reason: 'max_tokens', content: [{ type: 'thinking' }] }), true);
+  assert.equal(thinkingOnlyAtCap({ stop_reason: 'max_tokens', content: [{ type: 'thinking' }, { type: 'text' }] }), false, 'text arrived');
+  assert.equal(thinkingOnlyAtCap({ stop_reason: 'end_turn', content: [{ type: 'thinking' }] }), false, 'not at the cap');
+  assert.equal(thinkingOnlyAtCap({ stop_reason: 'max_tokens', content: [] }), false);
+});
+
+test('planThinkingOnlyRetry: one notch less thinking and twice the room; off if nothing left; none if thinking was off', () => {
+  assert.deepEqual(planThinkingOnlyRetry({ enabled: true, effort: 'max' }, 16000), { reasoning: { enabled: true, effort: 'high' }, maxTokens: 32000 });
+  assert.deepEqual(planThinkingOnlyRetry({ enabled: true, effort: 'low' }, 16000), { reasoning: { enabled: false }, maxTokens: 32000 });
+  assert.deepEqual(planThinkingOnlyRetry(undefined, 40000), { reasoning: { enabled: false }, maxTokens: 65536 });
+  assert.equal(planThinkingOnlyRetry({ enabled: false }, 16000), null);
 });

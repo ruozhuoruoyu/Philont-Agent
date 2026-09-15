@@ -476,3 +476,41 @@ test('a milestone carries the mainline metric: the chain to the target and what 
   const milestone = notes.find((t) => /第 1 轮已返回/.test(t))!;
   assert.match(milestone, /主线：根到本轮目标共 3 个节点，仍有 2 个未闭合；本轮闭合 1 个（T）/, 'X closed too, but X is not on the chain');
 });
+
+test('a rejected request is reported as a rejection, once, as important — not as an outage', async () => {
+  // Prod 2026-09-15 17:16: "400 … reasoning_effort must be l…" was pushed as "模型端点暂时无响应".
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  let now = 1_000_000;
+  const live = sess({});
+  const { store } = fakeStore({ active: [live], afterRound: () => live });
+  const notes: Array<{ text: string; important?: boolean }> = [];
+  const reason = '400 {"error":{"type":"invalid_request_error","message":"DeepSeek V4.1 reasoning_effort must be low/medium/high"}}';
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx, now: () => now,
+    advanceSession: async () => ({ success: false, output: '', error: 'round_not_run', data: { notRun: true, reason, rejected: true } }),
+    hasFormalAdmission: () => true,
+    notify: (text, opts) => { notes.push({ text, important: opts?.important }); },
+  });
+  await loop.tickOnce();
+  const card = notes.find((n) => /拒绝了/.test(n.text))!;
+  assert.ok(card, 'the rejection is named');
+  assert.equal(card.important, true);
+  assert.match(card.text, /reasoning_effort must be/);
+  assert.equal(notes.some((n) => /暂时无响应/.test(n.text)), false, 'not called an outage');
+});
+
+test('a claimed proof the tree did not record is named in the milestone', async () => {
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  const live = sess({ noProgressRounds: 1, frontierTargetNodeId: 't' } as any);
+  const { store } = fakeStore({ active: [sess({})], afterRound: () => live });
+  (store as any).getNodes = () => nodesFixture();
+  const notes: string[] = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx,
+    advanceSession: async () => ({ success: true, output: '', data: { relation: 'no_commit', claimed: ['proves_target', 'proves_target'] } }),
+    hasFormalAdmission: () => true,
+    notify: (text) => { notes.push(text); },
+  });
+  await loop.tickOnce();
+  assert.match(notes.find((t) => /第 1 轮已返回/.test(t))!, /本轮模型宣称已证明目标，但没有通过验证或未提交到树上/);
+});
