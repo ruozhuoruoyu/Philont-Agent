@@ -397,6 +397,41 @@ const NONSTREAMING_MAX_TOKENS = 21000;
 // longer ladder actually helps — one call absorbing a 5-second storm never becomes a breaker strike.
 const LLM_MAX_RETRIES = 4;
 
+/**
+ * An attempt that died of a timeout after this long was cut by the FAR side (a gateway's per-request
+ * limit: 300s on 2026-09-13, 362s on 2026-09-15), not by a blip. Re-issuing the identical request buys
+ * the identical cut. Prod 2026-09-15 06:18: the owner's "推进" spent 879s on two 440s waits and then
+ * failed; 07:05 → 07:57 four background rounds did the same, one 362s cut each.
+ */
+export const FAR_SIDE_TIMEOUT_FLOOR_MS = 240_000;
+
+/** Timeout-shaped AND long-lived: the far side gave up on a generation that was too long for it. */
+export function isFarSideTimeout(e: unknown, tookMs: number): boolean {
+  if (tookMs < FAR_SIDE_TIMEOUT_FLOOR_MS || !isTransientLlmError(e)) return false;
+  const err = e as { status?: number; message?: string; code?: string };
+  if (err.status === 408) return true;
+  if (err.status === 429 || (typeof err.status === 'number' && err.status >= 500)) return false; // said "later", not "too long"
+  return /timed out|timeout|fetch failed|terminated|premature close|socket hang up|econnreset/i.test(`${err.message ?? ''} ${err.code ?? ''}`);
+}
+
+/** Read the marker sendWithTransientRetry leaves on a far-side timeout it refused to repeat. */
+export function errorIsFarSideTimeout(e: unknown): boolean {
+  return !!(e as { farSideTimeout?: boolean } | null)?.farSideTimeout;
+}
+
+const EFFORT_LADDER = ['low', 'medium', 'high', 'max'] as const;
+
+/**
+ * The one retry that can succeed after a far-side timeout: the same request with less thinking. Returns
+ * null when there is nothing left to step down (already low, or thinking off).
+ */
+export function stepDownEffort(r: ReasoningConfig | undefined): ReasoningConfig | null {
+  if (!r || r.enabled === false) return null;
+  const i = EFFORT_LADDER.indexOf(r.effort ?? 'high');
+  if (i <= 0) return null;
+  return { ...r, enabled: true, effort: EFFORT_LADDER[i - 1] };
+}
+
 export function isTransientLlmError(e: unknown): boolean {
   const err = e as { status?: number; name?: string; message?: string; code?: string } | null;
   if (!err) return false;
@@ -510,7 +545,7 @@ export class LlmEndpointDownError extends Error {
 
 export const llmBreaker = new LlmEndpointBreaker();
 
-async function sendWithTransientRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+export async function sendWithTransientRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   let lastErr: unknown;
   // Checked once up front, not per attempt: an open breaker means do not even start.
   llmBreaker.assertClosed();
@@ -523,6 +558,18 @@ async function sendWithTransientRetry<T>(fn: () => Promise<T>, signal?: AbortSig
       return out;
     } catch (e) {
       lastErr = e;
+      const tookMs = Date.now() - attemptStartedAt;
+      if (isFarSideTimeout(e, tookMs)) {
+        // The identical request will be cut identically; hand it back so the caller can retry with
+        // less thinking (stepDownEffort) instead of spending another six minutes on the same wait.
+        console.warn(
+          `[llm-adapter] far-side timeout after ${Math.round(tookMs / 1000)}s — not retrying the same request ` +
+            `(${(e as Error)?.message ?? e})`,
+        );
+        try { (e as { farSideTimeout?: boolean; tookMs?: number }).farSideTimeout = true; (e as { tookMs?: number }).tookMs = tookMs; } catch { /* frozen error */ }
+        llmBreaker.recordFailure(e);
+        throw e;
+      }
       if (attempt >= LLM_MAX_RETRIES || !isTransientLlmError(e)) {
         llmBreaker.recordFailure(e);
         throw e;

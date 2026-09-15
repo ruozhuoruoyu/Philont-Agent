@@ -674,3 +674,13 @@ test('the mainline metric reaches the round output, the status line and the mile
   const aa = readFileSync(new URL('../src/deep_explore_autoadvance.ts', import.meta.url), 'utf8');
   assert.match(aa, /describeChainProgress\(chainProgress\(nodes, previous, fresh\.frontierTargetNodeId\)\)/);
 });
+
+test('a timeout is retried with less thinking, not with the same request; a proactive question stays answerable', () => {
+  assert.match(chatHandler, /if \(e instanceof LlmTimeoutError \|\| errorIsFarSideTimeout\(e\)\) \{/);
+  assert.match(chatHandler, /reasoning = lower;\s*try \{\s*const r = await call\(\);/, 'the retry runs at the stepped-down effort');
+  assert.match(chatHandler, /let reasoning = mainTurnReasoning\(/);
+  const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
+  assert.equal((deepExplore.match(/reasoning: roundReasoning\(session\.id\),/g) ?? []).length, 2, 'both round kinds use the session ladder');
+  assert.match(deepExplore, /noteRoundOutcomeForEffort\(session\.id, notRun\.reason\)/);
+  assert.match(chatHandler, /priorAssistant\?\.includes\(PROACTIVE_NOTICE_TAG\) \? PROACTIVE_QUESTION_BINDING_TTL_MS : SHORT_ANSWER_BINDING_TTL_MS/);
+});

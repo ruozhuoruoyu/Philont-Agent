@@ -102,6 +102,7 @@ import { decidePhaseTransition, goalNeedsDecision, classifyGoal, looksDeductive 
 import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
 import { safeSessionId } from './safe_session_id.js';
 import { currentPhraseLang } from './response_language.js';
+import { stepDownEffort } from './llm-adapter.js';
 
 const VALID_KINDS: ReadonlySet<string> = new Set([
   'subgoal',
@@ -2604,6 +2605,25 @@ const DEEP_EXPLORE_REASONING: ReasoningConfig = {
   enabled: true,
   effort: resolveEffort(process.env.PHILONT_DEEP_EXPLORE_EFFORT, 'max'),
 };
+/**
+ * Per-session round effort. Starts at DEEP_EXPLORE_REASONING; a far-side timeout steps it down one notch
+ * for every later round of that session (a generation the gateway cut at 300–362s will be cut again at
+ * the same effort). Process-lifetime memory: a restart returns to the configured effort.
+ */
+const sessionRoundEffort = new Map<string, ReasoningConfig>();
+export function roundReasoning(sessionId: string): ReasoningConfig {
+  return sessionRoundEffort.get(sessionId) ?? DEEP_EXPLORE_REASONING;
+}
+/** Called with the not-run reason; steps the session's effort down when the reason is a far-side timeout. Returns the new effort or null. */
+export function noteRoundOutcomeForEffort(sessionId: string, reason: string): ReasoningConfig | null {
+  if (!/far-side timeout|timed out|timeout/i.test(reason)) return null;
+  const lower = stepDownEffort(roundReasoning(sessionId));
+  if (!lower) return null;
+  sessionRoundEffort.set(sessionId, lower);
+  return lower;
+}
+export function _resetRoundEffortForTest(): void { sessionRoundEffort.clear(); }
+
 /** Reasoning config for the adversarial skeptic verifiers. env PHILONT_DEEP_EXPLORE_SKEPTIC_EFFORT ∈ {low,medium,high,max}, default high. */
 const DEEP_EXPLORE_SKEPTIC_REASONING: ReasoningConfig = {
   enabled: true,
@@ -3724,7 +3744,7 @@ export function createDeepExploreTool(
         onStatus: deps.onStatus,
         abortSignal: ctrl.signal,
         // 2026-06-07: proof-search round is a complex multi-step agent → max reasoning effort (tunable via PHILONT_DEEP_EXPLORE_EFFORT).
-        reasoning: DEEP_EXPLORE_REASONING,
+        reasoning: roundReasoning(session.id),
       });
     } finally {
       clearTimeout(deadlineTimer);
@@ -3744,6 +3764,10 @@ export function createDeepExploreTool(
         `[deep-explore] round NOT RUN session=${safeSessionId(session.id)} target=${roundTarget?.id ?? 'none'} — ` +
         `the endpoint never answered (${notRun.reason.slice(0, 160)}); nothing is charged to the model`,
       );
+      const lower = noteRoundOutcomeForEffort(session.id, notRun.reason);
+      if (lower) {
+        console.warn(`[deep-explore] round effort for ${safeSessionId(session.id)} stepped down to ${lower.effort} — the gateway cut a longer generation`);
+      }
       return {
         success: false,
         output: '',
@@ -3992,7 +4016,7 @@ export function createDeepExploreTool(
         onStatus: deps.onStatus,
         abortSignal: ctrl.signal,
         // 2026-06-07: discovery round is a complex multi-step search agent → max reasoning effort (tunable via PHILONT_DEEP_EXPLORE_EFFORT).
-        reasoning: DEEP_EXPLORE_REASONING,
+        reasoning: roundReasoning(session.id),
       });
     } finally {
       clearTimeout(deadlineTimer);

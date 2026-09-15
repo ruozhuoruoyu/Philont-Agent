@@ -131,7 +131,9 @@ import { createHash } from 'node:crypto';
 
 // __dirname does not exist under ESM; manually reconstruct the directory of this module for bundled-skill path resolution.
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
-import { createLLMAdapter, ContextTooLargeError, type NativeMessage, type LLMResponse } from './llm-adapter.js';
+import {
+  stepDownEffort,
+  errorIsFarSideTimeout, createLLMAdapter, ContextTooLargeError, type NativeMessage, type LLMResponse } from './llm-adapter.js';
 import { registerMainLLM, renderQuestion, parseQuestionAnswer, callAuxLLM, isAuxLLMConfigured, type AuxLLMRequest } from '@agent/tools';
 import { loadMcpConfig, McpSupervisor, type McpServerStatus } from '@agent/mcp';
 import {
@@ -7556,7 +7558,7 @@ async function sendLlmWithRescue(
   signal?.throwIfAborted();
   // 2026-06-07: send an explicit per-turn reasoning config (see mainTurnReasoning) instead of relying on the
   // provider's implicit always-on thinking; tunable via PHILONT_CHAT_REASONING.
-  const reasoning = mainTurnReasoning(findLastUserText(messages));
+  let reasoning = mainTurnReasoning(findLastUserText(messages));
   // The budget is what the TURN has left, not a constant computed in isolation. See turnDeadlines.
   const budgetMs = () => llmCallBudgetMs(turnRemainingMs(sessionId));
   const call = async () => {
@@ -7587,7 +7589,34 @@ async function sendLlmWithRescue(
     // User mid-turn stop cancelled the in-flight LLM call → propagate directly; do not record noisy api_error audit.
     // handleChatSend catch will map it to interrupted outcome.
     if (isAbortError(e)) throw e;
-    if (e instanceof LlmTimeoutError) {
+    if (e instanceof LlmTimeoutError || errorIsFarSideTimeout(e)) {
+      // Whichever side cut the wait, the identical request is the wrong retry: the generation was too
+      // long. Retry once with one notch less thinking when there is a notch left.
+      const lower = stepDownEffort(reasoning);
+      if (lower) {
+        if (!hasRoomForTimeoutRetry(turnRemainingMs(sessionId))) {
+          console.warn(`[llm] timeout session=${safeSessionId(sessionId)} — NOT retrying, ${Math.round(turnRemainingMs(sessionId) / 1000)}s left of the turn (wrap-up needs it)`);
+          throw e;
+        }
+        console.warn(
+          `[llm] timeout session=${safeSessionId(sessionId)} (${errorIsFarSideTimeout(e) ? 'far side' : 'client'}) — ` +
+            `retrying once at effort=${lower.effort} (was ${reasoning.effort ?? 'default'})`,
+        );
+        onTrace?.({ kind: 'system-event', tier: 4, text: `LLM call timed out; retrying with effort=${lower.effort}` });
+        reasoning = lower;
+        try {
+          const r = await call();
+          console.log(`[llm] timeout retry session=${safeSessionId(sessionId)} succeeded at effort=${lower.effort}`);
+          return r;
+        } catch (e2) {
+          if (e2 instanceof LlmTimeoutError || errorIsFarSideTimeout(e2)) {
+            console.warn(`[llm] timeout retry session=${safeSessionId(sessionId)} also failed at effort=${lower.effort} — giving up`);
+            internalAudit.append('task_failure_mode', { sessionId, kind: 'llm_timeout', ts: Date.now(), detail: `LLM call timed out twice (second at effort=${lower.effort})` });
+          }
+          throw e2;
+        }
+      }
+      if (errorIsFarSideTimeout(e)) throw e; // nothing to step down and the far side will cut it again
       // Real scenario: Anthropic stream occasionally returns only after waiting tens of seconds for the first token.
       // After the first 60s timeout fires, retry once directly — the dangling old request is GC'd by the SDK;
       // the new request returns in a second or two in most cases. Only when both timeout does it propagate to the outer layer.
@@ -8066,6 +8095,13 @@ export const SHORT_ANSWER_BINDING_TTL_MS = (() => {
   const raw = Number(process.env.PHILONT_SHORT_ANSWER_BINDING_TTL_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60_000;
 })();
+/**
+ * A question the AGENT raised on its own — the follow-up card after six hours of silence — is asked
+ * into an absence, and the owner answers it when they are back. Prod 2026-09-15 05:25 → 06:18: "推进"
+ * arrived 53 minutes after the card and was treated as a new message. Only proactive notices get this
+ * window; a question inside an ordinary reply keeps the 30 minutes that the 12-hour mis-bind taught.
+ */
+export const PROACTIVE_QUESTION_BINDING_TTL_MS = 24 * 60 * 60_000;
 
 export function resolveJudgeGoal(
   carriedGoal: string | undefined,
@@ -10585,13 +10621,14 @@ async function handleChatSendInner(
       return Number.POSITIVE_INFINITY; // unknown age → treat as stale; a missed hint beats a wrong one
     }
   })();
-  const bindingFresh = bindingAgeMs <= SHORT_ANSWER_BINDING_TTL_MS;
+  const bindingTtlMs = priorAssistant?.includes(PROACTIVE_NOTICE_TAG) ? PROACTIVE_QUESTION_BINDING_TTL_MS : SHORT_ANSWER_BINDING_TTL_MS;
+  const bindingFresh = bindingAgeMs <= bindingTtlMs;
   if (priorAssistant && messages[0] && !userIsItselfAQuestion && !isConversationOpener(userMessage)) {
     const detected = detectUnclosedQuestion(priorAssistant);
     if (detected.hasQuestion && !bindingFresh) {
       console.log(
         `[short-answer-binding] session=${safeSessionId(sessionId)} SKIPPED — the prior question is ` +
-          `${Math.round(bindingAgeMs / 60000)} min old (limit ${Math.round(SHORT_ANSWER_BINDING_TTL_MS / 60000)}); ` +
+          `${Math.round(bindingAgeMs / 60000)} min old (limit ${Math.round(bindingTtlMs / 60000)}); ` +
           `treating this as a new message, not an answer`,
       );
     }

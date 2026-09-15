@@ -13,7 +13,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { repairToolResultPairing, isTransientLlmError } from '../src/llm-adapter.js';
+import { repairToolResultPairing, isTransientLlmError, isFarSideTimeout, stepDownEffort, sendWithTransientRetry, errorIsFarSideTimeout, llmBreaker } from '../src/llm-adapter.js';
+import { mock } from 'node:test';
 import type { NativeMessage } from '../src/llm-adapter.js';
 
 test('isTransientLlmError: retries network/5xx, not aborts/4xx', () => {
@@ -186,4 +187,53 @@ test('persist-in-place: a misplaced pair is repaired ONCE — a second pass is a
   // …and a second repair on the now-normalized array finds nothing to relocate → idempotent (no re-warn storm).
   const second = repairToolResultPairing(msgs);
   assert.deepEqual(second, msgs);
+});
+
+// ── Far-side timeouts: the identical request is the wrong retry ────────────────────────────────
+// Prod 2026-09-15 06:18: "推进" spent 879s on two 440s waits; 07:05 → 07:57 four rounds, one 362s cut each.
+
+test('isFarSideTimeout: timeout-shaped AND long-lived; a quick 408 or any 429/5xx is not', () => {
+  assert.equal(isFarSideTimeout({ status: 408, message: 'Request timed out' }, 362_000), true);
+  assert.equal(isFarSideTimeout(new Error('fetch failed'), 305_000), true);
+  assert.equal(isFarSideTimeout({ status: 408, message: 'Request timed out' }, 5_000), false, 'a quick 408 is a blip');
+  assert.equal(isFarSideTimeout({ status: 429, message: 'Too many requests' }, 362_000), false, '429 says later, not too long');
+  assert.equal(isFarSideTimeout({ status: 503, message: 'unavailable' }, 362_000), false);
+  assert.equal(isFarSideTimeout({ status: 400, message: 'bad' }, 362_000), false);
+});
+
+test('stepDownEffort walks max → high → medium → low → nothing', () => {
+  assert.deepEqual(stepDownEffort({ enabled: true, effort: 'max' }), { enabled: true, effort: 'high' });
+  assert.deepEqual(stepDownEffort({ enabled: true, effort: 'high' }), { enabled: true, effort: 'medium' });
+  assert.deepEqual(stepDownEffort({ enabled: true, effort: 'medium' }), { enabled: true, effort: 'low' });
+  assert.equal(stepDownEffort({ enabled: true, effort: 'low' }), null);
+  assert.equal(stepDownEffort({ enabled: false }), null);
+  assert.equal(stepDownEffort(undefined), null);
+  assert.deepEqual(stepDownEffort({ enabled: true }), { enabled: true, effort: 'medium' }, 'unset effort is the provider default, high');
+});
+
+test('sendWithTransientRetry refuses to repeat a far-side timeout and marks the error', async () => {
+  llmBreaker.reset();
+  mock.timers.enable({ apis: ['Date'] });
+  try {
+    let calls = 0;
+    const err = Object.assign(new Error('Request timed out'), { status: 408 });
+    await assert.rejects(
+      sendWithTransientRetry(async () => { calls++; mock.timers.tick(362_000); throw err; }),
+      (e: unknown) => errorIsFarSideTimeout(e),
+    );
+    assert.equal(calls, 1, 'one six-minute wait, not five');
+    // The same status after a short wait is still a transient blip and is retried.
+    llmBreaker.reset();
+    let calls2 = 0;
+    const out = await sendWithTransientRetry(async () => {
+      calls2++;
+      if (calls2 === 1) { mock.timers.tick(5_000); throw Object.assign(new Error('Request timed out'), { status: 408 }); }
+      return 'ok';
+    });
+    assert.equal(out, 'ok');
+    assert.equal(calls2, 2);
+  } finally {
+    mock.timers.reset();
+    llmBreaker.reset();
+  }
 });

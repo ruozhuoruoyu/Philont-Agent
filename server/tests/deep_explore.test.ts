@@ -18,6 +18,9 @@ import {
   reasoningTreeVersion,
   makeReasoningToolRunner,
   openAncestorCount,
+  roundReasoning,
+  noteRoundOutcomeForEffort,
+  _resetRoundEffortForTest,
   chainProgress,
   describeChainProgress,
   assemblyReady,
@@ -1915,4 +1918,16 @@ test('chainProgress counts the path to the root and what closed on it this round
   assert.match(describeChainProgress(cp2), /本轮链上无节点闭合/);
   assert.equal(chainProgress(nodes, previous, null), null);
   assert.equal(chainProgress(nodes, previous, 'ghost'), null);
+});
+
+test('a far-side timeout steps the session round effort down; other outages leave it alone', () => {
+  _resetRoundEffortForTest();
+  const initial = roundReasoning('s-eff').effort;
+  assert.equal(noteRoundOutcomeForEffort('s-eff', 'OpenAI-compatible API 503: unavailable'), null, 'a 503 is not a length problem');
+  assert.equal(roundReasoning('s-eff').effort, initial);
+  const first = noteRoundOutcomeForEffort('s-eff', 'far-side timeout after 362s: Request timed out');
+  assert.ok(first && first.effort !== initial, 'stepped down');
+  assert.equal(roundReasoning('s-eff').effort, first!.effort);
+  assert.equal(roundReasoning('other').effort, initial, 'per session');
+  _resetRoundEffortForTest();
 });
