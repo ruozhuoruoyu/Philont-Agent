@@ -10,6 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Status: developer preview](https://img.shields.io/badge/status-developer%20preview-orange.svg)](#current-maturity)
 [![Wiki](https://img.shields.io/badge/docs-Wiki-2563eb.svg)](https://github.com/ruozhuoruoyu/Philont-Agent/wiki)
+[![Philont on StartupScores](https://startupscores.com/badge/philont.svg?style=shield&v=combo&theme=dark)](https://startupscores.com/open-source/philont)
 
 Give Philont a direction in `compass.md`. It keeps persistent pursuits across conversations, researches them while you are away, asks before crossing permission boundaries, and checks completion claims against what its tools actually executed.
 
