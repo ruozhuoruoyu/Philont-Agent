@@ -3425,6 +3425,7 @@ if (process.env.PHILONT_DEEP_EXPLORE !== '0') {
     // the round prompt (collectComputeLessons).
     actions: memory.actions,
     skills: memory.skills,
+    facts: memory.facts,
     getSelectedSessionId: (owner) => owner ? memory.reasoning.getFocusedSession(owner)?.id : undefined,
     takeAutoAdvanceOnCreate: (owner) => {
       if (!owner) return false;

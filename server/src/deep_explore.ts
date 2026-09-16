@@ -102,7 +102,8 @@ import { decidePhaseTransition, goalNeedsDecision, classifyGoal, looksDeductive 
 import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
 import { safeSessionId } from './safe_session_id.js';
 import { currentPhraseLang } from './response_language.js';
-import { stepDownEffort } from './llm-adapter.js';
+import { stepDownEffort, adapterStats } from './llm-adapter.js';
+import { MECHANICAL_FIX_NAMESPACE, mechanicalFixLearningEnabled } from './mechanical_fix_learning.js';
 
 const VALID_KINDS: ReadonlySet<string> = new Set([
   'subgoal',
@@ -1571,6 +1572,32 @@ function renderRecentToolFailures(sessionId: string): string[] {
  * Matched by a keyword regex over name+description; top few only, to bound prompt size.
  */
 const COMPUTE_LESSON_RE = /\b(pari\/?gp|pari|gp-(syntax|type|varname|args|timeout)|z3|smt|computation)\b/i;
+/** The shape of the fact store deep_explore needs for learned repairs: list one namespace. */
+export interface LearnedRepairSource {
+  listFacts(namespace: string): Array<{ key: string; value: unknown }>;
+}
+const COMPUTE_TOOL_PREFIX = /^(pariGp|z3Verify|leanCheck|magnitude):/;
+
+/**
+ * Repairs the main loop learned for the compute tools (mechanical_fix_learning), rendered for a round.
+ * Prod 2026-09-16 14:52: a round script used `arg=0` — "variable name expected" — two days after the main
+ * loop learned and verified "Don't name a variable `arg` in PARI/GP". The lesson lived in one store, the
+ * round prompt read another. Same tools, same failures, one cheatsheet.
+ */
+export function computeCheatsheet(facts: LearnedRepairSource | undefined, max = 12): string[] {
+  if (!facts || !mechanicalFixLearningEnabled()) return [];
+  let rows: Array<{ key: string; value: unknown }> = [];
+  try { rows = facts.listFacts(MECHANICAL_FIX_NAMESPACE); } catch { return []; }
+  const lines: string[] = [];
+  for (const r of rows) {
+    if (!COMPUTE_TOOL_PREFIX.test(r.key)) continue;
+    const v = Array.isArray(r.value) ? r.value.filter((x): x is string => typeof x === 'string') : typeof r.value === 'string' ? [r.value] : [];
+    for (const line of v) if (line.trim()) lines.push(`- [${r.key}] ${line.trim()}`);
+  }
+  if (lines.length === 0) return [];
+  return ['', '## 🔧 Repairs learned for the compute tools — apply BEFORE calling them', ...lines.slice(-max)];
+}
+
 export function collectComputeLessons(skills: SkillStore | undefined, query = ''): string[] {
   if (!skills) return [];
   const seen = new Set<string>();
@@ -2623,13 +2650,28 @@ const sessionRoundEffort = new Map<string, ReasoningConfig>();
 export function roundReasoning(sessionId: string): ReasoningConfig {
   return sessionRoundEffort.get(sessionId) ?? DEEP_EXPLORE_REASONING;
 }
-/** Called with the not-run reason; steps the session's effort down when the reason is a far-side timeout. Returns the new effort or null. */
-export function noteRoundOutcomeForEffort(sessionId: string, reason: string): ReasoningConfig | null {
-  if (!/far-side timeout|timed out|timeout/i.test(reason)) return null;
+/** One notch less thinking for every later round of this session. Returns the new config or null when at the floor. */
+export function stepSessionEffortDown(sessionId: string, why: string): ReasoningConfig | null {
   const lower = stepDownEffort(roundReasoning(sessionId));
   if (!lower) return null;
   sessionRoundEffort.set(sessionId, lower);
+  console.warn(`[deep-explore] round effort for ${safeSessionId(sessionId)} stepped down to ${lower.effort} — ${why}`);
   return lower;
+}
+/** Called with the not-run reason; steps the session's effort down when the reason is a far-side timeout. Returns the new effort or null. */
+export function noteRoundOutcomeForEffort(sessionId: string, reason: string): ReasoningConfig | null {
+  if (!/far-side timeout|timed out|timeout/i.test(reason)) return null;
+  return stepSessionEffortDown(sessionId, 'the gateway cut a longer generation');
+}
+/**
+ * The adapter had to retry a call in this round because thinking ate the whole output budget (prod
+ * 2026-09-16: thirteen such retries in a day, one per round, each first attempt three to five minutes
+ * and 16000 tokens for nothing). Pay that once per session, not once per round: the next rounds start
+ * at the effort the retry succeeded with.
+ */
+export function noteThinkingOnly(sessionId: string, retriesBefore: number): ReasoningConfig | null {
+  if (adapterStats.thinkingOnlyRetries <= retriesBefore) return null;
+  return stepSessionEffortDown(sessionId, 'thinking consumed the whole output budget this round');
 }
 export function _resetRoundEffortForTest(): void { sessionRoundEffort.clear(); }
 
@@ -3314,6 +3356,8 @@ export interface DeepExploreDeps {
   actions?: ActionLog;
   /** Skill store — learned compute lessons (incl. negative anti-patterns) are surfaced back into the round prompt. */
   skills?: SkillStore;
+  /** Fact store — the main loop's learned mechanical repairs for compute tools, surfaced into the round prompt. */
+  facts?: LearnedRepairSource;
   maxIters?: number;
   onStatus?: (text: string) => void;
   /** Per-round progress summary sink. Unlike onStatus (per-iteration pings, console-only), this
@@ -3701,7 +3745,7 @@ export function createDeepExploreTool(
       : '';
     const systemPrompt =
       AGENT_SELF_REFERENCE_NOTE + '\n\n' +
-      profile.buildConvergePrompt(session, before, collectComputeLessons(skills, session.goal)) +
+      profile.buildConvergePrompt(session, before, [...collectComputeLessons(skills, session.goal), ...computeCheatsheet(deps.facts)]) +
       (roundTarget
         ? `\n\n## Mechanism-pinned target for THIS round\n[${roundTarget.id}] ${roundTarget.claim}\n` +
           `All reason_decompose/reason_record writes are restricted to this node's subtree. ` +
@@ -3741,6 +3785,7 @@ export function createDeepExploreTool(
       },
     );
     let result;
+    const thinkingOnlyBefore = adapterStats.thinkingOnlyRetries;
     try {
       result = await runMiniAgentLoop({
         systemPrompt,
@@ -3755,6 +3800,7 @@ export function createDeepExploreTool(
         // 2026-06-07: proof-search round is a complex multi-step agent → max reasoning effort (tunable via PHILONT_DEEP_EXPLORE_EFFORT).
         reasoning: roundReasoning(session.id),
       });
+      noteThinkingOnly(session.id, thinkingOnlyBefore);
     } finally {
       clearTimeout(deadlineTimer);
       clearTimeout(warnTimer);
@@ -3773,10 +3819,7 @@ export function createDeepExploreTool(
         `[deep-explore] round NOT RUN session=${safeSessionId(session.id)} target=${roundTarget?.id ?? 'none'} — ` +
         `the endpoint never answered (${notRun.reason.slice(0, 400)}); nothing is charged to the model`,
       );
-      const lower = noteRoundOutcomeForEffort(session.id, notRun.reason);
-      if (lower) {
-        console.warn(`[deep-explore] round effort for ${safeSessionId(session.id)} stepped down to ${lower.effort} — the gateway cut a longer generation`);
-      }
+      noteRoundOutcomeForEffort(session.id, notRun.reason);
       return {
         success: false,
         output: '',
@@ -3982,7 +4025,7 @@ export function createDeepExploreTool(
     const beforeCandidates = before.filter((n) => candKinds.has(n.kind)).length;
     const systemPrompt =
       AGENT_SELF_REFERENCE_NOTE + '\n\n' +
-      profile.buildDivergePrompt(session, before, collectComputeLessons(skills, session.goal), seed);
+      profile.buildDivergePrompt(session, before, [...collectComputeLessons(skills, session.goal), ...computeCheatsheet(deps.facts)], seed);
     const userMessage = profile.buildDivergeUserMessage(session, seed);
 
     const ctrl = new AbortController();
@@ -4015,6 +4058,7 @@ export function createDeepExploreTool(
     // Diverge browses-instead-of-generating backstop: cap web lookups so the round must decompose.
     const cappedRunner = withWebCallCap(boundRunner, { cap: DIVERGE_WEB_CAP, webTools: WEB_TOOL_NAMES });
     let result;
+    const thinkingOnlyBefore = adapterStats.thinkingOnlyRetries;
     try {
       result = await runMiniAgentLoop({
         systemPrompt,
@@ -4029,6 +4073,7 @@ export function createDeepExploreTool(
         // 2026-06-07: discovery round is a complex multi-step search agent → max reasoning effort (tunable via PHILONT_DEEP_EXPLORE_EFFORT).
         reasoning: roundReasoning(session.id),
       });
+      noteThinkingOnly(session.id, thinkingOnlyBefore);
     } finally {
       clearTimeout(deadlineTimer);
       clearTimeout(warnTimer);

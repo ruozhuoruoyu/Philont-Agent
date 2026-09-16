@@ -435,6 +435,9 @@ export function planThinkingOnlyRetry(
   return { reasoning: lower, maxTokens: Math.min(65536, Math.max(maxTokens, 256) * 2) };
 }
 
+/** Process-wide counters a caller can diff around a call to learn what the adapter had to do for it. */
+export const adapterStats = { thinkingOnlyRetries: 0 };
+
 /** Read the marker sendWithTransientRetry leaves on a far-side timeout it refused to repeat. */
 export function errorIsFarSideTimeout(e: unknown): boolean {
   return !!(e as { farSideTimeout?: boolean } | null)?.farSideTimeout;
@@ -723,6 +726,7 @@ class AnthropicAdapter implements LLMAdapter {
       response = await dispatch(createParams, maxTokens);
       const retryPlan = thinkingOnlyAtCap(response) ? planThinkingOnlyRetry(effReasoning, maxTokens) : null;
       if (retryPlan) {
+        adapterStats.thinkingOnlyRetries += 1;
         console.warn(
           `[llm-adapter] anthropic: thinking consumed the whole ${maxTokens}-token budget with no text ` +
             `(stop_reason=max_tokens); retrying once at effort=${retryPlan.reasoning.enabled === false ? 'off' : retryPlan.reasoning.effort} ` +

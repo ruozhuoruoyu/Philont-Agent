@@ -19,6 +19,9 @@ import {
   makeReasoningToolRunner,
   openAncestorCount,
   isRejectedRequest,
+  computeCheatsheet,
+  noteThinkingOnly,
+  stepSessionEffortDown,
   roundReasoning,
   noteRoundOutcomeForEffort,
   _resetRoundEffortForTest,
@@ -1939,4 +1942,39 @@ test('isRejectedRequest: a 400 invalid request is refused, not down; 408/429/5xx
   assert.equal(isRejectedRequest('429 rate_limit_error'), false);
   assert.equal(isRejectedRequest('408 Request timed out'), false);
   assert.equal(isRejectedRequest('LLM call exceeded 439600ms timeout'), false);
+});
+
+// ── Learned repairs reach the round; thinking-only retries step the session down once ──────────
+test('computeCheatsheet renders the compute-tool repairs the main loop learned, and nothing else', () => {
+  const facts = {
+    listFacts: (ns: string) => ns === 'mechanical_fix' ? [
+      { key: 'pariGp:gp-varname', value: ["Don't name a variable `arg` in PARI/GP; it's a reserved keyword."] },
+      { key: 'shell:timeout', value: ['Use a shorter command.'] },
+      { key: 'z3Verify:z3-syntax', value: 'Declare sorts before use.' },
+      { key: 'pariGp:gp-type', value: [] },
+    ] : [],
+  };
+  const lines = computeCheatsheet(facts);
+  assert.match(lines[1], /Repairs learned for the compute tools/);
+  assert.ok(lines.some((l) => /\[pariGp:gp-varname\] Don't name a variable `arg`/.test(l)));
+  assert.ok(lines.some((l) => /\[z3Verify:z3-syntax\] Declare sorts/.test(l)));
+  assert.ok(!lines.some((l) => /shell:timeout/.test(l)), 'a shell repair is not a compute-tool repair');
+  assert.deepEqual(computeCheatsheet(undefined), []);
+  assert.deepEqual(computeCheatsheet({ listFacts: () => [] }), []);
+  assert.deepEqual(computeCheatsheet({ listFacts: () => { throw new Error('db'); } }), [], 'never throws into a round');
+});
+
+test('a thinking-only retry in a round steps the session effort down, once per round, only when it happened', () => {
+  _resetRoundEffortForTest();
+  const before = roundReasoning('s-think').effort;
+  assert.equal(noteThinkingOnly('s-think', 10), null, 'the counter did not move');
+  assert.equal(roundReasoning('s-think').effort, before);
+  // Simulate the adapter having retried once during the round: the counter is ahead of the snapshot.
+  const lower = noteThinkingOnly('s-think', -1);
+  assert.ok(lower && lower.effort !== before, 'stepped down');
+  assert.equal(roundReasoning('s-think').effort, lower!.effort);
+  assert.equal(roundReasoning('s-other').effort, before, 'per session');
+  const again = stepSessionEffortDown('s-think', 'test');
+  assert.ok(!again || again.effort !== lower!.effort, 'each step is one notch');
+  _resetRoundEffortForTest();
 });

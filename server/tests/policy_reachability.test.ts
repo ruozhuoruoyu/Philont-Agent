@@ -693,3 +693,13 @@ test('the Anthropic path retries a thinking-only reply with less thinking; round
   assert.match(deepExplore, /data: \{ notRun: true, reason: notRun\.reason, rejected: isRejectedRequest\(notRun\.reason\) \}/);
   assert.match(deepExplore, /data: \{ relation: attribution\.relation, claimed: claimedRelations \}/);
 });
+
+test('rounds learn from thinking-only retries and read the main loop\'s compute repairs', () => {
+  const adapter = readFileSync(new URL('../src/llm-adapter.ts', import.meta.url), 'utf8');
+  assert.match(adapter, /if \(retryPlan\) \{\s*adapterStats\.thinkingOnlyRetries \+= 1;/, 'the retry is counted');
+  const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
+  assert.equal((deepExplore.match(/noteThinkingOnly\(session\.id, thinkingOnlyBefore\);/g) ?? []).length, 2, 'both round kinds');
+  assert.equal((deepExplore.match(/const thinkingOnlyBefore = adapterStats\.thinkingOnlyRetries;/g) ?? []).length, 2);
+  assert.equal((deepExplore.match(/\.\.\.computeCheatsheet\(deps\.facts\)\]/g) ?? []).length, 2, 'converge and diverge prompts');
+  assert.match(chatHandler, /skills: memory\.skills,\s*facts: memory\.facts,/, 'the fact store is handed to deep_explore');
+});
