@@ -296,6 +296,10 @@ export function describeTargetDebt(target: ReasoningNode, allNodes: ReasoningNod
           `Prove it, refute it, or record dead_end with what was tried — a dead end returns its parent to the frontier.`
       : `Split debt: this node hangs from ${debt} open ancestors; it may be decomposed ${SPLIT_DEBT_LIMIT - debt} more level(s) before the chain must start closing. Prefer closing to splitting.`,
   );
+  parts.push(
+    `A dead_end must be earned: a compute/verifier call this round, a previous round on this node, a recorded ` +
+      `tried approach, or children that all settled. A dead end declared in seconds with no tool result is refused.`,
+  );
   return parts.join('\n');
 }
 
@@ -1526,6 +1530,25 @@ export function takeClaimedRelations(sessionId: string): string[] {
   return claims;
 }
 const VERIFIER_TOOLS = new Set(['magnitude', 'z3Verify', 'pariGp']);
+/** Tools whose successful run counts as having actually worked a node this round. */
+const COMPUTE_TOOLS = new Set(['magnitude', 'z3Verify', 'pariGp', 'leanCheck']);
+
+/**
+ * A dead end is a finding, not an exit. Prod 2026-09-17 00:22: a depth-1 child of the root was recorded
+ * dead_end 24 seconds into its first round after one list_facts call; 02:27 another depth-1 node in 20
+ * seconds; 23:49 "Analytic core (the real content)" after a census that timed out. With splitting capped
+ * (split debt), the cheapest way to satisfy "close or die" became "die" — twelve dead ends under forty
+ * seconds in one night, none with a tool result behind them. Earned means one of: the node's split
+ * already failed (children all settled), a previous round worked it, an approach was already recorded
+ * against it, or a compute/verifier tool ran successfully this round.
+ */
+export function deadEndEarned(node: ReasoningNode, all: ReasoningNode[], computeCallsThisRound: number): boolean {
+  if (computeCallsThisRound > 0) return true;
+  if (node.visits >= 1) return true;
+  if ((node.approachesTried?.length ?? 0) >= 1) return true;
+  const children = all.filter((n) => n.parentId === node.id);
+  return children.length > 0 && children.every((c) => c.status !== 'open');
+}
 
 /**
  * Checkable-object tooth (2026-07-22). The estimate tooth above fires only in FORMAL mode and only on
@@ -2979,6 +3002,8 @@ export function makeReasoningToolRunner(
   /** Mechanism-selected frontier node for this round. Tree writes must stay in its subtree. */
   roundTargetNodeId?: string,
 ): (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult> {
+  // One runner per round: this counts the compute/verifier calls that actually ran in it.
+  let computeCallsThisRound = 0;
   return async (name, input) => {
     const belongsToRoundTarget = (nodeId: string): boolean => {
       if (!roundTargetNodeId) return true;
@@ -3230,6 +3255,21 @@ export function makeReasoningToolRunner(
       }
 
       // refuted / dead_end
+      if (status === 'dead_end') {
+        const nodesNow = reasoning.getNodes(sessionId);
+        const target = nodesNow.find((n) => n.id === nodeId);
+        if (target && !deadEndEarned(target, nodesNow, computeCallsThisRound)) {
+          return {
+            ok: false,
+            output: '',
+            error:
+              `Dead end not earned: [${nodeId}] has never been worked — no previous round, no tried approach, ` +
+              `no settled children — and no compute/verifier tool ran successfully this round. A dead end is a ` +
+              `finding, not an exit. Run pariGp / z3Verify / magnitude / leanCheck against it (a counterexample ` +
+              `refutes it; a failed attempt earns the dead end), or leave it open.`,
+          };
+        }
+      }
       const updated = reasoning.updateNode(sessionId, nodeId, {
         status: status as ReasoningNode['status'],
         result,
@@ -3305,6 +3345,7 @@ export function makeReasoningToolRunner(
 
     // Delegate everything else (read-only research tools + verify teeth z3Verify/pariGp/magnitude).
     const result = await delegate(name, input);
+    if (result.ok && COMPUTE_TOOLS.has(name)) computeCallsThisRound += 1;
     // Estimate-honesty: a successful verification call clears the session's "never verified" flag.
     if (result.ok && VERIFIER_TOOLS.has(name)) sessionVerifierUsed.add(sessionId);
     // Surface verify-tool failures to the operator log — otherwise a broken pariGp (gp missing,

@@ -703,3 +703,10 @@ test('rounds learn from thinking-only retries and read the main loop\'s compute 
   assert.equal((deepExplore.match(/\.\.\.computeCheatsheet\(deps\.facts\)\]/g) ?? []).length, 2, 'converge and diverge prompts');
   assert.match(chatHandler, /skills: memory\.skills,\s*facts: memory\.facts,/, 'the fact store is handed to deep_explore');
 });
+
+test('a dead end has to be earned before the tree records it', () => {
+  const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
+  assert.match(deepExplore, /if \(target && !deadEndEarned\(target, nodesNow, computeCallsThisRound\)\)/);
+  assert.match(deepExplore, /if \(result\.ok && COMPUTE_TOOLS\.has\(name\)\) computeCallsThisRound \+= 1;/);
+  assert.match(deepExplore, /A dead_end must be earned/, 'the round prompt says so');
+});

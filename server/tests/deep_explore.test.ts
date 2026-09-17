@@ -20,6 +20,7 @@ import {
   openAncestorCount,
   isRejectedRequest,
   computeCheatsheet,
+  deadEndEarned,
   noteThinkingOnly,
   stepSessionEffortDown,
   roundReasoning,
@@ -371,6 +372,7 @@ test('round target binding rejects commits to a sibling but allows target descen
   });
   assert.equal(expanded.ok, true);
   const child = mem.reasoning.getNodes(session.id).find((n) => n.parentId === target.id)!;
+  mem.reasoning.incrementVisits(session.id, [child.id]); // a previous round worked it
   const settled = await run('reason_record', { nodeId: child.id, status: 'dead_end', approach: 'checked' });
   assert.equal(settled.ok, true);
   mem.close();
@@ -410,6 +412,7 @@ test('reason_record dead_end 追加 approach(回溯记忆)', async () => {
   const { session, rootNode } = mem.reasoning.createSession({ goal: 'G' });
   const [a] = mem.reasoning.addNodes(session.id, rootNode.id, [{ claim: 'A', kind: 'subgoal' }]);
   const run = makeReasoningToolRunner(mem.reasoning, session.id, noopDelegate);
+  mem.reasoning.incrementVisits(session.id, [a.id]); // a previous round worked it
   await run('reason_record', { nodeId: a.id, status: 'dead_end', approach: '试了反证法' });
   assert.deepEqual(mem.reasoning.getNode(session.id, a.id)!.approachesTried, ['试了反证法']);
   mem.close();
@@ -913,6 +916,7 @@ test('finalize:开放问题不收敛也产出收尾报告(已证引理/死路/�
   ]);
   const run = makeReasoningToolRunner(mem.reasoning, session.id, async () => ({ ok: true, output: '' }));
   await run('reason_record', { nodeId: proved.id, status: 'proved', result: '拓扑不兼容,QED' });
+  mem.reasoning.incrementVisits(session.id, [dead.id]); // a previous round worked it
   await run('reason_record', { nodeId: dead.id, status: 'dead_end', approach: 'Mahler 系数不趋于 0' });
   mem.reasoning.setNodeValues(session.id, [{ id: open1.id, value: 0.9, technique: 'p-adic-analysis' }]);
 
@@ -1860,7 +1864,8 @@ test('reason_decompose is refused under too many open ancestors; the leaf must c
   const upper = mem.reasoning.getNode(session.id, parent.parentId!)!;
   const allowed = await run('reason_decompose', { parentNodeId: upper.id, subClaims: [{ claim: 'sibling', kind: 'lemma' }] });
   assert.equal(allowed.ok, true);
-  // Closing the leaf is what the refusal asks for, and it is accepted.
+  // Closing the leaf is what the refusal asks for, and it is accepted once the leaf has been worked.
+  mem.reasoning.incrementVisits(session.id, [parent.id]);
   const closed = await run('reason_record', { nodeId: parent.id, status: 'dead_end', approach: 'tried the direct bound' });
   assert.equal(closed.ok, true);
   mem.close();
@@ -1977,4 +1982,41 @@ test('a thinking-only retry in a round steps the session effort down, once per r
   const again = stepSessionEffortDown('s-think', 'test');
   assert.ok(!again || again.effort !== lower!.effort, 'each step is one notch');
   _resetRoundEffortForTest();
+});
+
+// ── A dead end is a finding, not an exit ──────────────────────────────────────────────────
+test('a dead end on a never-worked node is refused until something was actually tried', async () => {
+  // Prod 2026-09-17 00:22: a depth-1 child of the root dead-ended 24 seconds into its first round.
+  const mem = openMemoryDb(':memory:');
+  const { session, rootNode } = mem.reasoning.createSession({ goal: 'G' });
+  const [fresh, split] = mem.reasoning.addNodes(session.id, rootNode.id, [
+    { claim: 'a top-level branch', kind: 'subgoal' }, { claim: 'a split branch', kind: 'subgoal' },
+  ]);
+  const delegate = async (name: string) => name === 'pariGp' ? { ok: true, output: '0' } : { ok: false, output: '', error: 'no' };
+  const run = makeReasoningToolRunner(mem.reasoning, session.id, delegate);
+  const refused = await run('reason_record', { nodeId: fresh.id, status: 'dead_end', approach: 'looked hard' });
+  assert.equal(refused.ok, false);
+  assert.match(refused.error!, /Dead end not earned/);
+  assert.equal(mem.reasoning.getNode(session.id, fresh.id)!.status, 'open', 'still open');
+  // One successful compute call this round earns it.
+  assert.equal((await run('pariGp', { script: '1+1' })).ok, true);
+  const earned = await run('reason_record', { nodeId: fresh.id, status: 'dead_end', approach: 'census found no structure' });
+  assert.equal(earned.ok, true);
+  // A node whose split already failed can be closed without a new tool call.
+  const [kid] = mem.reasoning.addNodes(session.id, split.id, [{ claim: 'the one child', kind: 'lemma' }]);
+  mem.reasoning.updateNode(session.id, kid.id, { status: 'dead_end', appendApproach: 'x' });
+  const run2 = makeReasoningToolRunner(mem.reasoning, session.id, noopDelegate);
+  assert.equal((await run2('reason_record', { nodeId: split.id, status: 'dead_end', approach: 'its only child died' })).ok, true);
+  mem.close();
+});
+
+test('deadEndEarned: the four ways a dead end is earned, and the one way it is not', () => {
+  const fresh = node({ id: 'f', visits: 0, approachesTried: [] });
+  assert.equal(deadEndEarned(fresh, [fresh], 0), false);
+  assert.equal(deadEndEarned(fresh, [fresh], 1), true, 'compute this round');
+  assert.equal(deadEndEarned(node({ id: 'v', visits: 2 }), [], 0), true, 'a previous round');
+  assert.equal(deadEndEarned(node({ id: 'a', approachesTried: ['induction'] }), [], 0), true, 'a tried approach');
+  const p = node({ id: 'p' });
+  assert.equal(deadEndEarned(p, [p, node({ id: 'c', parentId: 'p', status: 'proved' })], 0), true, 'children settled');
+  assert.equal(deadEndEarned(p, [p, node({ id: 'c', parentId: 'p', status: 'open' })], 0), false, 'an open child is not a failed split');
 });
