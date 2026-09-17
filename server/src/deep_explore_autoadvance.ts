@@ -15,7 +15,7 @@
  */
 import type { PhraseLang } from './channel_phrases.js';
 import { exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
-import { computeFrontier, chainProgress, describeChainProgress } from './deep_explore.js';
+import { computeFrontier, chainProgress, describeChainProgress, describeSettleRefusals, type SettleAttempt } from './deep_explore.js';
 import { startProgressTicker } from './task_progress.js';
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 import type { ToolResult } from '@agent/policy';
@@ -377,9 +377,17 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
             (newlySettled.length ? `\n本轮新增记录：${newlySettled.slice(0, 2).map((n) => n.claim.slice(0, 120)).join('；')}` : '') +
             // Prod 2026-09-15 14:45 → 15:14: two rounds on the depth-2 target, the model claimed proves_target
             // both times, the tree recorded nothing — the verifier refused the proof. The owner read "no progress".
-            (Array.isArray(out.data?.claimed) && (out.data.claimed as string[]).includes('proves_target') && out.data?.relation === 'no_commit'
-              ? `\n本轮模型宣称已证明目标，但没有通过验证或未提交到树上；按未推进计。`
-              : '') +
+            // 2026-09-17: say WHICH gate refused it and what it objected to; a proof the reviewers threw
+            // out and a proof never submitted are different failures and read differently to the owner.
+            (() => {
+              const line = describeSettleRefusals(
+                Array.isArray(out.data?.settles) ? (out.data.settles as SettleAttempt[]) : [],
+                Array.isArray(out.data?.claimed) ? (out.data.claimed as string[]) : [],
+                typeof out.data?.relation === 'string' ? out.data.relation : undefined,
+                deps.lang?.() ?? 'zh',
+              );
+              return line ? `\n${line}` : '';
+            })() +
             // The one number that cannot be gamed by splitting: did the root → target chain get shorter.
             (fresh.frontierTargetNodeId ? `\n${describeChainProgress(chainProgress(nodes, previous, fresh.frontierTargetNodeId))}` : '') +
             `\n下一步：${next ? next.claim.slice(0, 160) : '检查剩余开放节点和停止条件'}。`, { progress: 'milestone' });

@@ -625,7 +625,7 @@ test('the WeChat send ledger is fed on send, refusal and inbound, and read by th
   assert.match(wechat, /allowance\?\.onInbound\(event\.groupId \|\| event\.fromUserId\);\s*if \(!event\.text\)/, 'every inbound refills, before the text check');
   assert.match(wechat, /allowance: \(peer\) => allowance\.view\(peer\),/, 'the push channel exposes the ledger');
   const dispatcher = readFileSync(new URL('../src/push/dispatcher.ts', import.meta.url), 'utf8');
-  assert.match(dispatcher, /if \(req\.progress === 'heartbeat'\) \{\s*const a = lookupChannel\.allowance\?\.\(peer\)/, 'the dispatcher reads it for heartbeats');
+  assert.match(dispatcher, /if \(req\.progress === 'heartbeat' \|\| \(req\.progress === 'milestone' && req\.blocking !== true\)\) \{[\s\S]{0,200}const a = lookupChannel\.allowance\?\.\(peer\)/, 'the dispatcher reads it for heartbeats and routine reports');
   // The purge literal must be the kind chat-handler produces for a heartbeat.
   assert.match(chatHandler, /kind: opts\.blocking \? 'deep_explore:auto_paused' : `deep_explore:auto_\$\{opts\.progress \?\? 'advance'\}`/);
   const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
@@ -691,7 +691,7 @@ test('the Anthropic path retries a thinking-only reply with less thinking; round
   assert.match(adapter, /response = await dispatch\(buildParams\(wire2, retryPlan\.maxTokens\), retryPlan\.maxTokens\);/);
   const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
   assert.match(deepExplore, /data: \{ notRun: true, reason: notRun\.reason, rejected: isRejectedRequest\(notRun\.reason\) \}/);
-  assert.match(deepExplore, /data: \{ relation: attribution\.relation, claimed: claimedRelations \}/);
+  assert.match(deepExplore, /data: \{ relation: attribution\.relation, claimed: claimedRelations, settles: settleAttempts \}/);
 });
 
 test('rounds learn from thinking-only retries and read the main loop\'s compute repairs', () => {
@@ -709,4 +709,31 @@ test('a dead end has to be earned before the tree records it', () => {
   assert.match(deepExplore, /if \(target && !deadEndEarned\(target, nodesNow, computeCallsThisRound\)\)/);
   assert.match(deepExplore, /if \(result\.ok && COMPUTE_TOOLS\.has\(name\)\) computeCallsThisRound \+= 1;/);
   assert.match(deepExplore, /A dead_end must be earned/, 'the round prompt says so');
+});
+
+test('a refused proof is accounted at every gate, said in the owner\'s language, and the mailbox keeps only the newest report', () => {
+  const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
+  const auto = readFileSync(new URL('../src/deep_explore_autoadvance.ts', import.meta.url), 'utf8');
+  const chat = readFileSync(new URL('../src/chat-handler.ts', import.meta.url), 'utf8');
+  const dispatcher = readFileSync(new URL('../src/push/dispatcher.ts', import.meta.url), 'utf8');
+  // Every settle refusal site writes the ledger; the round takes it and hands it to the milestone.
+  for (const outcome of ['precheck_failed', 'unchecked_object', 'barrier_blocked', 'refuted_by_reviewers']) {
+    assert.match(deepExplore, new RegExp(`noteSettleAttempt\\(sessionId, \\{[^}]*outcome: '${outcome}'`), outcome);
+  }
+  assert.equal((deepExplore.match(/outcome: 'recorded'/g) ?? []).length, 2, 'both commit paths (skeptics on/off)');
+  assert.match(deepExplore, /const settleAttempts = takeSettleAttempts\(session\.id\);/);
+  assert.match(deepExplore, /settles=\$\{describeSettleAttemptsForLog\(settleAttempts\)\}/, 'the attribution log names the gate');
+  assert.match(deepExplore, /\[deep-explore\] settle refused by reviewers node=/, 'a reviewer refusal is a log line, not only a tool result');
+  assert.match(deepExplore, /data: \{ relation: attribution\.relation, claimed: claimedRelations, settles: settleAttempts \}/);
+  assert.match(auto, /describeSettleRefusals\(/);
+  assert.doesNotMatch(auto, /没有通过验证或未提交到树上/, 'the ambiguous sentence is gone');
+  // Owner-facing round text goes through the language-aware renderers.
+  assert.equal((deepExplore.match(/deps\.onMilestone\?\.\(renderRoundCapWarning\(roundDeadlineMs\)\)/g) ?? []).length, 2);
+  assert.doesNotMatch(deepExplore, /This round is approaching the \$\{Math\.round/);
+  assert.match(deepExplore, /lang: 'zh' \| 'en' = currentPhraseLang\(\),\n\): string \{\n  \/\/ Prod 2026-09-17 15:43/, 'renderProgressMilestone defaults to the owner\'s language');
+  // Progress cards belong to a per-session series; the dispatcher trims it on delivery and on deferral.
+  assert.match(chat, /supersedes: `deep_explore:progress:\$\{safeSessionId\(opts\.sessionId \?\? ''\)\}:`/);
+  assert.equal((dispatcher.match(/this\.supersede\(t\.channel, t\.peer, req/g) ?? []).length, 3, 'delivered, skipped-deferred, send-deferred');
+  assert.match(dispatcher, /req\.progress === 'milestone' && req\.blocking !== true/, 'routine reports keep the last slot for a blocking card');
+  assert.match(dispatcher, /'channel_not_ready', 'allowance_reserved'\]\.includes\(skip\.reason\)/, 'a held report is owed, not dropped');
 });

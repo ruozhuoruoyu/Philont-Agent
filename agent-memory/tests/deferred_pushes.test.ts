@@ -81,3 +81,28 @@ test('a kind that stopped being deferrable can be discarded wholesale', () => {
   assert.equal(h.deferredPushes.listPending('wechat', 'owner', 3, 4_000)[0]?.kind, 'deep_explore:auto_milestone');
   h.close();
 });
+
+test('a report series can be trimmed to its newest member by targetRef prefix, with LIKE wildcards escaped', () => {
+  const h = openMemoryDb(':memory:');
+  const row = (kind: string, targetRef: string, peer = 'owner') => h.deferredPushes.enqueue({
+    channel: 'wechat', peer, severity: 'urgent', kind, targetRef, text: targetRef, expiresAt: 99_000,
+  }, 1_000);
+  row('m', 'deep_explore:progress:A:1');
+  row('m', 'deep_explore:progress:A:2');
+  const keep = row('m', 'deep_explore:progress:A:3');
+  row('m', 'deep_explore:progress:AB:1'); // a different session whose id merely starts the same
+  row('m', 'deep_explore:progress:B:1');
+  row('other', 'deep_explore:progress:A:9'); // same series, different kind
+  row('m', 'deep_explore:progress:A:1', 'someone-else');
+  assert.equal(h.deferredPushes.discardSeries('wechat', 'owner', 'm', 'deep_explore:progress:A:', keep.id), 2);
+  const left = h.deferredPushes.listPending('wechat', 'owner', 10, 2_000).map((p) => `${p.kind} ${p.targetRef}`).sort();
+  assert.deepEqual(left, ['m deep_explore:progress:A:3', 'm deep_explore:progress:AB:1', 'm deep_explore:progress:B:1', 'other deep_explore:progress:A:9']);
+  assert.equal(h.deferredPushes.listPending('wechat', 'someone-else', 10, 2_000).length, 1, 'another peer\'s mailbox is untouched');
+  // No keepId: the whole series goes. Wildcards in the prefix are literal.
+  row('m', 'x%y:1');
+  row('m', 'xzy:1');
+  assert.equal(h.deferredPushes.discardSeries('wechat', 'owner', 'm', 'x%y:'), 1);
+  assert.equal(h.deferredPushes.discardSeries('wechat', 'owner', 'm', 'deep_explore:progress:A:'), 1);
+  assert.equal(h.deferredPushes.discardSeries('wechat', 'owner', 'm', ''), 0, 'an empty prefix never matches everything');
+  h.close();
+});

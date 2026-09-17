@@ -512,5 +512,31 @@ test('a claimed proof the tree did not record is named in the milestone', async 
     notify: (text) => { notes.push(text); },
   });
   await loop.tickOnce();
-  assert.match(notes.find((t) => /第 1 轮已返回/.test(t))!, /本轮模型宣称已证明目标，但没有通过验证或未提交到树上/);
+  assert.match(notes.find((t) => /第 1 轮已返回/.test(t))!, /只在文字里宣称已证明目标.*没有调用 reason_record/);
+});
+
+test('a proof the reviewers refused is reported with the objection, not as "unverified or not submitted"', async () => {
+  // Prod 2026-09-17 16:37: 7 calls / 459s, skeptics refused the proof of the depth-6 target; the card
+  // could not tell the owner whether a proof was even submitted.
+  process.env.PHILONT_DEEP_EXPLORE_AUTO_ADVANCE = 'on';
+  const live = sess({ noProgressRounds: 1, frontierTargetNodeId: 't' } as any);
+  const { store } = fakeStore({ active: [sess({})], afterRound: () => live });
+  (store as any).getNodes = () => nodesFixture();
+  const notes: string[] = [];
+  const loop = createAutoAdvanceLoop({
+    reasoning: store, runInContext: passthroughCtx,
+    advanceSession: async () => ({
+      success: true, output: '',
+      data: {
+        relation: 'no_commit', claimed: ['proves_target'],
+        settles: [{ nodeId: 't', outcome: 'refuted_by_reviewers', detail: '2/3: the bound fails at p=131' }],
+      },
+    }),
+    hasFormalAdmission: () => true,
+    notify: (text) => { notes.push(text); },
+  });
+  await loop.tickOnce();
+  const card = notes.find((t) => /第 1 轮已返回/.test(t))!;
+  assert.match(card, /提交了 1 次证明，均未被接受：被独立审稿人驳回（2\/3: the bound fails at p=131）/);
+  assert.doesNotMatch(card, /只在文字里宣称/);
 });

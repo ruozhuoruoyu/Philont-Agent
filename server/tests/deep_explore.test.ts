@@ -72,6 +72,9 @@ import {
   shouldDeliberateAutoAnswer,
   withSessionWebDedup,
   renderProgressMilestone,
+  renderRoundCapWarning,
+  describeSettleRefusals,
+  takeSettleAttempts,
   pariMethodFingerprint,
   pariFailureIsMethodFault,
   selectFrontierTarget,
@@ -89,10 +92,63 @@ function node(over: Partial<ReasoningNode>): ReasoningNode {
 
 test('user milestone never leaks the model-facing no-progress directive', () => {
   const text = renderProgressMilestone({
-    newlyProved: [], newlyRefuted: [], newDeadEnds: [], decomposedInto: 0, stillOpen: 21,
-  }, false, 'active');
-  assert.match(text, /21 open nodes remain/);
+    newlyProved: [], newlyRefuted: [], newDeadEnds: [], decomposedInto: 0, stillOpen: 72, openFrontier: 21,
+  }, false, 'active', 'proved', 'en');
+  assert.match(text, /21 frontier nodes remain open/, 'the frontier count, the one status and the cards show');
+  assert.doesNotMatch(text, /72/);
   assert.doesNotMatch(text, /pick ONE open node|Do not report this as progress|committed NOTHING/);
+});
+
+test('the owner-cranked round milestone speaks the owner\'s language and counts the frontier', () => {
+  // Prod 2026-09-17 15:43: "阶段记录：This round made no progress in the reasoning tree; 72 open nodes
+  // remain" — English under a Chinese label, and 72 where the next card said 30.
+  const barren = renderProgressMilestone({
+    newlyProved: [], newlyRefuted: [], newDeadEnds: [], decomposedInto: 0, stillOpen: 72, openFrontier: 30,
+  }, false, 'active', 'proved', 'zh');
+  assert.match(barren, /本轮没有推进推理树/);
+  assert.match(barren, /前沿仍有 30 个开放节点/);
+  assert.doesNotMatch(barren, /72|This round/);
+  const progress = renderProgressMilestone({
+    newlyProved: ['A'], newlyRefuted: [], newDeadEnds: ['B'], decomposedInto: 2, stillOpen: 9, openFrontier: 4,
+  }, true, 'active', 'proved', 'zh');
+  assert.match(progress, /已证 1 个：A/);
+  assert.match(progress, /新增 2 个子节点/);
+  assert.match(progress, /新增 1 个死路/);
+  assert.match(progress, /达到迭代上限/);
+  assert.match(renderProgressMilestone({
+    newlyProved: [], newlyRefuted: [], newDeadEnds: [], decomposedInto: 0, stillOpen: 0, openFrontier: 0,
+  }, false, 'solved', 'proved', 'zh'), /根命题已证明/);
+  assert.match(renderRoundCapWarning(6 * 60_000, 'zh'), /本轮已接近 6 分钟的单轮时限/);
+  assert.match(renderRoundCapWarning(6 * 60_000, 'en'), /approaching the 6-minute time cap/);
+});
+
+test('a refused proof is named by the gate that refused it; a bare claim is named as bare', () => {
+  // Prod 2026-09-17 15:37 / 16:29 / 16:38: three rounds of proofs the reviewers threw out; the card said
+  // "没有通过验证或未提交到树上" and the owner asked "为什么说声称已证明？".
+  const refused = describeSettleRefusals(
+    [{ nodeId: 'n1', outcome: 'refuted_by_reviewers', detail: '2/3: the census skipped p=131' }],
+    ['proves_target'], 'no_commit', 'zh',
+  )!;
+  assert.match(refused, /提交了 1 次证明，均未被接受：被独立审稿人驳回（2\/3: the census skipped p=131）/);
+  assert.match(refused, /按未推进计/);
+  const unchecked = describeSettleRefusals([{ nodeId: 'n1', outcome: 'unchecked_object', detail: 'determinant: det M' }], [], 'no_commit')!;
+  assert.match(unchecked, /从未核验的对象（determinant: det M）/);
+  const barrier = describeSettleRefusals([{ nodeId: 'n1', outcome: 'barrier_blocked', detail: 'parity_barrier Parity barrier' }], [], 'no_commit')!;
+  assert.match(barrier, /已知障碍/);
+  const two = describeSettleRefusals(
+    [{ nodeId: 'a', outcome: 'refuted_by_reviewers', detail: '3/3' }, { nodeId: 'b', outcome: 'precheck_failed', detail: 'no evidence' }],
+    [], 'reduces_target',
+  )!;
+  assert.match(two, /提交了 2 次证明/, 'refusals are reported even when the round committed something else');
+  // Claimed in prose, never submitted: a different failure, said differently.
+  const bare = describeSettleRefusals([], ['proves_target'], 'no_commit')!;
+  assert.match(bare, /只在文字里宣称已证明目标/);
+  assert.match(bare, /没有调用 reason_record/);
+  assert.match(describeSettleRefusals([], ['proves_target'], 'no_commit', 'en')!, /prose only/);
+  // Nothing to say: a recorded proof, or no claim at all.
+  assert.equal(describeSettleRefusals([{ nodeId: 'n1', outcome: 'recorded' }], ['proves_target'], 'proves_target'), null);
+  assert.equal(describeSettleRefusals([], [], 'no_commit'), null);
+  assert.equal(describeSettleRefusals([], ['reduces_target'], 'no_commit'), null);
 });
 
 test('PARI method fingerprint ignores formatting but includes target, range, and assumptions', () => {
@@ -299,6 +355,7 @@ test('summarizeProgress diff 出新证/新死胡同/分解数', () => {
   assert.deepEqual(s.newDeadEnds, ['B']);
   assert.equal(s.decomposedInto, 2); // b + c
   assert.equal(s.stillOpen, 2); // r + c
+  assert.equal(s.openFrontier, 2, 'r has no OPEN child (a proved, b dead, c is not r\'s child) so both are frontier');
 });
 
 test('judgeConvergence:根 proved→solved;frontier 空→stuck;否则 active', () => {
@@ -529,6 +586,11 @@ test('reason_record proved 被证伪 → 不落库,节点留 open + 反对入回
   const node = mem.reasoning.getNode(session.id, a.id)!;
   assert.equal(node.status, 'open'); // not recorded as proved
   assert.match(node.approachesTried.join(' '), /refuted/); // objection saved to backtracking memory
+  // The round ledger knows the gate and the objection, so the log line and the owner's card can say so.
+  const attempts = takeSettleAttempts(session.id);
+  assert.deepEqual(attempts.map((x) => [x.nodeId, x.outcome]), [[a.id, 'refuted_by_reviewers']]);
+  assert.match(attempts[0]!.detail!, /^2\/3: 第二步跳步/);
+  assert.deepEqual(takeSettleAttempts(session.id), [], 'taken once per round');
   mem.close();
 });
 

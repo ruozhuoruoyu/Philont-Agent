@@ -4785,6 +4785,8 @@ export const deepExploreAutoAdvance = createAutoAdvanceLoop({
           text,
           blocking: opts.blocking === true,
           progress: opts.progress,
+          // The newest progress card restates the tree; older undelivered ones for the same session are noise.
+          ...(opts.progress === 'milestone' ? { supersedes: `deep_explore:progress:${safeSessionId(opts.sessionId ?? '')}:` } : {}),
           ...(owner && parseDmPeerFromSessionId(owner) ? { routing: parseDmPeerFromSessionId(owner)! } : {}),
         })
         .then((result) => {

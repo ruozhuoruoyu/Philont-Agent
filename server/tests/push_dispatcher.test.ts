@@ -533,6 +533,63 @@ test('a heartbeat yields the tail of a metered allowance to content', async () =
   h.close();
 });
 
+test('a routine report leaves the last allowance slot to a blocking card', async () => {
+  // Prod 2026-09-17 16:37 → 16:46: the tenth message was a round report; the "paused" card bounced.
+  let now = Date.now();
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  let remaining = 2;
+  f.channel.allowance = () => ({ remaining, total: 10, sentSince: 10 - remaining });
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1' });
+  const ok = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'r1', progress: 'milestone' });
+  assert.equal(ok.delivered, 1, 'two left: a report may still go');
+  remaining = 1; now += 300_000;
+  const held = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'r2', progress: 'milestone' });
+  assert.equal(held.delivered, 0);
+  assert.equal(held.skipped[0]?.reason, 'allowance_reserved');
+  assert.equal(held.deferred, 1, 'a report held back is owed at the next inbound');
+  assert.equal(h.deferredPushes.listPending(f.channel.name, 'p1', 3, now)[0]?.targetRef, 'r2');
+  const paused = await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'paused', progress: 'milestone', blocking: true });
+  assert.equal(paused.delivered, 1, 'the slot is for exactly this');
+  assert.equal(f.sent.at(-1)?.text, 'urgent text');
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
+
+test('the newest report of a series supersedes the older ones still in the mailbox', async () => {
+  // Prod 2026-09-17 16:49: rounds 13, 19, 20 and "round 1" of the previous batch — with tree counts a
+  // live card had already contradicted — were handed over under 此前未能送达的待办通知.
+  let now = Date.now();
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1' });
+  const series = (sid: string, n: number): PushRequest => ({
+    ...URGENT_REQ, kind: 'deep_explore:auto_milestone', progress: 'milestone',
+    targetRef: `deep_explore:progress:${sid}:${n}`, text: `round ${n} of ${sid}`,
+    supersedes: `deep_explore:progress:${sid}:`,
+  });
+  f.setReturn({ ok: false, retry: 'next_inbound', error: 'prepare failed' });
+  for (const n of [13, 14, 15]) { now += 400_000; await dispatcher.enqueue(series('A', n)); }
+  now += 400_000; await dispatcher.enqueue(series('B', 1));
+  const pending = h.deferredPushes.listPending(f.channel.name, 'p1', 10, now);
+  assert.deepEqual(pending.map((p) => p.text).sort(), ['round 1 of B', 'round 15 of A'], 'one pending report per session, the newest');
+  // A live delivery clears the session's backlog too: the owner just read a newer state.
+  f.setReturn({ ok: true, messageIds: ['m'] });
+  now += 400_000;
+  const live = await dispatcher.enqueue(series('A', 16));
+  assert.equal(live.delivered, 1);
+  assert.deepEqual(h.deferredPushes.listPending(f.channel.name, 'p1', 10, now).map((p) => p.text), ['round 1 of B'], 'B untouched, A cleared');
+  // Without the series prefix nothing is discarded (other kinds keep today's semantics).
+  f.setReturn({ ok: false, retry: 'next_inbound', error: 'prepare failed' });
+  now += 400_000; await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'x1', progress: 'milestone', kind: 'other' });
+  now += 400_000; await dispatcher.enqueue({ ...URGENT_REQ, targetRef: 'x2', progress: 'milestone', kind: 'other' });
+  assert.equal(h.deferredPushes.listPending(f.channel.name, 'p1', 10, now).length, 3);
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
+
 test('an unmetered channel never reserves', async () => {
   const { h, dispatcher } = setup();
   const f = fakeChannel();

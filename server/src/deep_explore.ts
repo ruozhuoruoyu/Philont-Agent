@@ -1529,6 +1529,76 @@ export function takeClaimedRelations(sessionId: string): string[] {
   sessionClaimedRelations.delete(sessionId);
   return claims;
 }
+/**
+ * Why a `proved` submission did not land. Prod 2026-09-17 15:37 / 16:29 / 16:38: three rounds in a
+ * row spent 4–7 minutes inside the skeptic review of a proof for the pinned target, the reviewers
+ * refused it, and the only trace was the model-facing tool result. The log said `claimed=proves_target
+ * relation=no_commit`, the owner's card said "没有通过验证或未提交到树上" — the same sentence for a
+ * refused proof and for a proof that was never submitted — and the owner asked "为什么说声称已证明？".
+ * Recorded at each refusal site, taken once per round (like claimed relations) so the attribution log,
+ * the round result and the milestone can all say WHICH gate refused it and what it objected to.
+ */
+export type SettleOutcome = 'recorded' | 'refuted_by_reviewers' | 'unchecked_object' | 'barrier_blocked' | 'precheck_failed';
+export interface SettleAttempt {
+  nodeId: string;
+  outcome: SettleOutcome;
+  /** Short human-readable reason (objection excerpt, missing object, barrier id). */
+  detail?: string;
+}
+const sessionSettleAttempts = new Map<string, SettleAttempt[]>();
+export function noteSettleAttempt(sessionId: string, attempt: SettleAttempt): void {
+  const prior = sessionSettleAttempts.get(sessionId) ?? [];
+  sessionSettleAttempts.set(sessionId, [...prior, attempt].slice(-16));
+}
+export function takeSettleAttempts(sessionId: string): SettleAttempt[] {
+  const attempts = sessionSettleAttempts.get(sessionId) ?? [];
+  sessionSettleAttempts.delete(sessionId);
+  return attempts;
+}
+/** One log token per attempt: `refuted_by_reviewers:2b371234(2/3)`. */
+export function describeSettleAttemptsForLog(attempts: readonly SettleAttempt[]): string {
+  if (attempts.length === 0) return 'none';
+  return attempts.map((a) => `${a.outcome}:${a.nodeId.slice(0, 8)}${a.detail && a.outcome === 'refuted_by_reviewers' ? `(${a.detail.split(':')[0]})` : ''}`).join(',');
+}
+/**
+ * The owner-facing sentence for a round whose proof of the target did not land. Null when nothing needs
+ * saying (no refusal, and no bare claim). `claimed` + `relation` are the round's claimed/derived
+ * relations; `attempts` is what the settle gate actually saw.
+ */
+export function describeSettleRefusals(
+  attempts: readonly SettleAttempt[],
+  claimed: readonly string[],
+  relation: string | undefined,
+  lang: 'zh' | 'en' = 'zh',
+): string | null {
+  const refusals = attempts.filter((a) => a.outcome !== 'recorded');
+  const excerpt = (d?: string) => (d ? d.replace(/\s+/g, ' ').trim().slice(0, 140) : '');
+  if (refusals.length > 0) {
+    const first = refusals[0];
+    const n = refusals.length;
+    if (lang === 'en') {
+      const why =
+        first.outcome === 'refuted_by_reviewers' ? `refuted by independent reviewers${first.detail ? ` (${excerpt(first.detail)})` : ''}`
+        : first.outcome === 'unchecked_object' ? `it relies on a computable object that was never machine-checked${first.detail ? ` (${excerpt(first.detail)})` : ''}`
+        : first.outcome === 'barrier_blocked' ? `it runs through a known barrier with no named way around${first.detail ? ` (${excerpt(first.detail)})` : ''}`
+        : `it failed the settle precheck${first.detail ? ` (${excerpt(first.detail)})` : ''}`;
+      return `This round submitted ${n} proof${n > 1 ? 's' : ''} and none was accepted: ${why}. Counted as no progress.`;
+    }
+    const why =
+      first.outcome === 'refuted_by_reviewers' ? `被独立审稿人驳回${first.detail ? `（${excerpt(first.detail)}）` : ''}`
+      : first.outcome === 'unchecked_object' ? `依赖了一个可机器计算却从未核验的对象${first.detail ? `（${excerpt(first.detail)}）` : ''}`
+      : first.outcome === 'barrier_blocked' ? `走的是已知障碍封死的路而没有说明绕行方式${first.detail ? `（${excerpt(first.detail)}）` : ''}`
+      : `未通过提交前检查${first.detail ? `（${excerpt(first.detail)}）` : ''}`;
+    return `本轮提交了 ${n} 次证明，均未被接受：${why}。按未推进计。`;
+  }
+  if (claimed.includes('proves_target') && relation === 'no_commit') {
+    return lang === 'en'
+      ? 'This round claimed the target proved in prose only — no proof was submitted to the tree (reason_record was never called). Counted as no progress.'
+      : '本轮模型只在文字里宣称已证明目标，并没有把证明提交到树上（没有调用 reason_record）；按未推进计。';
+  }
+  return null;
+}
+
 const VERIFIER_TOOLS = new Set(['magnitude', 'z3Verify', 'pariGp']);
 /** Tools whose successful run counts as having actually worked a node this round. */
 const COMPUTE_TOOLS = new Set(['magnitude', 'z3Verify', 'pariGp', 'leanCheck']);
@@ -1869,6 +1939,8 @@ export interface ProgressSummary {
   newlyRefuted: string[];
   newDeadEnds: string[];
   stillOpen: number;
+  /** Open nodes with no open child — the count the status view and the auto-advance card call "开放节点". */
+  openFrontier: number;
   decomposedInto: number;
 }
 
@@ -1893,6 +1965,7 @@ export function summarizeProgress(
     newlyRefuted,
     newDeadEnds,
     stillOpen: after.filter((n) => n.status === 'open').length,
+    openFrontier: computeFrontier(after).length,
     decomposedInto: after.length - before.length,
   };
 }
@@ -2082,10 +2155,42 @@ export function renderProgressMilestone(
   hitCap: boolean,
   status: ReasoningSessionStatus,
   settledVerb = 'proved',
+  lang: 'zh' | 'en' = currentPhraseLang(),
 ): string {
-  if (!committedNothing(s)) return renderProgressText(s, hitCap, status, settledVerb);
-  if (status === 'solved' || status === 'stuck') return renderProgressText(s, hitCap, status, settledVerb);
-  return `This round made no progress in the reasoning tree; ${s.stillOpen} open nodes remain. The tree was saved.`;
+  // Prod 2026-09-17 15:43: the owner-cranked round pushed "This round made no progress in the reasoning
+  // tree; 72 open nodes remain" under a Chinese "阶段记录：" — English, and a count (every open node)
+  // that the card five minutes later contradicted with "30 个开放节点" (frontier). One language, one
+  // definition of open: the owner's, and the frontier.
+  if (lang === 'en') {
+    if (!committedNothing(s)) return renderProgressText(s, hitCap, status, settledVerb);
+    if (status === 'solved' || status === 'stuck') return renderProgressText(s, hitCap, status, settledVerb);
+    return `This round made no progress in the reasoning tree; ${s.openFrontier} frontier nodes remain open. The tree was saved.`;
+  }
+  const verb = settledVerb === 'proved' ? '已证' : '已定';
+  const head =
+    status === 'solved'
+      ? '✓ 根命题已证明，推理会话完成。'
+      : status === 'stuck'
+        ? '⚠ 前沿已空但根命题未证明，会话卡住（补充思路后可继续）。'
+        : committedNothing(s)
+          ? '本轮没有推进推理树。'
+          : '本轮推理有推进，会话仍在进行。';
+  const parts: string[] = [];
+  if (s.decomposedInto > 0) parts.push(`新增 ${s.decomposedInto} 个子节点`);
+  if (s.newlyProved.length) parts.push(`${verb} ${s.newlyProved.length} 个：${s.newlyProved.slice(0, 3).map((c) => c.slice(0, 80)).join(' / ')}`);
+  if (s.newlyRefuted.length) parts.push(`否证 ${s.newlyRefuted.length} 个`);
+  if (s.newDeadEnds.length) parts.push(`新增 ${s.newDeadEnds.length} 个死路`);
+  parts.push(`前沿仍有 ${s.openFrontier} 个开放节点`);
+  const cap = hitCap && !committedNothing(s) ? '（本轮达到迭代上限，可继续）' : '';
+  return `${head}${cap}\n本轮：${parts.join('；')}。推理树已保存。`;
+}
+
+/** The mid-round heads-up that a long round is about to be cut by the per-round cap. Owner-facing. */
+export function renderRoundCapWarning(roundDeadlineMs: number, lang: 'zh' | 'en' = currentPhraseLang()): string {
+  const minutes = Math.round(roundDeadlineMs / 60_000);
+  return lang === 'en'
+    ? `⏳ This round is approaching the ${minutes}-minute time cap; it will pause and save the tree shortly — reply "continue" to keep going.`
+    : `⏳ 本轮已接近 ${minutes} 分钟的单轮时限，即将暂停并保存推理树；回复「继续」可接着跑。`;
 }
 
 /**
@@ -3152,6 +3257,7 @@ export function makeReasoningToolRunner(
         if (!pre.ok) {
           writeEvidence(nodeId);
           reasoning.updateNode(sessionId, nodeId, { appendApproach: `not ${profile.settledVerb}: ${pre.reason ?? 'precheck failed'}` });
+          noteSettleAttempt(sessionId, { nodeId, outcome: 'precheck_failed', detail: pre.reason ?? 'precheck failed' });
           return {
             ok: true,
             output: `Node [${nodeId}] not ${profile.settledVerb}: ${pre.reason ?? 'precheck failed'} Node stays open — address that and settle again.`,
@@ -3174,6 +3280,7 @@ export function makeReasoningToolRunner(
             console.warn(
               `[deep-explore] settle refused once: ${obj.kind} was never machine-checked (node ${nodeId}, session ${safeSessionId(sessionId)})`,
             );
+            noteSettleAttempt(sessionId, { nodeId, outcome: 'unchecked_object', detail: `${obj.kind}: ${obj.excerpt}` });
             return {
               ok: true,
               output:
@@ -3211,6 +3318,7 @@ export function makeReasoningToolRunner(
                 console.warn(
                   `[deep-explore] reason_record proved blocked by barrier ${b0.id} (no named circumvention); node ${nodeId} kept open`,
                 );
+                noteSettleAttempt(sessionId, { nodeId, outcome: 'barrier_blocked', detail: `${b0.id} ${b0.title}` });
                 return {
                   ok: true,
                   output:
@@ -3234,6 +3342,18 @@ export function makeReasoningToolRunner(
             reasoning.updateNode(sessionId, nodeId, {
               appendApproach: `refuted by ${tally.refutedCount}/${tally.validVotes} reviewers${objection}`,
             });
+            // The only trace of a refused proof used to be the tool result the model reads; the log
+            // showed a 5-minute gap and `claimed=proves_target relation=no_commit`.
+            console.warn(
+              `[deep-explore] settle refused by reviewers node=${nodeId} session=${safeSessionId(sessionId)} ` +
+                `${tally.refutedCount}/${tally.validVotes} refuted` +
+                (tally.topObjection ? `: ${tally.topObjection.replace(/\s+/g, ' ').slice(0, 300)}` : ''),
+            );
+            noteSettleAttempt(sessionId, {
+              nodeId,
+              outcome: 'refuted_by_reviewers',
+              detail: `${tally.refutedCount}/${tally.validVotes}${tally.topObjection ? `: ${tally.topObjection}` : ''}`,
+            });
             return {
               ok: true,
               output:
@@ -3244,6 +3364,7 @@ export function makeReasoningToolRunner(
           }
           reasoning.updateNode(sessionId, nodeId, { status: 'proved', result, settleBasis: settleBasisToStore });
           writeEvidence(nodeId);
+          noteSettleAttempt(sessionId, { nodeId, outcome: 'recorded' });
           const vmark =
             tally && tally.validVotes > 0 ? ` (passed adversarial verification by ${tally.validVotes} reviewers)` : '';
           return { ok: true, output: `Recorded [${nodeId}] = ${profile.settledVerb}${result ? `: ${result}` : ''}${vmark}` };
@@ -3251,6 +3372,7 @@ export function makeReasoningToolRunner(
         // No skeptics: commit directly.
         reasoning.updateNode(sessionId, nodeId, { status: 'proved', result, settleBasis: settleBasisToStore });
         writeEvidence(nodeId);
+        noteSettleAttempt(sessionId, { nodeId, outcome: 'recorded' });
         return { ok: true, output: `Recorded [${nodeId}] = ${profile.settledVerb}${result ? `: ${result}` : ''}` };
       }
 
@@ -3801,10 +3923,7 @@ export function createDeepExploreTool(
     // tell the user it is approaching the per-round time cap and will wrap up & save soon.
     const warnAtMs = Math.round(roundDeadlineMs * 0.75);
     const warnTimer = setTimeout(() => {
-      deps.onMilestone?.(
-        `⏳ This round is approaching the ${Math.round(roundDeadlineMs / 60_000)}-minute time cap; ` +
-        `it will pause and save the tree shortly — reply "continue" to keep going.`,
-      );
+      deps.onMilestone?.(renderRoundCapWarning(roundDeadlineMs));
     }, warnAtMs);
 
     const { runner: boundRunner, stalled } = withNoProgressStop(
@@ -3910,11 +4029,13 @@ export function createDeepExploreTool(
       );
     }
     const claimedRelations = takeClaimedRelations(session.id);
+    const settleAttempts = takeSettleAttempts(session.id);
     if (roundTarget) {
       console.log(
         `[deep-explore] round attribution session=${safeSessionId(session.id)} target=${attribution.targetNodeId} ` +
         `relation=${attribution.relation} targetProgress=${attribution.targetProgress} ` +
-        `treeProgress=${attribution.treeProgress} claimed=${claimedRelations.join(',') || 'none'}`,
+        `treeProgress=${attribution.treeProgress} claimed=${claimedRelations.join(',') || 'none'} ` +
+        `settles=${describeSettleAttemptsForLog(settleAttempts)}`,
       );
       for (const claimed of claimedRelations) {
         const agreed = claimed === attribution.relation;
@@ -4046,7 +4167,7 @@ export function createDeepExploreTool(
       success: true,
       output: `${text}${chainLine}${tail}${churnNote}${stuckNote}${attributionLine}\n${renderSessionSubject(session.goal, session.id, session.mode, session.autoAdvance)}`,
       // What the round did to its target vs what the model said it did — the milestone reads both.
-      data: { relation: attribution.relation, claimed: claimedRelations },
+      data: { relation: attribution.relation, claimed: claimedRelations, settles: settleAttempts },
     };
   }
 
@@ -4074,10 +4195,7 @@ export function createDeepExploreTool(
     const roundDeadlineMs = effectiveRoundDeadlineMs();
     const deadlineTimer = setTimeout(() => { timedOut = true; ctrl.abort(); }, roundDeadlineMs);
     const warnTimer = setTimeout(() => {
-      deps.onMilestone?.(
-        `⏳ This round is approaching the ${Math.round(roundDeadlineMs / 60_000)}-minute time cap; ` +
-        `it will pause and save the tree shortly — reply "continue" to keep going.`,
-      );
+      deps.onMilestone?.(renderRoundCapWarning(roundDeadlineMs));
     }, Math.round(roundDeadlineMs * 0.75));
     const { runner: boundRunner, stalled } = withNoProgressStop(
       makeReasoningToolRunner(

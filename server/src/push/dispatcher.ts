@@ -37,6 +37,14 @@ const BLOCKING_MIN_INTERVAL_MS = 5 * 60_000;
  * few; a milestone always may be.
  */
 export const HEARTBEAT_ALLOWANCE_RESERVE = 3;
+/**
+ * Messages of a metered peer's allowance kept for a BLOCKING notice (paused / needs an answer). Prod
+ * 2026-09-17 16:37 → 16:46: the tenth message after "换namecheck10" was a routine round report; nine
+ * minutes later the "自动推进已暂停" card — the one that tells the owner to reply — bounced with
+ * `prepare failed`. A routine report at the last slot is deferred to the mailbox instead (and the
+ * series rule keeps only the newest one there); a blocking card still goes.
+ */
+export const MILESTONE_ALLOWANCE_RESERVE = 1;
 
 export interface PushRequest {
   severity: PushSeverity;
@@ -68,6 +76,13 @@ export interface PushRequest {
   blocking?: boolean;
   /** Opted-in task reports have their own cadence; routine urgent notices cannot starve them. */
   progress?: 'milestone' | 'heartbeat';
+  /**
+   * Series prefix: pending mailbox rows of the same kind whose targetRef starts with this are made
+   * obsolete by this push, whether it is delivered now or deferred itself. For reports where the latest
+   * one carries the whole state (a deep_explore progress card restates the tree counts and the next
+   * step), so the mailbox never hands the owner yesterday's round 13 after today's round 1.
+   */
+  supersedes?: string;
 }
 
 export interface DispatchResult {
@@ -197,13 +212,14 @@ export class PushDispatcher {
       if (skip) {
         result.skipped.push(skip);
         if (req.progress === 'milestone' && this.deferredPushes &&
-          ['rate_limited', 'quiet_hours', 'channel_not_ready'].includes(skip.reason)) {
-          this.deferredPushes.enqueue({
+          ['rate_limited', 'quiet_hours', 'channel_not_ready', 'allowance_reserved'].includes(skip.reason)) {
+          const row = this.deferredPushes.enqueue({
             channel: t.channel, peer: t.peer, severity: req.severity,
             kind: req.kind, targetRef: req.targetRef, text: req.text,
             expiresAt: now + 24 * 60 * 60_000,
           }, now);
           result.deferred++;
+          this.supersede(t.channel, t.peer, req, row.id);
         }
         continue;
       }
@@ -241,19 +257,21 @@ export class PushDispatcher {
           }
           const stale = this.deferredPushes?.get(t.channel, t.peer, req.kind, req.targetRef);
           if (stale) this.deferredPushes?.markDelivered(stale.id);
+          this.supersede(t.channel, t.peer, req);
         } else {
           if (sendResult.partiallyDelivered) result.partiallyDelivered += 1;
           // A heartbeat is about now. Delivered with the owner's next reply — prod 2026-09-13 23:13,
           // three "本轮已运行 5 分钟" from the previous evening under "此前未能送达的待办通知" — it is false.
           const deferrable = req.progress !== 'heartbeat';
           if (sendResult.retry === 'next_inbound' && this.deferredPushes && deferrable) {
-            this.deferredPushes.enqueue({
+            const row = this.deferredPushes.enqueue({
               channel: t.channel, peer: t.peer, severity: req.severity,
               kind: req.kind, targetRef: req.targetRef,
               text: sendResult.deferredText ?? req.text,
               expiresAt: now + (req.severity === 'urgent' ? 72 : 48) * 60 * 60_000,
             }, now);
             result.deferred += 1;
+            this.supersede(t.channel, t.peer, req, row.id);
           } else {
             result.failed += 1;
           }
@@ -306,6 +324,17 @@ export class PushDispatcher {
    * Determine whether a single target should be skipped.
    * Returns a SkipReason to skip, or null to proceed.
    */
+  /** Series rule: this push makes older pending rows of its series obsolete (see PushRequest.supersedes). */
+  private supersede(channel: string, peer: string, req: PushRequest, keepId?: string): void {
+    if (!req.supersedes || !this.deferredPushes) return;
+    try {
+      const n = this.deferredPushes.discardSeries(channel, peer, req.kind, req.supersedes, keepId);
+      if (n > 0) this.opts.logger.log(`[push] ${req.kind}: ${n} older pending report(s) superseded by the newest`);
+    } catch (e) {
+      this.opts.logger.warn(`[push] supersede failed (ignored): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   private evaluateTarget(
     channel: string,
     peer: string,
@@ -330,10 +359,12 @@ export class PushDispatcher {
       return { channel, peer, reason: 'channel_not_ready' };
     }
 
-    // Cheap talk yields to content when the peer's allowance runs low (HEARTBEAT_ALLOWANCE_RESERVE).
-    if (req.progress === 'heartbeat') {
+    // Cheap talk yields to content when the peer's allowance runs low (HEARTBEAT_ALLOWANCE_RESERVE), and
+    // routine reports yield the last slot to a blocking card (MILESTONE_ALLOWANCE_RESERVE).
+    if (req.progress === 'heartbeat' || (req.progress === 'milestone' && req.blocking !== true)) {
+      const reserve = req.progress === 'heartbeat' ? HEARTBEAT_ALLOWANCE_RESERVE : MILESTONE_ALLOWANCE_RESERVE;
       const a = lookupChannel.allowance?.(peer) ?? null;
-      if (a && a.remaining <= HEARTBEAT_ALLOWANCE_RESERVE) {
+      if (a && a.remaining <= reserve) {
         return { channel, peer, reason: 'allowance_reserved', detail: `remaining=${a.remaining}/${a.total}` };
       }
     }

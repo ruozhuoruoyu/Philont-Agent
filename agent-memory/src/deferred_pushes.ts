@@ -118,6 +118,22 @@ export class DeferredPushStore {
     return rows.map(rowToPush);
   }
 
+  /**
+   * Drop the pending rows of one kind whose targetRef starts with `targetRefPrefix`, except `keepId`.
+   * For report series where the newest item makes the older ones obsolete (a progress card carries
+   * the whole tree state, so "round 13" delivered a day after "round 1 of the next batch" is noise):
+   * prod 2026-09-17 16:49 handed the owner three cards from the previous night with counts a live
+   * card had already contradicted. Prefix match only — `%`/`_` in the prefix are escaped.
+   */
+  discardSeries(channel: string, peer: string, kind: string, targetRefPrefix: string, keepId?: string): number {
+    if (!targetRefPrefix) return 0;
+    const escaped = targetRefPrefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+    return this.db.prepare(
+      `DELETE FROM deferred_pushes
+       WHERE channel=? AND peer=? AND kind=? AND target_ref LIKE ? ESCAPE '\\' AND (? IS NULL OR id<>?)`,
+    ).run(channel, peer, kind, `${escaped}%`, keepId ?? null, keepId ?? null).changes;
+  }
+
   /** Drop every pending row of one kind — for kinds that stopped being deferrable. */
   discardKind(kind: string): number {
     return this.db.prepare(`DELETE FROM deferred_pushes WHERE kind=?`).run(kind).changes;
