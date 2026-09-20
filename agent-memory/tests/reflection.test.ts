@@ -1104,3 +1104,69 @@ test('apply: with the gate off, behaviour is unchanged (positives written withou
   assert.deepEqual(r.applied, [0, 1]);
   assert.equal(r.stats.withheldUnverified, 0);
 });
+
+// ── cross-turn support gate (2026-09-20, the cross-task vote) ────────────
+
+import { renderCrossTurnEvidence, CROSS_TURN_SUPPORT_MIN } from '../src/reflection.js';
+
+test('parse: routing_rule carries the failure signature it names', () => {
+  const r = parseReflectionOutput(JSON.stringify({
+    had_lesson: true, task_signature: 't', attempts: [],
+    learnings: [{ type: 'routing_rule', trigger_condition: 'x', carveout: 'y', evidence: 'z', signature: 'shell:cmd-not-found:rg' }],
+  }));
+  assert.equal(r.ok, true);
+  const l = r.reflection!.learnings[0];
+  assert.equal(l.type, 'routing_rule');
+  if (l.type === 'routing_rule') assert.equal(l.signature, 'shell:cmd-not-found:rg');
+});
+
+const avoidRule = (signature?: string) => ({
+  type: 'routing_rule' as const, triggerCondition: 'grep-like search on this host', preferSkill: null,
+  avoidSkills: [], carveout: 'only when rg is missing', evidence: 'cmd-not-found twice', signature,
+});
+
+test('apply: an avoid rule whose failure recurred in ≥2 sessions is written', () => {
+  const { skills, routingRules } = openMemoryDb(':memory:');
+  const r = applyReflection(
+    { hadLesson: true, taskSignature: 't', attempts: [], learnings: [avoidRule('shell:cmd-not-found:rg')] },
+    { skills, routingRules },
+    { requireCrossTurnSupport: true, signatureSupport: { 'shell:cmd-not-found:rg': CROSS_TURN_SUPPORT_MIN } },
+  );
+  assert.deepEqual(r.applied, [0]);
+  assert.equal(r.stats.withheldUnsupported, 0);
+});
+
+test('apply: an avoid rule from a failure seen once, or naming no signature, is withheld', () => {
+  const { skills, routingRules } = openMemoryDb(':memory:');
+  const r = applyReflection(
+    { hadLesson: true, taskSignature: 't', attempts: [], learnings: [avoidRule('shell:cmd-not-found:rg'), avoidRule(undefined)] },
+    { skills, routingRules },
+    { requireCrossTurnSupport: true, signatureSupport: { 'shell:cmd-not-found:rg': 1 } },
+  );
+  assert.deepEqual(r.applied, []);
+  assert.equal(r.stats.withheldUnsupported, 2);
+  assert.match(r.errors[0].error, /seen in 1 session/);
+  assert.match(r.errors[1].error, /no failure signature named/);
+  assert.equal(routingRules.count(), 0);
+});
+
+test('apply: a prefer-skill rule and a playbook are not subject to the recurrence gate', () => {
+  const { skills, routingRules } = openMemoryDb(':memory:');
+  const r = applyReflection(
+    { hadLesson: true, taskSignature: 't', attempts: [], learnings: [{ ...avoidRule(undefined), preferSkill: 'grep-fallback' }, failurePlaybook] },
+    { skills, routingRules },
+    { requireCrossTurnSupport: true, signatureSupport: {} },
+  );
+  assert.deepEqual(r.applied, [0, 1]);
+});
+
+test('render: the evidence block marks recurring vs this-session-only, and says so when empty', () => {
+  const empty = renderCrossTurnEvidence([]);
+  assert.match(empty, /none of this turn's failures has been seen in another session/);
+  const block = renderCrossTurnEvidence([
+    { signature: 'shell:cmd-not-found:rg', sessions: 3, occurrences: 5, sample: 'command not found: rg' },
+    { signature: 'readFile:enoent', sessions: 1, occurrences: 1, sample: 'ENOENT' },
+  ]);
+  assert.match(block, /signature=shell:cmd-not-found:rg — 3 session\(s\), 5 occurrence\(s\) \[recurring\]/);
+  assert.match(block, /signature=readFile:enoent — 1 session\(s\), 1 occurrence\(s\) \[this session only\]/);
+});

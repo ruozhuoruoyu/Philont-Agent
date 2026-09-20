@@ -287,3 +287,16 @@ test('a fixture the checker refuses to re-run is retired, and the bench never th
   assert.equal(loaded[0].status, 'retired');
   assert.equal(summarizeBench(store).retired, 1);
 });
+
+test('fixturesAsLedger: active fixtures first, ledger rows after, duplicates of a pinned input dropped', async () => {
+  const { fixturesAsLedger } = await import('../src/replay_bench.js');
+  const pinned = fixture({ sourceRecordedAt: 5 });
+  const retired = fixture({ input: { script: 'gone' }, status: 'retired' });
+  const rows = fixturesAsLedger([pinned, retired], [
+    failure({ recordedAt: 9 }), // same (tool, input) as the pinned fixture → dropped
+    failure({ input: { script: 'fresh' }, recordedAt: 8 }),
+  ]);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], { toolName: 'alpha', input: { script: 'bad' }, errorText: 'alpha: unbalanced thing', recordedAt: 5 });
+  assert.deepEqual(rows[1].input, { script: 'fresh' });
+});

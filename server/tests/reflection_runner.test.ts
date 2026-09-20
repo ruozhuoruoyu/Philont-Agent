@@ -167,3 +167,41 @@ test('playbooksSupersededBy: skips already-deprecated and non-matching signature
   ];
   assert.equal(playbooksSupersededBy(pbs, 'mycox').length, 0);
 });
+
+// ── cross-turn evidence (2026-09-20) ───────────────────────────────────
+
+import { buildCrossTurnEvidence, learningRequiresRecurrence } from '../src/reflection_runner.js';
+
+const sig = (tool: string, err: string) => `${tool}:${err.split(':')[1]?.trim() ?? 'other'}`;
+
+test('buildCrossTurnEvidence: counts distinct sessions per failure class of this turn, current session included', () => {
+  const ev = buildCrossTurnEvidence({
+    turnFailures: [{ toolName: 'shell', resultText: 'shell: cmd-not-found rg' }, { toolName: 'readFile', resultText: 'readFile: enoent' }],
+    ledger: [
+      { toolName: 'shell', result: 'shell: cmd-not-found rg', sessionId: 'cur' },
+      { toolName: 'shell', result: 'shell: cmd-not-found rg', sessionId: 'other-1' },
+      { toolName: 'shell', result: 'shell: cmd-not-found rg', sessionId: 'other-1' },
+      { toolName: 'http', result: 'http: 401', sessionId: 'other-2' }, // not this turn's class → ignored
+    ],
+    signatureOf: sig,
+    currentSessionId: 'cur',
+  });
+  assert.equal(ev.length, 2);
+  assert.deepEqual(ev[0], { signature: 'shell:cmd-not-found rg', sessions: 2, occurrences: 3, sample: 'shell: cmd-not-found rg' });
+  // Not in the ledger yet: still happened once, in this session.
+  assert.deepEqual(ev[1], { signature: 'readFile:enoent', sessions: 1, occurrences: 1, sample: 'readFile: enoent' });
+});
+
+test('buildCrossTurnEvidence: no failures this turn → nothing; cap respected', () => {
+  assert.deepEqual(buildCrossTurnEvidence({ turnFailures: [], ledger: [], signatureOf: sig }), []);
+  const many = buildCrossTurnEvidence({
+    turnFailures: [...'abcdefgh'].map((c) => ({ toolName: 't', resultText: `t: ${c}` })),
+    ledger: [], signatureOf: sig, limit: 3,
+  });
+  assert.equal(many.length, 3);
+});
+
+test('recurrence gate flag: on by default, off on 0/off/false/no', () => {
+  assert.equal(learningRequiresRecurrence({} as NodeJS.ProcessEnv), true);
+  assert.equal(learningRequiresRecurrence({ PHILONT_LEARNING_REQUIRE_RECURRENCE: 'off' } as NodeJS.ProcessEnv), false);
+});

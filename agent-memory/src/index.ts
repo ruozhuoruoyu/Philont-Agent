@@ -131,8 +131,12 @@ export {
   applyReflection,
   shouldTriggerReflection,
   renderReflectionPrompt,
+  renderCrossTurnEvidence,
+  isPositiveLearning,
+  CROSS_TURN_SUPPORT_MIN,
 } from './reflection.js';
 export type {
+  CrossTurnEvidence,
   ReflectionAttempt,
   ReflectionLearning,
   RoutingRuleLearning,

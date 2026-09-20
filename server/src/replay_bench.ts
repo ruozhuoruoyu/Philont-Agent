@@ -444,6 +444,32 @@ export async function runReplayBench(input: RunBenchInput): Promise<{ attempted:
   return { attempted: outcomes.filter((o) => o.transition !== 'not-attempted').length, outcomes };
 }
 
+/**
+ * The active bench as ledger rows, so anything that consumes ledger failures (draft validation) can be
+ * pointed at the fixed bank first and the rolling ledger second. `extra` rows whose (tool, input)
+ * already sit on the bench are dropped, so a fixture is never tried twice under two names.
+ */
+export function fixturesAsLedger(
+  fixtures: readonly BenchFixture[],
+  extra: readonly LedgerFailure[] = [],
+): LedgerFailure[] {
+  const out: LedgerFailure[] = [];
+  const seen = new Set<string>();
+  for (const f of fixtures) {
+    if (f.status !== 'active') continue;
+    seen.add(f.id);
+    out.push({ toolName: f.toolName, input: f.input, errorText: f.errorText, recordedAt: f.sourceRecordedAt });
+  }
+  for (const r of extra) {
+    if (!r.input || typeof r.input !== 'object' || Array.isArray(r.input)) continue;
+    const id = fixtureId(r.toolName, r.input);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(r);
+  }
+  return out;
+}
+
 export interface BenchSummary {
   active: number;
   retired: number;

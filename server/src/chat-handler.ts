@@ -277,6 +277,7 @@ import {
   type ReplayAttemptState,
 } from './repair_replay.js';
 import {
+  fixturesAsLedger,
   loadFixtures,
   pinFixture,
   replayBenchEnabled,
@@ -329,7 +330,7 @@ import {
   renderRepairNotice,
 } from './mechanical_repair.js';
 import { scheduledTurnMadeProgress } from './schedule_progress.js';
-import { maybeRunReflection } from './reflection_runner.js';
+import { maybeRunReflection, buildCrossTurnEvidence } from './reflection_runner.js';
 import { selectSkillsByAux } from './skill_relevance_llm.js';
 import { distillMechanicalFix, learnedCheatsheet } from './mechanical_fix_learning.js';
 import {
@@ -1617,9 +1618,14 @@ const idleConsolidator = startIdleConsolidator({
       } else {
         const eligible = replayEligibleTools();
         const rows = memory.actions.listRecentFailures({ sinceTs: Date.now() - 14 * 24 * 60 * 60_000, limit: 400 });
-        const failures: LedgerFailure[] = rows
+        const ledgerFailures: LedgerFailure[] = rows
           .filter((r) => eligible.has(r.toolName) && !!r.result && !!r.params && typeof r.params === 'object' && !Array.isArray(r.params))
           .map((r) => ({ toolName: r.toolName, input: r.params as Record<string, unknown>, errorText: r.result ?? '', recordedAt: r.timestamp }));
+        // 2026-09-20: the pinned bench first, the rolling ledger after it — a draft is tried against the
+        // same fixed failures a repair line is, so its verdicts stay comparable across weeks.
+        const failures: LedgerFailure[] = replayBenchEnabled()
+          ? fixturesAsLedger(loadFixtures(memory.facts), ledgerFailures)
+          : ledgerFailures;
         // File-backed SKILL.md entries are published capabilities/protocols. Their DB maturity may be
         // NULL→draft because source frontmatter is optional, but they are not learned repair hypotheses.
         // Determine identity from actual disk presence (the same rule as forget_skill), never from source.
@@ -9879,10 +9885,28 @@ export async function handleChatSend(
         || signalBus.inTurnToolBlockFired === true
         || signalBus.planAutoClosedFailure === true;
 
+      // 2026-09-20: this turn's failure classes across the recent ledger — the reflection reads them, and an
+      // avoid-only rule is written only for a class seen in ≥2 sessions (the cross-task vote).
+      let crossTurnEvidence: ReturnType<typeof buildCrossTurnEvidence> = [];
+      try {
+        const turnFailures = (signalBus.inTurnRecords ?? []).filter((r) => !r.success);
+        if (turnFailures.length > 0) {
+          crossTurnEvidence = buildCrossTurnEvidence({
+            turnFailures,
+            ledger: memory.actions.listRecentFailures({ sinceTs: Date.now() - 14 * 24 * 60 * 60_000, limit: 400 }),
+            signatureOf: (tool, err) => extractFailureSignature(tool, err),
+            currentSessionId: sessionId,
+          });
+        }
+      } catch (e) {
+        console.warn('[reflection] cross-turn evidence failed, ignored', e);
+      }
+
       void maybeRunReflection({
         sessionId,
         messages,
         userMessage,
+        crossTurnEvidence,
         // 2026-09-20: positive learnings (new_skill / skill_refine / prefer-skill routing rules) need a
         // judge-verified success behind them. See ApplyReflectionOptions.verifiedSuccess.
         verifiedSuccess: judgeVerdict.then((v) => (v ? v.outcome === 'success' : undefined)),

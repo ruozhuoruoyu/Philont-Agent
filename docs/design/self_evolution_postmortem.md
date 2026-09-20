@@ -98,6 +98,7 @@ catalogue of §2's last paragraph — is the part worth writing up.
 | Format-failure ladder: echo the model's own input, then the expected shape, then a strict one-call template; unknown tool names recorded and answered with the closest real names; format failures are their own signature class and never lock the tool | ModularRSI `parse_error_recovery` | `server/src/format_recovery.ts`, `failure_signatures.ts`, `llm-adapter.ts` (`safeJsonParse` no longer degrades to `{}`), `chat-handler.ts` rejection branches |
 | Inspection-only streak nudge (trailing run of local read-only calls) | ModularRSI `planning_with_guard` read-only guard | `in_turn_reflection.ts` `detectInspectionStreak` |
 | Positive artifacts require a judge-verified success (creation ≤ measurement) | RSEA keep-better gate; SEAL; redesign Phase 2.1 | `reflection.ts` `ApplyReflectionOptions.verifiedSuccess`, `reflection_runner.ts`, judge verdict hoisted in `chat-handler.ts` |
+| Cross-turn evidence in reflection: this turn's failure classes counted across the ledger (sessions, occurrences) are rendered into the prompt; an avoid-only routing rule must name a signature seen in ≥2 sessions or it is withheld (a one-turn lesson is a playbook) | ModularRSI cross-task vote on findings | `reflection.ts` `signatureSupport`/`requireCrossTurnSupport`, `reflection_runner.ts` `buildCrossTurnEvidence` |
 | Sealed replay bench: a fixed bank of pinned failures (≥2 sessions or rule-backed, one per class), re-run on idle under current rules with the tool as oracle; learned repair lines are candidates until they turn a fixture green where accepted rules did not; redundant/failed candidates dropped; a rule change that turns green to red is reverted | SEAL sealed audit; RSEA keep-better; ModularRSI benchmark-disjoint set + cross-task vote | `server/src/replay_bench.ts`, candidate ledger in `mechanical_fix_learning.ts`, idle tick in `chat-handler.ts`, `learning_stats.ts` |
 
 Deliberately **not** absorbed:
@@ -121,9 +122,9 @@ Deliberately **not** absorbed:
    them onto the pinned bank is the next step. Routing rules and playbooks remain ungated because
    prose has no executable check — the honest options are the judge-gated crystallization already
    in place and, later, offer-vs-withhold comparison on the judge's verdicts.
-2. **Reflection batched by failure signature across turns**, with a rule allowed only when ≥2
-   distinct tasks support it (ModularRSI's vote), replacing single-turn reflection over the last
-   12 messages. The bench's pinning rule (≥2 sessions) is the same vote, applied to fixtures.
+2. **Contrastive pairing in reflection.** The evidence block now counts recurrences; the next step
+   is to pair each recurring failure with a later SUCCESS of the same tool (ModularRSI's
+   success/failure trajectory pairing), so the model diagnoses a divergence rather than a failure.
 3. **Demotion on observed failure** for prose artifacts and disuse retirement for playbooks
    (redesign Phase 2.4 / 0.2) — currently the only negative edge is the draft cap.
 4. **The development discipline itself**: a finding needs ≥2 distinct tasks before a patch, one

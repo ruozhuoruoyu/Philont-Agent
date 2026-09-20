@@ -24,6 +24,8 @@ import {
   applyReflection,
   shouldTriggerReflection,
   renderReflectionPrompt,
+  renderCrossTurnEvidence,
+  type CrossTurnEvidence,
   type ReflectionTriggerInput,
   type SkillStore,
   type RoutingRuleStore,
@@ -208,6 +210,11 @@ export interface ReflectionRunOptions {
    * this resolves to `true`. Awaited here, off the turn's critical path.
    */
   verifiedSuccess?: Promise<boolean | undefined> | boolean;
+  /**
+   * 2026-09-20: this turn's failure classes over the recent ledger (buildCrossTurnEvidence). Rendered
+   * into the prompt, and its session counts gate avoid-only routing rules (cross-task vote).
+   */
+  crossTurnEvidence?: ReadonlyArray<CrossTurnEvidence>;
   /** 2026-06-22: optional instrumentation counters (turn-close reflection fire/skip/production). */
   metrics?: MetricsStore;
   /**
@@ -241,6 +248,70 @@ const lastReflectionFire = new Map<string, { ts: number; reasonsKey: string }>()
 export function learningRequiresVerifiedSuccess(env: NodeJS.ProcessEnv = process.env): boolean {
   const v = (env.PHILONT_LEARNING_REQUIRE_VERIFIED ?? '').trim().toLowerCase();
   return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/** PHILONT_LEARNING_REQUIRE_RECURRENCE — default on; an avoid-only rule needs its failure in ≥2 sessions. */
+export function learningRequiresRecurrence(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = (env.PHILONT_LEARNING_REQUIRE_RECURRENCE ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/** A failed call of this turn, as the turn ledger holds it. */
+export interface TurnFailureRecord {
+  toolName: string;
+  resultText?: string;
+}
+
+/** A failed call as the action ledger holds it (memory.actions.listRecentFailures). */
+export interface LedgerFailureRow {
+  toolName: string;
+  result: string | null;
+  sessionId: string;
+}
+
+/**
+ * This turn's failure classes, counted across the recent ledger. Pure. One entry per signature the
+ * turn produced, most-recurring first, capped so the prompt stays a prompt. The current session is
+ * in the ledger already (calls are logged as they run), so "2 sessions" means one OTHER session.
+ */
+export function buildCrossTurnEvidence(input: {
+  turnFailures: ReadonlyArray<TurnFailureRecord>;
+  ledger: ReadonlyArray<LedgerFailureRow>;
+  signatureOf: (toolName: string, errorText: string) => string;
+  currentSessionId?: string;
+  limit?: number;
+}): CrossTurnEvidence[] {
+  const wanted = new Set<string>();
+  for (const f of input.turnFailures) {
+    const sig = input.signatureOf(f.toolName, f.resultText ?? '');
+    if (sig) wanted.add(sig);
+  }
+  if (wanted.size === 0) return [];
+  const agg = new Map<string, { sessions: Set<string>; occurrences: number; sample: string }>();
+  for (const sig of wanted) {
+    agg.set(sig, { sessions: input.currentSessionId ? new Set([input.currentSessionId]) : new Set(), occurrences: 0, sample: '' });
+  }
+  for (const row of input.ledger) {
+    const sig = input.signatureOf(row.toolName, row.result ?? '');
+    const cur = agg.get(sig);
+    if (!cur) continue;
+    cur.occurrences++;
+    if (row.sessionId) cur.sessions.add(row.sessionId);
+    if (!cur.sample && row.result) cur.sample = row.result.replace(/\s+/g, ' ').trim().slice(0, 160);
+  }
+  // A failure of this turn that the ledger has not recorded yet still happened once.
+  for (const f of input.turnFailures) {
+    const sig = input.signatureOf(f.toolName, f.resultText ?? '');
+    const cur = agg.get(sig);
+    if (cur && cur.occurrences === 0) {
+      cur.occurrences = 1;
+      cur.sample = (f.resultText ?? '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    }
+  }
+  return [...agg.entries()]
+    .map(([signature, a]) => ({ signature, sessions: a.sessions.size, occurrences: a.occurrences, sample: a.sample }))
+    .sort((a, b) => b.sessions - a.sessions || b.occurrences - a.occurrences || a.signature.localeCompare(b.signature))
+    .slice(0, input.limit ?? 6);
 }
 
 /** Never throws and never hangs the apply on a judge that errored: an unresolved verdict is `undefined`. */
@@ -332,9 +403,10 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
           .join('\n')
       : '';
 
+    const evidenceBlock = renderCrossTurnEvidence(opts.crossTurnEvidence ?? []);
     const userPart =
       `${prompt}\n\n## 最近对话上下文(用于蒸馏)\n${recentCtx}` +
-      `${playbookContext}\n\n` +
+      `${playbookContext}${evidenceBlock}\n\n` +
       `仅输出 JSON。不要解释。不要 prose。`;
 
     let llmResponse: string;
@@ -395,6 +467,8 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
         turnDegraded: state.turnDegraded,
         verifiedSuccess,
         requireVerifiedSuccess: learningRequiresVerifiedSuccess(),
+        signatureSupport: Object.fromEntries((opts.crossTurnEvidence ?? []).map((e) => [e.signature, e.sessions])),
+        requireCrossTurnSupport: learningRequiresRecurrence(),
       },
     );
 
@@ -468,12 +542,15 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
     if (result.stats.withheldUnverified > 0) {
       opts.metrics?.increment('reflect.withheld_unverified', result.stats.withheldUnverified);
     }
+    if (result.stats.withheldUnsupported > 0) {
+      opts.metrics?.increment('reflect.withheld_unsupported', result.stats.withheldUnsupported);
+    }
 
     console.log(
       `[reflection] session=${safeSessionId(opts.sessionId)} reflectionId=${reflectionId} ` +
         `applied=${result.applied.length} routing=${result.stats.routingRulesCreated} ` +
         `playbooks=${result.stats.playbooksCreated} new_skills=${result.stats.newSkillsCreated} ` +
-        `refined=${result.stats.skillsRefined} withheld_unverified=${result.stats.withheldUnverified} ` +
+        `refined=${result.stats.skillsRefined} withheld_unverified=${result.stats.withheldUnverified} withheld_unsupported=${result.stats.withheldUnsupported} ` +
         `(judge=${verifiedSuccess === undefined ? 'none' : verifiedSuccess ? 'success' : 'failure'}) errors=${result.errors.length}`,
     );
   } catch (e) {

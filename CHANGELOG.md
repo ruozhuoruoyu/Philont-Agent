@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Avoid rules need their failure to have recurred (the cross-task vote).** Turn-close reflection
+  now sees this turn's failure classes counted across the recent ledger ("Recurring failures":
+  signature, distinct sessions, occurrences), and an avoid-only routing rule is written only when it
+  names a signature seen in ≥2 sessions; otherwise it is withheld and counted
+  (`reflect.withheld_unsupported`) — a lesson from one turn is a playbook, not a rule. Prefer-skill
+  rules stay behind the judge-verified gate; playbooks are unaffected. This is ModularRSI's
+  "modifications supported by distinct tasks" applied to reflection, replacing single-trajectory
+  updates over the last 12 messages. `PHILONT_LEARNING_REQUIRE_RECURRENCE=0` restores the old
+  behaviour. Draft-recipe validation now tries the pinned bench first, the rolling ledger after.
+
 - **The sealed replay bench.** Learned repair lines were only ever tested against whatever the
   failure ledger held in the last 14 days, so no two runs measured the same thing and a rule had
   nothing to be checked against once its failure rolled off. `replay_bench.ts` pins past failures

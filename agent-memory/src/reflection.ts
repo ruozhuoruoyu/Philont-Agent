@@ -50,6 +50,13 @@ export interface RoutingRuleLearning {
   evidence: string;
   /** LLM self-assessed confidence tier, influences initial confidence */
   selfConfidence?: 'provisional' | 'tentative';
+  /**
+   * 2026-09-20: the failure signature (`<tool>:<class>`) this rule is about, chosen from the recurring
+   * failures the reflection prompt lists. An avoid-only rule is written only when its signature
+   * recurred across sessions (see ApplyReflectionOptions.signatureSupport) — a single trajectory is a
+   * hypothesis, not a rule.
+   */
+  signature?: string;
 }
 
 export interface SkillRefineLearning {
@@ -431,6 +438,7 @@ function parseLearning(
     //
     // This type of "pure avoidance" rule equals a refined playbook, but the routing_rule path has a 5-tier
     // confidence state machine + task signature index, making it more structured than playbook.
+    const signature = strField(o, 'signature', 'failure_signature') || undefined;
     return {
       type: 'routing_rule',
       triggerCondition,
@@ -439,6 +447,7 @@ function parseLearning(
       carveout,
       evidence,
       selfConfidence,
+      signature,
     };
   }
 
@@ -644,7 +653,19 @@ export interface ApplyReflectionOptions {
    */
   verifiedSuccess?: boolean;
   requireVerifiedSuccess?: boolean;
+  /**
+   * 2026-09-20 (cross-task vote): distinct sessions each failure signature was seen in over the recent
+   * ledger window. With `requireCrossTurnSupport`, an AVOID-ONLY routing_rule (no preferSkill — a
+   * failure lesson) is written only when it names a signature with support ≥ 2; otherwise it is
+   * withheld and counted. Single-trajectory updates conflate one turn's reasoning with a systematic
+   * deficiency (ModularRSI, arXiv 2609.14857); a lesson that has not recurred belongs in a playbook.
+   */
+  signatureSupport?: Readonly<Record<string, number>>;
+  requireCrossTurnSupport?: boolean;
 }
+
+/** Distinct sessions a signature needs before an avoid-only rule may be written about it. */
+export const CROSS_TURN_SUPPORT_MIN = 2;
 
 export interface ApplyResult {
   /** Successfully written learnings (indexed to match original array) */
@@ -663,6 +684,8 @@ export interface ApplyResult {
     planKnowledgeWritten: number;
     /** 2026-09-20: positive learnings withheld because the turn was not a verified success */
     withheldUnverified: number;
+    /** 2026-09-20: avoid-only routing rules withheld because their failure has not recurred across sessions */
+    withheldUnsupported: number;
   };
 }
 
@@ -698,6 +721,7 @@ export function applyReflection(
       plansRevised: 0,
       planKnowledgeWritten: 0,
       withheldUnverified: 0,
+      withheldUnsupported: 0,
     },
   };
 
@@ -718,6 +742,21 @@ export function applyReflection(
             'unverified turn is a hypothesis, not a lesson. Failure lessons (avoid-only routing_rule / playbook) are still accepted.',
         });
         return;
+      }
+      // 2026-09-20: an avoid-only rule needs its failure to have recurred across sessions (the cross-task vote).
+      if (opts.requireCrossTurnSupport && learning.type === 'routing_rule' && !learning.preferSkill) {
+        const sig = learning.signature?.trim();
+        const support = sig ? (opts.signatureSupport?.[sig] ?? 0) : 0;
+        if (support < CROSS_TURN_SUPPORT_MIN) {
+          result.stats.withheldUnsupported++;
+          result.errors.push({
+            index: i,
+            error:
+              `unsupported-rule: withheld routing_rule — ${sig ? `signature '${sig}' was seen in ${support} session(s)` : 'no failure signature named'}; ` +
+              `an avoid rule needs the same failure in ≥${CROSS_TURN_SUPPORT_MIN} sessions. A lesson from one turn belongs in a playbook.`,
+          });
+          return;
+        }
       }
       // 2026-05-15: degraded turn rejects positive skill distillation (new_skill / skill_refine).
       // Failure path distilled into skill → re-applied via use_skill next time → same error infinite loop.
@@ -1089,6 +1128,7 @@ function renderDegradedReflectionPrompt(reasons: string[]): string {
     `### ✅ Allowed outputs (one or both)\n\n` +
     `**1. routing_rule (carveout form) — best**\n` +
     `   Describe "avoid tool Y / method Y under condition X". Next time a similar task hits this rule, it will be guided away.\n` +
+    `   Only for a failure listed under 'Recurring failures' (copy its signature). A failure seen once is a playbook, not a rule.\n` +
     `   Example: LLM used api_key_prefix as a full key → routing_rule\n` +
     `   triggerCondition="outbound http requiring secret auth"\n` +
     `   carveout="Do not use *_prefix / *_token_prefix fact fields directly; Authorization must use {credential-name} placeholder"\n\n` +
@@ -1112,6 +1152,7 @@ function renderDegradedReflectionPrompt(reasons: string[]): string {
     `      "avoid_skills": ["<skill name exposed as inappropriate by this failure>"],\n` +
     `      "carveout": "<specific avoidance action>",\n` +
     `      "evidence": "<concrete evidence of this turn's failure>",\n` +
+    `      "signature": "<one signature copied from 'Recurring failures' below — required for an avoid rule; if this failure is not listed there, write a playbook instead>",\n` +
     `      "self_confidence": "provisional"\n` +
     `    },\n` +
     `    {\n` +
@@ -1143,7 +1184,8 @@ export function renderReflectionPrompt(
     `**1. routing_rule — most valuable**\n` +
     `   Describes which path to take in the future. Auto-injected as a recommendation at task start; guides the same type of task next time.\n` +
     `   When to use: this failure exposed a discriminating condition like "use skill X / avoid skill Y in scenario Z".\n` +
-    `   Example: webFetch of service docs was blocked by aux LLM distillation → routing_rule "service API doc: use http GET not webFetch".\n\n` +
+    `   Example: webFetch of service docs was blocked by aux LLM distillation → routing_rule "service API doc: use http GET not webFetch".\n` +
+    `   An AVOID rule (no prefer_skill) is written only when its failure has recurred: copy its signature from 'Recurring failures' below. Not listed there → it has happened once → write a playbook, not a rule.\n\n` +
     `**2. new_skill — high value**\n` +
     `   Solidify the complete steps discovered this time into a SKILL.md template callable via use_skill.\n` +
     `   When to use: proved out a new workflow (registration / onboarding / report generation) that you want to call directly next time rather than rediscovering.\n\n` +
@@ -1174,6 +1216,7 @@ export function renderReflectionPrompt(
     `      "avoid_skills": ["...optional; leave empty array if no specific skill to avoid"],\n` +
     `      "carveout": "<required: this rule does not apply to...>",\n` +
     `      "evidence": "<required: which specific observation this is based on>",\n` +
+    `      "signature": "<when this rule is about a tool failure: one signature copied from 'Recurring failures' below; omit otherwise>",\n` +
     `      "self_confidence": "tentative"\n` +
     `    },\n` +
     `    // or: new_skill\n` +
@@ -1222,5 +1265,41 @@ export function renderReflectionPrompt(
     `- **routing_rule's prefer_skill / avoid_skills are both optional** (2026-05-11): filling null / empty array when no specific skill recommendation is compliant; trigger_condition + carveout + evidence are sufficient. Don't give up writing routing_rule in favor of playbook just because you can't recall a skill name\n` +
     `- No real lesson → directly \`{"had_lesson": false, "task_signature": "...", "attempts": [], "learnings": []}\`\n` +
     `- Don't fabricate attempts; only list methods actually tried in this task\n`
+  );
+}
+
+
+// ── Cross-turn evidence (2026-09-20) ────────────────────────────────────
+
+/** One failure signature's recurrence over the recent ledger window, as shown to the reflection model. */
+export interface CrossTurnEvidence {
+  signature: string;
+  /** Distinct sessions it was seen in (the current one included). */
+  sessions: number;
+  /** Failed calls with that signature in the window. */
+  occurrences: number;
+  /** A short sample of the error text. */
+  sample: string;
+}
+
+/**
+ * The block that turns single-trajectory reflection into a multi-trajectory one: what this turn's
+ * failures look like across the recent ledger. Empty evidence renders an explicit "nothing recurred"
+ * so the model does not guess a signature.
+ */
+export function renderCrossTurnEvidence(evidence: ReadonlyArray<CrossTurnEvidence>): string {
+  const head = `\n\n## Recurring failures (this turn's failure classes over the recent ledger; sessions = distinct sessions)\n`;
+  if (evidence.length === 0) {
+    return head + `(none of this turn's failures has been seen in another session — an avoid rule is not warranted; use a playbook)\n`;
+  }
+  return (
+    head +
+    evidence
+      .map((e) => {
+        const mark = e.sessions >= CROSS_TURN_SUPPORT_MIN ? 'recurring' : 'this session only';
+        return `- signature=${e.signature} — ${e.sessions} session(s), ${e.occurrences} occurrence(s) [${mark}]: ${e.sample}`;
+      })
+      .join('\n') +
+    '\n'
   );
 }
