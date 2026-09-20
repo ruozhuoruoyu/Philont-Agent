@@ -58,6 +58,58 @@ interface GpRun {
 
 type GpPrecheckClass = 'gp-precheck-paren' | 'gp-precheck-nested-braces' | 'gp-precheck-spanning';
 
+/**
+ * GP has no `//` comment: `\\` is the line comment, slash-star … star-slash the block comment. Models write `//`
+ * anyway (prod 2026-09-20 00:45 → 04:28: eleven scripts died with `syntax error, unexpected '/'` on a
+ * `//...` line, one of them twice), and `//` is never valid GP outside a string, so it is rewritten
+ * to `\\` before the pre-checks. Strings and existing comments are walked, not regexed, so a `//`
+ * inside `"http://…"` or inside a `\\` comment is left alone. Returns the script and how many
+ * comments were rewritten.
+ */
+export function normalizeGpComments(script: string): { script: string; rewritten: number } {
+  let out = '';
+  let rewritten = 0;
+  let i = 0;
+  const n = script.length;
+  while (i < n) {
+    const c = script[i];
+    const next = script[i + 1];
+    if (c === '"') {
+      // string literal, with backslash escapes
+      let j = i + 1;
+      while (j < n && script[j] !== '"') j += script[j] === '\\' ? 2 : 1;
+      out += script.slice(i, Math.min(n, j + 1));
+      i = Math.min(n, j + 1);
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      const end = script.indexOf('*/', i + 2);
+      const stop = end === -1 ? n : end + 2;
+      out += script.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (c === '\\' && next === '\\') {
+      const end = script.indexOf('\n', i);
+      const stop = end === -1 ? n : end;
+      out += script.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (c === '/' && next === '/') {
+      const end = script.indexOf('\n', i);
+      const stop = end === -1 ? n : end;
+      out += '\\\\' + script.slice(i + 2, stop);
+      rewritten += 1;
+      i = stop;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return { script: out, rewritten };
+}
+
 function renderGpPrecheck(kind: GpPrecheckClass, message: string): string {
   // The runtime produced this diagnostic, so preserve its already-known class in-band. Downstream
   // learning code must not reverse-engineer our own prose (or let "still unclosed" steal spanning).
@@ -310,10 +362,12 @@ export const pariGpTool: Tool = {
   capability: 'execute',
   domain: 'local',
   async execute(params) {
-    const script = typeof params.script === 'string' ? params.script : '';
-    if (!script.trim()) {
+    const rawScript = typeof params.script === 'string' ? params.script : '';
+    if (!rawScript.trim()) {
       return { success: false, output: '', error: 'Need a non-empty script (GP script)' };
     }
+    // `//` is not a GP comment; rewrite to `\\` instead of letting gp die on it (see normalizeGpComments).
+    const { script, rewritten: commentsRewritten } = normalizeGpComments(rawScript);
     // Pre-flight: reject unbalanced parens/brackets before spawning gp (saves a failed iteration).
     const syntaxIssue = checkGpParenBalance(script);
     if (syntaxIssue) {
@@ -371,7 +425,10 @@ export const pariGpTool: Tool = {
       if (!run.ok && stderrHasNonWarningContent(err)) {
         return { success: false, output: out, error: `PARI/GP error: ${err.slice(0, 600)}` };
       }
-      return { success: true, output: out || '(no output — remember to print(...) your conclusion)' };
+      const note = commentsRewritten > 0
+        ? `\n[note: ${commentsRewritten} \`//\` comment(s) were rewritten to GP's \`\\\\\` before running — GP has no \`//\` comment; write \`\\\\\` next time]`
+        : '';
+      return { success: true, output: (out || '(no output — remember to print(...) your conclusion)') + note };
     }
 
     return {

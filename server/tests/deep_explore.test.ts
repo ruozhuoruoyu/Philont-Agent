@@ -73,6 +73,7 @@ import {
   withSessionWebDedup,
   renderProgressMilestone,
   renderRoundCapWarning,
+  limitReviewerCompute,
   describeSettleRefusals,
   takeSettleAttempts,
   pariMethodFingerprint,
@@ -2081,4 +2082,25 @@ test('deadEndEarned: the four ways a dead end is earned, and the one way it is n
   const p = node({ id: 'p' });
   assert.equal(deadEndEarned(p, [p, node({ id: 'c', parentId: 'p', status: 'proved' })], 0), true, 'children settled');
   assert.equal(deadEndEarned(p, [p, node({ id: 'c', parentId: 'p', status: 'open' })], 0), false, 'an open child is not a failed split');
+});
+
+test('a reviewer may run pariGp a bounded number of times, each clamped to a short timeout', async () => {
+  // Prod 2026-09-17 22:05 / 22:19, 2026-09-20 00:54: reviewers without an enumeration tool refused finite
+  // censuses as "an empirical assertion I cannot independently verify".
+  const seen: Array<{ name: string; timeoutMs: unknown }> = [];
+  const delegate = async (name: string, input: Record<string, unknown>) => {
+    seen.push({ name, timeoutMs: input.timeoutMs });
+    return { ok: true, output: `ran ${name}` };
+  };
+  const run = limitReviewerCompute(delegate, { maxCalls: 2, timeoutMs: 20_000 });
+  assert.equal((await run('pariGp', { script: 'print(1)', timeoutMs: 60_000 })).ok, true);
+  assert.equal((await run('pariGp', { script: 'print(2)' })).ok, true);
+  const third = await run('pariGp', { script: 'print(3)' });
+  assert.equal(third.ok, false);
+  assert.match(third.error!, /Reviewer compute budget spent \(2 pariGp call\(s\) per review\)/);
+  assert.equal((await run('z3Verify', { smt: '(check-sat)' })).ok, true, 'other tools are not counted');
+  assert.deepEqual(seen.map((c) => [c.name, c.timeoutMs]), [['pariGp', 20_000], ['pariGp', 20_000], ['z3Verify', undefined]]);
+  // Each reviewer gets its own budget.
+  const other = limitReviewerCompute(delegate, { maxCalls: 1, timeoutMs: 5_000 });
+  assert.equal((await other('pariGp', { script: 'print(4)' })).ok, true);
 });

@@ -9,14 +9,27 @@
  * the same ten; today six of them were "本轮已运行 5 分钟", and the four milestones that carried the
  * night's work all bounced.
  *
- * The allowance is learned, not configured: a refusal after N sends sets the total to N, and a send
- * that succeeds past the learned total raises it. An unlearned peer starts at the observed ten.
+ * The allowance is learned, not configured: a refusal after N sends is one observation of the total,
+ * and a send that succeeds past the learned total raises it. An unlearned peer starts at the observed
+ * ten.
+ *
+ * One observation is not the total. Prod 2026-09-19/20: a single refusal after three sends set the
+ * total to 3; the dispatcher's reserves then held every one of the night's 47 round reports at
+ * `remaining=0/3`, and at 04:47 the blocking pause card — sent at the "exhausted" ledger — went
+ * through, proving the 3 wrong. A ledger that only ever ratchets down cannot recover, because the
+ * reserves stop the very sends that would correct it. The total is now the MAX of the last
+ * REFUSAL_WINDOW refusal points: one low outlier changes nothing; a real drop is learned once it
+ * repeats. A wrong-high total costs a few refused sends (deferred to the mailbox); a wrong-low one
+ * costs a night of silence.
  */
+export const REFUSAL_WINDOW = 5;
 export interface PeerAllowanceState {
   /** Messages the platform accepts per inbound (learned; DEFAULT_PEER_ALLOWANCE until observed). */
   total: number;
   /** Messages accepted since the peer's last inbound. */
   sentSince: number;
+  /** The last REFUSAL_WINDOW send counts at which the platform refused (newest last). */
+  refusalPoints?: number[];
   updatedAt: number;
 }
 
@@ -72,12 +85,16 @@ export class OutboundAllowance {
   }
 
   /**
-   * The platform refused (`ret=-2 prepare failed`). With sends on the ledger that count IS the
-   * allowance. A refusal with nothing sent since the inbound is some other failure; nothing is learned.
+   * The platform refused (`ret=-2 prepare failed`). With sends on the ledger that count is one
+   * observation of the allowance; the total is the max over the recent window (see the header).
+   * A refusal with nothing sent since the inbound is some other failure; nothing is learned.
    */
   onRefused(peer: string): void {
     const s = this.state(peer);
-    if (s.sentSince >= 1) s.total = s.sentSince;
+    if (s.sentSince >= 1) {
+      s.refusalPoints = [...(s.refusalPoints ?? []), s.sentSince].slice(-REFUSAL_WINDOW);
+      s.total = Math.max(...s.refusalPoints);
+    }
     this.commit(peer, s);
   }
 

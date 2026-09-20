@@ -2894,6 +2894,46 @@ export function tallyVerdicts(verdicts: Array<SkepticVerdict | null>): Verificat
   };
 }
 
+/**
+ * Reviewer compute budget. Reviewers were cut off from pariGp on 2026-06-08 (they burned their whole
+ * budget retrying malformed scripts). Since then the GP pre-checks (paren / braces / spanning / `//`)
+ * catch the malformed scripts before gp runs — and the session this was built on now lives on finite
+ * censuses: prod 2026-09-17 22:05 the reviewers refused C1 (160871 admissible pairs) as "an empirical
+ * assertion I cannot independently verify", 22:19 they z3-checked one witness and refused again ("a
+ * local witness is not the universal claim"), 2026-09-20 00:54 "a verbatim citation of a reported
+ * finite computation". A reviewer that cannot enumerate cannot judge a census; it can only say so.
+ * So a reviewer may run pariGp — at most SKEPTIC_PARI_CALLS times, each clamped to
+ * SKEPTIC_PARI_TIMEOUT_MS — enough to re-run a census on a sample slice, not enough to become the
+ * prover. 0 restores the old exclusion.
+ */
+const SKEPTIC_PARI_CALLS = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_SKEPTIC_PARI_CALLS);
+  return Number.isInteger(n) && n >= 0 && n <= 6 ? n : 2;
+})();
+const SKEPTIC_PARI_TIMEOUT_MS = 20_000;
+/** Per-reviewer wrapper: counts pariGp calls, clamps their timeout, refuses past the cap. Pure; exported for tests. */
+export function limitReviewerCompute(
+  delegate: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>,
+  limits: { maxCalls: number; timeoutMs: number } = { maxCalls: SKEPTIC_PARI_CALLS, timeoutMs: SKEPTIC_PARI_TIMEOUT_MS },
+): (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult> {
+  let calls = 0;
+  return async (name, input) => {
+    if (name !== 'pariGp') return delegate(name, input);
+    if (calls >= limits.maxCalls) {
+      return {
+        ok: false,
+        output: '',
+        error:
+          `Reviewer compute budget spent (${limits.maxCalls} pariGp call(s) per review). ` +
+          `Judge from what you have already computed and the argument as written; do not retry.`,
+      };
+    }
+    calls += 1;
+    const requested = typeof input.timeoutMs === 'number' && Number.isFinite(input.timeoutMs) ? input.timeoutMs : limits.timeoutMs;
+    return delegate(name, { ...input, timeoutMs: Math.min(requested, limits.timeoutMs) });
+  };
+}
+
 /** Run `count` independent skeptics concurrently, parse each verdict, and tally. count<=0 immediately accepts (verification disabled). */
 export async function runAdversarialVerification(opts: {
   llm: MiniLoopLLMClient;
@@ -2915,7 +2955,7 @@ export async function runAdversarialVerification(opts: {
       userMessage: `You are independent reviewer #${i + 1}. Review the proof of the proposition above independently and try hard to refute it; give your reasons, then output the verdict in the required format.`,
       llm: opts.llm,
       toolDefs: opts.toolDefs,
-      toolRunner: opts.toolRunner,
+      toolRunner: limitReviewerCompute(opts.toolRunner), // one budget per reviewer, not shared
       maxIters: opts.maxIters ?? SKEPTIC_MAX_ITERS,
       toolWhitelist: opts.whitelist,
       onStatus: opts.onStatus,
@@ -3643,8 +3683,11 @@ export function createDeepExploreTool(
       // CITED evidence already gathered into the argument/tree, not by re-fetching (3 web-enabled skeptics
       // re-crawling the same sources was the dominant deliberate re-fetch storm). Local recall (own
       // notes/facts) stays; only webSearch/webFetch are dropped for deliberate.
+      // 2026-09-20: pariGp is back for FORMAL reviewers under a per-reviewer cap (limitReviewerCompute);
+      // SKEPTIC_PARI_CALLS=0 restores the exclusion.
       const skepticToolDefs = PROFILE_RT[profile.id].researchDefs.filter(
-        (d) => d.name !== 'pariGp' && !(profile.id === 'deliberate' && WEB_TOOL_NAMES.has(d.name)),
+        (d) => !(d.name === 'pariGp' && (SKEPTIC_PARI_CALLS === 0 || profile.id !== 'formal')) &&
+          !(profile.id === 'deliberate' && WEB_TOOL_NAMES.has(d.name)),
       );
       const tally = await runAdversarialVerification({
         llm: miniLoopLLM,

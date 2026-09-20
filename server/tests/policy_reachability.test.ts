@@ -737,3 +737,13 @@ test('a refused proof is accounted at every gate, said in the owner\'s language,
   assert.match(dispatcher, /req\.progress === 'milestone' && req\.blocking !== true/, 'routine reports keep the last slot for a blocking card');
   assert.match(dispatcher, /'channel_not_ready', 'allowance_reserved'\]\.includes\(skip\.reason\)/, 'a held report is owed, not dropped');
 });
+
+test('reviewers may compute under a cap; `//` GP comments are rewritten before the pre-checks', () => {
+  const deepExplore = readFileSync(new URL('../src/deep_explore.ts', import.meta.url), 'utf8');
+  assert.match(deepExplore, /toolRunner: limitReviewerCompute\(opts\.toolRunner\),/, 'every reviewer run is wrapped');
+  assert.match(deepExplore, /d\.name === 'pariGp' && \(SKEPTIC_PARI_CALLS === 0 \|\| profile\.id !== 'formal'\)/, 'formal reviewers see pariGp unless disabled');
+  assert.doesNotMatch(deepExplore, /\(d\) => d\.name !== 'pariGp' &&/, 'the unconditional exclusion is gone');
+  const gp = readFileSync(new URL('../../agent-tools/src/runtime/gp.ts', import.meta.url), 'utf8');
+  assert.match(gp, /const \{ script, rewritten: commentsRewritten \} = normalizeGpComments\(rawScript\);\n\s*\/\/ Pre-flight: reject unbalanced/, 'normalized before the paren pre-check');
+  assert.match(gp, /comment\(s\) were rewritten to GP's/, 'the model is told, so it learns the spelling');
+});
