@@ -246,6 +246,98 @@ export function learnedCheatsheet(signature: string, facts: MechanicalFixStore):
 const MAX_LINES_PER_SIGNATURE = 6;
 
 /**
+ * Candidate lines (2026-09-20, replay bench). A line distilled for a signature whose tool the bench
+ * can replay is NOT shown to the agent yet: it waits here until a bench run proves it turns the
+ * pinned fixture green (see replay_bench.ts, keep-better gate). `failures` counts bench runs where
+ * the candidate did not help; two of them drop it. Signatures the bench cannot exercise (no replay-
+ * eligible tool, hence no oracle) keep the old path and land in the accepted list directly.
+ */
+export const MECHANICAL_FIX_CANDIDATES_NAMESPACE = 'mechanical_fix_candidates';
+
+export interface CandidateLines {
+  lines: string[];
+  failures: number;
+  updatedAt: number;
+}
+
+export function readCandidateLines(signature: string, facts: MechanicalFixStore): CandidateLines {
+  try {
+    const v = facts.getFact(MECHANICAL_FIX_CANDIDATES_NAMESPACE, signature)?.value as Partial<CandidateLines> | undefined;
+    return {
+      lines: Array.isArray(v?.lines) ? v!.lines.filter((x): x is string => typeof x === 'string') : [],
+      failures: Math.max(0, Number(v?.failures) || 0),
+      updatedAt: Number(v?.updatedAt) || 0,
+    };
+  } catch {
+    return { lines: [], failures: 0, updatedAt: 0 };
+  }
+}
+
+function writeCandidateLines(signature: string, facts: MechanicalFixStore, next: CandidateLines): void {
+  facts.storeFact({ namespace: MECHANICAL_FIX_CANDIDATES_NAMESPACE, key: signature, value: next });
+}
+
+/** Append a line to the candidate list (deduplicated, capped like the accepted list). */
+export function addCandidateLine(signature: string, line: string, facts: MechanicalFixStore, now = Date.now()): boolean {
+  const cur = readCandidateLines(signature, facts);
+  if (cur.lines.some((l) => l.toLowerCase() === line.toLowerCase())) return false;
+  writeCandidateLines(signature, facts, {
+    lines: [...cur.lines, line].slice(-MAX_LINES_PER_SIGNATURE),
+    failures: cur.failures,
+    updatedAt: now,
+  });
+  return true;
+}
+
+/** Move every candidate line of a signature into the accepted list (the bench turned the fixture green). */
+export function promoteCandidateLines(signature: string, facts: MechanicalFixStore, now = Date.now()): string[] {
+  const cur = readCandidateLines(signature, facts);
+  if (cur.lines.length === 0) return [];
+  const accepted = learnedCheatsheet(signature, facts);
+  const merged = [...accepted];
+  for (const l of cur.lines) {
+    if (!merged.some((m) => m.toLowerCase() === l.toLowerCase())) merged.push(l);
+  }
+  facts.storeFact({ namespace: MECHANICAL_FIX_NAMESPACE, key: signature, value: merged.slice(-MAX_LINES_PER_SIGNATURE) });
+  writeCandidateLines(signature, facts, { lines: [], failures: 0, updatedAt: now });
+  return cur.lines;
+}
+
+/** Drop the candidate lines of a signature (redundant, or failed the bench twice). */
+export function dropCandidateLines(signature: string, facts: MechanicalFixStore, now = Date.now()): string[] {
+  const cur = readCandidateLines(signature, facts);
+  if (cur.lines.length === 0) return [];
+  writeCandidateLines(signature, facts, { lines: [], failures: 0, updatedAt: now });
+  return cur.lines;
+}
+
+/** Record one bench run in which the candidates did not turn the fixture green. Returns the new count. */
+export function recordCandidateFailure(signature: string, facts: MechanicalFixStore, now = Date.now()): number {
+  const cur = readCandidateLines(signature, facts);
+  const failures = cur.failures + 1;
+  writeCandidateLines(signature, facts, { ...cur, failures, updatedAt: now });
+  return failures;
+}
+
+/**
+ * Keep-better in reverse: the accepted set changed and a fixture that was green went red. The newest
+ * accepted line is the change; it goes back to the candidate list, where the bench will judge it again.
+ */
+export function demoteNewestAcceptedLine(signature: string, facts: MechanicalFixStore, now = Date.now()): string | null {
+  const accepted = learnedCheatsheet(signature, facts);
+  if (accepted.length === 0) return null;
+  const newest = accepted[accepted.length - 1];
+  facts.storeFact({ namespace: MECHANICAL_FIX_NAMESPACE, key: signature, value: accepted.slice(0, -1) });
+  const cur = readCandidateLines(signature, facts);
+  writeCandidateLines(signature, facts, {
+    lines: [newest, ...cur.lines.filter((l) => l.toLowerCase() !== newest.toLowerCase())].slice(-MAX_LINES_PER_SIGNATURE),
+    failures: 0,
+    updatedAt: now,
+  });
+  return newest;
+}
+
+/**
  * Distil and store the repair, if this turn actually contains one. Returns the line it learned, or null.
  *
  * Called at turn close. Safe to call on every turn: the floor rejects turns with no recovery in them,
@@ -257,8 +349,14 @@ export async function distillMechanicalFix(
   deps: {
     ask?: (req: { system: string; user: string; maxTokens: number }) => Promise<string | null>;
     configured?: boolean;
+    /**
+     * 2026-09-20: whether a line for this tool/signature must first pass the replay bench. When true
+     * the line is stored as a CANDIDATE (not shown to the agent) until a bench run proves it; when
+     * false (default — no oracle exists for the tool) it lands in the accepted list as before.
+     */
+    candidateFor?: (toolName: string, signature: string) => boolean;
   } = {},
-): Promise<{ signature: string; line: string } | null> {
+): Promise<{ signature: string; line: string; candidate?: boolean } | null> {
   if (!mechanicalFixLearningEnabled()) return null;
   const recovery = findMechanicalRecovery(results);
   if (!recovery) return null;
@@ -293,6 +391,10 @@ export async function distillMechanicalFix(
 
   try {
     if (existing.some((l) => l.toLowerCase() === line!.toLowerCase())) return null;
+    if (deps.candidateFor?.(recovery.toolName, recovery.signature)) {
+      if (!addCandidateLine(recovery.signature, line, facts)) return null;
+      return { signature: recovery.signature, line, candidate: true };
+    }
     const next = [...existing, line].slice(-MAX_LINES_PER_SIGNATURE);
     facts.storeFact({
       namespace: MECHANICAL_FIX_NAMESPACE,

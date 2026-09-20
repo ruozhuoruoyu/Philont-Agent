@@ -9,6 +9,7 @@
  * Pure reader: no writes, no LLM. Safe to call anytime; every section is independently try/caught.
  */
 import { extractFailureSignature, isMechanismRejectionSignature } from '@agent/memory';
+import { summarizeBench } from './replay_bench.js';
 import type { MemoryHandle } from '@agent/memory';
 
 function pct(n: number, d: number): string {
@@ -115,6 +116,24 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
           `this is the count that no longer waits for the failure to recur`,
       );
     }
+    // The sealed replay bench (2026-09-20): the fixed bank every learned repair line is measured on.
+    // `green/red` is the state of the bench under the CURRENT accepted rules — the one number that
+    // says whether learning helps that does not move when the ledger window rolls.
+    try {
+      const b = summarizeBench(memory.facts);
+      if (b.active + b.retired > 0 || get('learning.bench.pinned') > 0) {
+        lines.push(
+          `  replay bench: fixtures active=${b.active} (green=${b.green} red=${b.red} never-run=${b.neverRun}) retired=${b.retired}; ` +
+            `runs verified=${get('learning.bench.verified')} no_effect=${get('learning.bench.no_effect')} ` +
+            `different_failure=${get('learning.bench.different_failure')} inconclusive=${get('learning.bench.inconclusive')} ` +
+            `not-attempted=${get('learning.bench.not-attempted')}; ` +
+            `keep-better: promoted=${get('learning.bench.promoted')} dropped(redundant=${get('learning.bench.dropped-redundant')} ` +
+            `failed=${get('learning.bench.dropped-failed')}) regressions=${get('learning.bench.regression') + get('learning.bench.regression-demoted')} ` +
+            `(demoted=${get('learning.bench.regression-demoted')}); candidates pending=${b.pendingCandidates} ` +
+            `learned-as-candidate=${get('mechanical_fix.candidate')} — a line reaches the agent only after it turned a fixture green`,
+        );
+      }
+    } catch { /* report what we have */ }
     const draftsTested = get('learning.draft_validation.verified') + get('learning.draft_validation.no_effect')
       + get('learning.draft_validation.different_failure') + get('learning.draft_validation.inconclusive');
     if (draftsTested > 0 || get('learning.draft_validation.not-attempted') > 0) {

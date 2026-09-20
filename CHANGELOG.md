@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The sealed replay bench.** Learned repair lines were only ever tested against whatever the
+  failure ledger held in the last 14 days, so no two runs measured the same thing and a rule had
+  nothing to be checked against once its failure rolled off. `replay_bench.ts` pins past failures
+  into a fixed bank (one per failure class, seen in ≥2 sessions or backed by a rule; capacity
+  `PHILONT_REPLAY_BENCH_SIZE`, default 50) and re-runs them on the idle tick under the current rules
+  with the tool itself as the oracle. A line distilled for a bench-eligible tool is now a
+  *candidate* the agent does not see until a bench run shows it turns a pinned fixture green where
+  the accepted rules alone did not; a redundant candidate is dropped, one that fails twice is
+  dropped, and an accepted-set change that turns a green fixture red is reverted. The agent never
+  sees the bank and acceptance is mechanical (SEAL, arXiv 2607.24300; RSEA's keep-better gate). It
+  gates executable learning only — prose artifacts have no oracle and are not pretended to be
+  measured. `PHILONT_REPLAY_BENCH=0` disables; the learning report gains a `replay bench:` line.
+
 - **Format-failure recovery: the model sees what it sent.** A tool call rejected before execution
   (arguments that did not parse, a required field missing, a tool name that does not exist) now
   comes back with the model's own input quoted, then the expected shape, then a strict one-call

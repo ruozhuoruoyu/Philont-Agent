@@ -284,3 +284,33 @@ test('the hand-written table is among the lines the verifier is shown', async ()
   assert.match(seen[1], /Balance every "\("/, 'the proposal must be quoted to the verifier');
   assert.match(seen[1], /PARI\/GP authoring rules|Balance every "\("/);
 });
+
+// ── replay bench candidates (2026-09-20) ───────────────────────────────
+
+import { readCandidateLines, MECHANICAL_FIX_CANDIDATES_NAMESPACE } from '../src/mechanical_fix_learning.js';
+
+test('a line for a bench-eligible tool is stored as a candidate, not shown to the agent yet', async () => {
+  const facts = fakeFacts();
+  const got = await distillMechanicalFix([failed, worked], facts, {
+    configured: true,
+    ask: asks('Close every "(" you open: for( needs its own ")" before the statement ends.'),
+    candidateFor: (toolName) => toolName === 'pariGp',
+  });
+  assert.ok(got);
+  assert.equal(got.candidate, true);
+  assert.deepEqual(learnedCheatsheet('pariGp:gp-syntax', facts), [], 'not accepted until the bench says so');
+  assert.deepEqual(readCandidateLines('pariGp:gp-syntax', facts).lines, [got.line]);
+  assert.ok(facts._dump.has(`${MECHANICAL_FIX_CANDIDATES_NAMESPACE}/pariGp:gp-syntax`));
+});
+
+test('a tool the bench cannot exercise keeps the old path — accepted directly', async () => {
+  const facts = fakeFacts();
+  const got = await distillMechanicalFix([failed, worked], facts, {
+    configured: true,
+    ask: asks('Close every "(" you open: for( needs its own ")" before the statement ends.'),
+    candidateFor: () => false,
+  });
+  assert.ok(got);
+  assert.equal(got.candidate, undefined);
+  assert.equal(learnedCheatsheet('pariGp:gp-syntax', facts).length, 1);
+});

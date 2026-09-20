@@ -277,6 +277,16 @@ import {
   type ReplayAttemptState,
 } from './repair_replay.js';
 import {
+  loadFixtures,
+  pinFixture,
+  replayBenchEnabled,
+  replayBenchRunsPerTick,
+  replayBenchSize,
+  runReplayBench,
+  selectFixturesToPin,
+  type SessionLedgerFailure,
+} from './replay_bench.js';
+import {
   DRAFT_VALIDATION_ATTEMPTS_NAMESPACE,
   draftValidationEnabled,
   excludeFileBackedDrafts,
@@ -1532,6 +1542,69 @@ const idleConsolidator = startIdleConsolidator({
       }
     } catch (e) {
       console.error('[repair-replay] failed', e);
+    }
+    // THE SEALED REPLAY BENCH (2026-09-20). The replay above measures against whatever the ledger
+    // holds this fortnight; the bench pins failures into a fixed bank and re-runs them under the
+    // current rules, so a learned repair line is promoted only when it turns a pinned fixture green
+    // where the accepted rules did not, and a rule change that turns a green fixture red is reverted.
+    // See replay_bench.ts. Budget-gated like everything else on this tick.
+    if (replayBenchEnabled()) try {
+      const budgetCheck = autonomousLoop.budget.checkCanRun('default');
+      if (!budgetCheck.allowed) {
+        memory.metrics.increment('learning.maintenance.budget_blocked');
+        console.log(`[replay-bench] skipped: autonomous budget ${budgetCheck.reason}`);
+      } else {
+        const eligible = replayEligibleTools();
+        const existing = loadFixtures(memory.facts);
+        const rows = memory.actions.listRecentFailures({ sinceTs: Date.now() - 14 * 24 * 60 * 60_000, limit: 400 });
+        const ledger: SessionLedgerFailure[] = rows
+          .filter((r) => eligible.has(r.toolName) && !!r.result && !!r.params && typeof r.params === 'object' && !Array.isArray(r.params))
+          .map((r) => ({ toolName: r.toolName, input: r.params as Record<string, unknown>, errorText: r.result ?? '', recordedAt: r.timestamp, sessionId: r.sessionId }));
+        const benchRules = (sig: string) => [
+          ...authoringCheatsheet(sig).filter((l) => l.trim()),
+          ...learnedCheatsheet(sig, memory.facts),
+        ];
+        const toPin = selectFixturesToPin({
+          failures: ledger,
+          existing,
+          signatureOf: (tool, err) => extractFailureSignature(tool, err),
+          rulesFor: benchRules,
+          eligibleTools: eligible,
+          capacity: replayBenchSize(),
+        });
+        for (const c of toPin) {
+          pinFixture(memory.facts, c);
+          memory.metrics.increment('learning.bench.pinned');
+          console.log(`[replay-bench] pinned ${c.signature} (seen in ${c.sessions} session(s))`);
+        }
+        const bench = await runReplayBench({
+          store: memory.facts,
+          signatureOf: (tool, err) => extractFailureSignature(tool, err),
+          rulesFor: benchRules,
+          isSafeToRerun: async (toolName, rewritten) =>
+            (await getSubLoopChecker()({ toolName, approval: 'never', params: JSON.stringify(rewritten) })) === null,
+          ask: (req) => callAuxLLM({ ...req, fallbackToMain: false }),
+          runTool: async (toolName, rewritten) => {
+            const r = await subTurnToolRunner(toolName, rewritten);
+            return { success: r.ok, output: r.output, error: r.error };
+          },
+          limit: replayBenchRunsPerTick(),
+          onOutcome: (o) => {
+            memory.metrics.increment(`learning.bench.${o.transition}`);
+            if (o.decision !== 'none') memory.metrics.increment(`learning.bench.${o.decision}`);
+            console.log(
+              `[replay-bench] ${o.signature} (${o.why}) → ${o.transition}${o.reason ? ` (${o.reason})` : ''}` +
+                (o.decision !== 'none' ? ` ⇒ ${o.decision}${o.lines?.length ? `: ${o.lines.join(' | ').slice(0, 200)}` : ''}` : ''),
+            );
+          },
+        });
+        if (bench.attempted > 0) {
+          autonomousLoop.budget.commit('default', { llmTokens: 0, toolCalls: bench.attempted });
+          memory.metrics.increment('learning.maintenance.initiatives');
+        }
+      }
+    } catch (e) {
+      console.error('[replay-bench] failed', e);
     }
     // Validation throughput for the frozen draft pool. One fixture per idle cycle, verifier-only,
     // and every rewritten call must pass the no-approval policy checker. Unlike an offer, this is a
@@ -9785,13 +9858,16 @@ export async function handleChatSend(
       // abstract principle. So 71 recurrences of pariGp:gp-syntax produced 71 ways to say "avoid it" and
       // not one repair. This runs beside reflection, gated on the trace showing a real recovery — see
       // mechanical_fix_learning.ts. Fire-and-forget: it must never delay or fail a turn close.
-      void distillMechanicalFix(extractRecentToolResults(messages), memory.facts)
+      void distillMechanicalFix(extractRecentToolResults(messages), memory.facts, {
+        // 2026-09-20: a line the replay bench can exercise is a candidate until a bench run proves it.
+        candidateFor: (toolName) => replayBenchEnabled() && replayEligibleTools().has(toolName),
+      })
         .then((learned) => {
           if (learned) {
             console.log(
-              `[mechanical-fix] learned a repair for ${learned.signature}: ${learned.line}`,
+              `[mechanical-fix] learned a repair for ${learned.signature}${learned.candidate ? ' (candidate, awaiting bench)' : ''}: ${learned.line}`,
             );
-            memory.metrics.increment('mechanical_fix.learned');
+            memory.metrics.increment(learned.candidate ? 'mechanical_fix.candidate' : 'mechanical_fix.learned');
           }
         })
         .catch((e) => console.warn('[mechanical-fix] distillation failed, ignored:', (e as Error)?.message));
