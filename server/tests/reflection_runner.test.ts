@@ -258,3 +258,14 @@ test('playbooksContradictedThisTurn: only signature-tagged playbooks whose class
   assert.deepEqual(playbooksContradictedThisTurn(offered, []), []);
   assert.deepEqual(playbooksContradictedThisTurn([], ['shell:cmd-not-found:rg']), []);
 });
+
+test('rulesContradictedThisTurn: only signature-bearing rules whose class failed this turn', async () => {
+  const { rulesContradictedThisTurn } = await import('../src/reflection_runner.js');
+  const rules = [
+    { id: 1, failureSignature: 'shell:cmd-not-found:rg' },
+    { id: 2, failureSignature: null },
+    { id: 3, failureSignature: 'pariGp:gp-syntax' },
+  ];
+  assert.deepEqual(rulesContradictedThisTurn(rules, ['shell:cmd-not-found:rg', 'readFile:enoent']), [1]);
+  assert.deepEqual(rulesContradictedThisTurn(rules, []), []);
+});

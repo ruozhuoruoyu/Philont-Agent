@@ -799,6 +799,7 @@ export function applyReflection(
             // outranking everything in injection while validated stayed 0.
             confidence: 'provisional',
             reflectionId: ctx.reflectionId ?? null,
+            failureSignature: learning.signature ?? null,
           });
           result.stats.routingRulesCreated++;
           break;

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Routing rules get a rule-specific negative edge.** The confidence machine recorded success on
+  clean turns and nothing on failed ones, because a turn-level failure cannot be pinned on one rule.
+  A rule's own failure signature can: reflection-minted avoid rules now store the signature they are
+  about (schema v48, `routing_rules.failure_signature`), and a rule injected in a turn where that
+  signature recurred anyway is recorded as a failure and excluded from that turn's success credit
+  (`routing.outcome.contradicted`). Existing confidence tiers handle the rest (disputed → retired).
+
 - **Reflection sees the contrast, and playbooks can finally be wrong.** The "Recurring failures"
   block now pairs each failure class with the same tool's later *successful* input from the ledger,
   so the reflection names the difference instead of restating the failure (ModularRSI's

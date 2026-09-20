@@ -43,6 +43,8 @@ export interface RoutingRule {
   consecutiveFailures: number;
   contextKeywords: string[];
   reflectionId: string | null;
+  /** v48: the tool-failure signature this rule is about, when it is about one (avoid rules). */
+  failureSignature?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -61,6 +63,7 @@ export interface RoutingRuleInput {
   /** Keywords extracted from triggerCondition; caller provides by default; if empty, createRule will best-effort extract */
   contextKeywords?: string[];
   reflectionId?: string | null;
+  failureSignature?: string | null;
 }
 
 interface RoutingRuleRow {
@@ -78,6 +81,7 @@ interface RoutingRuleRow {
   consecutive_failures: number;
   context_keywords: string | null;
   reflection_id: string | null;
+  failure_signature?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -273,6 +277,7 @@ function rowToRule(row: RoutingRuleRow): RoutingRule {
     consecutiveFailures: row.consecutive_failures,
     contextKeywords: row.context_keywords ? safeJsonArray(row.context_keywords) : [],
     reflectionId: row.reflection_id,
+    failureSignature: row.failure_signature ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -372,14 +377,11 @@ export class RoutingRuleStore extends EventEmitter {
     }
 
     const result = this.db
-      .prepare<[
-        string, string, string | null, string, string, string,
-        string, string, string | null, number, number,
-      ]>(
+      .prepare<[string, string, string | null, string, string, string, string, string, string | null, string | null, number, number]>(
         `INSERT INTO routing_rules
          (task_signature, trigger_condition, prefer_skill, avoid_skills, carveout, evidence,
-          confidence, context_keywords, reflection_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          confidence, context_keywords, reflection_id, failure_signature, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.taskSignature,
@@ -391,6 +393,7 @@ export class RoutingRuleStore extends EventEmitter {
         confidence,
         contextKeywords,
         input.reflectionId ?? null,
+        input.failureSignature ?? null,
         now,
         now,
       );

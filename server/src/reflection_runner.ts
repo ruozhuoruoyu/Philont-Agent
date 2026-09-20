@@ -404,6 +404,23 @@ export function playbooksContradictedThisTurn(
   return out;
 }
 
+/**
+ * Injected routing rules whose failure signature happened this turn anyway — the rule was shown and
+ * did not prevent the failure it exists for. Pure. Rules without a signature are never returned.
+ */
+export function rulesContradictedThisTurn(
+  rules: ReadonlyArray<{ id: number; failureSignature?: string | null }>,
+  turnFailureSignatures: ReadonlyArray<string>,
+): number[] {
+  if (rules.length === 0 || turnFailureSignatures.length === 0) return [];
+  const failed = new Set(turnFailureSignatures.filter(Boolean));
+  const out: number[] = [];
+  for (const r of rules) {
+    if (r.failureSignature && failed.has(r.failureSignature) && !out.includes(r.id)) out.push(r.id);
+  }
+  return out;
+}
+
 /** Never throws and never hangs the apply on a judge that errored: an unresolved verdict is `undefined`. */
 async function resolveVerifiedSuccess(
   v: ReflectionRunOptions['verifiedSuccess'],

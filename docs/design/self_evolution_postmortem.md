@@ -101,6 +101,7 @@ catalogue of §2's last paragraph — is the part worth writing up.
 | Cross-turn evidence in reflection: this turn's failure classes counted across the ledger (sessions, occurrences) are rendered into the prompt; an avoid-only routing rule must name a signature seen in ≥2 sessions or it is withheld (a one-turn lesson is a playbook) | ModularRSI cross-task vote on findings | `reflection.ts` `signatureSupport`/`requireCrossTurnSupport`, `reflection_runner.ts` `buildCrossTurnEvidence` |
 | Contrastive pairing: each recurring failure class is shown next to the same tool's later successful input | ModularRSI success/failure trajectory pairing | `reflection_runner.ts` `buildCrossTurnEvidence` (`allActions`), `reflection.ts` `renderCrossTurnEvidence` |
 | Playbook negative edges: contradiction (shown, failure recurred; 3 in a row → deprecated) and disuse retirement (old, often shown, failure gone from the ledger) | redesign Phase 2.4 / 0.2 (demotion-only for prose) | `skill_maturity.ts`, `skills.ts` `retireStalePlaybooks`, `chat-handler.ts` prefix + turn close + idle tick |
+| Routing rules' negative edge: avoid rules store their failure signature (schema v48); a rule injected in a turn where that signature recurred is recorded as failure and denied success credit | same contradiction rule as playbooks; redesign Phase 2.4 | `routing_rules.ts`, `chat-handler.ts` routing outcome block, `reflection_runner.ts` `rulesContradictedThisTurn` |
 | Sealed replay bench: a fixed bank of pinned failures (≥2 sessions or rule-backed, one per class), re-run on idle under current rules with the tool as oracle; learned repair lines are candidates until they turn a fixture green where accepted rules did not; redundant/failed candidates dropped; a rule change that turns green to red is reverted | SEAL sealed audit; RSEA keep-better; ModularRSI benchmark-disjoint set + cross-task vote | `server/src/replay_bench.ts`, candidate ledger in `mechanical_fix_learning.ts`, idle tick in `chat-handler.ts`, `learning_stats.ts` |
 
 Deliberately **not** absorbed:
@@ -124,9 +125,9 @@ Deliberately **not** absorbed:
    them onto the pinned bank is the next step. Routing rules and playbooks remain ungated because
    prose has no executable check — the honest options are the judge-gated crystallization already
    in place and, later, offer-vs-withhold comparison on the judge's verdicts.
-2. **Routing rules' negative edge.** Playbooks now have one; avoid-only routing rules still record
-   success only. The same contradiction rule (rule injected, its signature recurred) applies once a
-   rule carries its signature at injection time — the field exists since today, the wiring does not.
+2. **Legacy rules.** The 1000+ rules written before today carry no signature and so have no negative
+   edge beyond unproven-decay; they will leave through decay, not contradiction. That is acceptable —
+   none of them ever reached `validated` either.
 3. **Judge calibration** stays deferred: it needs a per-turn truth column, and none exists beyond the
    deterministic rails already applied. An owner-correction signal would provide one; building a
    confidence table before that source exists would be data nothing consumes.

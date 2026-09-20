@@ -56,7 +56,8 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
     }
     const ro = get('routing.outcome.success') + get('routing.outcome.failure');
     lines.push(
-      `  routing outcomes recorded: success=${get('routing.outcome.success')} failure=${get('routing.outcome.failure')} (success ${pct(get('routing.outcome.success'), ro)})`,
+      `  routing outcomes recorded: success=${get('routing.outcome.success')} failure=${get('routing.outcome.failure')} (success ${pct(get('routing.outcome.success'), ro)}); ` +
+        `contradicted (injected, its failure signature recurred anyway)=${get('routing.outcome.contradicted')} — the first rule-specific negative edge`,
     );
     lines.push(
       `  in-turn reminders fired=${get('inturn.fire')} (mechanical=${get('inturn.mechanical')} format=${get('inturn.format')}) — the cheap path that actually reaches the agent same-turn`,

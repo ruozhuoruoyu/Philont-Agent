@@ -330,7 +330,7 @@ import {
   renderRepairNotice,
 } from './mechanical_repair.js';
 import { scheduledTurnMadeProgress } from './schedule_progress.js';
-import { maybeRunReflection, buildCrossTurnEvidence, playbooksContradictedThisTurn } from './reflection_runner.js';
+import { maybeRunReflection, buildCrossTurnEvidence, playbooksContradictedThisTurn, rulesContradictedThisTurn } from './reflection_runner.js';
 import { playbookSignature } from '@agent/memory';
 
 /** A playbook this old, shown this often, whose failure has not recurred in the ledger window, is retired. */
@@ -9858,6 +9858,33 @@ export async function handleChatSend(
           signalBus.honesty !== undefined ||
           signalBus.emptyConclusionFired === true;
         const outcome = !strongFailure;
+        // 2026-09-20: the one failure signal that IS about a specific rule. A rule injected this turn whose
+        // own failure signature recurred anyway did not stick — record failure for it (the confidence
+        // machine's first real negative edge) and keep it out of this turn's success credit.
+        const contradictedRuleIds = (() => {
+          try {
+            const turnSigs = (signalBus.inTurnRecords ?? [])
+              .filter((r) => !r.success)
+              .map((r) => extractFailureSignature(r.toolName, r.resultText ?? ''));
+            if (turnSigs.length === 0) return [] as number[];
+            const active = signalBus.activeRuleIds
+              .map((id) => memory.routingRules.getById(id))
+              .filter((r): r is NonNullable<typeof r> => !!r);
+            return rulesContradictedThisTurn(active, turnSigs);
+          } catch {
+            return [] as number[];
+          }
+        })();
+        for (const ruleId of contradictedRuleIds) {
+          try {
+            const after = memory.routingRules.recordRuleOutcome(ruleId, false);
+            memory.metrics.increment('routing.outcome.contradicted');
+            console.log(`[routing-outcome] rule ${ruleId} contradicted: its failure signature recurred while injected (now ${after?.confidence ?? '?'})`);
+          } catch (e) {
+            console.warn(`[routing-outcome] recordRuleOutcome(${ruleId}, false) failed, ignored:`, (e as Error)?.message);
+          }
+        }
+        const creditedRuleIds = signalBus.activeRuleIds.filter((id) => !contradictedRuleIds.includes(id));
         // 2026-07-05 attribution fix: a hard turn is NOT evidence against the injected rules — the
         // gate signals (honesty / same-root-cause / interrupt / empty-conclusion) fire for reasons
         // unrelated to routing, yet EVERY injected rule was blame-marked failure (prod stream:
@@ -9868,9 +9895,9 @@ export async function handleChatSend(
         // failed (ambiguous — noise, not signal). Bad rules still die via unproven-decay.
         memory.metrics.increment(
           outcome ? 'routing.outcome.success' : 'routing.outcome.ambiguous_skipped',
-          signalBus.activeRuleIds.length,
+          creditedRuleIds.length,
         ); // instrumentation: does the confidence machine actually get fed?
-        for (const ruleId of outcome ? signalBus.activeRuleIds : []) {
+        for (const ruleId of outcome ? creditedRuleIds : []) {
           try {
             memory.routingRules.recordRuleOutcome(ruleId, true);
           } catch (e) {

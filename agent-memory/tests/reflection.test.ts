@@ -1183,3 +1183,13 @@ test('playbook: the signature it names is parsed and stored as a sig: keyword', 
   const pb = skills.listAll()[0];
   assert.deepEqual(pb.triggerKeywords, ['sig:pariGp:gp-syntax']);
 });
+
+test('apply: a routing rule keeps the failure signature it named', () => {
+  const { skills, routingRules } = openMemoryDb(':memory:');
+  applyReflection(
+    { hadLesson: true, taskSignature: 't', attempts: [], learnings: [avoidRule('shell:cmd-not-found:rg')] },
+    { skills, routingRules },
+    { requireCrossTurnSupport: true, signatureSupport: { 'shell:cmd-not-found:rg': 2 } },
+  );
+  assert.equal(routingRules.listAll()[0].failureSignature, 'shell:cmd-not-found:rg');
+});

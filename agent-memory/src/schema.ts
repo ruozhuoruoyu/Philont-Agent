@@ -20,7 +20,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
 } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 47;
+export const SCHEMA_VERSION = 48;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -470,6 +470,9 @@ const DDL_TABLE_ROUTING_RULES = `
       consecutive_failures INTEGER NOT NULL DEFAULT 0,
       context_keywords TEXT,
       reflection_id TEXT,
+      -- v48 (2026-09-20): the tool-failure signature an avoid rule is about; a turn in which the rule was
+      -- injected and this signature recurred anyway counts against the rule (its first negative edge).
+      failure_signature TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -1418,6 +1421,11 @@ function migrateV46ToV47(db: Database.Database): void {
   migrateV44ToV45(db);
 }
 
+/** v48: routing rules carry the failure signature they are about (contradiction edge). */
+function migrateV47ToV48(db: Database.Database): void {
+  addColumnIfMissing(db, 'routing_rules', 'failure_signature', 'TEXT');
+}
+
 /**
  * The CREATE TABLE text is the truth about which columns exist; the migrations are the path that was
  * walked to get there. When a shipped migration is edited after databases have walked it, the two
@@ -1726,6 +1734,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 47) {
     migrateV46ToV47(db);
+  }
+  if (current < 48) {
+    migrateV47ToV48(db);
   }
   reconcileColumnsWithDdl(db, ALL_TABLE_DDL.join('\n'));
 

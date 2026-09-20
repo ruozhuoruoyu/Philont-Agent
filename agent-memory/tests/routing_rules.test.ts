@@ -546,3 +546,24 @@ test('createRule: per-signature cap retires the weakest sibling to make room', (
     else process.env.PHILONT_ROUTING_RULES_PER_SIG_CAP = prev;
   }
 });
+
+// ── failure signature (v48) ─────────────────────────────────────────────
+
+test('createRule persists the failure signature and reads it back; absent by default', () => {
+  const { routingRules } = openMemoryDb(':memory:');
+  const withSig = routingRules.createRule({
+    taskSignature: 'grep-on-host',
+    triggerCondition: 'searching files on this host',
+    carveout: 'only when rg is missing',
+    evidence: 'cmd-not-found twice',
+    failureSignature: 'shell:cmd-not-found:rg',
+  });
+  assert.equal(routingRules.getById(withSig.id)?.failureSignature, 'shell:cmd-not-found:rg');
+  const without = routingRules.createRule({
+    taskSignature: 'pdf-to-word',
+    triggerCondition: 'scanned pdf',
+    carveout: 'not for text pdfs',
+    evidence: 'turn 5',
+  });
+  assert.equal(routingRules.getById(without.id)?.failureSignature, null);
+});
