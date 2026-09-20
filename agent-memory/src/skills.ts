@@ -765,6 +765,44 @@ export class SkillStore extends EventEmitter {
    * the model never picked was indistinguishable from a skill the model never saw — and the loop could
    * neither promote nor honestly reject anything. Best-effort: never throw into the prompt-build path.
    */
+  /**
+   * Disuse retirement for playbooks (2026-09-20, self-learning redesign Phase 0.2 / 2.4).
+   *
+   * A playbook has no success signal, so the ladder could never retire one: created once, injected
+   * forever. This closes that deterministically. A playbook old enough (`maxAgeMs`) and shown often
+   * enough (`minOffers`) whose failure class is NOT among the signatures still recurring in the ledger
+   * (`recurring`) is deprecated: either the failure is solved or the lesson was never needed, and in
+   * both cases reflection recreates it — now with a signature — the day the failure comes back. A
+   * playbook whose signature is still recurring is kept regardless of age: it is still being tested.
+   * Disk-backed rows are never touched.
+   */
+  retireStalePlaybooks(opts: {
+    now?: number;
+    maxAgeMs: number;
+    minOffers: number;
+    recurring: ReadonlySet<string>;
+    signatureOf: (skill: Skill) => string | null;
+  }): { retired: string[] } {
+    const now = opts.now ?? Date.now();
+    const rows = this.db
+      .prepare<[number, number]>(
+        `SELECT * FROM memory_skills
+          WHERE maturity = 'playbook' AND COALESCE(from_disk, 0) = 0
+            AND created_at <= ? AND COALESCE(offered_count, 0) >= ?`,
+      )
+      .all(now - opts.maxAgeMs, opts.minOffers) as SkillRow[];
+    const retired: string[] = [];
+    for (const row of rows) {
+      const skill = rowToSkill(row);
+      const sig = opts.signatureOf(skill);
+      if (sig && opts.recurring.has(sig)) continue;
+      this.db.prepare<[string]>(`UPDATE memory_skills SET maturity = 'deprecated' WHERE name = ?`).run(skill.name);
+      this.emit('changed', { type: 'updated', name: skill.name } satisfies SkillChangeEvent);
+      retired.push(skill.name);
+    }
+    return { retired };
+  }
+
   recordSkillsOffered(names: string[], matchedNames: readonly string[] = []): void {
     if (!names.length) return;
     try {

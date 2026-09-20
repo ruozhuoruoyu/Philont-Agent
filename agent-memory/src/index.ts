@@ -133,6 +133,8 @@ export {
   renderReflectionPrompt,
   renderCrossTurnEvidence,
   isPositiveLearning,
+  playbookSignature,
+  PLAYBOOK_SIGNATURE_TAG,
   CROSS_TURN_SUPPORT_MIN,
 } from './reflection.js';
 export type {

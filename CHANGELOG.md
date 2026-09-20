@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Reflection sees the contrast, and playbooks can finally be wrong.** The "Recurring failures"
+  block now pairs each failure class with the same tool's later *successful* input from the ledger,
+  so the reflection names the difference instead of restating the failure (ModularRSI's
+  success/failure trajectory pairing). Playbooks gain the two negative edges they never had: a
+  playbook shown in a turn whose failure class recurred anyway is recorded as contradicted, and three
+  in a row deprecate it (`playbook.contradicted`, `playbook.deprecated`); a playbook older than 90 days,
+  shown at least 20 times, whose failure class no longer appears in the recent ledger is retired for
+  disuse (`playbook.retired_stale`; `PHILONT_PLAYBOOK_RETIRE_DAYS`, `PHILONT_PLAYBOOK_RETIRE_MIN_OFFERS`).
+  Reflection-minted playbooks carry their failure signature as a `sig:` keyword so both edges can
+  find them; untagged legacy playbooks are subject to disuse retirement only.
+
 - **Avoid rules need their failure to have recurred (the cross-task vote).** Turn-close reflection
   now sees this turn's failure classes counted across the recent ledger ("Recurring failures":
   signature, distinct sessions, occurrences), and an avoid-only routing rule is written only when it

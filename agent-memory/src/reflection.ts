@@ -69,6 +69,12 @@ export interface SkillRefineLearning {
 
 export interface PlaybookLearning {
   type: 'playbook';
+  /**
+   * 2026-09-20: the failure signature this lesson is about (from the reflection prompt's "Recurring
+   * failures"). Stored as a `sig:` trigger keyword so a turn in which the lesson was shown and the same
+   * failure happened anyway can be counted against it (skill_maturity: playbook → deprecated).
+   */
+  signature?: string;
   /** Optional name; auto-generated as 'playbook-<task_sig>-<random>' if not provided */
   name?: string;
   lesson: string;
@@ -493,8 +499,10 @@ function parseLearning(
       return null;
     }
     const name = strField(o, 'name') || undefined;
+    const signature = strField(o, 'signature', 'failure_signature') || undefined;
     return {
       type: 'playbook',
+      signature,
       name,
       lesson,
       whenApplies,
@@ -664,6 +672,15 @@ export interface ApplyReflectionOptions {
   requireCrossTurnSupport?: boolean;
 }
 
+/** Trigger-keyword prefix under which a playbook carries the failure signature it is about. */
+export const PLAYBOOK_SIGNATURE_TAG = 'sig:';
+
+/** The failure signature a playbook was written about, if it carries one. */
+export function playbookSignature(skill: { triggerKeywords: readonly string[] }): string | null {
+  const tag = skill.triggerKeywords.find((k) => k.startsWith(PLAYBOOK_SIGNATURE_TAG));
+  return tag ? tag.slice(PLAYBOOK_SIGNATURE_TAG.length) || null : null;
+}
+
 /** Distinct sessions a signature needs before an avoid-only rule may be written about it. */
 export const CROSS_TURN_SUPPORT_MIN = 2;
 
@@ -823,7 +840,7 @@ export function applyReflection(
           ctx.skills.createSkill({
             name,
             description,
-            triggerKeywords: [],
+            triggerKeywords: learning.signature ? [`${PLAYBOOK_SIGNATURE_TAG}${learning.signature}`] : [],
             actionTemplate,
             maturity: 'playbook',
             source: ctx.reflectionId ? `self:reflect-${ctx.reflectionId}` : null,
@@ -1160,7 +1177,8 @@ function renderDegradedReflectionPrompt(reasons: string[]): string {
     `      "lesson": "<root cause of this failure + what to avoid next time>",\n` +
     `      "when_applies": "<when this lesson applies>",\n` +
     `      "next_time_action": "<what exactly to do next time>",\n` +
-    `      "why_not_routing_rule": "<why this cannot be upgraded to routing_rule>"\n` +
+    `      "why_not_routing_rule": "<why this cannot be upgraded to routing_rule>",\n` +
+    `      "signature": "<when the lesson is about a tool failure: its signature from 'Recurring failures' below; omit otherwise>"\n` +
     `    }\n` +
     `  ]\n` +
     `}\n`
@@ -1254,7 +1272,8 @@ export function renderReflectionPrompt(
     `      "lesson": "<one-sentence lesson>",\n` +
     `      "when_applies": "<required: exact scenario where this lesson applies>",\n` +
     `      "next_time_action": "<required: what to do next time (concrete action)>",\n` +
-    `      "why_not_routing_rule": "<required: why this lesson cannot be upgraded to routing_rule / new_skill / skill_refine>"\n` +
+    `      "why_not_routing_rule": "<required: why this lesson cannot be upgraded to routing_rule / new_skill / skill_refine>",\n` +
+    `      "signature": "<when the lesson is about a tool failure: its signature from 'Recurring failures' below; omit otherwise>"\n` +
     `    }\n` +
     `  ]\n` +
     `}\n\n` +
@@ -1280,6 +1299,11 @@ export interface CrossTurnEvidence {
   occurrences: number;
   /** A short sample of the error text. */
   sample: string;
+  /**
+   * 2026-09-20 contrastive pairing (ModularRSI): a LATER successful call of the same tool, when the ledger
+   * has one — the input that worked, so the model diagnoses a divergence rather than a failure.
+   */
+  laterSuccess?: { inputSample: string; sessionId?: string };
 }
 
 /**
@@ -1297,7 +1321,10 @@ export function renderCrossTurnEvidence(evidence: ReadonlyArray<CrossTurnEvidenc
     evidence
       .map((e) => {
         const mark = e.sessions >= CROSS_TURN_SUPPORT_MIN ? 'recurring' : 'this session only';
-        return `- signature=${e.signature} — ${e.sessions} session(s), ${e.occurrences} occurrence(s) [${mark}]: ${e.sample}`;
+        const pair = e.laterSuccess
+          ? `\n    ↳ the same tool LATER SUCCEEDED with: ${e.laterSuccess.inputSample} — name what differs; that difference is the rule, the failure alone is not`
+          : '';
+        return `- signature=${e.signature} — ${e.sessions} session(s), ${e.occurrences} occurrence(s) [${mark}]: ${e.sample}${pair}`;
       })
       .join('\n') +
     '\n'

@@ -330,7 +330,12 @@ import {
   renderRepairNotice,
 } from './mechanical_repair.js';
 import { scheduledTurnMadeProgress } from './schedule_progress.js';
-import { maybeRunReflection, buildCrossTurnEvidence } from './reflection_runner.js';
+import { maybeRunReflection, buildCrossTurnEvidence, playbooksContradictedThisTurn } from './reflection_runner.js';
+import { playbookSignature } from '@agent/memory';
+
+/** A playbook this old, shown this often, whose failure has not recurred in the ledger window, is retired. */
+const PLAYBOOK_RETIRE_AGE_MS = Number(process.env.PHILONT_PLAYBOOK_RETIRE_DAYS ?? 90) * 24 * 60 * 60_000;
+const PLAYBOOK_RETIRE_MIN_OFFERS = Number(process.env.PHILONT_PLAYBOOK_RETIRE_MIN_OFFERS ?? 20);
 import { selectSkillsByAux } from './skill_relevance_llm.js';
 import { distillMechanicalFix, learnedCheatsheet } from './mechanical_fix_learning.js';
 import {
@@ -1457,6 +1462,29 @@ const idleConsolidator = startIdleConsolidator({
       }
     } catch (e) {
       console.error('[routing-decay] failed', e);
+    }
+    // 2026-09-20: playbook disuse retirement — the mirror of routing decay that playbooks never had.
+    // Old, often-shown, and its failure class not seen in the recent ledger ⇒ deprecated (reflection
+    // recreates it, with a signature, if the failure returns). Idempotent per tick.
+    try {
+      const windowStart = Date.now() - 14 * 24 * 60 * 60_000;
+      const recurring = new Set<string>();
+      for (const a of memory.actions.listRecentFailures({ sinceTs: windowStart, limit: 400 })) {
+        recurring.add(extractFailureSignature(a.toolName, a.result ?? ''));
+      }
+      const r = memory.skills.retireStalePlaybooks({
+        maxAgeMs: PLAYBOOK_RETIRE_AGE_MS,
+        minOffers: PLAYBOOK_RETIRE_MIN_OFFERS,
+        recurring,
+        signatureOf: playbookSignature,
+      });
+      if (r.retired.length > 0) {
+        memory.metrics.increment('playbook.retired_stale', r.retired.length);
+        internalAudit.append('self_domain_write', { source: 'playbook_retire', origin: 'Internal', toolName: 'playbook_retired_stale', retired: r.retired });
+        console.log(`[playbook-retire] retired ${r.retired.length} stale playbook(s): ${r.retired.slice(0, 5).join(', ')}${r.retired.length > 5 ? ', …' : ''}`);
+      }
+    } catch (e) {
+      console.error('[playbook-retire] failed', e);
     }
     // A RULE LEARNED ONCE AND NEVER APPLIED IS INDISTINGUISHABLE FROM ONE THAT DOES NOT WORK.
     //
@@ -6916,6 +6944,15 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
         .listByMaturity('playbook', PLAYBOOK_TOP_N + failurePlaybooks.length)
         .filter((p) => !failureNames.has(p.name))
         .slice(0, PLAYBOOK_TOP_N);
+  // 2026-09-20: what was SHOWN, for the two edges playbooks never had — contradiction at turn close
+  // (offeredPlaybooks) and disuse retirement (offered_count; see retireStalePlaybooks on the idle tick).
+  {
+    const shown = [...failurePlaybooks, ...playbooks];
+    if (signalBus) signalBus.offeredPlaybooks = shown.map((p) => ({ name: p.name, signature: playbookSignature(p) }));
+    if (shown.length > 0) {
+      try { memory.skills.recordSkillsOffered(shown.map((p) => p.name), []); } catch { /* counting never blocks a turn */ }
+    }
+  }
   if (playbooks.length > 0) {
     memory.metrics.increment('playbook.inject.turns'); // instrumentation: lesson actually reached the prompt
     lines.push('');
@@ -9891,15 +9928,42 @@ export async function handleChatSend(
       try {
         const turnFailures = (signalBus.inTurnRecords ?? []).filter((r) => !r.success);
         if (turnFailures.length > 0) {
+          const windowStart = Date.now() - 14 * 24 * 60 * 60_000;
           crossTurnEvidence = buildCrossTurnEvidence({
             turnFailures,
-            ledger: memory.actions.listRecentFailures({ sinceTs: Date.now() - 14 * 24 * 60 * 60_000, limit: 400 }),
+            ledger: memory.actions.listRecentFailures({ sinceTs: windowStart, limit: 400 }),
+            // Successes too, for the contrastive pair (the same tool's later working input). Bounded by
+            // the same window; the ledger keeps a summary per row, not the full output.
+            allActions: memory.actions.getByRange(windowStart, Date.now()).map((a) => ({
+              toolName: a.toolName, params: a.params, success: a.success, sessionId: a.sessionId, timestamp: a.timestamp, result: a.result,
+            })),
             signatureOf: (tool, err) => extractFailureSignature(tool, err),
             currentSessionId: sessionId,
           });
         }
       } catch (e) {
         console.warn('[reflection] cross-turn evidence failed, ignored', e);
+      }
+
+      // 2026-09-20: a playbook shown this turn whose failure class happened anyway did not stick. That is
+      // the only negative edge prose can have; three in a row deprecate it (skill_maturity).
+      try {
+        const contradicted = playbooksContradictedThisTurn(
+          signalBus.offeredPlaybooks ?? [],
+          (signalBus.inTurnRecords ?? []).filter((r) => !r.success).map((r) => extractFailureSignature(r.toolName, r.resultText ?? '')),
+        );
+        for (const name of contradicted) {
+          const after = memory.skills.recordSkillOutcome(name, false);
+          memory.metrics.increment('playbook.contradicted');
+          if (after?.maturity === 'deprecated') {
+            memory.metrics.increment('playbook.deprecated');
+            console.log(`[playbook] ${name} retired: its failure class recurred three times while it was shown`);
+          } else {
+            console.log(`[playbook] ${name} contradicted this turn (consecutive=${after?.consecutiveFailures ?? '?'})`);
+          }
+        }
+      } catch (e) {
+        console.warn('[playbook] contradiction bookkeeping failed, ignored', e);
       }
 
       void maybeRunReflection({
@@ -12176,6 +12240,12 @@ export async function decideForcedDeepExploreCall(
 }
 
 interface TurnSignalBus {
+  /**
+   * 2026-09-20: the playbooks buildMemoryPrefix rendered this turn, with the failure signature each is
+   * about. At turn close, a playbook shown in a turn whose failure class recurred anyway is recorded as
+   * contradicted (skill maturity: three in a row retire it).
+   */
+  offeredPlaybooks?: Array<{ name: string; signature: string | null }>;
   /** Wire send time supplied by the channel; may precede receipt by an entire long agent turn. */
   inboundSentAtMs?: number;
   authInboundDisposition?: PendingAuthInboundDisposition;

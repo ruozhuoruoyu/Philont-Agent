@@ -269,6 +269,29 @@ export interface LedgerFailureRow {
   sessionId: string;
 }
 
+/** Any call as the action ledger holds it (memory.actions.getByRange) — successes included. */
+export interface LedgerActionRow {
+  toolName: string;
+  params: unknown;
+  success: boolean;
+  sessionId: string;
+  timestamp: number;
+  /** The failure text for failed rows (used to classify them); ignored for successes. */
+  result?: string | null;
+}
+
+/** The part of a successful call's input worth showing next to the failure it contrasts with. */
+export function sampleInput(params: unknown, cap = 200): string {
+  let text: string;
+  try {
+    text = typeof params === 'string' ? params : JSON.stringify(params ?? {});
+  } catch {
+    return '(unserializable input)';
+  }
+  text = text.replace(/\s+/g, ' ').trim();
+  return text.length <= cap ? text : `${text.slice(0, cap)}…`;
+}
+
 /**
  * This turn's failure classes, counted across the recent ledger. Pure. One entry per signature the
  * turn produced, most-recurring first, capped so the prompt stays a prompt. The current session is
@@ -280,6 +303,12 @@ export function buildCrossTurnEvidence(input: {
   signatureOf: (toolName: string, errorText: string) => string;
   currentSessionId?: string;
   limit?: number;
+  /**
+   * 2026-09-20 contrastive pairing: every call in the window, successes included. For each failure class
+   * the newest SUCCESSFUL call of the same tool — recorded after the class's first failure — is attached,
+   * so the reflection sees "this input worked" next to "this one did not".
+   */
+  allActions?: ReadonlyArray<LedgerActionRow>;
 }): CrossTurnEvidence[] {
   const wanted = new Set<string>();
   for (const f of input.turnFailures) {
@@ -308,10 +337,71 @@ export function buildCrossTurnEvidence(input: {
       cur.sample = (f.resultText ?? '').replace(/\s+/g, ' ').trim().slice(0, 160);
     }
   }
+  const pairs = pairLaterSuccesses(wanted, input.allActions ?? [], input.signatureOf);
   return [...agg.entries()]
-    .map(([signature, a]) => ({ signature, sessions: a.sessions.size, occurrences: a.occurrences, sample: a.sample }))
+    .map(([signature, a]) => ({
+      signature,
+      sessions: a.sessions.size,
+      occurrences: a.occurrences,
+      sample: a.sample,
+      ...(pairs.get(signature) ? { laterSuccess: pairs.get(signature) } : {}),
+    }))
     .sort((a, b) => b.sessions - a.sessions || b.occurrences - a.occurrences || a.signature.localeCompare(b.signature))
     .slice(0, input.limit ?? 6);
+}
+
+/**
+ * For each wanted failure signature, the newest successful call of the SAME tool that came after that
+ * signature's earliest failure in the window. Same tool is the strongest contrast the ledger can give
+ * without semantics: the input that worked where another did not.
+ */
+function pairLaterSuccesses(
+  wanted: ReadonlySet<string>,
+  actions: ReadonlyArray<LedgerActionRow>,
+  signatureOf: (toolName: string, errorText: string) => string,
+): Map<string, { inputSample: string; sessionId?: string }> {
+  const out = new Map<string, { inputSample: string; sessionId?: string }>();
+  if (wanted.size === 0 || actions.length === 0) return out;
+  const firstFailureAt = new Map<string, number>();
+  const toolOf = new Map<string, string>();
+  for (const a of actions) {
+    if (a.success) continue;
+    const sig = signatureOf(a.toolName, a.result ?? '');
+    if (!wanted.has(sig)) continue;
+    toolOf.set(sig, a.toolName);
+    const t = firstFailureAt.get(sig);
+    if (t === undefined || a.timestamp < t) firstFailureAt.set(sig, a.timestamp);
+  }
+  for (const sig of wanted) {
+    const tool = toolOf.get(sig) ?? sig.slice(0, sig.indexOf(':'));
+    // No failure row recorded yet (this turn's failure may not be in the ledger): any success in the
+    // window is still the same tool working where this turn's input did not.
+    const since = firstFailureAt.get(sig) ?? 0;
+    let best: LedgerActionRow | undefined;
+    for (const a of actions) {
+      if (!a.success || a.toolName !== tool || a.timestamp <= since) continue;
+      if (!best || a.timestamp > best.timestamp) best = a;
+    }
+    if (best) out.set(sig, { inputSample: sampleInput(best.params), sessionId: best.sessionId });
+  }
+  return out;
+}
+
+/**
+ * Playbooks shown this turn whose failure class happened anyway. Pure. A playbook without a signature
+ * cannot be contradicted by a tool failure (it is about something else), so it is never returned.
+ */
+export function playbooksContradictedThisTurn(
+  offered: ReadonlyArray<{ name: string; signature: string | null }>,
+  turnFailureSignatures: ReadonlyArray<string>,
+): string[] {
+  if (offered.length === 0 || turnFailureSignatures.length === 0) return [];
+  const failed = new Set(turnFailureSignatures.filter(Boolean));
+  const out: string[] = [];
+  for (const p of offered) {
+    if (p.signature && failed.has(p.signature) && !out.includes(p.name)) out.push(p.name);
+  }
+  return out;
 }
 
 /** Never throws and never hangs the apply on a judge that errored: an unresolved verdict is `undefined`. */

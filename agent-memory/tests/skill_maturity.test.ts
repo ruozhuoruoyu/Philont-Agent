@@ -164,7 +164,7 @@ test('maturity: success_count < 5 时失败率不触发 deprecated', () => {
   assert.equal(r, 'draft');
 });
 
-test('maturity: playbook 任何情况都不变(终态)', () => {
+test('maturity: playbook never moves on success, and only leaves after 3 consecutive contradictions', () => {
   const succ = nextMaturity({
     current: 'playbook',
     successCount: 100,
@@ -173,14 +173,22 @@ test('maturity: playbook 任何情况都不变(终态)', () => {
     lastOutcome: 'success',
   });
   assert.equal(succ, 'playbook');
-  const fail = nextMaturity({
+  const twice = nextMaturity({
     current: 'playbook',
     successCount: 0,
-    failureCount: 100,
-    consecutiveFailures: 100,
+    failureCount: 2,
+    consecutiveFailures: 2,
     lastOutcome: 'failure',
   });
-  assert.equal(fail, 'playbook');
+  assert.equal(twice, 'playbook');
+  const thrice = nextMaturity({
+    current: 'playbook',
+    successCount: 0,
+    failureCount: 3,
+    consecutiveFailures: 3,
+    lastOutcome: 'failure',
+  });
+  assert.equal(thrice, 'deprecated');
 });
 
 test('maturity: deprecated 任何情况都不变(终态)', () => {

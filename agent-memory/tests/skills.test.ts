@@ -1414,3 +1414,48 @@ test('recordSkillsOffered counts offers separately from uses', () => {
   assert.equal(after.useCount, 1, 'accepted once');
   // offered:used is the learning loop's conversion rate — in production it was invisible.
 });
+
+// ── playbook disuse retirement (2026-09-20) ────────────────────────────
+
+import { playbookSignature } from '../src/reflection.js';
+
+test('retireStalePlaybooks: old, often-shown playbooks whose failure no longer recurs are deprecated; recurring ones are kept', () => {
+  const { skills } = openMemoryDb(':memory:');
+  const DAY = 24 * 3600_000;
+  const now = 200 * DAY;
+  const mk = (name: string, keywords: string[]) => {
+    skills.createSkill({ name, description: 'lesson', triggerKeywords: keywords, actionTemplate: 'x', maturity: 'playbook' });
+  };
+  mk('pb-old-solved', ['sig:shell:cmd-not-found:rg']);
+  mk('pb-old-recurring', ['sig:pariGp:gp-syntax']);
+  mk('pb-old-untagged', []);
+  mk('pb-young', ['sig:shell:cmd-not-found:rg']);
+  mk('pb-old-rarely-shown', []);
+  // Age and offers are set directly: the test is about the rule, not about waiting 90 days.
+  const db = (skills as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } } }).db;
+  for (const n of ['pb-old-solved', 'pb-old-recurring', 'pb-old-untagged', 'pb-old-rarely-shown']) {
+    db.prepare(`UPDATE memory_skills SET created_at = ? WHERE name = ?`).run(now - 100 * DAY, n);
+  }
+  db.prepare(`UPDATE memory_skills SET created_at = ? WHERE name = ?`).run(now - 10 * DAY, 'pb-young');
+  for (const n of ['pb-old-solved', 'pb-old-recurring', 'pb-old-untagged', 'pb-young']) {
+    db.prepare(`UPDATE memory_skills SET offered_count = 25 WHERE name = ?`).run(n);
+  }
+  db.prepare(`UPDATE memory_skills SET offered_count = 3 WHERE name = ?`).run('pb-old-rarely-shown');
+
+  const r = skills.retireStalePlaybooks({
+    now, maxAgeMs: 90 * DAY, minOffers: 20,
+    recurring: new Set(['pariGp:gp-syntax']),
+    signatureOf: playbookSignature,
+  });
+  assert.deepEqual(r.retired.sort(), ['pb-old-solved', 'pb-old-untagged']);
+  assert.equal(skills.getByName('pb-old-recurring')?.maturity, 'playbook', 'still being tested by a live failure');
+  assert.equal(skills.getByName('pb-young')?.maturity, 'playbook');
+  assert.equal(skills.getByName('pb-old-rarely-shown')?.maturity, 'playbook');
+  assert.equal(skills.getByName('pb-old-solved')?.maturity, 'deprecated');
+});
+
+test('playbookSignature reads the sig: tag and nothing else', () => {
+  assert.equal(playbookSignature({ triggerKeywords: ['pdf', 'sig:readFile:enoent'] }), 'readFile:enoent');
+  assert.equal(playbookSignature({ triggerKeywords: ['pdf'] }), null);
+  assert.equal(playbookSignature({ triggerKeywords: ['sig:'] }), null);
+});

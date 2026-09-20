@@ -1170,3 +1170,16 @@ test('render: the evidence block marks recurring vs this-session-only, and says 
   assert.match(block, /signature=shell:cmd-not-found:rg — 3 session\(s\), 5 occurrence\(s\) \[recurring\]/);
   assert.match(block, /signature=readFile:enoent — 1 session\(s\), 1 occurrence\(s\) \[this session only\]/);
 });
+
+test('playbook: the signature it names is parsed and stored as a sig: keyword', () => {
+  const parsed = parseReflectionOutput(JSON.stringify({
+    had_lesson: true, task_signature: 't', attempts: [],
+    learnings: [{ type: 'playbook', lesson: 'l', when_applies: 'w', next_time_action: 'n', why_not_routing_rule: 'y', signature: 'pariGp:gp-syntax' }],
+  }));
+  assert.equal(parsed.ok, true);
+  const { skills, routingRules } = openMemoryDb(':memory:');
+  const r = applyReflection(parsed.reflection!, { skills, routingRules, reflectionId: 'r-sig' });
+  assert.deepEqual(r.applied, [0]);
+  const pb = skills.listAll()[0];
+  assert.deepEqual(pb.triggerKeywords, ['sig:pariGp:gp-syntax']);
+});

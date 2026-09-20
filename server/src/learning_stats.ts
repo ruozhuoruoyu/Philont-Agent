@@ -78,7 +78,9 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
       `  idle skill extraction: ran=${get('idle_reflect.ran')} suppressed_doomloop=${get('idle_reflect.suppressed')}`,
     );
     lines.push(
-      `  auto-injected lessons: playbook turns=${get('playbook.inject.turns')} anti-pattern turns=${get('antipattern.inject.turns')}`,
+      `  auto-injected lessons: playbook turns=${get('playbook.inject.turns')} anti-pattern turns=${get('antipattern.inject.turns')}; ` +
+        `playbooks contradicted (shown, failure recurred anyway)=${get('playbook.contradicted')} → deprecated=${get('playbook.deprecated')}; ` +
+        `retired for disuse=${get('playbook.retired_stale')} — the two negative edges a lesson never had before 2026-09-20`,
     );
     // THE ONLY LINES HERE THAT ARE EFFECT AND NOT ACTIVITY.
     //

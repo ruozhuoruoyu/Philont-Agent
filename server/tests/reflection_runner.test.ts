@@ -170,7 +170,7 @@ test('playbooksSupersededBy: skips already-deprecated and non-matching signature
 
 // ── cross-turn evidence (2026-09-20) ───────────────────────────────────
 
-import { buildCrossTurnEvidence, learningRequiresRecurrence } from '../src/reflection_runner.js';
+import { buildCrossTurnEvidence, learningRequiresRecurrence, playbooksContradictedThisTurn } from '../src/reflection_runner.js';
 
 const sig = (tool: string, err: string) => `${tool}:${err.split(':')[1]?.trim() ?? 'other'}`;
 
@@ -204,4 +204,57 @@ test('buildCrossTurnEvidence: no failures this turn → nothing; cap respected',
 test('recurrence gate flag: on by default, off on 0/off/false/no', () => {
   assert.equal(learningRequiresRecurrence({} as NodeJS.ProcessEnv), true);
   assert.equal(learningRequiresRecurrence({ PHILONT_LEARNING_REQUIRE_RECURRENCE: 'off' } as NodeJS.ProcessEnv), false);
+});
+
+test('buildCrossTurnEvidence: pairs a recurring failure with the same tool\'s later successful input', () => {
+  const ev = buildCrossTurnEvidence({
+    turnFailures: [{ toolName: 'pariGp', resultText: 'pariGp: gp-syntax' }],
+    ledger: [
+      { toolName: 'pariGp', result: 'pariGp: gp-syntax', sessionId: 'a' },
+      { toolName: 'pariGp', result: 'pariGp: gp-syntax', sessionId: 'b' },
+    ],
+    allActions: [
+      { toolName: 'pariGp', params: { code: 'for(n=1,3, print(n)' }, success: false, sessionId: 'a', timestamp: 10, result: 'pariGp: gp-syntax' } as never,
+      { toolName: 'pariGp', params: { code: 'print(1)' }, success: true, sessionId: 'z', timestamp: 5 },   // before the failure → not a contrast
+      { toolName: 'pariGp', params: { code: 'for(n=1,3, print(n))' }, success: true, sessionId: 'b', timestamp: 20 },
+      { toolName: 'pariGp', params: { code: 'for(n=1,9, print(n))' }, success: true, sessionId: 'c', timestamp: 30 },
+      { toolName: 'shell', params: { command: 'ls' }, success: true, sessionId: 'c', timestamp: 40 }, // other tool
+    ],
+    signatureOf: sig,
+    currentSessionId: 'cur',
+  });
+  assert.equal(ev.length, 1);
+  assert.deepEqual(ev[0].laterSuccess, { inputSample: '{"code":"for(n=1,9, print(n))"}', sessionId: 'c' });
+  assert.equal(ev[0].sessions, 3);
+});
+
+test('buildCrossTurnEvidence: no success of that tool → no pair; the block renders the pair when present', async () => {
+  const none = buildCrossTurnEvidence({
+    turnFailures: [{ toolName: 'pariGp', resultText: 'pariGp: gp-syntax' }],
+    ledger: [], allActions: [{ toolName: 'shell', params: {}, success: true, sessionId: 'z', timestamp: 1 }],
+    signatureOf: sig, currentSessionId: 'cur',
+  });
+  assert.equal(none[0].laterSuccess, undefined);
+  // This turn's failure is not in the ledger yet: an earlier success of the same tool still contrasts.
+  const ev = buildCrossTurnEvidence({
+    turnFailures: [{ toolName: 'pariGp', resultText: 'pariGp: gp-syntax' }],
+    ledger: [], allActions: [{ toolName: 'pariGp', params: { code: 'ok' }, success: true, sessionId: 'z', timestamp: 1 }],
+    signatureOf: sig, currentSessionId: 'cur',
+  });
+  assert.deepEqual(ev[0].laterSuccess, { inputSample: '{"code":"ok"}', sessionId: 'z' });
+  const { renderCrossTurnEvidence } = await import('@agent/memory');
+  const block = renderCrossTurnEvidence([{ signature: 'pariGp:gp-syntax', sessions: 2, occurrences: 2, sample: 'syntax error', laterSuccess: { inputSample: '{"code":"ok"}' } }]);
+  assert.match(block, /LATER SUCCEEDED with: \{"code":"ok"\} — name what differs/);
+});
+
+test('playbooksContradictedThisTurn: only signature-tagged playbooks whose class failed this turn', () => {
+  const offered = [
+    { name: 'pb-rg', signature: 'shell:cmd-not-found:rg' },
+    { name: 'pb-gp', signature: 'pariGp:gp-syntax' },
+    { name: 'pb-untagged', signature: null },
+    { name: 'pb-rg', signature: 'shell:cmd-not-found:rg' },
+  ];
+  assert.deepEqual(playbooksContradictedThisTurn(offered, ['shell:cmd-not-found:rg', 'readFile:enoent']), ['pb-rg']);
+  assert.deepEqual(playbooksContradictedThisTurn(offered, []), []);
+  assert.deepEqual(playbooksContradictedThisTurn([], ['shell:cmd-not-found:rg']), []);
 });

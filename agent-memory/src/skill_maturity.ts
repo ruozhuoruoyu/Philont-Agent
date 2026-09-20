@@ -57,8 +57,15 @@ export interface MaturityComputeInput {
 export function nextMaturity(input: MaturityComputeInput): SkillMaturity {
   const { current, successCount, failureCount, consecutiveFailures, lastOutcome } = input;
 
-  // playbook terminal state: automatic state machine does not enter or exit
-  if (current === 'playbook') return 'playbook';
+  // playbook: the state machine never ENTERS it (reflection sets it explicitly) and success never moves
+  // it — a lesson has no success signal. Since 2026-09-20 it can LEAVE on observed failure: a playbook
+  // offered in a turn whose failure class recurred anyway was contradicted (self-learning redesign
+  // Phase 2.4, demotion-only for prose). Three contradictions in a row retire it.
+  if (current === 'playbook') {
+    return lastOutcome === 'failure' && consecutiveFailures >= DEPRECATED_CONSECUTIVE_FAILURES
+      ? 'deprecated'
+      : 'playbook';
+  }
 
   // deprecated terminal state: no revival
   if (current === 'deprecated') return 'deprecated';
