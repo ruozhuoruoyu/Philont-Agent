@@ -890,12 +890,21 @@ function stripTemplateArtifacts(v: unknown): unknown {
   return v;
 }
 
+/**
+ * Arguments that are not JSON come back as `{ _raw: <text> }` rather than `{}` (2026-09-20). With `{}`
+ * the model only ever learned "missing required field(s)" and never that its JSON was broken, so it
+ * re-sent the same malformed text — the parse-error death spiral. The chat loop detects the `_raw`
+ * shape before authorization (format_recovery.rawArgumentsLeak), echoes the text back and never passes
+ * it to a tool. Same convention parseToolCallJson already uses for text-embedded calls.
+ */
 export function safeJsonParse(s: string): Record<string, unknown> {
   if (!s) return {};
   try {
-    return stripTemplateArtifacts(JSON.parse(s)) as Record<string, unknown>;
+    const parsed = stripTemplateArtifacts(JSON.parse(s));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    return { _raw: s };
   } catch {
-    return {};
+    return { _raw: s };
   }
 }
 

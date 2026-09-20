@@ -59,6 +59,19 @@ export function extractFailureSignature(
     return `${tool}:endpoint-down`;
   }
 
+  // Format-class failures (2026-09-20): the call never reached a tool. The model wrote arguments that
+  // did not parse or lacked a required field, or named a tool that does not exist. A class of their
+  // own on purpose: the recovery is "rewrite the call" (show the model what it sent), never "lock the
+  // tool" or "research first" — the in-turn gates read this suffix to skip themselves. Before this,
+  // two rejections fell into `<tool>:other:tool input format error, block` and disabled the tool for
+  // the turn; an unknown name was not recorded at all. See server/src/format_recovery.ts.
+  if (/^(?:error: )?unknown tool\b/.test(lower)) {
+    return `${tool}:unknown-tool`;
+  }
+  if (/^tool input format error\b/.test(lower)) {
+    return `${tool}:input-format`;
+  }
+
   // 0. Tool-specific taxonomies take precedence over the generic patterns below — otherwise a
   //    pariGp/z3 error whose text happens to contain a 3-digit number / "timeout" / etc. gets
   //    mislabelled (observed: `pariGp:http-500`). Classify by the compute tool first so its errors

@@ -201,6 +201,13 @@ export interface ReflectionRunOptions {
   ) => void;
   /** Maximum number of messages the context LLM sees; default 12 */
   contextWindow?: number;
+  /**
+   * 2026-09-20: the learning judge's verdict for this turn (`true` verified success, `false` failure,
+   * `undefined` none), or a promise of it — the judge runs concurrently with turn close. With
+   * PHILONT_LEARNING_REQUIRE_VERIFIED on (default), applyReflection writes positive artifacts only when
+   * this resolves to `true`. Awaited here, off the turn's critical path.
+   */
+  verifiedSuccess?: Promise<boolean | undefined> | boolean;
   /** 2026-06-22: optional instrumentation counters (turn-close reflection fire/skip/production). */
   metrics?: MetricsStore;
   /**
@@ -230,6 +237,24 @@ const lastReflectionFire = new Map<string, { ts: number; reasonsKey: string }>()
  *
  * Never throws: any error is caught and only printed via console.warn.
  */
+/** PHILONT_LEARNING_REQUIRE_VERIFIED — default on; `0|off|false|no` restores unconditional crystallization. */
+export function learningRequiresVerifiedSuccess(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = (env.PHILONT_LEARNING_REQUIRE_VERIFIED ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
+/** Never throws and never hangs the apply on a judge that errored: an unresolved verdict is `undefined`. */
+async function resolveVerifiedSuccess(
+  v: ReflectionRunOptions['verifiedSuccess'],
+): Promise<boolean | undefined> {
+  if (v === undefined || typeof v === 'boolean') return v;
+  try {
+    return await v;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<void> {
   try {
     const state = collectReflectionState(
@@ -356,6 +381,7 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
     }
 
     const reflectionId = `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const verifiedSuccess = await resolveVerifiedSuccess(opts.verifiedSuccess);
     const result = applyReflection(
       reflection,
       {
@@ -365,7 +391,11 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
         planFiles: opts.planFiles,
         reflectionId,
       },
-      { turnDegraded: state.turnDegraded },
+      {
+        turnDegraded: state.turnDegraded,
+        verifiedSuccess,
+        requireVerifiedSuccess: learningRequiresVerifiedSuccess(),
+      },
     );
 
     opts.appendAudit?.('self_domain_write', {
@@ -435,12 +465,16 @@ export async function maybeRunReflection(opts: ReflectionRunOptions): Promise<vo
     opts.metrics?.increment('reflect.playbook', result.stats.playbooksCreated);
     opts.metrics?.increment('reflect.new_skill', result.stats.newSkillsCreated);
     opts.metrics?.increment('reflect.skill_refine', result.stats.skillsRefined);
+    if (result.stats.withheldUnverified > 0) {
+      opts.metrics?.increment('reflect.withheld_unverified', result.stats.withheldUnverified);
+    }
 
     console.log(
       `[reflection] session=${safeSessionId(opts.sessionId)} reflectionId=${reflectionId} ` +
         `applied=${result.applied.length} routing=${result.stats.routingRulesCreated} ` +
         `playbooks=${result.stats.playbooksCreated} new_skills=${result.stats.newSkillsCreated} ` +
-        `refined=${result.stats.skillsRefined} errors=${result.errors.length}`,
+        `refined=${result.stats.skillsRefined} withheld_unverified=${result.stats.withheldUnverified} ` +
+        `(judge=${verifiedSuccess === undefined ? 'none' : verifiedSuccess ? 'success' : 'failure'}) errors=${result.errors.length}`,
     );
   } catch (e) {
     // Reflection failures must never affect the main flow

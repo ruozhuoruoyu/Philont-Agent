@@ -1019,3 +1019,88 @@ test('apply: turnDegraded=true 仍允许 routing_rule + playbook', () => {
   assert.equal(r.stats.routingRulesCreated, 1);
   assert.equal(r.stats.playbooksCreated, 1);
 });
+
+// ── verified-success gate (2026-09-20, redesign Phase 2.1 "born validated") ──
+
+const positiveRule = {
+  type: 'routing_rule' as const,
+  triggerCondition: 'PDF has no text layer',
+  preferSkill: 'camscanner',
+  avoidSkills: [],
+  carveout: 'not for scanned images over 50 pages',
+  evidence: 'turn 5-12',
+};
+const avoidOnlyRule = {
+  type: 'routing_rule' as const,
+  triggerCondition: 'PDF has no text layer',
+  preferSkill: null,
+  avoidSkills: ['pdf2docx'],
+  carveout: 'only when pdftotext returns empty',
+  evidence: 'turn 5-12',
+};
+const failurePlaybook = {
+  type: 'playbook' as const,
+  lesson: 'probe the text layer before converting',
+  whenApplies: 'any PDF-to-Word request',
+  nextTimeAction: 'run pdftotext first; empty output means OCR is needed',
+  whyNotRoutingRule: 'no OCR skill exists yet',
+};
+const newSkill = {
+  type: 'new_skill' as const,
+  name: 'pdf-probe',
+  description: 'probe a PDF text layer',
+  triggerKeywords: ['pdf'],
+  actionTemplate: '1. pdftotext file.pdf - | head',
+};
+
+test('apply: with the gate on, an unverified turn withholds positive artifacts and keeps failure lessons', () => {
+  const { skills, routingRules } = openMemoryDb(':memory:');
+  const r = applyReflection(
+    { hadLesson: true, taskSignature: 'pdf-to-word', attempts: [], learnings: [positiveRule, avoidOnlyRule, failurePlaybook, newSkill] },
+    { skills, routingRules, reflectionId: 'refl-gate-1' },
+    { requireVerifiedSuccess: true, verifiedSuccess: undefined },
+  );
+  assert.deepEqual(r.applied, [1, 2], 'avoid-only rule and playbook are failure evidence: still written');
+  assert.equal(r.stats.withheldUnverified, 2);
+  assert.equal(r.stats.routingRulesCreated, 1);
+  assert.equal(r.stats.playbooksCreated, 1);
+  assert.equal(r.stats.newSkillsCreated, 0);
+  assert.equal(r.errors.length, 2);
+  assert.match(r.errors[0].error, /^unverified-turn: withheld routing_rule/);
+  assert.match(r.errors[1].error, /^unverified-turn: withheld new_skill/);
+  assert.equal(routingRules.listAll()[0].preferSkill, null);
+});
+
+test('apply: a judge-verified success turn writes everything', () => {
+  const { skills, routingRules } = openMemoryDb(':memory:');
+  const r = applyReflection(
+    { hadLesson: true, taskSignature: 'pdf-to-word', attempts: [], learnings: [positiveRule, newSkill] },
+    { skills, routingRules, reflectionId: 'refl-gate-2' },
+    { requireVerifiedSuccess: true, verifiedSuccess: true },
+  );
+  assert.deepEqual(r.applied, [0, 1]);
+  assert.equal(r.stats.withheldUnverified, 0);
+  assert.equal(r.stats.newSkillsCreated, 1);
+});
+
+test('apply: a judged FAILURE withholds positives too, and the error names the verdict', () => {
+  const { skills, routingRules } = openMemoryDb(':memory:');
+  const r = applyReflection(
+    { hadLesson: true, taskSignature: 'pdf-to-word', attempts: [], learnings: [newSkill] },
+    { skills, routingRules },
+    { requireVerifiedSuccess: true, verifiedSuccess: false },
+  );
+  assert.deepEqual(r.applied, []);
+  assert.match(r.errors[0].error, /verdict=failure/);
+});
+
+test('apply: with the gate off, behaviour is unchanged (positives written without a verdict)', () => {
+  const { skills, routingRules } = openMemoryDb(':memory:');
+  const r = applyReflection(
+    { hadLesson: true, taskSignature: 'pdf-to-word', attempts: [], learnings: [positiveRule, newSkill] },
+    { skills, routingRules },
+    { requireVerifiedSuccess: false },
+  );
+  assert.deepEqual(r.applied, [0, 1]);
+  assert.equal(r.stats.withheldUnverified, 0);
+});

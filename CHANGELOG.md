@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Format-failure recovery: the model sees what it sent.** A tool call rejected before execution
+  (arguments that did not parse, a required field missing, a tool name that does not exist) now
+  comes back with the model's own input quoted, then the expected shape, then a strict one-call
+  template — one rung per repeat on the same tool this turn. Two of its causes were invisible: the
+  OpenAI-compatible adapter (the DeepSeek path) turned unparseable argument JSON into `{}`, so the
+  model only ever learned "missing required field" and re-sent the same broken text; and an unknown
+  tool name was answered but never recorded, so `read_file` for `readFile` could loop to the
+  iteration cap. Unknown names now get the closest real names and enter the turn ledger. Format
+  failures are their own signature class (`<tool>:input-format`, `<name>:unknown-tool`) and no
+  longer trip the strategic gates — before this, two malformed `writeFile` calls disabled `writeFile`
+  for the rest of the turn and demanded research. Design source: the `parse_error_recovery` harness
+  variant that ModularRSI (arXiv 2609.14857) evolved on DeepSeek-V4-Flash.
+- **Inspection-only streak nudge.** A trailing run of read-only local calls (readFile, grep, listDir,
+  facts…) with nothing written, run, verified, or answered gets a one-shot reminder to act, answer,
+  or say what is missing (`PHILONT_INSPECTION_STREAK_AT`, default 8; 0 disables). Web research is
+  read-only by design and never counts. The last entry of ModularRSI's evolved failure catalogue that
+  philont did not already guard.
+- **Positive learnings need a verified success behind them** (self-learning redesign Phase 2.1). A
+  `new_skill`, `skill_refine`, or a routing rule that *prefers* a skill is written at turn close
+  only when the learning judge verified the turn as a success; otherwise it is withheld and counted
+  (`reflect.withheld_unverified`). Failure lessons — avoid-only rules, playbooks, plan revisions — are
+  unaffected. `PHILONT_LEARNING_REQUIRE_VERIFIED=0` restores the old behaviour. Rationale in
+  `docs/design/self_evolution_postmortem.md`: a year of production wrote 1022 routing rules with
+  validated=0, and the 2026 RSI literature measured the same thing — LLM-authored skills without a
+  validation gate show no benefit, and unguarded context evolution is high-variance.
+
 - **Skills install as bundles, not as a single markdown file.** A skill is written as if the
   agent were standing in its directory ("read FORMS.md", "run scripts/fill_fillable_fields.py"),
   and 16 of the 18 skills in `anthropics/skills` ship such companions — philont installed the

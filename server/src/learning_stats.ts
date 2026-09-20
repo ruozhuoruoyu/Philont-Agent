@@ -58,10 +58,20 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
       `  routing outcomes recorded: success=${get('routing.outcome.success')} failure=${get('routing.outcome.failure')} (success ${pct(get('routing.outcome.success'), ro)})`,
     );
     lines.push(
-      `  in-turn reminders fired=${get('inturn.fire')} (mechanical=${get('inturn.mechanical')}) — the cheap path that actually reaches the agent same-turn`,
+      `  in-turn reminders fired=${get('inturn.fire')} (mechanical=${get('inturn.mechanical')} format=${get('inturn.format')}) — the cheap path that actually reaches the agent same-turn`,
+    );
+    // Format-class failures (2026-09-20): calls that never reached a tool. `format_reject` is every
+    // pre-authorization rejection (echoed back with an escalating template), `unknown_tool` every call
+    // to a name that does not exist (now recorded; before this it was invisible to every detector).
+    // `inspection_streak` is the read-only-looking nudge. All three are activity, not effect — they say
+    // how often the model writes a call wrong, which is the number the escalation ladder should lower.
+    lines.push(
+      `  format failures: input rejected=${get('inturn.format_reject')} unknown tool=${get('inturn.unknown_tool')}; ` +
+        `inspection-only streak nudges=${get('inturn.inspection_streak')}`,
     );
     lines.push(
-      `  turn-close reflection: fired=${get('reflect.fire')} skipped_cooldown=${get('reflect.skip_cooldown')} → produced routing_rule=${get('reflect.routing_rule')} playbook=${get('reflect.playbook')} new_skill=${get('reflect.new_skill')} skill_refine=${get('reflect.skill_refine')}`,
+      `  turn-close reflection: fired=${get('reflect.fire')} skipped_cooldown=${get('reflect.skip_cooldown')} → produced routing_rule=${get('reflect.routing_rule')} playbook=${get('reflect.playbook')} new_skill=${get('reflect.new_skill')} skill_refine=${get('reflect.skill_refine')}; ` +
+        `positive learnings withheld (turn not judge-verified)=${get('reflect.withheld_unverified')} — creation may not outrun measurement`,
     );
     lines.push(
       `  idle skill extraction: ran=${get('idle_reflect.ran')} suppressed_doomloop=${get('idle_reflect.suppressed')}`,

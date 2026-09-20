@@ -592,3 +592,32 @@ test('an endpoint outage is the infrastructure, not the agent hitting a wall', (
   const outage = [1, 2, 3].map(() => ({ toolName: 'deep_explore', result: 'round_not_run: API 429', timestamp: ts }));
   assert.equal(countSameRootCauseFailures(outage), 0, 'three outages are zero walls');
 });
+
+// ── format-class signatures (2026-09-20) ───────────────────────────────
+
+test('sig: a pre-authorization input rejection is its own class, not the generic tail', () => {
+  const s = extractFailureSignature(
+    'writeFile',
+    'tool input format error, blocked before authorization: missing required field(s): path\nYou sent: {"content":"x"}',
+  );
+  assert.equal(s, 'writeFile:input-format');
+  // The class must not depend on the detail text — a JSON parse failure lands in the same bucket.
+  assert.equal(
+    extractFailureSignature('writeFile', 'tool input format error, blocked before authorization: arguments were not valid JSON'),
+    'writeFile:input-format',
+  );
+});
+
+test('sig: an unknown tool name is recorded under the name the model used', () => {
+  assert.equal(extractFailureSignature('read_file', "Error: Unknown tool 'read_file'. Did you mean: readFile?"), 'read_file:unknown-tool');
+  assert.equal(extractFailureSignature('foo', "Unknown tool 'foo'"), 'foo:unknown-tool');
+});
+
+test('sig: format classes take precedence over the http-status and generic fallbacks', () => {
+  // "404" inside the echoed input must not turn a format error into an http class.
+  const s = extractFailureSignature(
+    'http',
+    'tool input format error, blocked before authorization: missing required field(s): url\nYou sent: {"status":404}',
+  );
+  assert.equal(s, 'http:input-format');
+});

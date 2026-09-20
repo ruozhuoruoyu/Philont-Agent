@@ -243,6 +243,80 @@ export function authoringCheatsheet(signature: string): string[] {
   return [];
 }
 
+/**
+ * Inspection-only streak (2026-09-20).
+ *
+ * Local, side-effect-free tools. A run of these at the tail of a turn's ledger is the agent looking
+ * without acting: reading files, listing directories, grepping, re-fetching the same facts. ModularRSI
+ * (arXiv 2609.14857) found this failure class on DeepSeek-V4-Flash by contrastive trajectory analysis —
+ * "spends multiple consecutive turns inspecting (ls, cat, man) without creating any task artifact or
+ * running build/test commands" — and evolved a read-only guard for it; philont had every other guard
+ * from that catalogue (evidence-gated completion, repeated-command detection, stuck detection) but not
+ * this one. Web tools are deliberately NOT in the set: a research turn is read-only by design.
+ */
+export const INSPECTION_TOOLS: ReadonlySet<string> = new Set([
+  'readFile', 'listDir', 'inspectPath', 'grep', 'glob', 'json', 'hash', 'env', 'time', 'echo',
+  'get_fact', 'list_facts', 'search_notes', 'search_skills', 'searchSkills', 'recall_sessions',
+  'use_skill', 'lemmaLookup', 'barrierCheck', 'listCredentialNames',
+]);
+
+export interface InspectionStreakResult {
+  triggered: boolean;
+  /** Length of the trailing inspection-only run. */
+  count?: number;
+  /** Tally of the tools in that run, most frequent first ("readFile ×4"). */
+  tally?: string;
+  reminder?: string;
+}
+
+export function inspectionStreakThreshold(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.PHILONT_INSPECTION_STREAK_AT ?? '').trim();
+  if (raw === '') return 8;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 8;
+}
+
+/**
+ * Trailing run of inspection-only calls (success or failure — a failed readFile is still looking).
+ * Any non-inspection call at the tail resets the run to zero, so a turn that writes, runs, or
+ * answers in between never trips it. `threshold <= 0` disables.
+ */
+export function detectInspectionStreak(
+  records: ReadonlyArray<InTurnToolRecord>,
+  threshold: number = inspectionStreakThreshold(),
+): InspectionStreakResult {
+  if (threshold <= 0) return { triggered: false };
+  const counts = new Map<string, number>();
+  let run = 0;
+  for (let i = records.length - 1; i >= 0; i--) {
+    const name = records[i].toolName;
+    if (!INSPECTION_TOOLS.has(name)) break;
+    run++;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  if (run < threshold) return { triggered: false, count: run };
+  const tally = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([n, c]) => `${n} ×${c}`)
+    .join(', ');
+  return { triggered: true, count: run, tally, reminder: buildInspectionStreakReminder(run, tally) };
+}
+
+function buildInspectionStreakReminder(count: number, tally: string): string {
+  return [
+    '',
+    `[drive inspection-streak] Your last ${count} tool calls were all read-only inspection (${tally}) — nothing was written, run, verified, or answered.`,
+    '',
+    '**Reading more will not change what you know.** Pick ONE now:',
+    '  (a) act — write / run / verify the thing the task actually asks for;',
+    '  (b) if you already have what you need, stop calling tools and write the answer;',
+    '  (c) if you are blocked, say exactly which fact or file is missing and stop.',
+    '',
+    'Do not open another file or run another search unless you can name what decision it will change. This reminder fires once per turn.',
+    '',
+  ].join('\n');
+}
+
 export type RepairTransition = 'verified' | 'no_effect' | 'different_failure' | 'inconclusive';
 
 /** Deterministic comparison of the verifier result before and after a mechanical rewrite. */

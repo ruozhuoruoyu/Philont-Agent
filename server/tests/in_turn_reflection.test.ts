@@ -296,3 +296,50 @@ test('isMechanicalFailure: ENOENT on read tools is mechanical — same deadlock 
   assert.equal(isMechanicalFailure('listDir:enoent'), true);
   assert.equal(isMechanicalFailure('fetchedStore:enoent'), true);
 });
+
+// ── inspection-only streak (2026-09-20) ───────────────────────────────
+
+import { detectInspectionStreak, inspectionStreakThreshold } from '../src/in_turn_reflection.js';
+
+const look = (toolName: string, success = true): InTurnToolRecord => ({ toolName, success, resultText: success ? '✓ TOOL OK' : '⚠ TOOL FAILED — ENOENT' });
+
+test('inspection streak: below threshold → nothing', () => {
+  const r = detectInspectionStreak([look('readFile'), look('grep'), look('listDir')], 4);
+  assert.equal(r.triggered, false);
+  assert.equal(r.count, 3);
+});
+
+test('inspection streak: a trailing run of read-only calls trips it, with a tally', () => {
+  const r = detectInspectionStreak(
+    [look('readFile'), look('readFile'), look('grep'), look('readFile', false), look('listDir'), look('get_fact')],
+    5,
+  );
+  assert.equal(r.triggered, true);
+  assert.equal(r.count, 6);
+  assert.equal(r.tally, 'readFile ×3, get_fact ×1, grep ×1, listDir ×1');
+  assert.match(r.reminder!, /Your last 6 tool calls were all read-only inspection \(readFile ×3/);
+  assert.match(r.reminder!, /fires once per turn/);
+});
+
+test('inspection streak: any act at the tail resets the run — writes and runs are not looking', () => {
+  const acted = detectInspectionStreak([look('readFile'), look('readFile'), look('readFile'), look('writeFile')], 3);
+  assert.equal(acted.triggered, false);
+  assert.equal(acted.count, 0);
+  // Reads BEFORE the act do not count either: only the trailing run matters.
+  const after = detectInspectionStreak([look('readFile'), look('readFile'), look('shell'), look('readFile'), look('grep')], 3);
+  assert.equal(after.triggered, false);
+  assert.equal(after.count, 2);
+});
+
+test('inspection streak: web research is read-only by design and never counts', () => {
+  const r = detectInspectionStreak([look('readFile'), look('webFetch'), look('webSearch'), look('webFetch')], 2);
+  assert.equal(r.triggered, false);
+});
+
+test('inspection streak: threshold 0 disables; env parsing', () => {
+  assert.equal(detectInspectionStreak([look('readFile'), look('readFile')], 0).triggered, false);
+  assert.equal(inspectionStreakThreshold({} as NodeJS.ProcessEnv), 8);
+  assert.equal(inspectionStreakThreshold({ PHILONT_INSPECTION_STREAK_AT: '5' } as NodeJS.ProcessEnv), 5);
+  assert.equal(inspectionStreakThreshold({ PHILONT_INSPECTION_STREAK_AT: 'abc' } as NodeJS.ProcessEnv), 8);
+  assert.equal(inspectionStreakThreshold({ PHILONT_INSPECTION_STREAK_AT: '0' } as NodeJS.ProcessEnv), 0);
+});

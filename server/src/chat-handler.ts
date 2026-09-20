@@ -168,7 +168,17 @@ import { renderHonestyFallback } from './honesty_fallback.js';
 import { classifyAuthIntent, matchOfferedAuthWord } from './auth_intent.js';
 import { authRequestCode, isBarePredeliveryAuthReply, matchScopedAuthReply } from './auth_request_id.js';
 import { classifyExploreControlReply, decideResumeBatch, resolveExploreTarget } from './explore_control.js';
-import { judgeRun, type JudgeToolRecord } from './learning_judge.js';
+import { judgeRun, type JudgeToolRecord, type RunVerdict } from './learning_judge.js';
+import {
+  buildFormatFixReminder,
+  buildInputRejection,
+  buildUnknownToolFeedback,
+  isFormatFailureSignature,
+  priorFormatFailures,
+  rawArgumentsLeak,
+  schemaShapeHint,
+  suggestToolNames,
+} from './format_recovery.js';
 import {
   extractScheduleIdFromSession,
   utcDateString,
@@ -284,6 +294,7 @@ import {
 } from './auth-continuation.js';
 import {
   detectInTurnFailurePattern,
+  detectInspectionStreak,
   isMechanicalFailure,
   buildMechanicalFixReminder,
   authoringCheatsheet,
@@ -8240,11 +8251,14 @@ function shadowLearningJudge(
       }
     | undefined,
   resumedFromAuth = false,
-): void {
-  if (!learningJudgeEnabled()) return;
+): Promise<RunVerdict | undefined> {
+  // 2026-09-20: the verdict is returned (still fire-and-forget for the turn) so turn-close reflection can
+  // gate positive artifacts on it — redesign Phase 2.1. `undefined` = no verdict, which the gate treats
+  // as unverified. Nothing here may throw or delay the turn.
+  if (!learningJudgeEnabled()) return Promise.resolve(undefined);
   try {
     const records = bus?.inTurnRecords ?? [];
-    if (records.length === 0) return; // nothing ran this turn — no verdict worth logging
+    if (records.length === 0) return Promise.resolve(undefined); // nothing ran this turn — no verdict worth logging
     // On a pending-auth RESUME the turn's userMessage is the approval word — "ok" — not the task. Judging
     // "did this turn achieve the goal 'ok'?" can only ever come back could_not_verify, and the judge said
     // so in as many words in production ("The goal \"ok\" is too vague to determine what constitutes
@@ -8268,7 +8282,7 @@ function shadowLearningJudge(
       // Nothing recoverable: emit no verdict rather than a meaningless one. A skipped sample is honest;
       // a could_not_verify about the word "ok" is noise that looks like data.
       console.log(`[learning-judge] shadow session=${safeSessionId(sessionId)} skipped (auth resume, original goal not recoverable)`);
-      return;
+      return Promise.resolve(undefined);
     }
     const goal = resolved;
     const trace: JudgeToolRecord[] = records.map((r) => ({
@@ -8277,7 +8291,7 @@ function shadowLearningJudge(
       summary: (r.resultText ?? '').replace(/\s+/g, ' ').slice(0, 200),
     }));
     const claim = lastAssistantText(messages as unknown as NativeMessage[]).slice(0, 1000);
-    void judgeRun({
+    return judgeRun({
       goal,
       trace,
       assistantClaim: claim,
@@ -8305,16 +8319,19 @@ function shadowLearningJudge(
         // The judge stays shadow-only: this changes no control flow, it only makes a recurring
         // "goal not met" visible to the same detector that already watches for recurring blocks.
         const scheduleId = extractScheduleIdFromSession(sessionId);
-        if (!scheduleId) return;
-        if (v.outcome === 'failure' || v.outcome === 'could_not_verify') {
-          lastJudgeGoalUnmet.set(scheduleId, (v.evidence ?? '').replace(/\s+/g, ' ').trim().slice(0, 240));
-        } else {
-          lastJudgeGoalUnmet.delete(scheduleId); // a confirmed run breaks the streak
+        if (scheduleId) {
+          if (v.outcome === 'failure' || v.outcome === 'could_not_verify') {
+            lastJudgeGoalUnmet.set(scheduleId, (v.evidence ?? '').replace(/\s+/g, ' ').trim().slice(0, 240));
+          } else {
+            lastJudgeGoalUnmet.delete(scheduleId); // a confirmed run breaks the streak
+          }
         }
+        return v;
       })
-      .catch(() => {});
+      .catch(() => undefined);
   } catch {
     // Shadow must never affect the turn.
+    return Promise.resolve(undefined);
   }
 }
 
@@ -9641,6 +9658,10 @@ export async function handleChatSend(
     // Stage A (2026-06-22): could_not_verify is a natural HONEST end (the agent admitted it lacked
     // tool backing instead of fabricating) — reflection should run on it like response/stop_and_report
     // so the system can distil "this needs a working compute path" rather than treating it as failure.
+    // Phase 1 shadow judge: score this turn (log + counters; the turn never waits on it). Started here so
+    // turn-close reflection below can await the verdict before writing a positive artifact (2026-09-20).
+    const judgeVerdict = shadowLearningJudge(sessionId, userMessage, messages, signalBus, !!pending);
+
     if (outcomeType === 'response' || outcomeType === 'stop_and_report' || outcomeType === 'could_not_verify') {
       // 2026-05-06 sameRootCauseFailures integration: scans up to 30 failed tool calls within the last 24h,
       // clusters by (toolName + errorClass) signature, and takes the count of the largest same-signature group.
@@ -9786,6 +9807,9 @@ export async function handleChatSend(
         sessionId,
         messages,
         userMessage,
+        // 2026-09-20: positive learnings (new_skill / skill_refine / prefer-skill routing rules) need a
+        // judge-verified success behind them. See ApplyReflectionOptions.verifiedSuccess.
+        verifiedSuccess: judgeVerdict.then((v) => (v ? v.outcome === 'success' : undefined)),
         skills: memory.skills,
         routingRules: memory.routingRules,
         plans: memory.plans,
@@ -9805,8 +9829,7 @@ export async function handleChatSend(
       });
     }
 
-    // Phase 1 shadow: score this turn, log only. See shadowLearningJudge.
-    shadowLearningJudge(sessionId, userMessage, messages, signalBus, !!pending);
+    // Phase 1 shadow judge: started above (judgeVerdict), before the reflection block that reads it.
 
     return result;
   } catch (e) {
@@ -12734,13 +12757,24 @@ async function runToolLoop(
     const requiredCheck = prepared.input
       ? validateRequiredToolInput(prepared.input, tools.get(call.name)?.schema)
       : { valid: false as const, reason: prepared.reason ?? 'invalid tool input' };
-    if (!prepared.input || !requiredCheck.valid) {
+    // 2026-09-20 format recovery: the rejection quotes what the model sent and escalates (shape hint,
+    // then a strict template) with each repeat on the same tool this turn — see format_recovery.ts.
+    // `_raw` is the adapter's marker for arguments that were not JSON; it is never passed to a tool.
+    const rawLeak = rawArgumentsLeak(prepared.input);
+    if (!prepared.input || !requiredCheck.valid || rawLeak !== null) {
       const detail = requiredCheck.valid ? 'invalid tool input' : requiredCheck.reason;
-      const reason = `tool input format error, blocked before authorization: ${detail}`;
+      const reason = buildInputRejection({
+        toolName: call.name,
+        detail,
+        received: rawLeak ?? prepared.input ?? call.input,
+        schema: tools.get(call.name)?.schema,
+        priorFailures: priorFormatFailures(inTurnRecords, call.name),
+      });
       toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: reason });
       totalToolCallsThisTurn++;
       inTurnRecords.push({ toolName: call.name, success: false, resultText: reason });
-      console.warn(`[tool] ${call.name} → pre-auth input rejected: ${detail}`);
+      memory.metrics.increment('inturn.format_reject');
+      console.warn(`[tool] ${call.name} → pre-auth input rejected: ${rawLeak !== null ? 'arguments were not JSON' : detail}`);
       continue;
     }
     call.input = prepared.input;
@@ -12777,8 +12811,18 @@ async function runToolLoop(
       continue;
     }
     if (!classification) {
-      toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: `Error: Unknown tool '${call.name}'` });
+      // 2026-09-20: an unknown name is a format failure — recorded (it was invisible to every detector
+      // before), answered with the closest real names, and escalated on repeat. See format_recovery.ts.
+      const feedback = buildUnknownToolFeedback(
+        call.name,
+        toolDefs.map((d) => d.name),
+        priorFormatFailures(inTurnRecords, call.name),
+      );
+      toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: feedback });
       totalToolCallsThisTurn++;
+      inTurnRecords.push({ toolName: call.name, success: false, resultText: feedback });
+      memory.metrics.increment('inturn.unknown_tool');
+      console.warn(`[tool] unknown tool '${call.name}' — ${feedback.split('\n')[1] ?? ''}`);
       continue;
     }
 
@@ -13413,6 +13457,8 @@ async function runToolLoop(
   // 2026-05-12 Phase 7 hardening 2: after in-turn-reflection fires, automatically promote to slow + create a placeholder plan
   // (or inject a plan_revise hint for an already-reviewed plan). Triggered only once per turn.
   let autoRevisePlanInjected = false;
+  // 2026-09-20: inspection-only streak nudge (detectInspectionStreak). Once per turn; never blocks.
+  let inspectionNudgeInjected = false;
   // Phase 11 constitutional amendment (2026-05-15): plan factory circuit breaker.
   // Production (mycox-heartbeat) revealed: after failure, LLM enters "plan_draft fails → plan_revise fails →
   // plan_close fails → auto-revise-on-fail creates another placeholder → fails again" infinite loop;
@@ -13521,6 +13567,29 @@ async function runToolLoop(
     //   - in-turn (this mechanism): mid-turn stop, LLM immediately self-corrects this turn
     // Reason for threshold 2 not 3: 1 failure LLM naturally pivots (transient glitch); 2 same-signature
     // is the earliest evidence of "LLM not self-correcting". Each wasted retry is expensive.
+    // 2026-09-20: inspection-only streak — the agent looking without acting (ModularRSI's read-only
+    // guard, the one entry of its evolved catalogue philont lacked). A nudge, never a block.
+    if (!inspectionNudgeInjected) {
+      const streak = detectInspectionStreak(inTurnRecords);
+      if (streak.triggered) {
+        inspectionNudgeInjected = true;
+        memory.metrics.increment('inturn.inspection_streak');
+        pushGateDirective(messages, streak.reminder!);
+        console.warn(
+          `[inspection-streak] session=${safeSessionId(sessionId)} ${streak.count} consecutive read-only calls (${streak.tally}) — nudged`,
+        );
+        onTrace?.({ kind: 'loop-control', tier: 4, text: `连续 ${streak.count} 次只读巡视无产出,提醒行动或收尾` });
+        audit.append('self_domain_write', {
+          source: 'inspection_streak',
+          origin: 'Internal',
+          toolName: 'inspection_streak_reminder_injected',
+          sessionId,
+          count: streak.count ?? 0,
+          tally: streak.tally ?? '',
+        });
+      }
+    }
+
     if (!reflectionReminderInjected) {
       const reflection = detectInTurnFailurePattern(inTurnRecords, 2);
       if (reflection.triggered) {
@@ -13532,6 +13601,13 @@ async function runToolLoop(
         // tools → deadlock (prod 2026-06-17). For mechanical errors: give the fix-it reminder, skip the gates.
         const mechanicalFailure = isMechanicalFailure(reflection.signature);
         if (mechanicalFailure) memory.metrics.increment('inturn.mechanical');
+        // A FORMAT failure (2026-09-20: `<tool>:input-format` / `<name>:unknown-tool`) is a call that
+        // never reached a tool. Like a mechanical error it must not lock the tool or demand research —
+        // that lock was the deadlock: two malformed writeFile calls disabled writeFile for the turn. The
+        // reminder shows the model the shape it must send, or the real name it meant.
+        const formatFailure = isFormatFailureSignature(reflection.signature);
+        if (formatFailure) memory.metrics.increment('inturn.format');
+        const formatTool = formatFailure && reflection.signature ? reflection.signature.slice(0, reflection.signature.indexOf(':')) : '';
         if (mechanicalFailure && reflection.signature && reflection.signature !== 'shell:timeout') {
           const colonIdx = reflection.signature.indexOf(':');
           if (colonIdx > 0) {
@@ -13541,23 +13617,29 @@ async function runToolLoop(
         }
         pushGateDirective(
           messages,
-          mechanicalFailure
-            ? buildMechanicalFixReminder(
-                reflection.signature!,
-                reflection.count!,
-                learnedCheatsheet(reflection.signature!, memory.facts),
-              )
-            : reflection.reminder!,
+          formatFailure
+            ? buildFormatFixReminder(reflection.signature!, reflection.count!, {
+                toolName: formatTool,
+                shapeHint: schemaShapeHint(tools.get(formatTool)?.schema),
+                suggestions: suggestToolNames(formatTool, toolDefs.map((d) => d.name)),
+              })
+            : mechanicalFailure
+              ? buildMechanicalFixReminder(
+                  reflection.signature!,
+                  reflection.count!,
+                  learnedCheatsheet(reflection.signature!, memory.facts),
+                )
+              : reflection.reminder!,
         );
         onTrace?.({
           kind: 'loop-control', tier: 4,
-          text: `同根因失败 ${reflection.count}x,触发反思提醒${mechanicalFailure ? '(机械错:仅提示修复,不锁工具)' : ''}`,
+          text: `同根因失败 ${reflection.count}x,触发反思提醒${formatFailure ? '(格式错:回显所发内容,不锁工具)' : mechanicalFailure ? '(机械错:仅提示修复,不锁工具)' : ''}`,
         });
         // 2026-05-11: extract toolName from the signature head as the block list for the rest of this turn.
         // Signature looks like `http:http-401` / `webFetch:other:...` / `shell:cmd-not-found:rg`;
         // toolName is before the first colon. Graceful degradation on failure: if parsing fails, do not block; only inject reminder.
         // Mechanical errors skip the tool-block + research-before-retry entirely (the fix needs those tools).
-        if (reflection.signature && !mechanicalFailure) {
+        if (reflection.signature && !mechanicalFailure && !formatFailure) {
           const colonIdx = reflection.signature.indexOf(':');
           if (colonIdx > 0) {
             blockedToolAfterReflection = reflection.signature.slice(0, colonIdx);
@@ -13627,6 +13709,7 @@ async function runToolLoop(
         // Mechanical errors (script/syntax bug) are not a strategic wall — escalating to slow+placeholder-plan
         // and blocking writeFile via plan_protocol_gate is exactly what deadlocked the fix in prod. Skip it.
         const mechFail = isMechanicalFailure(reflection.signature);
+        const fmtFail = isFormatFailureSignature(reflection.signature);
         const isBenignMiss =
           /^(get_fact|list_facts|search_notes|search_skills|search_kb|recall_sessions):/i.test(
             reflection.signature ?? '',
@@ -13635,13 +13718,16 @@ async function runToolLoop(
             reflection.signature ?? '',
           ) ||
           isMechanismReject ||
-          mechFail;
+          mechFail ||
+          fmtFail;
         if (isBenignMiss) {
           const skipReason = isMechanismReject
             ? 'mechanism-layer active reject'
             : mechFail
               ? 'mechanical error (fix-and-retry, not a strategic wall)'
-              : 'benign miss';
+              : fmtFail
+                ? 'format error (rewrite the call, not the plan)'
+                : 'benign miss';
           console.log(
             `[auto-revise-on-fail] session=${safeSessionId(sessionId)} skipped (${skipReason}, no escalation): ${reflection.signature}`,
           );
@@ -14580,20 +14666,41 @@ async function runToolLoop(
       const requiredCheck = prepared.input
         ? validateRequiredToolInput(prepared.input, tools.get(call.name)?.schema)
         : { valid: false as const, reason: prepared.reason ?? 'invalid tool input' };
-      if (!prepared.input || !requiredCheck.valid) {
+      // 2026-09-20 format recovery: the rejection quotes what the model sent and escalates (shape hint,
+      // then a strict template) with each repeat on the same tool this turn — see format_recovery.ts.
+      // `_raw` is the adapter's marker for arguments that were not JSON; it is never passed to a tool.
+      const rawLeak = rawArgumentsLeak(prepared.input);
+      if (!prepared.input || !requiredCheck.valid || rawLeak !== null) {
         const detail = requiredCheck.valid ? 'invalid tool input' : requiredCheck.reason;
-        const reason = `tool input format error, blocked before authorization: ${detail}`;
+        const reason = buildInputRejection({
+          toolName: call.name,
+          detail,
+          received: rawLeak ?? prepared.input ?? call.input,
+          schema: tools.get(call.name)?.schema,
+          priorFailures: priorFormatFailures(inTurnRecords, call.name),
+        });
         nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: reason });
         totalToolCallsThisTurn++;
         inTurnRecords.push({ toolName: call.name, success: false, resultText: reason });
-        console.warn(`[tool] ${call.name} → pre-auth input rejected: ${detail}`);
+        memory.metrics.increment('inturn.format_reject');
+        console.warn(`[tool] ${call.name} → pre-auth input rejected: ${rawLeak !== null ? 'arguments were not JSON' : detail}`);
         continue;
       }
       call.input = prepared.input;
       const classification = tools.classify(call.name, call.input);
       if (!classification) {
-        nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: `Error: Unknown tool '${call.name}'` });
+        // 2026-09-20: an unknown name is a format failure — recorded (it was invisible to every detector
+        // before), answered with the closest real names, and escalated on repeat. See format_recovery.ts.
+        const feedback = buildUnknownToolFeedback(
+          call.name,
+          toolDefs.map((d) => d.name),
+          priorFormatFailures(inTurnRecords, call.name),
+        );
+        nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: feedback });
         totalToolCallsThisTurn++;
+        inTurnRecords.push({ toolName: call.name, success: false, resultText: feedback });
+        memory.metrics.increment('inturn.unknown_tool');
+        console.warn(`[tool] unknown tool '${call.name}' — ${feedback.split('\n')[1] ?? ''}`);
         continue;
       }
 

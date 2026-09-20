@@ -1,6 +1,11 @@
 # Self-Learning Redesign — Verify-then-Condense
 
-Status: PROPOSED (2026-07-15). Baseline for iteration, not yet implemented.
+Status: IN PROGRESS. Proposed 2026-07-15. Landed since: Phase 0 instrumentation (`learning_stats`),
+Phase 1 judge in shadow (`learning_judge.ts`), Phase 3a controller registry, the mechanical-repair
+closed loop with replay, and on 2026-09-20 Phase 2.1 (positive artifacts gated on a judge-verified
+success — `ApplyReflectionOptions.verifiedSuccess`). Still open: Phase 2.2–2.4, Phase 3b, Phase 4.
+See `self_evolution_postmortem.md` for why the pre-redesign loops never closed and what the 2026
+RSI literature adds.
 Author: ruozhuoruoyu
 
 This plan consolidates a code-level audit of philont's self-learning loops and a design

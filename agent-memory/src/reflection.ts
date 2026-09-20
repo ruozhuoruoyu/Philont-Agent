@@ -629,6 +629,21 @@ export interface ApplyReflectionOptions {
    * When triggered: learning is skipped, errors records `degraded-turn:...` reason.
    */
   turnDegraded?: boolean;
+  /**
+   * 2026-09-20 (self-learning redesign Phase 2.1, "born validated"): what the learning judge said about
+   * this turn — `true` verified success, `false` failure, `undefined` no verdict (judge disabled, no
+   * tools ran, could_not_verify). With `requireVerifiedSuccess`, POSITIVE artifacts — new_skill,
+   * skill_refine, and a routing_rule that prefers a skill — are written only from a verified-success
+   * turn; otherwise they are withheld and counted. Failure lessons (avoid-only routing rules, playbooks,
+   * plan revisions, plan knowledge) are unaffected: their evidence is the failure itself.
+   *
+   * Why: a year of production wrote 1022 routing rules with validated=0 and the literature measured the
+   * same thing at scale — LLM-authored skills without a validation gate show no benefit (SkillsBench),
+   * and unguarded context evolution is high-variance (RSEA, arXiv 2606.28374). Creation rate must not
+   * exceed measurement rate; the judge is the measurement.
+   */
+  verifiedSuccess?: boolean;
+  requireVerifiedSuccess?: boolean;
 }
 
 export interface ApplyResult {
@@ -646,7 +661,16 @@ export interface ApplyResult {
     plansRevised: number;
     /** Phase 14: number of plan_knowledge entries written (truly new after dedup) */
     planKnowledgeWritten: number;
+    /** 2026-09-20: positive learnings withheld because the turn was not a verified success */
+    withheldUnverified: number;
   };
+}
+
+/** A learning that claims something WORKED (as opposed to recording that something failed). */
+export function isPositiveLearning(learning: ReflectionLearning): boolean {
+  if (learning.type === 'new_skill' || learning.type === 'skill_refine') return true;
+  if (learning.type === 'routing_rule') return !!learning.preferSkill;
+  return false;
 }
 
 /**
@@ -673,6 +697,7 @@ export function applyReflection(
       newSkillsCreated: 0,
       plansRevised: 0,
       planKnowledgeWritten: 0,
+      withheldUnverified: 0,
     },
   };
 
@@ -682,6 +707,18 @@ export function applyReflection(
 
   reflection.learnings.forEach((learning, i) => {
     try {
+      // 2026-09-20: a positive artifact needs a verified-success turn behind it (see ApplyReflectionOptions).
+      if (opts.requireVerifiedSuccess && opts.verifiedSuccess !== true && isPositiveLearning(learning)) {
+        result.stats.withheldUnverified++;
+        result.errors.push({
+          index: i,
+          error:
+            `unverified-turn: withheld ${learning.type} — the learning judge did not verify this turn as a success ` +
+            `(verdict=${opts.verifiedSuccess === false ? 'failure' : 'none'}); a skill or preference distilled from an ` +
+            'unverified turn is a hypothesis, not a lesson. Failure lessons (avoid-only routing_rule / playbook) are still accepted.',
+        });
+        return;
+      }
       // 2026-05-15: degraded turn rejects positive skill distillation (new_skill / skill_refine).
       // Failure path distilled into skill → re-applied via use_skill next time → same error infinite loop.
       // Allowed: routing_rule(carveout) + playbook(failure_lesson) + plan_revision.

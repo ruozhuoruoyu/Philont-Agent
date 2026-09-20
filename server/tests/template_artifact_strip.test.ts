@@ -41,7 +41,8 @@ test('does NOT strip legitimate <|...|> content — only the quote-token form', 
   assert.equal((out.body as Record<string, string>).text, 'the <|im_start|> token and <|endoftext|>');
 });
 
-test('unparseable arguments still degrade to {} (unchanged)', () => {
-  assert.deepEqual(safeJsonParse('not json'), {});
+test('unparseable arguments are kept as {_raw} so the loop can echo them (2026-09-20); empty stays {}', () => {
+  // Was `{}`: the model then only ever saw "missing required field", never that its JSON was broken.
+  assert.deepEqual(safeJsonParse('not json'), { _raw: 'not json' });
   assert.deepEqual(safeJsonParse(''), {});
 });
