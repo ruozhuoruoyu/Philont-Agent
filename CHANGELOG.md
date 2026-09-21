@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hours of autonomous work no longer collapse to one line, and a silent owner still gets one
+  digest.** The mailbox's series rule deleted every older pending report when a newer one arrived;
+  a morning of forty-five auto-advance rounds reached the owner as the newest card only. A deferred
+  report now folds what it replaced (count, span, recent headlines; schema v49
+  `deferred_pushes.folded_json`) and the fold is appended to whichever card is finally delivered.
+  When reports have been pending for a whole silence window (`PHILONT_PUSH_SILENCE_DIGEST_MS`,
+  default 2h) with no inbound, one routine report may spend the allowance slot reserved for
+  blocking cards — once per window — so the silence itself is reported.
+- **In-turn heartbeats respect the peer's allowance.** The progress relay had a per-turn cap but
+  never looked at the metered allowance: a "已运行 N 分钟" heartbeat spent one of four messages and
+  every later milestone bounced. Heartbeats now yield below the same reserve the dispatcher uses
+  (and never on a peer whose whole allowance is tiny); a milestone never takes the final reply's
+  slot and rides the reply instead.
+- **Status questions run nothing.** "进展如何？" produced an authorization card and a two-minute
+  shell command before an answer. A short, action-free status question now refuses execute- and
+  write-class tools for the turn with a tool_result that says to report from what is known; read
+  tools stay open (`status_gate.blocked`).
+- **Findings about what the owner just asked about are owner-visible.** Curiosity found
+  `openai/ten-proofs` an hour after the owner asked about that very claim, with new facts, and the
+  funnel dropped it at gate 1. A finding whose token the owner literally saw in the last day (their
+  messages) or in the agent's replies of the last six hours now passes gate 1 when it carries at
+  least one new fact (`visibleBy=owner_recent` in the funnel log).
+
 - **Routing rules get a rule-specific negative edge.** The confidence machine recorded success on
   clean turns and nothing on failed ones, because a turn-level failure cannot be pinned on one rule.
   A rule's own failure signature can: reflection-minted avoid rules now store the signature they are

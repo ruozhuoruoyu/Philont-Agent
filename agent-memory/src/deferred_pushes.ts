@@ -4,6 +4,22 @@ import type Database from 'better-sqlite3';
 
 export type DeferredPushSeverity = 'urgent' | 'digest';
 
+/**
+ * What the series rule folded into this row (2026-09-21). The rule used to DELETE the older pending
+ * reports of a series when a newer one arrived; a morning of forty auto-advance rounds reached the
+ * owner as one line. The newest report still carries the whole state, but the rounds it replaced are
+ * kept as a count and their headlines, so the card the owner finally sees says what happened in
+ * between, not only where things stand now.
+ */
+export interface FoldedReports {
+  /** Reports folded into this one (not counting itself). */
+  count: number;
+  /** createdAt of the oldest folded report. */
+  since: number;
+  /** One line per folded report, oldest first, bounded. */
+  headlines: string[];
+}
+
 export interface DeferredPush {
   id: string;
   channel: string;
@@ -15,6 +31,7 @@ export interface DeferredPush {
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
+  folded?: FoldedReports | null;
 }
 
 export interface DeferredPushExpirySummary {
@@ -34,12 +51,29 @@ interface DeferredPushRow {
   created_at: number;
   updated_at: number;
   expires_at: number;
+  folded_json?: string | null;
+}
+
+function parseFolded(raw: string | null | undefined): FoldedReports | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<FoldedReports>;
+    if (!v || typeof v !== 'object') return null;
+    return {
+      count: Math.max(0, Number(v.count) || 0),
+      since: Number(v.since) || 0,
+      headlines: Array.isArray(v.headlines) ? v.headlines.filter((h): h is string => typeof h === 'string') : [],
+    };
+  } catch {
+    return null;
+  }
 }
 
 const rowToPush = (r: DeferredPushRow): DeferredPush => ({
   id: r.id, channel: r.channel, peer: r.peer, severity: r.severity,
   kind: r.kind, targetRef: r.target_ref, text: r.text,
   createdAt: r.created_at, updatedAt: r.updated_at, expiresAt: r.expires_at,
+  folded: parseFolded(r.folded_json),
 });
 
 /**
@@ -66,16 +100,33 @@ export class DeferredPushStore {
   /** Upsert by semantic identity so repeated retries never create duplicate cards. */
   enqueue(input: Omit<DeferredPush, 'id' | 'createdAt' | 'updatedAt'>, now = Date.now()): DeferredPush {
     const id = randomUUID();
+    const foldedJson = input.folded ? JSON.stringify(input.folded) : null;
     this.db.prepare(
       `INSERT INTO deferred_pushes
-       (id, channel, peer, severity, kind, target_ref, text, created_at, updated_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (id, channel, peer, severity, kind, target_ref, text, created_at, updated_at, expires_at, folded_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(channel, peer, kind, target_ref) DO UPDATE SET
          severity = excluded.severity, text = excluded.text,
-         updated_at = excluded.updated_at, expires_at = excluded.expires_at`,
+         updated_at = excluded.updated_at, expires_at = excluded.expires_at,
+         folded_json = excluded.folded_json`,
     ).run(id, input.channel, input.peer, input.severity, input.kind, input.targetRef,
-      input.text, now, now, input.expiresAt);
+      input.text, now, now, input.expiresAt, foldedJson);
     return this.get(input.channel, input.peer, input.kind, input.targetRef)!;
+  }
+
+  /**
+   * The pending rows of one series (same kind, targetRef prefix), oldest first, except `excludeId` —
+   * what `discardSeries` is about to delete, read first so it can be folded into the survivor.
+   */
+  listSeries(channel: string, peer: string, kind: string, targetRefPrefix: string, excludeId?: string, now = Date.now()): DeferredPush[] {
+    if (!targetRefPrefix) return [];
+    const escaped = targetRefPrefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+    const rows = this.db.prepare(
+      `SELECT * FROM deferred_pushes
+       WHERE channel=? AND peer=? AND kind=? AND target_ref LIKE ? ESCAPE '\\' AND expires_at>? AND (? IS NULL OR id<>?)
+       ORDER BY created_at ASC`,
+    ).all(channel, peer, kind, `${escaped}%`, now, excludeId ?? null, excludeId ?? null) as DeferredPushRow[];
+    return rows.map(rowToPush);
   }
 
   get(channel: string, peer: string, kind: string, targetRef: string): DeferredPush | null {

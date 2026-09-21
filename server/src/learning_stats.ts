@@ -69,7 +69,8 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
     // how often the model writes a call wrong, which is the number the escalation ladder should lower.
     lines.push(
       `  format failures: input rejected=${get('inturn.format_reject')} unknown tool=${get('inturn.unknown_tool')}; ` +
-        `inspection-only streak nudges=${get('inturn.inspection_streak')}`,
+        `inspection-only streak nudges=${get('inturn.inspection_streak')}; ` +
+        `status-question gate refused execute/write calls=${get('status_gate.blocked')}`,
     );
     lines.push(
       `  turn-close reflection: fired=${get('reflect.fire')} skipped_cooldown=${get('reflect.skip_cooldown')} → produced routing_rule=${get('reflect.routing_rule')} playbook=${get('reflect.playbook')} new_skill=${get('reflect.new_skill')} skill_refine=${get('reflect.skill_refine')}; ` +

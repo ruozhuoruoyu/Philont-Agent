@@ -32,3 +32,20 @@ test('periodic reports stop when the task ends', (t) => {
   t.mock.timers.tick(600_000);
   assert.equal(reports, 1);
 });
+
+test('a channel can refuse a heartbeat outright and hold a milestone for the final reply (2026-09-21)', async () => {
+  const sent: string[] = [];
+  const skipped: string[] = [];
+  const relay = createProgressRelay({
+    send: async (text) => { sent.push(text); return true; },
+    receipt() {},
+    canSend: (kind) => kind !== 'heartbeat' && kind !== 'milestone',
+    skipped: (kind, reason) => skipped.push(`${kind}:${reason}`),
+  });
+  relay.offer('已运行 5 分钟', { kind: 'heartbeat' });
+  relay.offer('闭合了一个节点', { kind: 'milestone' });
+  const unsent = await relay.drain();
+  assert.deepEqual(sent, []);
+  assert.deepEqual(skipped, ['heartbeat:allowance_reserved', 'milestone:allowance_reserved']);
+  assert.deepEqual(unsent, ['闭合了一个节点'], 'the milestone rides the final reply; the heartbeat is dropped');
+});

@@ -20,7 +20,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
 } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 48;
+export const SCHEMA_VERSION = 49;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -633,6 +633,8 @@ const DDL_TABLE_DEFERRED_PUSHES = `
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL,
+      -- v49 (2026-09-21): the reports of the same series this row replaced, kept as a digest.
+      folded_json TEXT,
       UNIQUE(channel, peer, kind, target_ref)
     );
     CREATE INDEX IF NOT EXISTS idx_deferred_push_peer
@@ -1426,6 +1428,11 @@ function migrateV47ToV48(db: Database.Database): void {
   addColumnIfMissing(db, 'routing_rules', 'failure_signature', 'TEXT');
 }
 
+/** v49: a deferred report keeps a digest of the series rows it superseded. */
+function migrateV48ToV49(db: Database.Database): void {
+  addColumnIfMissing(db, 'deferred_pushes', 'folded_json', 'TEXT');
+}
+
 /**
  * The CREATE TABLE text is the truth about which columns exist; the migrations are the path that was
  * walked to get there. When a shipped migration is edited after databases have walked it, the two
@@ -1737,6 +1744,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 48) {
     migrateV47ToV48(db);
+  }
+  if (current < 49) {
+    migrateV48ToV49(db);
   }
   reconcileColumnsWithDdl(db, ALL_TABLE_DDL.join('\n'));
 

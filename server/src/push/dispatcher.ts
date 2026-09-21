@@ -22,7 +22,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { DeferredPushStore, PushSubscription, PushSubscriptionStore } from '@agent/memory';
+import type { DeferredPush, DeferredPushStore, FoldedReports, PushSubscription, PushSubscriptionStore } from '@agent/memory';
 import type { PushChannel } from './channel.js';
 import { findPushChannel, describePushChannelMiss } from './channel.js';
 
@@ -45,6 +45,78 @@ export const HEARTBEAT_ALLOWANCE_RESERVE = 3;
  * series rule keeps only the newest one there); a blocking card still goes.
  */
 export const MILESTONE_ALLOWANCE_RESERVE = 1;
+
+/**
+ * Silence-window digest (2026-09-21). The milestone reserve above keeps the peer's last allowance slot
+ * for a blocking card — correct while the owner is around, and a black hole when they are not: prod
+ * 2026-09-21 07:56 → 13:21, forty-five auto-advance rounds, every report `allowance_reserved
+ * (remaining=0/4)`, and the mailbox's series rule kept only the newest. When reports have been pending
+ * this long with no inbound, ONE routine report may spend the reserved slot — and it carries the fold
+ * digest of everything it replaced, so that one message says what the silence contained. Once per
+ * window per series; `PHILONT_PUSH_SILENCE_DIGEST_MS=0` disables. A blocking card that follows inside
+ * the window bounces to the mailbox and is delivered with the next inbound, as any failed push is.
+ */
+export function silenceDigestWindowMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.PHILONT_PUSH_SILENCE_DIGEST_MS ?? '').trim();
+  if (raw === '') return 2 * 60 * 60_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 2 * 60 * 60_000;
+}
+
+const FOLD_MAX_HEADLINES = 8;
+const FOLD_HEADLINE_CHARS = 90;
+
+/** The first meaningful line of a report, stripped of markdown furniture, bounded. */
+export function headlineOf(text: string): string {
+  for (const raw of (text ?? '').split('\n')) {
+    const line = raw.replace(/^[\s#>*\-•·]+/, '').replace(/\*\*/g, '').trim();
+    if (!line) continue;
+    return line.length > FOLD_HEADLINE_CHARS ? `${line.slice(0, FOLD_HEADLINE_CHARS)}…` : line;
+  }
+  return '';
+}
+
+/**
+ * Fold the pending rows a new report is about to supersede into one digest: their count (including
+ * what they had folded themselves), the oldest timestamp, and the most recent headlines. Pure.
+ */
+export function foldSeries(rows: ReadonlyArray<Pick<DeferredPush, 'text' | 'createdAt' | 'folded'>>): FoldedReports | null {
+  if (rows.length === 0) return null;
+  let count = 0;
+  let since = Number.POSITIVE_INFINITY;
+  const headlines: string[] = [];
+  for (const r of [...rows].sort((a, b) => a.createdAt - b.createdAt)) {
+    count += 1 + (r.folded?.count ?? 0);
+    since = Math.min(since, r.createdAt, r.folded?.since ?? r.createdAt);
+    for (const h of r.folded?.headlines ?? []) headlines.push(h);
+    const own = headlineOf(r.text);
+    if (own) headlines.push(own);
+  }
+  return { count, since: Number.isFinite(since) ? since : 0, headlines: headlines.slice(-FOLD_MAX_HEADLINES) };
+}
+
+/** The digest block appended to a report's text. Empty when nothing was folded. */
+export function renderFold(folded: FoldedReports | null | undefined, lang: 'zh' | 'en', now = Date.now()): string {
+  if (!folded || folded.count <= 0) return '';
+  const hours = Math.max(0, now - folded.since) / 3_600_000;
+  const span = hours >= 1 ? `${Math.round(hours * 10) / 10}h` : `${Math.max(1, Math.round(hours * 60))}min`;
+  const omitted = Math.max(0, folded.count - folded.headlines.length);
+  const lines = folded.headlines.map((h) => `- ${h}`);
+  if (lang === 'zh') {
+    return (
+      `\n\n（此前 ${folded.count} 轮进展未能送达，跨 ${span}；摘要：\n${lines.join('\n')}` +
+      (omitted > 0 ? `\n- …另 ${omitted} 轮略` : '') + '）'
+    );
+  }
+  return (
+    `\n\n(${folded.count} earlier report(s) could not be delivered, spanning ${span}; digest:\n${lines.join('\n')}` +
+    (omitted > 0 ? `\n- … ${omitted} more omitted` : '') + ')'
+  );
+}
+
+function langOfChannel(channel: string): 'zh' | 'en' {
+  return channel.startsWith('wechat') ? 'zh' : 'en';
+}
 
 export interface PushRequest {
   severity: PushSeverity;
@@ -149,6 +221,9 @@ export class PushDispatcher {
   /** Last blocking (decision-carrying) push per channel+peer — the floor that keeps a storm out. */
   private readonly lastBlockingAt = new Map<string, number>();
   private readonly lastProgressAt = new Map<string, number>();
+  /** Last silence-window digest per channel+peer+kind, and the sends armed to record one. */
+  private readonly lastSilenceDigestAt = new Map<string, number>();
+  private readonly silenceDigestArmed = new Set<string>();
   private readonly onSendOutcome?: (channel: string, ok: boolean) => void;
   private readonly deferredPushes?: DeferredPushStore;
 
@@ -208,7 +283,16 @@ export class PushDispatcher {
     // 4. Send per target
     let anyDelivered = false;
     for (const t of targets) {
-      const skip = this.evaluateTarget(t.channel, t.peer, t.sub, req, now);
+      // What this report is about to supersede, read BEFORE anything is discarded: folded into the
+      // deferred row if it waits, appended as a digest if it goes out now. Rows for the same targetRef
+      // are the same report retried, not an earlier one.
+      const series = req.supersedes && this.deferredPushes
+        ? this.deferredPushes.listSeries(t.channel, t.peer, req.kind, req.supersedes, undefined, now)
+            .filter((r) => r.targetRef !== req.targetRef)
+        : [];
+      const fold = foldSeries(series);
+      const oldestPendingAt = series.length > 0 ? series[0].createdAt : null;
+      const skip = this.evaluateTarget(t.channel, t.peer, t.sub, req, now, oldestPendingAt);
       if (skip) {
         result.skipped.push(skip);
         if (req.progress === 'milestone' && this.deferredPushes &&
@@ -217,12 +301,14 @@ export class PushDispatcher {
             channel: t.channel, peer: t.peer, severity: req.severity,
             kind: req.kind, targetRef: req.targetRef, text: req.text,
             expiresAt: now + 24 * 60 * 60_000,
+            folded: fold,
           }, now);
           result.deferred++;
           this.supersede(t.channel, t.peer, req, row.id);
         }
         continue;
       }
+      const textToSend = fold ? req.text + renderFold(fold, langOfChannel(t.channel), now) : req.text;
 
       const channel = findPushChannel(t.channel);
       if (!channel) {
@@ -236,11 +322,16 @@ export class PushDispatcher {
       }
 
       try {
-        const sendResult = await channel.pushText(t.peer, req.text);
+        const sendResult = await channel.pushText(t.peer, textToSend);
         try { this.onSendOutcome?.(t.channel, sendResult.ok); } catch { /* observability must not break sends */ }
         if (sendResult.ok) {
           result.delivered += 1;
           anyDelivered = true;
+          const silenceKey = `${t.channel}\u0000${t.peer}\u0000${req.kind}`;
+          if (this.silenceDigestArmed.delete(silenceKey)) {
+            this.lastSilenceDigestAt.set(silenceKey, now);
+            this.opts.logger.log(`[push] ${req.kind}: silence digest delivered (${fold?.count ?? 0} folded report(s))`);
+          }
           if (req.blocking === true) {
             // Its own floor, and deliberately NOT the routine budget: a question that stopped the work
             // must not make the next progress note wait an hour, nor be made to wait by one.
@@ -335,12 +426,22 @@ export class PushDispatcher {
     }
   }
 
+  /** Whether a pending series has waited long enough, with the owner silent, to earn the reserved slot. */
+  private silenceDigestDue(channel: string, peer: string, kind: string, oldestPendingAt: number | null, now: number): boolean {
+    const window = silenceDigestWindowMs();
+    if (window <= 0 || oldestPendingAt === null) return false;
+    if (now - oldestPendingAt < window) return false;
+    const last = this.lastSilenceDigestAt.get(`${channel}\u0000${peer}\u0000${kind}`);
+    return last === undefined || now - last >= window;
+  }
+
   private evaluateTarget(
     channel: string,
     peer: string,
     sub: PushSubscription | null,
     req: PushRequest,
     now: number,
+    oldestPendingAt: number | null = null,
   ): SkipReason | null {
     if (!sub || !sub.enabled) {
       return { channel, peer, reason: 'no_active_subscription' };
@@ -365,7 +466,15 @@ export class PushDispatcher {
       const reserve = req.progress === 'heartbeat' ? HEARTBEAT_ALLOWANCE_RESERVE : MILESTONE_ALLOWANCE_RESERVE;
       const a = lookupChannel.allowance?.(peer) ?? null;
       if (a && a.remaining <= reserve) {
-        return { channel, peer, reason: 'allowance_reserved', detail: `remaining=${a.remaining}/${a.total}` };
+        if (req.progress === 'milestone' && a.remaining >= 1 && this.silenceDigestDue(channel, peer, req.kind, oldestPendingAt, now)) {
+          const waitedMin = Math.round((now - (oldestPendingAt ?? now)) / 60_000);
+          this.opts.logger.log(
+            `[push] ${req.kind}: owner silent with reports pending for ${waitedMin}min — spending the reserved slot on one digest (remaining=${a.remaining}/${a.total})`,
+          );
+          this.silenceDigestArmed.add(`${channel}\u0000${peer}\u0000${req.kind}`);
+        } else {
+          return { channel, peer, reason: 'allowance_reserved', detail: `remaining=${a.remaining}/${a.total}` };
+        }
       }
     }
 

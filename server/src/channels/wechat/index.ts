@@ -58,6 +58,8 @@ import { recordControllerFire } from '../../controller_registry.js';
 import { renderForWeChat, renderAuthPromptForWeChat } from './wechat_render.js';
 import { explainSuspension } from '../../suspend_detector.js';
 import { currentPhraseLang } from '../../response_language.js';
+import type { FoldedReports } from '@agent/memory';
+import { HEARTBEAT_ALLOWANCE_RESERVE, renderFold } from '../../push/dispatcher.js';
 
 /** AuthRequest structure from chat-handler (provided by handleChatSend) */
 export type AuthRequestPayload = {
@@ -94,7 +96,7 @@ export interface MountOptions {
   policy?: PolicyConfig;
   logger?: GatewayLogger;
   deferredPushes?: {
-    listPending(channel: string, peer: string, limit?: number, now?: number): Array<{ id: string; kind: string; text: string }>;
+    listPending(channel: string, peer: string, limit?: number, now?: number): Array<{ id: string; kind: string; text: string; folded?: FoldedReports | null }>;
     markManyDelivered(ids: readonly string[]): number;
   };
   /** Called only after the complete authorization card was accepted by WeChat. */
@@ -330,8 +332,8 @@ export function makeDispatcher(opts: {
   outbound: OutboundQueue;
   logger: GatewayLogger;
   deferredPushes?: MountOptions['deferredPushes'];
-  /** The per-inbound send ledger: an inbound message from the peer refills it. */
-  allowance?: { onInbound(peer: string): void };
+  /** The per-inbound send ledger: an inbound message from the peer refills it; `view` is read by the progress relay. */
+  allowance?: { onInbound(peer: string): void; view?(peer: string): { remaining: number; total: number } };
   onAuthDelivered?: MountOptions['onAuthDelivered'];
   onAuthDeliveryFailed?: MountOptions['onAuthDeliveryFailed'];
 }): (e: InboundEvent) => Promise<void> {
@@ -401,7 +403,8 @@ export function makeDispatcher(opts: {
     const deferredForReply: Array<{ id: string; kind: string; rendered: string }> = [];
     let deferredBudget = 1500;
     for (const item of deferred) {
-      const renderedItem = renderForWeChat(item.text);
+      // A deferred report carries the digest of the series rows it superseded (2026-09-21).
+      const renderedItem = renderForWeChat(item.text + renderFold(item.folded, currentPhraseLang('wechat'), Date.now()));
       if (deferredForReply.length > 0 && renderedItem.length + 2 > deferredBudget) break;
       const clipped = renderedItem.length > deferredBudget
         ? renderedItem.slice(0, Math.max(0, deferredBudget - 45)) +
@@ -449,6 +452,21 @@ export function makeDispatcher(opts: {
           (result.chunksSent > 0 || result.chunksDeduped > 0);
       },
       receipt: (kind, delivered) => logger.info('progress delivery', { kind, delivered }),
+      // 2026-09-21: the relay had its own per-turn cap but never looked at the peer's allowance, so a
+      // "已运行 N 分钟" heartbeat spent one of four messages and every later milestone bounced. Same rule
+      // as the dispatcher's HEARTBEAT_ALLOWANCE_RESERVE, plus: a peer whose whole allowance is tiny gets
+      // no cheap talk at all, and a milestone never takes the final reply's slot.
+      canSend: (kind) => {
+        const a = allowance?.view?.(replyTo);
+        if (!a) return true;
+        if (kind === 'heartbeat') return a.remaining > HEARTBEAT_ALLOWANCE_RESERVE && a.total > HEARTBEAT_ALLOWANCE_RESERVE + 2;
+        if (kind === 'milestone') return a.remaining >= 2;
+        return true;
+      },
+      skipped: (kind, reason) => {
+        const a = allowance?.view?.(replyTo);
+        logger.info('progress skipped', { kind, reason, allowance: a ? `${a.remaining}/${a.total}` : 'n/a' });
+      },
     });
     const onStatus = progress.offer;
 

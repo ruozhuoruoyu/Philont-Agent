@@ -41,7 +41,7 @@ test('fresh DB: initSchema creates current schema with all new tables and column
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 48);
+  assert.equal(SCHEMA_VERSION, 49);
   assert.ok(tableExists(db, 'deferred_pushes'), 'v42: deferred push mailbox must exist');
   assert.ok(hasColumn(db, 'reasoning_sessions', 'budget_granted'), 'v46: owner-granted budget must exist');
 
@@ -478,7 +478,7 @@ test('migration v36 → v37: reasoning_sessions gets followup_asked_at, existing
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 48);
+  assert.equal(SCHEMA_VERSION, 49);
   assert.ok(hasColumn(db, 'reasoning_sessions', 'followup_asked_at'), 'v37 must add followup_asked_at');
   const row = db.prepare(`SELECT goal, followup_asked_at FROM reasoning_sessions WHERE id = 'rs-old'`).get() as
     { goal: string; followup_asked_at: number | null };
@@ -504,7 +504,7 @@ test('migration v37 → v38: reasoning_nodes gets check_criterion, existing node
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 48);
+  assert.equal(SCHEMA_VERSION, 49);
   assert.ok(hasColumn(db, 'reasoning_nodes', 'check_criterion'), 'v38 must add check_criterion');
   const row = db.prepare(`SELECT claim, check_criterion FROM reasoning_nodes WHERE id = 'rn-old'`).get() as
     { claim: string; check_criterion: string | null };
@@ -531,7 +531,7 @@ test('migration v38 → v39: memory_skills gets from_disk, backfilled to 0', () 
   initSchema(db);
 
   assert.equal(getSchemaVersion(db), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 48);
+  assert.equal(SCHEMA_VERSION, 49);
   assert.ok(hasColumn(db, 'memory_skills', 'from_disk'), 'v39 must add from_disk');
   const row = db.prepare(`SELECT name, from_disk FROM memory_skills WHERE id = 'sk-old'`).get() as
     { name: string; from_disk: number };

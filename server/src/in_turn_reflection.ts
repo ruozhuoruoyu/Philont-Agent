@@ -96,7 +96,7 @@ export function detectInTurnFailurePattern(
     // stops. The LLM should self-adapt when it sees this rejection text
     // (signature looks like shell:other:[plan_protocol_gate]...).
     if (
-      /:other:\[(plan_protocol_gate|in_turn_tool_block|autonomous_blacklist|research[_-]?before[_-]?retry)\b/i.test(
+      /:other:\[(plan_protocol_gate|in_turn_tool_block|autonomous_blacklist|status_question_gate|research[_-]?before[_-]?retry)\b/i.test(
         sig,
       )
     ) {

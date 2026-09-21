@@ -619,3 +619,86 @@ test('a refused heartbeat is dropped, not deferred to the next inbound', async (
   unregisterPushChannel(f.channel.name);
   h.close();
 });
+
+// ── fold digests and the silence-window digest (2026-09-21) ──────────────────
+
+const ROUND = (n: number): PushRequest => ({
+  severity: 'urgent',
+  kind: 'deep_explore:auto_milestone',
+  targetRef: `deep_explore:s1:round-${n}`,
+  supersedes: 'deep_explore:s1:',
+  text: `Round ${n}: closed node ${n}; 40 still open\nMainline: ...`,
+  progress: 'milestone',
+});
+
+test('deferred rounds fold into the newest instead of vanishing, and the fold rides the delivered card', async () => {
+  // Prod 2026-09-21 07:56 → 13:21: forty-five rounds, every one "superseded by the newest".
+  let now = Date.now();
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  let remaining = 0;
+  f.channel.allowance = () => ({ remaining, total: 4, sentSince: 4 - remaining });
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1' });
+
+  for (let n = 1; n <= 3; n++) {
+    const r = await dispatcher.enqueue(ROUND(n));
+    assert.equal(r.deferred, 1, `round ${n} waits in the mailbox`);
+    now += 60_000;
+  }
+  const pending = h.deferredPushes.listPending(f.channel.name, 'p1', 5, now);
+  assert.equal(pending.length, 1, 'the series rule still keeps one row');
+  assert.equal(pending[0].targetRef, 'deep_explore:s1:round-3');
+  assert.equal(pending[0].folded?.count, 2, 'but it remembers the two it replaced');
+  assert.deepEqual(pending[0].folded?.headlines, ['Round 1: closed node 1; 40 still open', 'Round 2: closed node 2; 40 still open']);
+
+  // The owner comes back: allowance refilled, the next round goes out and carries the digest.
+  remaining = 4; now += 60_000;
+  const r4 = await dispatcher.enqueue(ROUND(4));
+  assert.equal(r4.delivered, 1);
+  const text = f.sent.at(-1)!.text;
+  assert.match(text, /^Round 4:/);
+  assert.match(text, /此前 3 轮进展未能送达/);
+  assert.match(text, /- Round 1: closed node 1/);
+  assert.match(text, /- Round 3: closed node 3/);
+  assert.equal(h.deferredPushes.listPending(f.channel.name, 'p1', 5, now).length, 0, 'delivered: the mailbox is clear');
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
+
+test('after a long silence one routine report may spend the reserved slot, once per window', async () => {
+  let now = Date.now();
+  const { h, dispatcher } = setup({ now: () => now });
+  const f = fakeChannel();
+  const remaining = 1; // exactly the reserved slot
+  f.channel.allowance = () => ({ remaining, total: 4, sentSince: 3 });
+  registerPushChannel(f.channel);
+  h.pushSubscriptions.subscribe({ channel: f.channel.name, peer: 'p1' });
+
+  const first = await dispatcher.enqueue(ROUND(1));
+  assert.equal(first.skipped[0]?.reason, 'allowance_reserved', 'fresh: the reserve holds');
+  now += 2 * 60 * 60_000 + 1;
+  const promoted = await dispatcher.enqueue(ROUND(2));
+  assert.equal(promoted.delivered, 1, 'two hours of silence with a report pending: the reserved slot is spent');
+  assert.match(f.sent.at(-1)!.text, /此前 1 轮进展未能送达/);
+  now += 60_000;
+  const again = await dispatcher.enqueue(ROUND(3));
+  assert.equal(again.skipped[0]?.reason, 'allowance_reserved', 'and not again inside the same window');
+  unregisterPushChannel(f.channel.name);
+  h.close();
+});
+
+test('foldSeries and renderFold: counts nest, headlines cap, both languages', async () => {
+  const { foldSeries, renderFold, headlineOf } = await import('../src/push/dispatcher.js');
+  assert.equal(headlineOf('## **Round 9**: refuted 1; 59 still open\nMainline: …'), 'Round 9: refuted 1; 59 still open');
+  assert.equal(foldSeries([]), null);
+  const rows = Array.from({ length: 10 }, (_, i) => ({ text: `Round ${i + 1}: x`, createdAt: 1000 + i, folded: i === 0 ? { count: 2, since: 500, headlines: ['Round -1: y', 'Round 0: z'] } : null }));
+  const f = foldSeries(rows)!;
+  assert.equal(f.count, 12);
+  assert.equal(f.since, 500);
+  assert.equal(f.headlines.length, 8, 'capped at the most recent eight');
+  assert.equal(f.headlines[7], 'Round 10: x');
+  assert.match(renderFold(f, 'en', 500 + 3_600_000), /^\n\n\(12 earlier report\(s\) could not be delivered, spanning 1h; digest:/);
+  assert.match(renderFold(f, 'en', 500 + 3_600_000), /… 4 more omitted\)$/);
+  assert.equal(renderFold(null, 'zh'), '');
+});

@@ -261,6 +261,19 @@ export class RawStore {
    * Used for the service_dormancy signal: getting the most recent `role='assistant'` = "last time the agent truly served the user".
    * Returns null if not found. Performance: uses the timestamp DESC index, O(log n).
    */
+  /** Recent messages of one role in one session since `sinceTs`, newest first, bounded. */
+  listRecentByRole(sessionId: string, role: RawMessage['role'], sinceTs: number, limit = 50): RawMessage[] {
+    const rows = this.db
+      .prepare<[string, string, number, number]>(
+        `SELECT * FROM memory_raw_messages
+         WHERE session_id = ? AND role = ? AND timestamp >= ?
+         ORDER BY timestamp DESC, id DESC
+         LIMIT ?`
+      )
+      .all(sessionId, role, sinceTs, Math.max(1, limit)) as MessageRow[];
+    return rows.map(rowToMessage);
+  }
+
   getLastMessageByRole(role: RawMessage['role']): RawMessage | null {
     const row = this.db
       .prepare<[string]>(

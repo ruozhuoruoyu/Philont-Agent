@@ -106,3 +106,36 @@ test('a report series can be trimmed to its newest member by targetRef prefix, w
   assert.equal(h.deferredPushes.discardSeries('wechat', 'owner', 'm', ''), 0, 'an empty prefix never matches everything');
   h.close();
 });
+
+test('a deferred row keeps its fold digest, and listSeries reads a series oldest first (2026-09-21)', () => {
+  const h = openMemoryDb(':memory:');
+  const now = 1_000_000;
+  h.deferredPushes.enqueue({ channel: 'wechat', peer: 'p', severity: 'urgent', kind: 'k', targetRef: 's1:a', text: 'A', expiresAt: now + 10_000 }, now);
+  h.deferredPushes.enqueue({ channel: 'wechat', peer: 'p', severity: 'urgent', kind: 'k', targetRef: 's1:b', text: 'B', expiresAt: now + 10_000,
+    folded: { count: 3, since: now - 5, headlines: ['x', 'y'] } }, now + 1);
+  h.deferredPushes.enqueue({ channel: 'wechat', peer: 'p', severity: 'urgent', kind: 'k', targetRef: 's2:c', text: 'C', expiresAt: now + 10_000 }, now + 2);
+  const b = h.deferredPushes.get('wechat', 'p', 'k', 's1:b');
+  assert.deepEqual(b?.folded, { count: 3, since: now - 5, headlines: ['x', 'y'] });
+  assert.equal(h.deferredPushes.get('wechat', 'p', 'k', 's1:a')?.folded, null);
+  const series = h.deferredPushes.listSeries('wechat', 'p', 'k', 's1:', undefined, now + 3);
+  assert.deepEqual(series.map((r) => r.targetRef), ['s1:a', 's1:b']);
+  assert.deepEqual(h.deferredPushes.listSeries('wechat', 'p', 'k', 's1:', b!.id, now + 3).map((r) => r.targetRef), ['s1:a']);
+  h.close();
+});
+
+test('raw.listRecentByRole: one role, one session, since a timestamp, newest first', () => {
+  const h = openMemoryDb(':memory:');
+  h.raw.startSession('g');
+  h.raw.startSession('other');
+  const before = Date.now();
+  h.raw.appendMessage({ sessionId: 'g', role: 'user', content: 'first' });
+  h.raw.appendMessage({ sessionId: 'g', role: 'user', content: 'second' });
+  h.raw.appendMessage({ sessionId: 'g', role: 'assistant', content: 'reply' });
+  h.raw.appendMessage({ sessionId: 'other', role: 'user', content: 'elsewhere' });
+  const got = h.raw.listRecentByRole('g', 'user', before, 10);
+  assert.deepEqual(got.map((m) => m.content), ['second', 'first'], 'newest first, one session, one role');
+  assert.deepEqual(h.raw.listRecentByRole('g', 'assistant', before, 10).map((m) => m.content), ['reply']);
+  assert.deepEqual(h.raw.listRecentByRole('g', 'user', Date.now() + 60_000, 10), [], 'nothing since the future');
+  assert.equal(h.raw.listRecentByRole('g', 'user', before, 1).length, 1, 'bounded');
+  h.close();
+});

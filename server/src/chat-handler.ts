@@ -332,6 +332,8 @@ import {
 import { scheduledTurnMadeProgress } from './schedule_progress.js';
 import { maybeRunReflection, buildCrossTurnEvidence, playbooksContradictedThisTurn, rulesContradictedThisTurn } from './reflection_runner.js';
 import { playbookSignature } from '@agent/memory';
+import { userAsksProgressStatus, statusQuestionGateReason } from './status_question.js';
+import { tokenOfTargetRef, ownerMentionedToken, OWNER_RECENT_USER_WINDOW_MS, OWNER_RECENT_ASSISTANT_WINDOW_MS } from './owner_recent.js';
 
 /** A playbook this old, shown this often, whose failure has not recurred in the ledger window, is retired. */
 const PLAYBOOK_RETIRE_AGE_MS = Number(process.env.PHILONT_PLAYBOOK_RETIRE_DAYS ?? 90) * 24 * 60 * 60_000;
@@ -4405,6 +4407,26 @@ function enqueueResearchGrantPush(
  * Reads the origin rather than the id shape: `compass-<slug>-<hash>` is only a readability convention, and
  * matching on it would be a naming table that breaks the first time the id scheme changes.
  */
+/**
+ * True when a curiosity token is something the owner literally saw in the last day: in their own
+ * messages, or in the agent's replies of the last few hours (where the owner's question got its concrete
+ * names). See owner_recent.ts for why this is the third owner-visibility criterion.
+ */
+function isOwnerRecentTarget(targetRef: string): boolean {
+  const token = tokenOfTargetRef(targetRef);
+  if (!token) return false;
+  try {
+    const now = Date.now();
+    const texts = [
+      ...memory.raw.listRecentByRole(GLOBAL_TIMELINE_SESSION_ID, 'user', now - OWNER_RECENT_USER_WINDOW_MS, 60),
+      ...memory.raw.listRecentByRole(GLOBAL_TIMELINE_SESSION_ID, 'assistant', now - OWNER_RECENT_ASSISTANT_WINDOW_MS, 30),
+    ].map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '')));
+    return ownerMentionedToken(token, texts);
+  } catch {
+    return false;
+  }
+}
+
 function isOwnerDeclaredTarget(targetRef: string): boolean {
   const m = /^pursuit:([^:]+)/.exec(targetRef);
   if (!m) return false;
@@ -4560,7 +4582,7 @@ const autonomousInterruptSink: InterruptSink = {
       );
     }
     if (severity === 'high') {
-      console.log(`[autonomy-funnel] initiative=${payload.initiativeId} [${who}] passed gate 1/9 (severity=high)`);
+      console.log(`[autonomy-funnel] initiative=${payload.initiativeId} [${who}] passed gate 1/9 (severity=high, by=${payload.visibleBy ?? '?'})`);
       interruptController.sendHigh({ signalType: 'AutonomousFinding', payload: text });
       // Web-ui: surface the finding to any connected web-ui session (no subscription/rate-limit;
       // the user is actively looking at the chat). WeChat/Telegram still go through pushDispatcher below.
@@ -4764,6 +4786,7 @@ export const autonomousLoop: AutonomousLoopHandle = startAutonomousLoop({
   // declared in their compass. See AutonomousLoopOptions.isOwnerDeclared for why the LLM self-rating it
   // replaced could never fire.
   isOwnerDeclared: (targetRef: string) => isOwnerDeclaredTarget(targetRef),
+  isOwnerRecent: (targetRef: string) => isOwnerRecentTarget(targetRef),
   budgetCaps: _autonomousBudgetCaps,
   // 2026-05-06 PursuitProgressWriter:pursuit:* initiative done → addEvidence +
   // bumpProgress (automatically updates last_touched_ts), so the next PursuitDriver tick does not immediately hit
@@ -10097,6 +10120,12 @@ async function handleChatSendInner(
   // B (2026-06-28): flag a deep_explore STATUS/COUNT query so force-continue can't hijack it into a 6-min
   // advancing round and the fabrication gate doesn't block the snapshot answer (read by both downstream).
   signalBus.userAsksExploreStatus = userAsksExploreStatus(userMessage);
+  // 2026-09-21: a bare status question runs nothing — see status_question.ts. Read tools stay open.
+  signalBus.statusQuestionTurn = userAsksProgressStatus(userMessage);
+  signalBus.statusQuestionText = signalBus.statusQuestionTurn ? userMessage : undefined;
+  if (signalBus.statusQuestionTurn) {
+    console.log(`[status-question-gate] session=${safeSessionId(sessionId)} armed: execute/write tools refused this turn`);
+  }
 
   // Skill hot-reload: if the revision has changed, inject a skill catalog update notification before this turn's message
   const seen = sessionSkillsRevision.get(sessionId) ?? 0;
@@ -12273,6 +12302,9 @@ interface TurnSignalBus {
    * contradicted (skill maturity: three in a row retire it).
    */
   offeredPlaybooks?: Array<{ name: string; signature: string | null }>;
+  /** 2026-09-21: the owner asked how things stand; execute/write tools are refused this turn (status_question.ts). */
+  statusQuestionTurn?: boolean;
+  statusQuestionText?: string;
   /** Wire send time supplied by the channel; may precede receipt by an entire long agent turn. */
   inboundSentAtMs?: number;
   authInboundDisposition?: PendingAuthInboundDisposition;
@@ -12977,6 +13009,24 @@ async function runToolLoop(
     call.input = prepared.input;
     const classification = tools.classify(call.name, call.input);
 
+    // 2026-09-21 status-question gate: the owner asked how things stand; nothing runs or is written to
+    // answer that. Refused calls are mechanism rejections (not failures) for every detector downstream.
+    if (signalBus.statusQuestionTurn && (classification?.capability === 'execute' || classification?.capability === 'write')) {
+      const reason = statusQuestionGateReason(call.name, signalBus.statusQuestionText ?? '');
+      toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: reason });
+      totalToolCallsThisTurn++;
+      inTurnRecords.push({ toolName: call.name, success: false, resultText: reason });
+      memory.metrics.increment('status_gate.blocked');
+      memory.actions.log({
+        sessionId: GLOBAL_TIMELINE_SESSION_ID,
+        toolName: call.name,
+        params: call.input,
+        result: 'rejected_by_status_question_gate',
+        success: false,
+      });
+      console.warn(`[status-question-gate] session=${safeSessionId(sessionId)} refused ${call.name} (${classification?.capability})`);
+      continue;
+    }
     // 2026-05-10: autonomous turn blacklist interception. Return failure as tool_result; the LLM
     // adapts to this turn's constraint without interrupting the turn (unlike auth_pending which halts the entire schedule).
     if (isAutonomousTurn && AUTONOMOUS_TURN_BLACKLIST.has(call.name)) {
@@ -13900,7 +13950,7 @@ async function runToolLoop(
         // Infinite loop risk. These rejects are not real wall collisions; they are ON-PURPOSE protocol-layer stops
         // and should not trigger plan escalation.
         // Signature head pattern: `<tool>:other:[<mechanism>_<name>]` (square bracket + mechanism name marker).
-        const isMechanismReject = /:other:\[(plan_protocol_gate|in_turn_tool_block|autonomous_blacklist|research[_-]?before[_-]?retry)\b/i.test(
+        const isMechanismReject = /:other:\[(plan_protocol_gate|in_turn_tool_block|autonomous_blacklist|status_question_gate|research[_-]?before[_-]?retry)\b/i.test(
           reflection.signature ?? '',
         );
         // Mechanical errors (script/syntax bug) are not a strategic wall — escalating to slow+placeholder-plan
@@ -14912,6 +14962,24 @@ async function runToolLoop(
         }
       }
 
+      // 2026-09-21 status-question gate: the owner asked how things stand; nothing runs or is written to
+      // answer that. Refused calls are mechanism rejections (not failures) for every detector downstream.
+      if (signalBus.statusQuestionTurn && (classification?.capability === 'execute' || classification?.capability === 'write')) {
+        const reason = statusQuestionGateReason(call.name, signalBus.statusQuestionText ?? '');
+        nextResults.push({ type: 'tool_result', tool_use_id: call.id, content: reason });
+        totalToolCallsThisTurn++;
+        inTurnRecords.push({ toolName: call.name, success: false, resultText: reason });
+        memory.metrics.increment('status_gate.blocked');
+        memory.actions.log({
+          sessionId: GLOBAL_TIMELINE_SESSION_ID,
+          toolName: call.name,
+          params: call.input,
+          result: 'rejected_by_status_question_gate',
+          success: false,
+        });
+        console.warn(`[status-question-gate] session=${safeSessionId(sessionId)} refused ${call.name} (${classification?.capability})`);
+        continue;
+      }
       // 2026-05-10: autonomous turn blacklist check must also be applied inside the main loop branch
       // (previously only checked on initial calls; subsequent iterations were missed)
       if (isAutonomousTurn && AUTONOMOUS_TURN_BLACKLIST.has(call.name)) {

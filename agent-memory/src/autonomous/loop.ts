@@ -63,6 +63,8 @@ export interface AutonomousInterruptPayload {
    */
   driver?: string;
   targetRef?: string;
+  /** Which criterion made a 'high' finding owner-visible (2026-09-21). */
+  visibleBy?: 'owner_declared' | 'owner_recent' | 'escalated';
 }
 
 /**
@@ -135,6 +137,15 @@ export interface AutonomousLoopOptions {
    * once at kickoff and then on the stalled cadence, so this cannot become a firehose.
    */
   isOwnerDeclared?: (targetRef: string) => boolean;
+  /**
+   * 2026-09-21: true when the finding's target is something the OWNER brought up recently (a URL, an
+   * arXiv id, a name they typed in the last day). Prod 2026-09-21 11:11 the owner asked about a claimed
+   * Goldbach proof; at 12:05 curiosity had `openai/ten-proofs` and the paper in hand, both with new
+   * facts, and dropped them at gate 1 because the executor had not self-rated them as escalations. A
+   * finding about the thing the owner just asked about is owner-visible by construction; it still needs
+   * at least one new fact (a note-only outcome stays silent, as before).
+   */
+  isOwnerRecent?: (targetRef: string) => boolean;
   audit?: AutonomousAuditHook;
   /**
    * Side-effect hook after each initiative is persisted (added 2026-05-06, serves PursuitProgressWriter etc.).
@@ -307,7 +318,14 @@ export function startAutonomousLoop(
       } catch {
         ownerDeclared = false;
       }
-      const ownerVisible = ownerDeclared || (result.escalate === true && hasNewFacts);
+      let ownerRecent = false;
+      try {
+        ownerRecent = opts.isOwnerRecent?.(initiative.targetRef) === true;
+      } catch {
+        ownerRecent = false;
+      }
+      const ownerVisible = ownerDeclared || (ownerRecent && hasNewFacts) || (result.escalate === true && hasNewFacts);
+      const visibleBy = ownerDeclared ? 'owner_declared' : ownerRecent && hasNewFacts ? 'owner_recent' : ownerVisible ? 'escalated' : undefined;
       if (updated && opts.interrupt) {
         // WS6 (selfhood_closure): escalate to 'high' only when the executor LLM flagged the finding
         // AND it produced at least one NEW FACT (evidence-backed knowledge). Notes do NOT qualify:
@@ -325,6 +343,7 @@ export function startAutonomousLoop(
             summary: updated.outcomeSummary ?? '',
             driver: initiative.driver,
             targetRef: initiative.targetRef,
+            visibleBy,
           },
         );
       }

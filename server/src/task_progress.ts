@@ -14,6 +14,13 @@ export function startProgressTicker(report: () => void, intervalMs = 5 * 60_000)
 export function createProgressRelay(deps: {
   send: (text: string) => Promise<boolean>;
   receipt: (kind: ProgressKind, delivered: boolean) => void;
+  /**
+   * 2026-09-21: the channel's say on whether a report of this kind may spend a message right now (a
+   * metered peer's allowance). A refused heartbeat is simply dropped; a refused milestone stays in
+   * `unsent` and rides the final reply. Absent ⇒ always allowed (the old behaviour).
+   */
+  canSend?: (kind: ProgressKind) => boolean;
+  skipped?: (kind: ProgressKind, reason: string) => void;
 }) {
   let attempts = 0;
   let heartbeats = 0;
@@ -25,6 +32,10 @@ export function createProgressRelay(deps: {
     // Frequent tool labels must not consume the two messages reserved for actual reports.
     if (kind === 'activity' || !text.trim() || seen.has(text)) return;
     if (kind === 'milestone') unsent.add(text);
+    if (deps.canSend && !deps.canSend(kind)) {
+      deps.skipped?.(kind, 'allowance_reserved');
+      return;
+    }
     if (attempts >= 2 || (kind === 'heartbeat' && heartbeats >= 1)) return;
     attempts++;
     if (kind === 'heartbeat') heartbeats++;
