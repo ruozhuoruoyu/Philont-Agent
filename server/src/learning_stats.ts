@@ -76,6 +76,20 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
       `  turn-close reflection: fired=${get('reflect.fire')} skipped_cooldown=${get('reflect.skip_cooldown')} → produced routing_rule=${get('reflect.routing_rule')} playbook=${get('reflect.playbook')} new_skill=${get('reflect.new_skill')} skill_refine=${get('reflect.skill_refine')}; ` +
         `positive learnings withheld (turn not judge-verified)=${get('reflect.withheld_unverified')} — creation may not outrun measurement`,
     );
+    // Pre-call failure predictor (2026-10-03, shadow). `hi` = calls scored P(fail) ≥ 0.5 before dispatch.
+    // The number to watch is the failure rate inside `hi` against the rate inside `lo`: offline, on this
+    // product's ledger, the predictor reached AUROC 89.8 — if the shadow split does not separate, do not
+    // wire anything to it (see server/src/failure_predictor.ts).
+    const hiF = get('predictor.shadow.hi.fail');
+    const hiOk = get('predictor.shadow.hi.ok');
+    const loF = get('predictor.shadow.lo.fail');
+    const loOk = get('predictor.shadow.lo.ok');
+    if (hiF + hiOk + loF + loOk > 0) {
+      lines.push(
+        `  failure predictor (shadow): scored=${hiF + hiOk + loF + loOk}; P(fail)≥0.5 → ${hiF}/${hiF + hiOk} failed (${pct(hiF, hiF + hiOk)}); ` +
+          `P(fail)<0.5 → ${loF}/${loF + loOk} failed (${pct(loF, loF + loOk)}) — separation is the calibration check`,
+      );
+    }
     lines.push(
       `  idle skill extraction: ran=${get('idle_reflect.ran')} suppressed_doomloop=${get('idle_reflect.suppressed')}`,
     );

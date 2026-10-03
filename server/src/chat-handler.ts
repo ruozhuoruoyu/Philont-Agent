@@ -187,6 +187,7 @@ import {
   type ToolCallTrace,
 } from '@agent/memory';
 import { extractFailureSignature } from '@agent/memory';
+import { FailurePredictor, failurePredictorMode, type Prediction } from './failure_predictor.js';
 import { detectRecurringUserPatterns } from '@agent/memory';
 import { reconcilePredictiveWakeups } from '@agent/memory';
 import {
@@ -882,6 +883,42 @@ logRegisteredControllers();
 // Intrinsic-drive audit log: all cross-session self-domain internal writes (extractor/reflector/compactor)
 // are recorded through this AuditLog. SHA-256 chain covers all Internal-origin events.
 export const internalAudit = new AuditLog();
+
+// Pre-call failure predictor (2026-10-03, SHADOW). Scores every real tool dispatch from tool identity +
+// the recent failure streak (offline AUROC 89.8 on this product's ledger, philosophers exp 100), records the
+// (P(fail), outcome) pair to metrics + audit, drives nothing. See server/src/failure_predictor.ts and
+// docs/design/memory_interface_evidence.md. Controller id `failure_predictor`.
+export const failurePredictor: FailurePredictor | null = (() => {
+  if (failurePredictorMode() === 'off') return null;
+  const fp = new FailurePredictor({
+    sink: (r) => {
+      const hi = r.pFail >= 0.5;
+      memory.metrics.increment(`predictor.shadow.${hi ? 'hi' : 'lo'}.${r.failed ? 'fail' : 'ok'}`);
+      if (hi) recordControllerFire('failure_predictor');
+      internalAudit.append('self_domain_write', {
+        source: 'failure_predictor',
+        origin: 'Internal',
+        toolName: 'failure_predictor_shadow',
+        tool: r.toolName,
+        pFail: Number(r.pFail.toFixed(3)),
+        failed: r.failed,
+        sessionId: r.sessionId,
+      });
+    },
+  });
+  try {
+    const now = Date.now();
+    const rows = memory.actions
+      .getByRange(now - 30 * 86_400_000, now)
+      .sort((a, b) => a.timestamp - b.timestamp || a.id - b.id)
+      .map((a) => ({ toolName: a.toolName, success: a.success, timestamp: a.timestamp }));
+    fp.warmStart(rows);
+    console.log(`[failure-predictor] shadow mode, warm-started on ${fp.examples} ledger rows`);
+  } catch (e) {
+    console.warn('[failure-predictor] warm start failed, starting cold:', (e as Error)?.message);
+  }
+  return fp;
+})();
 
 // ── Pursuit / Constitution startup: soul identity registration ─────────────────────────
 //
@@ -13410,6 +13447,7 @@ async function runToolLoop(
     // corrupt messages history → next LLM call hits 400. Intercept and fix here.
     const sanitized = sanitizeToolInput(call.input);
     let result;
+    let failurePrediction: Prediction | undefined;
     if (sanitized.input === null) {
       console.warn(
         `[tool] ${call.name} → input rejected: ${sanitized.reason ?? 'unknown'} (path=${sanitized.path})`,
@@ -13452,6 +13490,7 @@ async function runToolLoop(
           async (rewritten) =>
             (await checker({ toolName: call.name, approval: 'never', params: JSON.stringify(rewritten) })) === null,
         );
+        failurePrediction = failurePredictor?.predict(call.name);
         result = fitted.run
           ? withBudgetNotice(await tools.execute(call.name, fitted.input), fitted.notice)
           : { success: false, output: '', error: fitted.error, duration: 0 };
@@ -13610,6 +13649,7 @@ async function runToolLoop(
           ? signalBus.activeSkillName
           : undefined,
     });
+    if (failurePrediction) failurePredictor?.observe(call.name, result.success, failurePrediction, sessionId);
   }
 
   // All tools executed; push into message history and continue LLM conversation.
@@ -15401,6 +15441,7 @@ async function runToolLoop(
       // Same as main loop: sanitize tool input (prevent multiple JSON concatenation)
       const sanitized2 = sanitizeToolInput(call.input);
       let result;
+      let failurePrediction2: Prediction | undefined;
       if (sanitized2.input === null) {
         console.warn(
           `[tool] ${call.name} → input rejected: ${sanitized2.reason ?? 'unknown'} (path=${sanitized2.path})`,
@@ -15427,6 +15468,7 @@ async function runToolLoop(
             async (rewritten) =>
               (await checker({ toolName: call.name, approval: 'never', params: JSON.stringify(rewritten) })) === null,
           );
+          failurePrediction2 = failurePredictor?.predict(call.name);
           result = fitted2.run
             ? withBudgetNotice(await tools.execute(call.name, fitted2.input), fitted2.notice)
             : { success: false, output: '', error: fitted2.error, duration: 0 };
@@ -15491,6 +15533,7 @@ async function runToolLoop(
         toolName: call.name,
         ...finalLedgerRow,
       });
+      if (failurePrediction2) failurePredictor?.observe(call.name, result.success, failurePrediction2, sessionId);
     }
 
     if (nextResults.length === 0) {

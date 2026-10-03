@@ -206,6 +206,19 @@ const SPECS: readonly ControllerSpec[] = [
     countable: false,
     envSwitch: 'PHILONT_DEEP_EXPLORE_PHASES',
   },
+  {
+    id: 'failure_predictor',
+    failureMode:
+      'a tool call is dispatched while the agent is in a failing streak and fails too — nothing predicted it before the call (every other controller is post-hoc)',
+    module: 'server/src/failure_predictor.ts',
+    entry: 'FailurePredictor.predict',
+    layer: 'tool-gate',
+    shape: 'decide',
+    firesWhen:
+      'SHADOW: before every real tool dispatch it scores P(fail) from tool identity + the recent failure streak (offline AUROC 89.8 on this product’s ledger, philosophers exp 100); the fire count is the number of calls scored with P(fail) ≥ 0.5 — it drives nothing until the shadow pairs reproduce the offline calibration',
+    countable: true,
+    envSwitch: 'PHILONT_FAILURE_PREDICTOR',
+  },
 ];
 
 function makeController(spec: ControllerSpec): Controller {

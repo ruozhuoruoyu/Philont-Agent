@@ -219,3 +219,40 @@ test('matchedByRelevance is non-zero when the query and the corpus share a langu
   });
   assert.ok(r.matchedByRelevance > 0, 'relevance works and now says so');
 });
+
+// ── No-fill (2026-10-03): an unrelated skill is not a neutral filler ─────────────────────────
+import { recallNoFillEnabled } from '../src/skill_recall.js';
+
+test('noFill: zero relevance match leaves the section empty; a partial match still fills', () => {
+  const store = makeStore();
+  add(store, 'send-wechat-files-and-verify-size', 'Send a file over WeChat and verify size');
+  add(store, 'test-mersenne-check', 'Check Mersenne primality with pariGp');
+  const fallback = () => store.listAll(40);
+  // CJK query vs English corpus: nothing matches → empty, not the popular two.
+  const none = selectRelevantSkillsDetailed(store, '脊线前诱导染色试探有机会吗', { pool: 'positive', k: 2, fallback, noFill: true });
+  assert.equal(none.matchedByRelevance, 0);
+  assert.equal(none.skills.length, 0, 'no fill when nothing matched');
+  // Same query, flag off → legacy fill.
+  const legacy = selectRelevantSkillsDetailed(store, '脊线前诱导染色试探有机会吗', { pool: 'positive', k: 2, fallback, noFill: false });
+  assert.equal(legacy.skills.length, 2);
+  // Partial match: one relevant skill, the other slot still fills.
+  const partial = selectRelevantSkillsDetailed(store, 'check mersenne primality', { pool: 'positive', k: 2, fallback, noFill: true });
+  assert.ok(partial.matchedByRelevance >= 1);
+  assert.equal(partial.skills.length, 2, 'partial matches keep filling the remaining slots');
+  assert.equal(partial.skills[0].name, 'test-mersenne-check');
+});
+
+test('noFill flag: default off; 1/on/true/yes → on', () => {
+  const prev = process.env.PHILONT_SKILL_RECALL_NO_FILL;
+  try {
+    delete process.env.PHILONT_SKILL_RECALL_NO_FILL;
+    assert.equal(recallNoFillEnabled(), false);
+    for (const v of ['1', 'on', 'true', 'yes']) {
+      process.env.PHILONT_SKILL_RECALL_NO_FILL = v;
+      assert.equal(recallNoFillEnabled(), true);
+    }
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_SKILL_RECALL_NO_FILL;
+    else process.env.PHILONT_SKILL_RECALL_NO_FILL = prev;
+  }
+});

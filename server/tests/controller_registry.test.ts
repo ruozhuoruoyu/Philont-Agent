@@ -36,6 +36,7 @@ const EXPECTED_IDS = [
   'conscience',
   'plan_protocol',
   'phase',
+  'failure_predictor',
 ];
 
 test('enumeration: every existing gate is registered exactly once', () => {
@@ -71,6 +72,7 @@ test('enumeration: the two per-call deciders are enumerated but not fire-counted
       'citation_grounding',
       'conscience',
       'empty_conclusion',
+      'failure_predictor',
       'half_finished',
       'honesty',
       'numeric_grounding',
@@ -157,7 +159,7 @@ test('logRegisteredControllers emits a one-line summary of the registry', () => 
   const lines: string[] = [];
   logRegisteredControllers((m) => lines.push(m));
   assert.equal(lines.length, 1);
-  assert.ok(lines[0].includes('11 controllers registered'));
+  assert.ok(lines[0].includes('12 controllers registered'));
   assert.ok(lines[0].includes('fire-counted:'));
   assert.ok(lines[0].includes('enumerated-only:'));
   assert.ok(lines[0].includes('plan_protocol'));

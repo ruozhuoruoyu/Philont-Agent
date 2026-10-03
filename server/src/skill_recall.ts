@@ -27,6 +27,29 @@ export function recallRelevanceEnabled(): boolean {
 }
 
 /**
+ * PHILONT_SKILL_RECALL_NO_FILL (2026-10-03, default OFF). When ON, a section whose relevance match is
+ * EMPTY is left empty instead of being filled from the global top-N.
+ *
+ * Why this exists: the fallback fill guarantees the section is never empty, but what it fills with is
+ * by construction unrelated to the task (it reached the list by popularity, not by matching). Two
+ * independent measurements say that unrelated recall is not neutral: in philosophers exp 103 (ScienceWorld,
+ * 27B) retrieving facts from other tasks by similarity turned a task solved in 5/5 episodes into 5/5
+ * failures, and the SRDP formalisation (Memento 2) reserves an explicit "void case" so the model can act
+ * without memory rather than on the wrong memory. Here, with a CJK query against an English corpus,
+ * matchedByRelevance is 0 on every turn and the same six popular skills are injected regardless of topic
+ * (see the 2026-07-25 note below) — the exact "wrong memory" case.
+ *
+ * Default OFF because the fill is also the only path by which a never-matched but genuinely useful skill
+ * is ever seen; flipping the default is a measurement decision (use_skill rate and recurring-failure
+ * signatures before/after), not a design one. Partial matches are not affected: if ≥1 skill matched,
+ * the remaining slots still fill as before.
+ */
+export function recallNoFillEnabled(): boolean {
+  const v = (process.env.PHILONT_SKILL_RECALL_NO_FILL ?? '').trim().toLowerCase();
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+}
+
+/**
  * Which slice of the skill corpus a section wants. The store's search() returns a mixed kind set
  * (FTS only filters deprecated), so the pool predicate is applied JS-side — no store API change.
  *   positive: s.kind !== 'negative' && s.maturity !== 'playbook'
@@ -68,7 +91,7 @@ function skillText(s: Skill): string {
 export function selectRelevantSkills(
   skills: SkillStore,
   query: string,
-  opts: { pool: SkillPool; k: number; fallback: () => Skill[] },
+  opts: { pool: SkillPool; k: number; fallback: () => Skill[]; noFill?: boolean },
 ): Skill[] {
   return selectRelevantSkillsDetailed(skills, query, opts).skills;
 }
@@ -89,7 +112,7 @@ export function selectRelevantSkills(
 export function selectRelevantSkillsDetailed(
   skills: SkillStore,
   query: string,
-  opts: { pool: SkillPool; k: number; fallback: () => Skill[] },
+  opts: { pool: SkillPool; k: number; fallback: () => Skill[]; noFill?: boolean },
 ): { skills: Skill[]; matchedByRelevance: number } {
   const { pool, k, fallback } = opts;
 
@@ -121,6 +144,11 @@ export function selectRelevantSkillsDetailed(
   }
 
   // 6. Fill from fallback() (the path's current global list) deduped by name until k.
+  //    With PHILONT_SKILL_RECALL_NO_FILL on and NOTHING matched, leave the section empty: an unrelated
+  //    skill is not a neutral filler (see recallNoFillEnabled).
+  if (matchedByRelevance === 0 && (opts.noFill ?? recallNoFillEnabled())) {
+    return { skills: [], matchedByRelevance: 0 };
+  }
   if (result.length < k) {
     for (const s of fallback()) {
       if (result.length >= k) break;
