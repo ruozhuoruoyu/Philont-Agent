@@ -59,6 +59,21 @@ Nothing here drives a decision yet. The sequence is the one the learning judge f
 the logged pairs reproduce the offline separation, then decide what a high P(fail) should do (a hint,
 a research nudge, a skip) and measure it with the learning layer on and off, two runs each.
 
+## 3b. The shipped TypeScript predictor replayed on the exported ledger
+
+Same protocol as the offline study (time order, warm on the first 70% = 19,269 calls, score the last
+8,259, online update after each outcome):
+
+| | AUROC | calls | failure rate |
+|---|---|---|---|
+| predictor, P(fail) ≥ 0.5 | **0.928** | 1,152 | **74.8%** |
+| predictor, P(fail) < 0.5 | | 7,107 | 7.9% |
+| per-tool base rate (first 70%) | 0.821 | | |
+
+The online version scores above the offline batch fit (0.898) because it keeps adapting through the
+test stream. This is the separation the shadow counters have to show in production before anything is
+wired to the prediction.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's
