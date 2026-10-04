@@ -2,8 +2,9 @@
  * Skill safety scan (2026-10-04) — a pattern gate on SELF-AUTHORED skill text.
  *
  * Why: *Practice Makes Unsafe: Skill Misevolution in Self-Improving LLM Agents* (arXiv 2608.12851) found
- * that 21/21 evolved agent configurations authored unsafe artifacts without any adversary, and that three
- * malicious tasks raised the carried-over attack success rate from 16.0% to 35.3%; their SafeEvolve wrapper
+ * that all 21 evolved agent configurations (4 frameworks × 6 evolution methods) authored unsafe artifacts on a
+ * stream that interleaves malicious and benign tasks, that 15 of them carried the harm into fresh sessions, and that
+ * the carried-over attack success rate was 16.0% even without malicious exposure and 35.3% after one block of three; their SafeEvolve wrapper
  * (a check at skill authoring + reuse) cut harm by 26.7 / 17.3 points. philont writes skills from reflection,
  * from the extractor and from the self-repair driver, and none of those paths had a check — only externally
  * installed skills pass `skill_install_boundary`. This module is that check for the self-authored paths.

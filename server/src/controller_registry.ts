@@ -236,7 +236,7 @@ const SPECS: readonly ControllerSpec[] = [
   {
     id: 'skill_safety_scan',
     failureMode:
-      'a self-authored skill (reflection, extractor, repair driver) encodes a destructive, exfiltrating or gate-disabling command and is later offered as learned knowledge — 21/21 evolved configurations did this without an adversary in arXiv 2608.12851',
+      'a self-authored skill (reflection, extractor, repair driver) encodes a destructive, exfiltrating or gate-disabling command and is later offered as learned knowledge — all 21 evolved configurations did this on a mixed malicious/benign stream in arXiv 2608.12851, and 16% carry-over harm remained even without malicious exposure',
     module: 'agent-memory/src/skill_safety.ts',
     entry: 'scanSkillSafety (applied by SkillStore.createSkill / reviseRecipe)',
     layer: 'learn-time',

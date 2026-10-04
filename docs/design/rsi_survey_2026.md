@@ -34,6 +34,23 @@ philont 已有前三个的局部实现(case 库、回放台、评审影子),缺�
 | Fragility(2608.18066) | 方差被自改进放大;任务顺序依赖;多次运行 | 见左 | `learning-ab --runs 2` | **借:跨 run 打乱任务顺序**(§3-C) | 本项目两次运行规则的出处 |
 | The Last AI Built by Humans(2609.11873) | 五阶自治:改进执行→改进策略→经验获取→环境适应→递归元改进;HCI 指数 | 立场文 | philont 在第 1 阶(自写规则/技能),第 2 阶空缺(不会改"怎么改") | 作为路线图 | — |
 
+## 1b. 全文核验(2026-10-05;§1 是按摘要写的,本节按全文实验部分逐篇订正)
+
+| 论文 | 评估任务与判定 | 协议要点 | 方差报告 | 对 §1 的订正 |
+|---|---|---|---|---|
+| SkillRevise | SkillsBench 86 + SkillLearnBench-Random 50 + SWE-Skills-Bench-Hard 70(共 206,测试脚本判定)+ ALFWorld 100、BFCL-v4 | 执行器 GPT-5.5;修订预算 B=3;诊断分三块(验证规格 / 失败归因 / 保留约束);返回"效用门控的最优观测版本",效用 = 成功 + 效率 + 迁移 − 干扰 | **单次运行,temperature 0.2,无方差** | 36.05→61.63 是 SkillsBench 的 31/86→53/86。消融里**结构化诊断**最重要(去掉 −29 分),"保优"没有单独消融;自由修订只差 1 分。局限:依赖可见的验证器,测试稀疏会过拟合。→ A 项(保优回退)的证据比我写的弱;更强的证据是"修订要带结构化诊断",philont 的 H3 修复已有诊断 |
+| Skill-α | CL-Bench(GPT-5.5 判)、tau2-bench 三域(环境反馈)、SpreadsheetBench、BFCL 多轮(未训练) | 技能编辑策略 = Qwen3-8B(SFT 6,481 例 + GRPO),执行器固定 GPT-4o;rollback reward = 同一锚定题上改后 > 改前得 1 | 附录多 seed"稳定",主表无区间 | CL-Bench 绝对值只有 8.57%→10.38%;tau2 33.3→55.8。消融:去掉 rollback reward 退到 SFT 水平(3.68)——**"改后与改前在同一道题上对比"是唯一关键信号**,支持 A 项的"锚定对比"而非训练 |
+| MemArbiter | ALFWorld 134 OOD 局,50 步;Qwen3.6-27B-FP8,GPT-5.4 复核 | 五个功能库(目标 / 任务状态 / 约束 / 情景 / 参考),**全部规则**,无学习参数;token 预算 500/750 | **单次,seed 42,无方差** | 82.84 vs 61.94(BM25 平铺)。失败动作重复 47.1%→26.7%,状态-动作重现 27.0%→13.0%——这是 103/104 否决机制的另一种实现(呈现时门控而非候选集)。去掉时间门 SR@15 反而 +3、SR@50 −9。局限自述:单环境、人工角色设计、机制证据只是相关 |
+| MetaSkill-Evolve | OfficeQA / SealQA / ALFWorld,**三分(训练挖失败 / 验证选子技能 / 留出测试)** | 技能与元技能都是 SKILL.md 文本;骨干 Gemma-4 31B 冻结;慢回路每 2 次快回路一次 | 无 | 留出测试 OfficeQA 31.78→55.32、SealQA 29.17→45.26;**ALFWorld 无技能已 92.31**,只 +1.92——与 philont 任务库到顶同形。去掉慢回路 = 单层基线(48.94 / 37.21),元技能贡献 +6.4 / +8.1 |
+| Mem-π | WebArena 812、WorkArena 33 模板、LifelongAgentBench DB/OS 各 500、ALFWorld 3,553 训 / 134 测 | 记忆模型 Qwen2.5-7B,输出 [ABSTAIN] 或 ≤256 token 指导;奖励 = 任务奖励 − 长度罚;下游 agent 是**微调过的 7B**,迁移测 gpt-5.4-mini | **3 seed 均值**,无区间 | WebArena 27.1→43.1;**易题弃权 71%、难题 13%**,增益集中在最难档(+9.7)。下游是弱 agent,对前沿模型的增益未测 |
+| SEAGym | Terminal-Bench 2.0 + HLE;80 训 / 35 验 / 55 测 / 80 OOD | 验证视图冻结、ID/OOD 只从快照评;**无接受 / 拒绝机制**,只测量 | 无 | AHE 验证 +17.1 → ID +9.1 → OOD +6.3;TF-GRPO 验证 +17.1 → OOD −2.5;批大小 10 和 80 都退化、只有 20 涨;HLE-only 最终快照全崩。→ C 项(留出)成立,但 SEAGym 本身不是"验收",是"测量" |
+| Fragility | WebArena 812、VisualWebArena 910、SCUBA 267;GPT-5-mini;方法 AWM、ReasoningBank | 每实验 3 次 + 默认序 + 2 个打乱序 | 这篇就是方差研究 | 无记忆基线最好最差差 4.4%;自改进放大方差 17/24;打乱顺序 −4.5% vs 默认 +1.5%;规约 + 环境反馈 + 提示改写合起来只补回 31%。**传染效应**:一条错策略进了记忆就扩散。→ C 项的打乱顺序成立;philont 的 case 库同样会传染,评审门是防线 |
+| Practice Makes Unsafe | SkillMisevo-Bench 525 任务(225 恶意学习 + 225 良性评估 + 75 干净会话持久探针),4 框架(Claude Code / Codex / Hermes / OpenClaw)× 6 演化法 = 21 配置 | 判定:Kimi-K2 内容不安全 1–5 分,Gemini-3-Flash 有害轨迹规约;SafeEvolve = 写入时评论员 + 删除器,复用时按效用与血统风险排序并退休 | 固定 seed、固定分母,无区间 | **订正**:21/21 是在**混有恶意任务的流**上;无恶意暴露时携带 ASR 仍 16.0%,一块三题后 35.3%;15/21 带入新会话。SafeEvolve:不安全取回 35.3%→8.7%,C-ASR 21.3%→4.0%,**代价**:携带效用 53.3%→40.7%。→ B 项成立,但要记效用代价;philont 的 SKILL.md 技能库正属该基准的范围 |
+| APEx | FVQA / SimpleVQA / LiveVQA / InfoSeek / MMSearch / HotpotQA / 2Wiki,LLM 判 | 三阶段交替 GRPO 训 7B/8B 三模块;测试时只更新规划器 | 无 | 消融:无记忆 −1.8、无技能 −3.1、两者都无 −10.1;执行器不训 −8.4。全靠训练,**不借**成立 |
+| AgentStream | AppWorld / BFCL / BrowseComp-Plus / HLE / SWE-bench Verified / tau2,各 50 题;ACE / A-Mem / ReasoningBank / AutoSkill / Harness | 隔离 / 顺序 / 交错三种流 | **3 seed,报 ±** | **GPT-5.4 上五种自进化全部为负(−0.35 到 −0.78%)**,Gemini 3.1 Pro +2.0/+2.7,Claude Opus 4.7 +0.9/+1.75;非单调。→ 前沿模型上自进化增益 ≈ 1–3 分或为负,philont 用 glm-5.3 测不出增益与此一致 |
+
+三条综合订正:(1)这些工作里只有 Mem-π、AgentStream、Fragility 报多 seed,其余单次运行——我们"两次运行起步"的要求在文献里是少数做法;(2)自进化的增益随基线强度递减(MetaSkill 的 ALFWorld 92→94、AgentStream 的 GPT-5.4 为负、Mem-π 易题弃权 71%),所以**任务库必须让模型先失败**;(3)所有正结果都在有验证器或环境奖励的任务上,没有一篇在无标准答案的个人助手流量上测过。
+
 ## 2. 哪些结论互相印证
 
 - **保优而非覆写**:SkillRevise、Skill-α、RSEA、philont 回放台的 keep-better 都是同一件事——改动要在同一道题上
