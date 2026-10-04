@@ -949,6 +949,8 @@ export * from './constitution_proposals.js';
 // H3 skill self-repair (skill_self_repair.md): the pure repair-candidate gate + thrash guard, needed by
 // both the driver (this layer) and the server's skillRepairContext re-check at execution time.
 export * from './skill_repair.js';
+// 2026-10-04: self-authored skill safety scan (Practice Makes Unsafe / SafeEvolve).
+export * from './skill_safety.js';
 export {
   parseCompass,
   clampTraitsToCompass,

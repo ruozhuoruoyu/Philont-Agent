@@ -262,6 +262,11 @@ export interface SkillInput {
   /** v33 (H2): optional callable-recipe fields. Omit/null → an advisory prose lesson (today's behavior). */
   verification?: RecipeVerification | null;
   toolPolicy?: string[] | null;
+  /**
+   * 2026-10-04: run the self-authored skill safety scan (skill_safety.ts) on create. Default true. Importers
+   * of externally installed skills pass false — their boundary is skill_install_boundary.
+   */
+  safetyScan?: boolean;
 }
 
 // ── Extraction Results ────────────────────────────────────────────────────────────

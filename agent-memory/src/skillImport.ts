@@ -100,6 +100,7 @@ export function importSkills(
           whenToUse: skill.whenToUse ?? '',
           kind: skill.kind,
           source: skill.source ?? null,
+          safetyScan: false, // external SKILL.md: boundary is skill_install_boundary, not the self-authored scan
         });
         result.created.push(skill.name);
         touched = true;

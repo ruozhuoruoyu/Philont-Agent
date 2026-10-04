@@ -32,7 +32,8 @@ export type ControllerLayer =
   | 'answer-time' // inspects the drafted reply before it is emitted; fires a bounded regen
   | 'send-time' // inspects an outbound human-facing message at the channel exit
   | 'tool-gate' // decides whether a single tool call may proceed this turn
-  | 'phase'; // decides the next reasoning phase (deep_explore diverge/converge)
+  | 'phase' // decides the next reasoning phase (deep_explore diverge/converge)
+  | 'learn-time'; // decides whether a learned artifact (skill text, recipe revision) is written, kept or quarantined
 
 /** The runtime shape of the underlying gate — why it could not be wrapped in one uniform signature. */
 export type ControllerShape =
@@ -218,6 +219,32 @@ const SPECS: readonly ControllerSpec[] = [
       'SHADOW: before every real tool dispatch it scores P(fail) from tool identity + the recent failure streak (offline AUROC 89.8 on this product’s ledger, philosophers exp 100); the fire count is the number of calls scored with P(fail) ≥ 0.5 — it drives nothing until the shadow pairs reproduce the offline calibration',
     countable: true,
     envSwitch: 'PHILONT_FAILURE_PREDICTOR',
+  },
+  {
+    id: 'skill_keep_best',
+    failureMode:
+      'the self-repair driver rewrites a recipe and the rewrite is worse than the version it replaced — nothing compared the two, so the only exit was the ladder deprecating the whole skill (SkillRevise / Skill-α rollback reward / RSEA keep-better, arXiv 2606.01139 / 2608.01678)',
+    module: 'agent-memory/src/skill_repair.ts',
+    entry: 'keepBestDecision (applied by SkillStore.recordSkillOutcome)',
+    layer: 'learn-time',
+    shape: 'decide',
+    firesWhen:
+      'after an outcome on a recipe whose live version came from the repair driver and has ≥3 outcomes of its own, when its Laplace success rate is below the best earlier version’s (≥3 outcomes) — the fire count is the number of revert decisions; PHILONT_SKILL_KEEP_BEST=shadow (default) only records them, =on restores the best version through reviseRecipe',
+    countable: true,
+    envSwitch: 'PHILONT_SKILL_KEEP_BEST',
+  },
+  {
+    id: 'skill_safety_scan',
+    failureMode:
+      'a self-authored skill (reflection, extractor, repair driver) encodes a destructive, exfiltrating or gate-disabling command and is later offered as learned knowledge — 21/21 evolved configurations did this without an adversary in arXiv 2608.12851',
+    module: 'agent-memory/src/skill_safety.ts',
+    entry: 'scanSkillSafety (applied by SkillStore.createSkill / reviseRecipe)',
+    layer: 'learn-time',
+    shape: 'decide',
+    firesWhen:
+      'a self-authored skill text matches one of the pattern families (destructive rm, disk wipe, pipe-to-shell, sudo, credential exfiltration, disabling PHILONT_* gates, covering tracks): on create the skill is stored as deprecated (never recalled), on revise the revision is refused; externally installed skills are exempt (skill_install_boundary). PHILONT_SKILL_SAFETY_SCAN=0 disables',
+    countable: true,
+    envSwitch: 'PHILONT_SKILL_SAFETY_SCAN',
   },
 ];
 

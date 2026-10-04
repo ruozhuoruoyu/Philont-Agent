@@ -926,6 +926,42 @@ export const failurePredictor: FailurePredictor | null = (() => {
   return fp;
 })();
 
+// ── Learn-time gates in the skill store (2026-10-04) ───────────────────────────────────────────────
+// The store decides (keep-best revision acceptance, self-authored safety scan — see docs/design/rsi_survey_2026.md
+// §3 A/B); this layer only counts and audits, so learning_stats and the audit trail show what the gates did.
+memory.skills.setLearningHooks({
+  onKeepBest: (i) => {
+    memory.metrics.increment(`skill.keep_best.${i.decision.action}.${i.applied ? 'applied' : i.mode}`);
+    if (i.decision.action === 'revert') recordControllerFire('skill_keep_best');
+    internalAudit.append('self_domain_write', {
+      source: 'skill_keep_best',
+      origin: 'Internal',
+      toolName: i.applied ? 'skill_revision_reverted' : 'skill_keep_best_shadow',
+      skill: i.name,
+      mode: i.mode,
+      decision: i.decision.action,
+      reason: i.decision.reason,
+      current: i.decision.current ? `${i.decision.current.successes}/${i.decision.current.failures}` : null,
+      best: i.decision.best ? `#${i.decision.best.index} ${i.decision.best.successes}/${i.decision.best.failures}` : null,
+      restoredIndex: i.restoredIndex,
+    });
+  },
+  onQuarantine: (i) => {
+    memory.metrics.increment(`skill.quarantine.${i.stage}`);
+    recordControllerFire('skill_safety_scan');
+    internalAudit.append('self_domain_write', {
+      source: 'skill_safety_scan',
+      origin: 'Internal',
+      toolName: 'skill_quarantined',
+      skill: i.name,
+      stage: i.stage,
+      rule: i.hit.rule,
+      excerpt: i.hit.excerpt,
+      skillSource: i.source,
+    });
+  },
+});
+
 // ── Pursuit / Constitution startup: soul identity registration ─────────────────────────
 //
 // Since v7 the root row of the pursuit table is the agent identity. initSchema inside openMemoryDb()

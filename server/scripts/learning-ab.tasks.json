@@ -38,5 +38,15 @@
     "id": "sh-04-repeat-of-03",
     "family": "shell",
     "task": "Check again which of these commands are available: git, python3, node, rg, jq. Report the same table as before."
+  },
+  {
+    "id": "ho-01-csv-sum",
+    "family": "holdout",
+    "task": "Create sales.csv in the workspace with a header row (item,qty,price) and four data rows, then use a shell command to compute the total of qty*price over all rows and report it."
+  },
+  {
+    "id": "ho-02-dir-tree",
+    "family": "holdout",
+    "task": "In the workspace create the directories src/, src/lib/ and tests/, put an empty README.md in each, then list the resulting tree with a shell command and report how many README.md files exist."
   }
 ]

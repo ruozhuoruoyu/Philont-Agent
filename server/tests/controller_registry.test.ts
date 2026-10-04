@@ -37,6 +37,8 @@ const EXPECTED_IDS = [
   'plan_protocol',
   'phase',
   'failure_predictor',
+  'skill_keep_best',
+  'skill_safety_scan',
 ];
 
 test('enumeration: every existing gate is registered exactly once', () => {
@@ -55,7 +57,7 @@ test('enumeration: each controller carries a real failure mode + source pointer'
     assert.ok(c.failureMode.length > 10, `${c.id} failureMode too thin`);
     assert.ok(/\.ts$/.test(c.module), `${c.id} module should point at a .ts file`);
     assert.ok(c.entry.length > 0, `${c.id} missing entry`);
-    assert.ok(['answer-time', 'send-time', 'tool-gate', 'phase'].includes(c.layer));
+    assert.ok(['answer-time', 'send-time', 'tool-gate', 'phase', 'learn-time'].includes(c.layer));
     assert.ok(['regen', 'block', 'decide', 'exempt-predicate'].includes(c.shape));
   }
 });
@@ -77,6 +79,8 @@ test('enumeration: the two per-call deciders are enumerated but not fire-counted
       'honesty',
       'numeric_grounding',
       'output_format',
+      'skill_keep_best',
+      'skill_safety_scan',
       'viability',
     ].sort(),
   );
@@ -159,7 +163,7 @@ test('logRegisteredControllers emits a one-line summary of the registry', () => 
   const lines: string[] = [];
   logRegisteredControllers((m) => lines.push(m));
   assert.equal(lines.length, 1);
-  assert.ok(lines[0].includes('12 controllers registered'));
+  assert.ok(lines[0].includes('14 controllers registered'));
   assert.ok(lines[0].includes('fire-counted:'));
   assert.ok(lines[0].includes('enumerated-only:'));
   assert.ok(lines[0].includes('plan_protocol'));

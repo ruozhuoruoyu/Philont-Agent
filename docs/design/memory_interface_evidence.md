@@ -95,6 +95,36 @@ The online version scores above the offline batch fit (0.898) because it keeps a
 test stream. This is the separation the shadow counters have to show in production before anything is
 wired to the prediction.
 
+## 3c. Third batch (2026-10-04): learn-time gates and evaluation rules from the RSI survey
+
+From `rsi_survey_2026.md` §3, all flag-gated:
+
+- **Keep-best revision acceptance** (`agent-memory/src/skill_repair.ts` keepBestDecision / versionRecords,
+  applied in `SkillStore.recordSkillOutcome`; `PHILONT_SKILL_KEEP_BEST` shadow default | on | off). Each
+  `reviseRecipe` snapshot now carries the cumulative success/failure totals at supersede time, so every
+  version's own record is reconstructible. After an outcome on a recipe whose live version came from the
+  repair driver and has ≥3 outcomes, if its Laplace rate is below the best earlier version's (≥3 outcomes),
+  mode `on` restores that version through `reviseRecipe` (snapshotting the displaced one, ladder restarts
+  at draft); shadow only reports. A restored version is not judged again against the one it displaced.
+  Source: SkillRevise / Skill-α rollback reward / RSEA. Metrics `skill.keep_best.<action>.<applied|mode>`,
+  audit `skill_revision_reverted` / `skill_keep_best_shadow`, controller `skill_keep_best`.
+- **Self-authored skill safety scan** (`agent-memory/src/skill_safety.ts`, applied in `createSkill` and
+  `reviseRecipe`; `PHILONT_SKILL_SAFETY_SCAN` default on). Ten pattern families (destructive rm, disk wipe,
+  fork bomb, world-writable root, kill-all/shutdown, pipe-to-shell, sudo, credential exfiltration, disabling
+  PHILONT_* gates / --no-verify, covering tracks). A hit on create stores the skill as `deprecated` (auditable,
+  never recalled) with a `[quarantined by safety scan: <rule>]` suffix; a hit on revise refuses the revision.
+  Externally imported SKILL.md files are exempt (`SkillInput.safetyScan: false`; their boundary is
+  `skill_install_boundary`). Source: Practice Makes Unsafe / SafeEvolve. Metrics `skill.quarantine.<stage>`,
+  audit `skill_quarantined`, controller `skill_safety_scan`.
+- **A/B harness evaluation rules** (`server/scripts/learning-ab.ts`): `--holdout <family,…>` runs those tasks
+  only at the end of each run (frozen held-out view; SEAGym), `--shuffle` runs the evolution stream in a
+  seeded per-run order shared by both configurations (Fragility), the report prints the model in use
+  (AgentStream) and ID / held-out columns separately. Two `holdout` tasks added to the bank.
+
+Verification: agent-memory 1559/1559, server 1846/1846, tsc clean in both; mock-provider A/B smoke with
+`--holdout holdout --shuffle --runs 2` produces the two-column report and distinct orders per run. Not yet
+run against a real model (gateway 429) — every number in this file remains offline or synthetic.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's

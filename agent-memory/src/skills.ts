@@ -16,12 +16,32 @@ import { EventEmitter } from 'node:events';
 import type { Skill, SkillInput, SkillMaturity } from './types.js';
 import type { RecipeVerification } from './skill_recipes.js';
 import { nextMaturity, parseMaturity } from './skill_maturity.js';
-import { parseRevisionHistory, type SkillRevision } from './skill_repair.js';
+import {
+  parseRevisionHistory,
+  keepBestDecision,
+  keepBestMode,
+  KEEP_BEST_REASON_PREFIX,
+  type SkillRevision,
+  type KeepBestDecision,
+  type KeepBestMode,
+} from './skill_repair.js';
+import { scanSkillSafety, skillSafetyScanEnabled, type SkillSafetyHit } from './skill_safety.js';
 
 /** SkillStore event payload */
 export interface SkillChangeEvent {
   type: 'created' | 'updated' | 'deleted';
   name: string;
+}
+
+/**
+ * 2026-10-04: observation hooks for the two learning-layer gates that live in this store. The store has no
+ * metrics/audit handle (lower layer); the server attaches these to count and audit. Never throw.
+ */
+export interface SkillLearningHooks {
+  /** A keep-best judgement was made on a repaired recipe after an outcome. `applied` = the revert happened. */
+  onKeepBest?: (info: { name: string; mode: KeepBestMode; decision: KeepBestDecision; applied: boolean; restoredIndex: number | null }) => void;
+  /** A self-authored skill text hit the safety scan. `stage: 'create'` → stored as deprecated; `'revise'` → revision refused. */
+  onQuarantine?: (info: { name: string; stage: 'create' | 'revise'; hit: SkillSafetyHit; source: string | null }) => void;
 }
 
 interface SkillRow {
@@ -146,8 +166,20 @@ export function isDeclinedDraft(s: Skill): boolean {
 }
 
 export class SkillStore extends EventEmitter {
+  private hooks: SkillLearningHooks = {};
+
   constructor(private readonly db: Database.Database) {
     super();
+  }
+
+  /** Attach (replace) the learning-gate observation hooks. */
+  setLearningHooks(hooks: SkillLearningHooks): void {
+    this.hooks = hooks ?? {};
+  }
+
+  private safetyHit(texts: ReadonlyArray<string | null | undefined>, want: boolean | undefined): SkillSafetyHit | null {
+    if (want === false || !skillSafetyScanEnabled()) return null;
+    return scanSkillSafety(texts);
   }
 
   /**
@@ -160,12 +192,28 @@ export class SkillStore extends EventEmitter {
     const keywordsJson = JSON.stringify(input.triggerKeywords);
     const kind: 'positive' | 'negative' = input.kind === 'negative' ? 'negative' : 'positive';
     const source: string | null = input.source ?? null;
-    const maturity: SkillMaturity = parseMaturity(input.maturity, 'draft');
+    let maturity: SkillMaturity = parseMaturity(input.maturity, 'draft');
     const whenToUse: string = input.whenToUse ?? '';
     const verification: RecipeVerification | null = input.verification ?? null;
     const toolPolicy: string[] | null = input.toolPolicy ?? null;
     const verificationJson = verification ? JSON.stringify(verification) : null;
     const toolPolicyJson = toolPolicy ? JSON.stringify(toolPolicy) : null;
+
+    // 2026-10-04 safety scan (skill_safety.ts): a self-authored skill whose text encodes a destructive or
+    // exfiltrating command is stored — so the write is auditable and the author path can be traced — but as
+    // `deprecated`, which every recall path already excludes. Nothing learned is silently dropped; nothing
+    // unsafe is ever offered.
+    let description = input.description;
+    const hit = this.safetyHit([input.actionTemplate, input.description, input.whenToUse], input.safetyScan);
+    if (hit) {
+      maturity = 'deprecated';
+      description = `${input.description}\n[quarantined by safety scan: ${hit.rule}]`;
+      try {
+        this.hooks.onQuarantine?.({ name: input.name, stage: 'create', hit, source });
+      } catch {
+        /* observation only */
+      }
+    }
 
     this.db
       .prepare<[string, string, string, string, string, number, string, string | null, string, string | null, string | null, string | null]>(
@@ -173,14 +221,14 @@ export class SkillStore extends EventEmitter {
          (id, name, description, trigger_keywords, action_template, created_at, kind, source, maturity, when_to_use, verification, tool_policy)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, input.name, input.description, keywordsJson, input.actionTemplate, createdAt, kind, source, maturity, whenToUse || null, verificationJson, toolPolicyJson);
+      .run(id, input.name, description, keywordsJson, input.actionTemplate, createdAt, kind, source, maturity, whenToUse || null, verificationJson, toolPolicyJson);
 
     this.emit('changed', { type: 'created', name: input.name } satisfies SkillChangeEvent);
 
     return {
       id,
       name: input.name,
-      description: input.description,
+      description,
       whenToUse,
       offeredCount: 0,
       matchedCount: 0,
@@ -471,14 +519,50 @@ export class SkillStore extends EventEmitter {
       consecutiveFailures: after.consecutiveFailures,
       lastOutcome: success ? 'success' : 'failure',
     });
+    let out: Skill = after;
     if (computed !== after.maturity) {
       this.db
         .prepare<[string, string]>(`UPDATE memory_skills SET maturity = ? WHERE name = ?`)
         .run(computed, name);
       this.emit('changed', { type: 'updated', name } satisfies SkillChangeEvent);
-      return { ...after, maturity: computed };
+      out = { ...after, maturity: computed };
     }
-    return after;
+    return this.applyKeepBest(out) ?? out;
+  }
+
+  /**
+   * 2026-10-04 keep-best (skill_repair.ts): after an outcome on a recipe whose live version came from the
+   * repair driver, compare its record with the best earlier version's. Mode `on` restores that version
+   * (through reviseRecipe, so the displaced version is itself snapshotted and the ladder restarts at draft);
+   * `shadow` (default) only reports through the hook; `off` skips. Returns the skill after a revert, else null.
+   */
+  private applyKeepBest(skill: Skill): Skill | null {
+    const mode = keepBestMode();
+    if (mode === 'off' || skill.verification == null || skill.revisionHistory.length === 0) return null;
+    const decision = keepBestDecision(skill);
+    if (decision.action === 'not_applicable') return null;
+    let applied = false;
+    let restoredIndex: number | null = null;
+    let restored: Skill | null = null;
+    if (decision.action === 'revert' && mode === 'on' && decision.best) {
+      const snap = skill.revisionHistory[decision.best.index];
+      if (snap) {
+        restored = this.reviseRecipe(skill.name, {
+          actionTemplate: snap.actionTemplate,
+          verification: snap.verification,
+          toolPolicy: snap.toolPolicy,
+          reason: `${KEEP_BEST_REASON_PREFIX}${decision.reason} (restored revision #${decision.best.index})`,
+        });
+        applied = restored != null;
+        restoredIndex = applied ? decision.best.index : null;
+      }
+    }
+    try {
+      this.hooks.onKeepBest?.({ name: skill.name, mode, decision, applied, restoredIndex });
+    } catch {
+      /* observation only */
+    }
+    return restored;
   }
 
   /**
@@ -589,12 +673,29 @@ export class SkillStore extends EventEmitter {
     const existing = this.getByName(name);
     if (!existing || existing.verification == null) return null;
 
+    // 2026-10-04 safety scan on the INCOMING text: a repair that rewrites a recipe into an unsafe command is
+    // refused outright (the current version stays live); the refusal is observable through the hook.
+    if (updates.actionTemplate !== undefined) {
+      const hit = this.safetyHit([updates.actionTemplate], undefined);
+      if (hit) {
+        try {
+          this.hooks.onQuarantine?.({ name, stage: 'revise', hit, source: existing.source });
+        } catch {
+          /* observation only */
+        }
+        return null;
+      }
+    }
+
     const outgoing: SkillRevision = {
       at: Date.now(),
       actionTemplate: existing.actionTemplate,
       verification: existing.verification,
       toolPolicy: existing.toolPolicy,
       reason: updates.reason,
+      // keep-best (skill_repair.ts): cumulative totals at supersede time → this version's own record
+      successCount: existing.successCount,
+      failureCount: existing.failureCount,
     };
     const revisionHistory = [...existing.revisionHistory, outgoing];
 

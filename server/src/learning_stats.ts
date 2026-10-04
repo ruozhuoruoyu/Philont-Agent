@@ -95,6 +95,18 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
     lines.push(
       `  cases: recorded success=${get('case.recorded.success')} failure=${get('case.recorded.failure')}; injected in ${get('case.inject.turns')} turns`,
     );
+    // Learn-time gates (2026-10-04, docs/design/rsi_survey_2026.md §3): keep-best judges a repaired recipe
+    // against the version it replaced; the safety scan quarantines self-authored skill text.
+    const kbRevertShadow = get('skill.keep_best.revert.shadow');
+    const kbRevertApplied = get('skill.keep_best.revert.applied');
+    const kbKeep = get('skill.keep_best.keep.shadow') + get('skill.keep_best.keep.on');
+    const quarantined = get('skill.quarantine.create') + get('skill.quarantine.revise');
+    if (kbRevertShadow + kbRevertApplied + kbKeep + quarantined > 0) {
+      lines.push(
+        `  learn-time gates: keep-best keep=${kbKeep} revert=${kbRevertApplied} (shadow-only reverts=${kbRevertShadow}) · ` +
+          `safety scan quarantined=${quarantined} (create=${get('skill.quarantine.create')} revise-refused=${get('skill.quarantine.revise')})`,
+      );
+    }
     lines.push(
       `  idle skill extraction: ran=${get('idle_reflect.ran')} suppressed_doomloop=${get('idle_reflect.suppressed')}`,
     );
