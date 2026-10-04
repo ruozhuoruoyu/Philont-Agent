@@ -28,6 +28,12 @@ export const HOST_IS_WINDOWS = process.platform === 'win32';
  * Returns undefined on Windows → Node uses cmd.exe (the host dialect hint constrains the LLM to write cmd).
  */
 export const POSIX_PREFERRED_SHELL: string | undefined = (() => {
+  // PHILONT_SHELL_BIN (2026-10-05): an explicit shell program for the `shell` and `process` tools. Node passes
+  // the command as `<bin> -c "<command>"`, so a small wrapper script can redirect every command into another
+  // execution environment (a benchmark's Docker container, a jail) without touching the tools. Test harness use;
+  // unset in production. The file must exist, otherwise the default resolution below applies.
+  const forced = (process.env.PHILONT_SHELL_BIN ?? '').trim();
+  if (forced && existsSync(forced)) return forced;
   if (HOST_IS_WINDOWS) return undefined;
   for (const sh of ['/bin/bash', '/usr/bin/bash', '/usr/local/bin/bash', '/opt/homebrew/bin/bash']) {
     if (existsSync(sh)) return sh;
