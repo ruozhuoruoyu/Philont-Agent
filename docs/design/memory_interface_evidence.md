@@ -125,6 +125,41 @@ Verification: agent-memory 1559/1559, server 1846/1846, tsc clean in both; mock-
 `--holdout holdout --shuffle --runs 2` produces the two-column report and distinct orders per run. Not yet
 run against a real model (gateway 429) — every number in this file remains offline or synthetic.
 
+## 3d. First real-model rounds of the learning A/B (2026-10-04, glm-5.3 via the owner's gateway)
+
+Harness: `scripts/learning-ab.ts`, bank of 10 file/shell tasks (8 evolution + 2 held-out, two near-repeats),
+2 runs per configuration, fresh sandbox HOME per run, memory accumulating across tasks within a run, held-out
+tasks last, evolution order shuffled per run (same order for both configurations). Correctness from an
+expected-answer regex per task; efficiency (tool calls / failed calls / seconds per task) from the sandbox
+`memory_actions` ledger. Raw outputs stay on the owner's machine.
+
+**A bug first.** Round 1 showed every learning metric at 0: headless defaults its memory DB to a path under
+each task's `--output`, so no memory ever crossed a task boundary. Fixed in e5460e3 (`--memory-db` per
+sandbox). Round 1 is kept as the "fresh memory per task" reference.
+
+| round | treatment | ID correct (base / treat, 2 runs) | calls per task (base / treat) | case.inject.turns | note |
+|---|---|---|---|---|---|
+| ab1b | CASE_RECALL + NO_FILL | 8/8, 8/8 / 8/8, 8/8 | 5.2, 5.4 / 5.7, 7.2 | 0 / 9, 9 | cases injected on 9 of 10 turns, no efficiency change |
+| ab2 | CASE_RECALL | 8/8, 8/8 / 8/8, 8/8 | 6.5, 2.9 / 6.1, 5.7 | 0 / 9, 9 | baseline runs differ 2x from each other |
+| ab3 | NO_FILL | 8/8, 8/8 / 7/8, 8/8 | 5.0, 5.1 / 6.1, 4.3 | 0 / 0 | no skill recall fired in either arm (bundled skills do not match these goals) |
+| ab4 | all + KEEP_BEST=on | see addendum | | | |
+
+What the data say: (1) the bank is at ceiling for this model (13 of 14 runs 8/8 correct), so correctness
+cannot show a learning effect; (2) within-configuration run-to-run variation in call counts (2–3x; one task
+11/13/4/6) exceeds every configuration difference; (3) the mechanisms work as designed — the judge records
+4–9 success cases per 10-turn run, case recall injects on 9/10 turns, the predictor scores every call in
+shadow (P(fail) ≥ 0.5 once per run, and that call succeeded; failure rate of the bank ≈ 4%), reflection
+fires 0–5 times — but none of them has anything to improve: the repeat tasks already take 1–2 calls without
+memory. This is the product-side instance of philosophers exp 108 (a procedure the model already has adds
+nothing) and the mirror of exp 110 (the same memory forms gain +9 to +17 on ScienceWorld, where the model
+starts at 40%).
+
+Decision: no flag default changes from these rounds — no gain and no harm are both unmeasurable here. The
+measurement itself is the result: the harness runs end to end on a real model, with held-out / shuffle /
+correctness / efficiency columns and a known noise floor. Next: a bank where the model's first-round
+accuracy is 50–80% and failures repeat (missing tools, environment traps, multi-step dependencies), ≥3 runs
+per configuration; only then are CASE_RECALL / NO_FILL / KEEP_BEST defaults a data question.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's
