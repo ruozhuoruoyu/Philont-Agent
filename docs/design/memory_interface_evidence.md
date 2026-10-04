@@ -190,6 +190,43 @@ run with a shuffled order before flipping the default. CASE_RECALL injected on 5
 measurable effect; KEEP_BEST had nothing to act on. Next: feed the benchmark's exit code to the judge as a
 deterministic signal so failures enter the case store; then the veto/predictor have something to learn from.
 
+## 3f. LifelongAgentBench OS, batch 2 (2026-10-05): three configurations × two task orders
+
+base (shipped) / nofill (`NO_FILL` only) / full (`NO_FILL` + `CASE_RECALL` + `KEEP_BEST=on` + the benchmark's
+exit code written into `memory_cases` as the verdict, replacing the judge's row for that task). 60 tasks, same
+shuffled order across configurations within a seed.
+
+| config | correct s1 / s2 | timeouts | calls / failed per task | paired vs base (only-base / only-this correct) |
+|---|---|---|---|---|
+| base | 73.3 / 61.7 | 19 / 15 | 13.2 / 0.23, 13.1 / 0.52 | — |
+| nofill | 78.3 / 63.3 | 20 / 15 | 12.9 / 0.40, 10.9 / 0.38 | 1/4, 3/4 |
+| full | 73.3 / 66.7 | 23 / 13 | 12.0 / 0.35, 12.3 / 0.23 | 1/1, 2/5 |
+
+1. **The §3e timeout halving is retracted as a general effect.** Batch-2 baselines produced no antipattern /
+   playbook fill injections at all (the batch-1 baselines had 37–41 turns of them because reflection authored a
+   "task failed" playbook early), so NO_FILL had nothing to block and the timeouts are equal. It remains a
+   conditional mechanism: when the fill would inject zero-relevance lessons, suppressing them saves time; it never
+   hurt (≥ base in 4/4 runs). **Default → on**, on the grounds that the path only ever adds noise.
+2. **Failure cases in the store change nothing.** full holds 13 / 18 failure + 41 / 40 success cases and injects on
+   59/60 turns; same-skill revisit accuracy 75 / 65 vs base 75 / 62; per-skill accuracy full ≈ nofill. A failure
+   case rendered as prompt text does not alter behaviour (philosophers exp 104 again). Next: turn failure cases into a
+   constraint at the tool-call layer (the failed command shape of a same-family task as a pre-dispatch warning or
+   candidate narrowing), not more prompt text. `CASE_RECALL` stays off.
+3. **Judge calibration, first truth column.** Over six runs the judge said success on 269 tasks of which **57 (21%)
+   fail the evaluation script**; it said failure once; it was silent on 130 tasks (36%). It is blind to "did it, but
+   not quite right" (permission bits, group ownership, a missing file). This fills the row the postmortem (§5.3)
+   deferred for lack of a truth source.
+4. **Safety scan false positives.** 8 quarantines across six runs, all legitimate task-family skills (`sudo -u
+   outsider ls` as a permission check; `rm -f /var/log/chsh_failure`). Bare `sudo` and any `rm` under /var/log are
+   normal on an administration task set. Rules narrowed in a8d3eda (sudo only wrapping destructive commands;
+   /var/log only system logs / wildcard / history); agent-memory dist rebuilt before batch 3.
+5. **Order effect.** Every configuration scores 7–12 points lower under order s2 than s1; only same-order pairs are
+   comparable (Fragility's finding reproduced). Same-order agreement 53–58/60.
+
+Flags: NO_FILL default on; CASE_RECALL off; KEEP_BEST shadow (no skill repair occurred in any run). Batch 3 (tasks
+60–179, base vs full, two orders) is running to see whether a longer stream or more accumulated failure cases
+changes any of this.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's

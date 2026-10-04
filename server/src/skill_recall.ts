@@ -27,7 +27,7 @@ export function recallRelevanceEnabled(): boolean {
 }
 
 /**
- * PHILONT_SKILL_RECALL_NO_FILL (2026-10-03, default OFF). When ON, a section whose relevance match is
+ * PHILONT_SKILL_RECALL_NO_FILL (2026-10-03, default OFF; default ON since 2026-10-05, see recallNoFillEnabled). When ON, a section whose relevance match is
  * EMPTY is left empty instead of being filled from the global top-N.
  *
  * Why this exists: the fallback fill guarantees the section is never empty, but what it fills with is
@@ -45,8 +45,12 @@ export function recallRelevanceEnabled(): boolean {
  * the remaining slots still fill as before.
  */
 export function recallNoFillEnabled(): boolean {
+  // 2026-10-05: default ON. Evidence (docs/design/memory_interface_evidence.md §3e/§3f): on LifelongAgentBench OS
+  // the fill never helped in 8 real-model runs; when the baseline's reflection had authored a failure playbook, the
+  // fill injected it into 37–41 of 60 turns and the no-fill arm hit the wall-clock limit half as often; when no such
+  // artifact existed, the two arms were equal. Set PHILONT_SKILL_RECALL_NO_FILL=0/off to restore the fill.
   const v = (process.env.PHILONT_SKILL_RECALL_NO_FILL ?? '').trim().toLowerCase();
-  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
 /**
@@ -121,7 +125,14 @@ export function selectRelevantSkillsDetailed(
   if (qTokens.size === 0) return { skills: fallback().slice(0, k), matchedByRelevance: 0 };
 
   // 2. Wide candidate pull to defeat rankByScore pre-truncation cold-start bias.
-  const candidates = skills.search(query, Math.max(k * 12, 60));
+  //    2026-10-05: the FTS pull alone returned NOTHING for ordinary multi-word queries ("compare gpu hbm memory
+  //    bandwidth across hardware" against a skill keyed hbm/bandwidth/gpu), so the relevance re-rank below had
+  //    no candidates and every slot was filled from the global list — the "same six skills every turn" seen in
+  //    production, and the reason the no-fill arm injected nothing in the LifelongAgentBench runs. The corpus
+  //    is small (tens to a few hundred rows), so also pull the recommendation list and let jaccard decide.
+  const pulled = [...skills.search(query, Math.max(k * 12, 60)), ...skills.listForRecommendation(400)];
+  const seenCand = new Set<string>();
+  const candidates = pulled.filter((s) => (seenCand.has(s.name) ? false : (seenCand.add(s.name), true)));
 
   // 3. Pool predicate filter.
   const matched = candidates.filter(poolPredicate(pool));
@@ -130,24 +141,27 @@ export function selectRelevantSkillsDetailed(
   const scored = matched.map((s) => ({ s, score: jaccard(qTokens, tokenize(skillText(s))) }));
   scored.sort((a, b) => b.score - a.score);
 
-  // 5. Take top-k, deduping by name. A zero-scoring row is NOT a relevance match — it reached this list
-  //    through the FTS candidate pull and would otherwise be counted as evidence the ranker worked.
+  // 5. Take the top-k RELEVANT rows (score > 0), deduping by name. A zero-scoring row is not a relevance
+  //    match — it reached this list through the candidate pull (now the whole corpus) and must not be
+  //    counted as evidence the ranker worked, nor selected as if it were.
   const seen = new Set<string>();
   const result: Skill[] = [];
   let matchedByRelevance = 0;
   for (const { s, score } of scored) {
     if (result.length >= k) break;
+    if (score <= 0) break; // sorted DESC: nothing relevant follows
     if (seen.has(s.name)) continue;
     seen.add(s.name);
     result.push(s);
-    if (score > 0) matchedByRelevance++;
+    matchedByRelevance++;
   }
 
-  // 6. Fill from fallback() (the path's current global list) deduped by name until k.
-  //    With PHILONT_SKILL_RECALL_NO_FILL on and NOTHING matched, leave the section empty: an unrelated
-  //    skill is not a neutral filler (see recallNoFillEnabled).
-  if (matchedByRelevance === 0 && (opts.noFill ?? recallNoFillEnabled())) {
-    return { skills: [], matchedByRelevance: 0 };
+  // 6. Fill from fallback() (the path's current global list) deduped by name until k — the legacy padding.
+  //    With PHILONT_SKILL_RECALL_NO_FILL (default on since 2026-10-05) the section holds ONLY what matched:
+  //    an unrelated skill is not a neutral filler (philosophers exp 103; recallNoFillEnabled), whether the
+  //    section is otherwise empty or partially filled.
+  if (opts.noFill ?? recallNoFillEnabled()) {
+    return { skills: result, matchedByRelevance };
   }
   if (result.length < k) {
     for (const s of fallback()) {

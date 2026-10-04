@@ -78,7 +78,7 @@ test('blank/whitespace/punctuation/CJK-sub-trigram query returns fallback unchan
   const expected = fallback().slice(0, k);
 
   for (const q of ['', '   ', '\t\n', '!@#$%^&*()', 'a', '中']) {
-    const got = selectRelevantSkills(skills, q, { pool: 'positive', k, fallback });
+    const got = selectRelevantSkills(skills, q, { pool: 'positive', k, fallback, noFill: false });
     assert.deepEqual(
       got.map((s) => s.name),
       expected.map((s) => s.name),
@@ -150,7 +150,7 @@ test('fill appends from fallback deduped-by-name until k', () => {
 
   const fallback = () => skills.listAll(40);
   const k = 3;
-  const got = selectRelevantSkills(skills, 'kubernetes ingress', { pool: 'positive', k, fallback });
+  const got = selectRelevantSkills(skills, 'kubernetes ingress', { pool: 'positive', k, fallback, noFill: false });
 
   assert.equal(got.length, Math.min(k, 3), 'length is min(k, total)');
   assert.equal(got[0]?.name, 'match-one', 'matched skill comes first');
@@ -181,8 +181,8 @@ test('Chinese query with no FTS hits still fills from fallback (no worse than to
   const fallback = () => skills.listAll(40);
   const k = 2;
   // multi-char Chinese query: tokenizes to >=1 token (not blank), but no FTS/LIKE match.
-  const got = selectRelevantSkills(skills, '部署集群', { pool: 'positive', k, fallback });
-  assert.equal(got.length, k, 'fallback fills to k even with zero matches');
+  const got = selectRelevantSkills(skills, '部署集群', { pool: 'positive', k, fallback, noFill: false });
+  assert.equal(got.length, k, 'legacy fill (noFill:false) fills to k even with zero matches');
   assert.equal(new Set(got.map((s) => s.name)).size, got.length, 'no dup');
 });
 
@@ -203,9 +203,12 @@ test('matchedByRelevance reports 0 when a CJK query cannot touch an English corp
     pool: 'positive',
     k: 6,
     fallback: () => store.listAll(40),
+    noFill: false,
   });
   assert.equal(r.matchedByRelevance, 0, 'the honest number behind the frozen list');
-  assert.ok(r.skills.length > 0, 'the fallback still fills the slots — behaviour unchanged, only visible');
+  assert.ok(r.skills.length > 0, 'with the legacy fill the slots are still filled — only the number is visible');
+  const strict = selectRelevantSkillsDetailed(store, '脊线前诱导染色试探有机会吗', { pool: 'positive', k: 6, fallback: () => store.listAll(40) });
+  assert.deepEqual(strict.skills, [], 'default (no-fill): zero relevance leaves the section empty');
 });
 
 test('matchedByRelevance is non-zero when the query and the corpus share a language', () => {
@@ -223,7 +226,7 @@ test('matchedByRelevance is non-zero when the query and the corpus share a langu
 // ── No-fill (2026-10-03): an unrelated skill is not a neutral filler ─────────────────────────
 import { recallNoFillEnabled } from '../src/skill_recall.js';
 
-test('noFill: zero relevance match leaves the section empty; a partial match still fills', () => {
+test('noFill: zero relevance match leaves the section empty; a partial match is NOT padded (2026-10-05)', () => {
   const store = makeStore();
   add(store, 'send-wechat-files-and-verify-size', 'Send a file over WeChat and verify size');
   add(store, 'test-mersenne-check', 'Check Mersenne primality with pariGp');
@@ -235,18 +238,24 @@ test('noFill: zero relevance match leaves the section empty; a partial match sti
   // Same query, flag off → legacy fill.
   const legacy = selectRelevantSkillsDetailed(store, '脊线前诱导染色试探有机会吗', { pool: 'positive', k: 2, fallback, noFill: false });
   assert.equal(legacy.skills.length, 2);
-  // Partial match: one relevant skill, the other slot still fills.
+  // Partial match: one relevant skill; under no-fill the other slot stays empty (an unrelated skill is not a filler).
   const partial = selectRelevantSkillsDetailed(store, 'check mersenne primality', { pool: 'positive', k: 2, fallback, noFill: true });
-  assert.ok(partial.matchedByRelevance >= 1);
-  assert.equal(partial.skills.length, 2, 'partial matches keep filling the remaining slots');
+  assert.equal(partial.matchedByRelevance, 1);
+  assert.deepEqual(partial.skills.map((s) => s.name), ['test-mersenne-check'], 'only the relevant skill, no padding');
+  const partialLegacy = selectRelevantSkillsDetailed(store, 'check mersenne primality', { pool: 'positive', k: 2, fallback, noFill: false });
+  assert.equal(partialLegacy.skills.length, 2, 'legacy fill pads the remaining slot');
   assert.equal(partial.skills[0].name, 'test-mersenne-check');
 });
 
-test('noFill flag: default off; 1/on/true/yes → on', () => {
+test('noFill flag: default ON since 2026-10-05; 0/off/false/no → off', () => {
   const prev = process.env.PHILONT_SKILL_RECALL_NO_FILL;
   try {
     delete process.env.PHILONT_SKILL_RECALL_NO_FILL;
-    assert.equal(recallNoFillEnabled(), false);
+    assert.equal(recallNoFillEnabled(), true);
+    for (const v of ['0', 'off', 'false', 'no']) {
+      process.env.PHILONT_SKILL_RECALL_NO_FILL = v;
+      assert.equal(recallNoFillEnabled(), false);
+    }
     for (const v of ['1', 'on', 'true', 'yes']) {
       process.env.PHILONT_SKILL_RECALL_NO_FILL = v;
       assert.equal(recallNoFillEnabled(), true);
@@ -255,4 +264,13 @@ test('noFill flag: default off; 1/on/true/yes → on', () => {
     if (prev === undefined) delete process.env.PHILONT_SKILL_RECALL_NO_FILL;
     else process.env.PHILONT_SKILL_RECALL_NO_FILL = prev;
   }
+});
+
+test('a multi-word query reaches a keyword-matching skill even when the FTS pull returns nothing (2026-10-05)', () => {
+  const store = makeStore();
+  add(store, 'avoid-hbm-bandwidth-overestimate', 'do not overestimate hbm memory bandwidth when comparing gpu hardware', { keywords: ['hbm', 'bandwidth', 'gpu'] });
+  add(store, 'unrelated-wechat', 'Send a file over WeChat and verify size', { keywords: ['wechat'] });
+  const r = selectRelevantSkillsDetailed(store, 'compare gpu hbm memory bandwidth across hardware', { pool: 'positive', k: 2, fallback: () => store.listAll(40) });
+  assert.equal(r.matchedByRelevance, 1);
+  assert.deepEqual(r.skills.map((s) => s.name), ['avoid-hbm-bandwidth-overestimate'], 'relevance, not fill, selected it; the unrelated skill is not appended');
 });
