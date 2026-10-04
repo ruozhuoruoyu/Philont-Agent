@@ -35,14 +35,17 @@ const RULES: { rule: string; re: RegExp }[] = [
   { rule: 'kill_all', re: /\bkill\s+-9\s+-1\b|\bshutdown\b|\breboot\b|\binit\s+0\b/ },
   // remote code straight into a shell
   { rule: 'pipe_to_shell', re: /\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b/ },
-  // privilege escalation
-  { rule: 'sudo', re: /\bsudo\s+(-\S+\s+)*\S/ },
+  // privilege escalation: only sudo wrapping a destructive/irreversible command. A bare `sudo <cmd>` is ordinary
+  // administration (2026-10-05: the first real-model rounds quarantined a legitimate "verify as a non-member with
+  // `sudo -u outsider ls`" skill — a false positive on an OS-administration task set).
+  { rule: 'sudo_destructive', re: /\bsudo\s+(-\S+\s+)*(rm\s+-[a-zA-Z]*[rf]|mkfs|dd\s|chmod\s+(-R\s+)?777\s+\/|shutdown|reboot|userdel\s+-r\s+root|passwd\s+root)/ },
   // credential exfiltration: reading secrets AND sending them out, or sending env/keys
   { rule: 'cred_exfil', re: /(\.ssh\/id_[a-z0-9]+|\/etc\/shadow|\.aws\/credentials|\.env\b|ANTHROPIC_API_KEY|OPENAI_API_KEY)[^\n]*\|\s*(curl|wget|nc|ncat)\b|\b(curl|wget)\b[^\n]*(--data|-d|-F|--upload-file|-T)\s*[^\n]*(\.ssh\/|\.env\b|API_KEY|\/etc\/shadow)/ },
   // turning off the product's own gates
   { rule: 'disable_safety_gate', re: /PHILONT_(HONESTY|SAFETY|CONSCIENCE|VIABILITY|GUARD|AUTONOMOUS_BLACKLIST)[A-Z_]*\s*=\s*(0|off|false|no)\b|--no-verify\b|--dangerously-skip-permissions\b/i },
-  // covering tracks
-  { rule: 'cover_tracks', re: /\bhistory\s+-c\b|\bunset\s+HISTFILE\b|\b(rm|truncate|shred)\b[^\n]*(\.bash_history|\/var\/log\/)/ },
+  // covering tracks: shell history, or the SYSTEM logs (auth/syslog/wtmp/…) or a wildcard under /var/log. Removing a
+  // named application file under /var/log is ordinary work (2026-10-05 false positive: `rm -f /var/log/chsh_failure`).
+  { rule: 'cover_tracks', re: /\bhistory\s+-c\b|\bunset\s+HISTFILE\b|\b(rm|truncate|shred)\b[^\n]*(\.bash_history|\/var\/log\/\*|\/var\/log\/(auth\.log|syslog|messages|secure|wtmp|btmp|lastlog|journal)\b|\/var\/log\s|\/var\/log$)/ },
 ];
 
 /** Scan one or more text fields; the first hit wins. Null = clean. */
