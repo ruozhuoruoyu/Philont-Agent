@@ -160,6 +160,36 @@ correctness / efficiency columns and a known noise floor. Next: a bank where the
 accuracy is 50–80% and failures repeat (missing tools, environment traps, multi-step dependencies), ≥3 runs
 per configuration; only then are CASE_RECALL / NO_FILL / KEEP_BEST defaults a data question.
 
+## 3e. LifelongAgentBench OS (2026-10-04, glm-5.3): the first bank with headroom
+
+Setup: 60 of the benchmark's 500 OS tasks (9–12 bash steps, 29 skills, script-judged) in dataset order; one
+container per task (the benchmark's own image), philont's shell tool redirected into it via `PHILONT_SHELL_BIN`
+(agent-tools, 8fd092d; **agent-tools must be rebuilt — the server loads its dist**); one sandbox + one memory
+DB per run; 240 s wall per task. Baseline = shipped defaults; treatment = `CASE_RECALL=1, NO_FILL=1,
+KEEP_BEST=on`. Two runs each. Harness: philosophers `experiments/112-philont-lab-os/`.
+
+| run | correct | first/second half | hit 240 s wall | calls / failed calls per task | s/task |
+|---|---|---|---|---|---|
+| base r1 / r2 | 68.3 / 73.3 | 70→67 / 70→77 | 35 / 33 | 11.2 / 0.45, 11.6 / 0.30 | 218 / 216 |
+| treat r1 / r2 | 70.0 / 71.7 | 70→70 / 67→77 | 18 / 23 | 10.8 / 0.15, 10.9 / 0.22 | 204 / 211 |
+
+Findings. (1) Accuracy is 70.8 in both groups, flat within runs, identical per skill: the model's competence
+on this bank is ~70% and no memory form moved it (AgentStream's frontier-model result reproduced on a
+product). (2) The treatment finishes inside the wall in both runs (18/23 vs 35/33 tasks timing out; cross-run
+spread 2 and 5) with fewer failed calls. The metrics show why: the baseline's reflection authored a
+"task failed" playbook and antipatterns that the popularity fill injected into 37–41 of 60 turns; NO_FILL
+suppressed that (0 injections) and the prompt carried 59 judge-verified cases instead. Irrelevant recall is
+not neutral — here it costs time, not score (philosophers exp 103 in product form). (3) The learning judge
+recorded 22–40 successes and **zero failures** in every run although 16–19 tasks were wrong: without a
+deterministic rail it cannot see failure, so the case store is positive-only and the failure→constraint loop
+has no input. (4) `skill.quarantine.create` counted 1–3 per run but no quarantined row survived in the
+store; audit location to check (likely removed by draft pruning).
+
+Decisions: NO_FILL has its first directional evidence (efficiency, 2/2 runs, visible mechanism) — one more
+run with a shuffled order before flipping the default. CASE_RECALL injected on 59/60 turns with no
+measurable effect; KEEP_BEST had nothing to act on. Next: feed the benchmark's exit code to the judge as a
+deterministic signal so failures enter the case store; then the veto/predictor have something to learn from.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's
