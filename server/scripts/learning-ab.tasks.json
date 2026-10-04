@@ -2,51 +2,61 @@
   {
     "id": "fs-01-create-count",
     "family": "files",
-    "task": "In the workspace, create a file notes.txt containing exactly three lines of text, then count its lines with a shell command and report the number."
+    "task": "In the workspace, create a file notes.txt containing exactly three lines of text, then count its lines with a shell command and report the number.",
+    "expect": "\\b3\\b"
   },
   {
     "id": "fs-02-read-missing-then-recover",
     "family": "files",
-    "task": "Read the file config/settings.yaml in the workspace. If it does not exist, create config/settings.yaml with the keys name: demo and version: 1, then read it back and report its contents."
+    "task": "Read the file config/settings.yaml in the workspace. If it does not exist, create config/settings.yaml with the keys name: demo and version: 1, then read it back and report its contents.",
+    "expect": "demo[\\s\\S]*1|1[\\s\\S]*demo"
   },
   {
     "id": "sh-01-tool-missing",
     "family": "shell",
-    "task": "Using a shell command, count how many lines in the workspace contain the word 'error' across all .log files. If no .log files exist, create app.log with four lines, two of which contain 'error', and then do the count. Report the number."
+    "task": "Using a shell command, count how many lines in the workspace contain the word 'error' across all .log files. If no .log files exist, create app.log with four lines, two of which contain 'error', and then do the count. Report the number.",
+    "expect": "\\b2\\b"
   },
   {
     "id": "sh-02-json-transform",
     "family": "shell",
-    "task": "Create data.json in the workspace with an array of five objects {id, value} where value is id squared, then use a shell command (python3 or node, whichever is available) to compute the sum of all values and report it."
+    "task": "Create data.json in the workspace with an array of five objects {id, value} where value is id squared, then use a shell command (python3 or node, whichever is available) to compute the sum of all values and report it.",
+    "expect": "\\b55\\b"
   },
   {
     "id": "fs-03-rename-list",
     "family": "files",
-    "task": "In the workspace create three files a.txt, b.txt, c.txt, rename b.txt to beta.txt, and report the sorted list of files that remain."
+    "task": "In the workspace create three files a.txt, b.txt, c.txt, rename b.txt to beta.txt, and report the sorted list of files that remain.",
+    "expect": "a\\.txt[\\s\\S]*beta\\.txt[\\s\\S]*c\\.txt"
   },
   {
     "id": "sh-03-env-check",
     "family": "shell",
-    "task": "Report which of these commands are available on this machine: git, python3, node, rg, jq. Use a shell command per tool and summarise as a table of name → available/missing."
+    "task": "Report which of these commands are available on this machine: git, python3, node, rg, jq. Use a shell command per tool and summarise as a table of name → available/missing.",
+    "expect": "git[\\s\\S]*python3[\\s\\S]*node[\\s\\S]*rg[\\s\\S]*jq"
   },
   {
     "id": "fs-04-repeat-of-01",
     "family": "files",
-    "task": "In the workspace, create a file notes2.txt containing exactly five lines of text, then count its lines with a shell command and report the number."
+    "task": "In the workspace, create a file notes2.txt containing exactly five lines of text, then count its lines with a shell command and report the number.",
+    "expect": "\\b5\\b"
   },
   {
     "id": "sh-04-repeat-of-03",
     "family": "shell",
-    "task": "Check again which of these commands are available: git, python3, node, rg, jq. Report the same table as before."
+    "task": "Check again which of these commands are available: git, python3, node, rg, jq. Report the same table as before.",
+    "expect": "git[\\s\\S]*python3[\\s\\S]*node[\\s\\S]*rg[\\s\\S]*jq"
   },
   {
     "id": "ho-01-csv-sum",
     "family": "holdout",
-    "task": "Create sales.csv in the workspace with a header row (item,qty,price) and four data rows, then use a shell command to compute the total of qty*price over all rows and report it."
+    "task": "Create sales.csv in the workspace with a header row (item,qty,price) and exactly these four data rows: pen,3,1.5 / book,2,10 / cup,4,2.25 / bag,1,20. Then use a shell command to compute the total of qty*price over all rows and report it.",
+    "expect": "53\\.5"
   },
   {
     "id": "ho-02-dir-tree",
     "family": "holdout",
-    "task": "In the workspace create the directories src/, src/lib/ and tests/, put an empty README.md in each, then list the resulting tree with a shell command and report how many README.md files exist."
+    "task": "In the workspace create the directories src/, src/lib/ and tests/, put an empty README.md in each, then list the resulting tree with a shell command and report how many README.md files exist.",
+    "expect": "\\b3\\b"
   }
 ]
