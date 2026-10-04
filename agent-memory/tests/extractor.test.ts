@@ -339,3 +339,53 @@ test('skip malformed action entries', async () => {
   assert.equal(facts.getFact('user', 'valid')?.value, 'ok');
   assert.equal(facts.getFact('user', 'another')?.value, 42);
 });
+
+// ── Novelty gate (2026-10-04): identical / near-verbatim duplicates are skipped, updates still go through ──
+
+test('novelty gate: identical value for the same key is not re-stored; a changed value supersedes; a near-verbatim duplicate under another key is skipped', async () => {
+  const { facts, notes, raw } = openMemoryDb(':memory:');
+  const session = raw.startSession();
+  raw.appendMessage({ sessionId: session.id, role: 'user', content: 'x' });
+  facts.storeFact({ namespace: 'project', key: 'deploy_cmd', value: 'run npm run build then pm2 restart api on the prod box' });
+
+  const audit: Record<string, unknown>[] = [];
+  const mockLlm = new MockLlm(
+    JSON.stringify([
+      // identical → skipped
+      { action: 'store_fact', namespace: 'project', key: 'deploy_cmd', value: 'run npm run build then pm2 restart api on the prod box' },
+      // same key, different value → an update, must still be stored (supersede path)
+      { action: 'store_fact', namespace: 'project', key: 'deploy_cmd', value: 'run npm run build then pm2 restart api on the staging box' },
+      // near-verbatim copy of an existing fact under a new key → skipped
+      { action: 'store_fact', namespace: 'project', key: 'deploy_steps', value: 'run npm run build then pm2 restart api on the staging box.' },
+      // genuinely new → stored
+      { action: 'store_fact', namespace: 'project', key: 'db_port', value: '5432' },
+    ]),
+  );
+  const extractor = new SessionExtractor(mockLlm, facts, notes, raw, { auditHook: { append: (_t, d) => audit.push(d) } });
+  const result = await extractor.extractFromSession(session.id);
+
+  assert.equal(result.factsStored, 2, 'update + new stored; identical + near-verbatim skipped');
+  assert.equal(facts.getFact('project', 'deploy_cmd')?.value, 'run npm run build then pm2 restart api on the staging box');
+  assert.equal(facts.getFact('project', 'deploy_steps'), null);
+  assert.equal(facts.getFact('project', 'db_port')?.value, '5432');
+  const skipped = audit.filter((d) => d.toolName === 'store_fact_skipped_duplicate');
+  assert.equal(skipped.length, 2);
+  assert.deepEqual(skipped.map((d) => d.reason).sort(), ['identical', 'near-verbatim']);
+});
+
+test('novelty gate: PHILONT_EXTRACTOR_NOVELTY_GATE=off restores unconditional writes', async () => {
+  const prev = process.env.PHILONT_EXTRACTOR_NOVELTY_GATE;
+  process.env.PHILONT_EXTRACTOR_NOVELTY_GATE = 'off';
+  try {
+    const { facts, notes, raw } = openMemoryDb(':memory:');
+    const session = raw.startSession();
+    raw.appendMessage({ sessionId: session.id, role: 'user', content: 'x' });
+    facts.storeFact({ namespace: 'user', key: 'name', value: '张三' });
+    const extractor = new SessionExtractor(new MockLlm(JSON.stringify([{ action: 'store_fact', namespace: 'user', key: 'name', value: '张三' }])), facts, notes, raw);
+    const result = await extractor.extractFromSession(session.id);
+    assert.equal(result.factsStored, 1);
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_EXTRACTOR_NOVELTY_GATE;
+    else process.env.PHILONT_EXTRACTOR_NOVELTY_GATE = prev;
+  }
+});

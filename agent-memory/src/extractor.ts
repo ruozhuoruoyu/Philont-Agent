@@ -10,6 +10,7 @@
  */
 
 import type { MemoryStore } from './store.js';
+import { tokenize as noveltyTokenize, jaccard as noveltyJaccard } from './text_tokenize.js';
 import type { NotesStore } from './notes.js';
 import type { RawStore } from './raw.js';
 import type { CalendarStore } from './calendar.js';
@@ -248,6 +249,30 @@ export class SessionExtractor {
   }
 
   /**
+   * Is `value` already in the store? Returns the matching key and why, or null.
+   *   - identical: same (namespace, key) with the same trimmed value
+   *   - near-verbatim: another active fact in the namespace whose value has token Jaccard ≥ 0.9
+   * Narrow on purpose (see the call site); a same-key different-value write is an update, not a duplicate.
+   */
+  private duplicateOf(namespace: string, key: string, value: string): { key: string; reason: 'identical' | 'near-verbatim' } | null {
+    const v = (process.env.PHILONT_EXTRACTOR_NOVELTY_GATE ?? '').trim().toLowerCase();
+    if (v === '0' || v === 'off' || v === 'false' || v === 'no') return null;
+    try {
+      const same = this.facts.getFact(namespace, key);
+      if (same && String(same.value).trim() === String(value).trim()) return { key, reason: 'identical' };
+      const q = noveltyTokenize(String(value));
+      if (q.size < 3) return null; // too short to compare by overlap; let it through
+      for (const f of this.facts.listFacts(namespace)) {
+        if (f.key === key) continue;
+        if (noveltyJaccard(q, noveltyTokenize(String(f.value))) >= 0.9) return { key: f.key, reason: 'near-verbatim' };
+      }
+    } catch {
+      /* a failed novelty check must never block a write */
+    }
+    return null;
+  }
+
+  /**
    * Extract from session (legacy API, by session_id)
    */
   async extractFromSession(sessionId: string): Promise<ExtractResult> {
@@ -312,6 +337,27 @@ export class SessionExtractor {
         try {
           const kind: FactKind = act.fact_kind === 'event' ? 'event' : 'state';
           const occurredAt = parseTimeField(act.occurred_at);
+          // Novelty gate (2026-10-04): a fact that is already in the store adds a row and a prefix line but no
+          // information. philosophers exp 96 (LongMemEval): under a fixed memory budget, keeping facts by
+          // NOVELTY beat keeping them by recency (64.5 vs 61.3) and by chance (58.7); exp 105: unmanaged growth
+          // itself did not hurt, so the gate is deliberately narrow — only an identical value for the same
+          // (namespace, key), or a near-verbatim duplicate (token Jaccard ≥ 0.9) of another active fact in the
+          // same namespace, is skipped. Anything that could be an update (same key, different value) still
+          // goes through storeFact's supersede path untouched. PHILONT_EXTRACTOR_NOVELTY_GATE=off disables.
+          const dup = this.duplicateOf(act.namespace, act.key, String(act.value ?? ""));
+          if (dup) {
+            this.auditHook?.append('self_domain_write', {
+              source: 'extractor',
+              origin: 'Internal',
+              toolName: 'store_fact_skipped_duplicate',
+              sessionId: tag,
+              namespace: act.namespace,
+              key: act.key,
+              duplicateOf: dup.key,
+              reason: dup.reason,
+            });
+            continue;
+          }
           const fact = this.facts.storeFact({
             namespace: act.namespace,
             key: act.key,

@@ -20,7 +20,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
 } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 49;
+export const SCHEMA_VERSION = 50;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -639,6 +639,24 @@ const DDL_TABLE_DEFERRED_PUSHES = `
     );
     CREATE INDEX IF NOT EXISTS idx_deferred_push_peer
       ON deferred_pushes(channel, peer, expires_at);
+`;
+
+
+/** v50 (2026-10-04): judge-verified cases — (goal, tool trace, verdict) per run. See cases.ts. */
+const DDL_TABLE_MEMORY_CASES = `
+    CREATE TABLE IF NOT EXISTS memory_cases (
+      id         TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      goal       TEXT NOT NULL,
+      trace_json TEXT NOT NULL,
+      tools      TEXT NOT NULL DEFAULT '',
+      verdict    TEXT NOT NULL CHECK(verdict IN ('success','failure')),
+      basis      TEXT,
+      evidence   TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_cases_created ON memory_cases(created_at);
+    CREATE INDEX IF NOT EXISTS idx_memory_cases_verdict ON memory_cases(verdict, created_at);
 `;
 
 /** Hoisted from its migration so reconcileColumnsWithDdl can see the table; the migration still executes it. */
@@ -1433,6 +1451,11 @@ function migrateV48ToV49(db: Database.Database): void {
   addColumnIfMissing(db, 'deferred_pushes', 'folded_json', 'TEXT');
 }
 
+/** v50: judge-verified cases table (append-only run records; see cases.ts). */
+function migrateV49ToV50(db: Database.Database): void {
+  db.exec(DDL_TABLE_MEMORY_CASES);
+}
+
 /**
  * The CREATE TABLE text is the truth about which columns exist; the migrations are the path that was
  * walked to get there. When a shipped migration is edited after databases have walked it, the two
@@ -1446,7 +1469,7 @@ function migrateV48ToV49(db: Database.Database): void {
  * Every CREATE TABLE text this module owns. A table created inside a migration and never listed here
  * would be invisible to the reconcile — schema.test scans the source for exactly that.
  */
-export const ALL_TABLE_DDL: readonly string[] = [DDL_BASE, DDL_V3_DEPENDENT, DDL_TABLE_ROUTING_RULES, DDL_TABLE_MEMORY_INITIATIVES, DDL_TABLE_PUSH_SUBSCRIPTIONS, DDL_TABLE_MEMORY_PLANS, DDL_TABLE_REASONING_SESSIONS, DDL_TABLE_DEFERRED_PUSHES, DDL_TABLE_CONFIG_RULES];
+export const ALL_TABLE_DDL: readonly string[] = [DDL_BASE, DDL_V3_DEPENDENT, DDL_TABLE_ROUTING_RULES, DDL_TABLE_MEMORY_INITIATIVES, DDL_TABLE_PUSH_SUBSCRIPTIONS, DDL_TABLE_MEMORY_PLANS, DDL_TABLE_REASONING_SESSIONS, DDL_TABLE_DEFERRED_PUSHES, DDL_TABLE_CONFIG_RULES, DDL_TABLE_MEMORY_CASES];
 
 export function reconcileColumnsWithDdl(db: Database.Database, ddl: string): string[] {
   const healed: string[] = [];
@@ -1747,6 +1770,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 49) {
     migrateV48ToV49(db);
+  }
+  if (current < 50) {
+    migrateV49ToV50(db);
   }
   reconcileColumnsWithDdl(db, ALL_TABLE_DDL.join('\n'));
 

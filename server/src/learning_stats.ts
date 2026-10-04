@@ -90,6 +90,11 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
           `P(fail)<0.5 → ${loF}/${loF + loOk} failed (${pct(loF, loF + loOk)}) — separation is the calibration check`,
       );
     }
+    // Judge-verified cases (2026-10-04): the structured run record. `recorded` counts what the judge established;
+    // `inject.turns` counts turns in which a similar earlier case reached the prompt (PHILONT_CASE_RECALL).
+    lines.push(
+      `  cases: recorded success=${get('case.recorded.success')} failure=${get('case.recorded.failure')}; injected in ${get('case.inject.turns')} turns`,
+    );
     lines.push(
       `  idle skill extraction: ran=${get('idle_reflect.ran')} suppressed_doomloop=${get('idle_reflect.suppressed')}`,
     );

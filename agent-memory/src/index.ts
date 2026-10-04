@@ -37,6 +37,7 @@ import { RoutingRuleStore } from './routing_rules.js';
 import { ConfigRuleStore } from './config_rules.js';
 import { PushSubscriptionStore } from './push_subscriptions.js';
 import { DeferredPushStore } from './deferred_pushes.js';
+import { CaseStore } from './cases.js';
 import { ReasoningStore } from './reasoning.js';
 import { ScheduleOutcomeStore } from './schedule_outcomes.js';
 import { PlanFileStore } from './plan_files.js';
@@ -45,6 +46,8 @@ import { BackupRunner, type BackupConfig } from './backup.js';
 
 export { MemoryStore } from './store.js';
 export { DeferredPushStore } from './deferred_pushes.js';
+export { CaseStore, CASE_RETAIN_MAX } from './cases.js';
+export type { Case, CaseInput, CaseMatch, CaseToolStep, CaseVerdict } from './cases.js';
 export type { DeferredPush, DeferredPushSeverity, DeferredPushExpirySummary, FoldedReports } from './deferred_pushes.js';
 export { NotesStore } from './notes.js';
 export { RawStore } from './raw.js';
@@ -659,6 +662,8 @@ export interface MemoryHandle {
   pushSubscriptions: PushSubscriptionStore;
   /** v42: proactive messages waiting for the channel's next inbound reply allowance */
   deferredPushes: DeferredPushStore;
+  /** v50 (2026-10-04): judge-verified cases — (goal, tool trace, verdict) per run */
+  cases: CaseStore;
   /** v21: run trace for repeated schedule firings (2026-05-17) */
   scheduleOutcomes: ScheduleOutcomeStore;
   /** v22 Phase 13 (2026-05-17): per-project plan.md work notes (LLM-perspective accumulation layer) */
@@ -911,6 +916,7 @@ export function openMemoryDb(
     configRules: new ConfigRuleStore(db),
     pushSubscriptions: new PushSubscriptionStore(db),
     deferredPushes: new DeferredPushStore(db),
+    cases: new CaseStore(db),
     scheduleOutcomes: new ScheduleOutcomeStore(db),
     planFiles: new PlanFileStore(),
     reasoning: new ReasoningStore(db),

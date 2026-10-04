@@ -59,6 +59,27 @@ Nothing here drives a decision yet. The sequence is the one the learning judge f
 the logged pairs reproduce the offline separation, then decide what a high P(fail) should do (a hint,
 a research nudge, a skip) and measure it with the learning layer on and off, two runs each.
 
+## 3a. Second batch (2026-10-04)
+
+4. `agent-memory/src/cases.ts` + schema v50 `memory_cases` — **judge-verified cases**: `(goal, tool trace
+   with per-call success, verdict, basis, evidence)` appended at turn close when the learning judge returns
+   `success` or `failure` (`chat-handler.ts`, judge `.then`). Append-only, bounded (5000), no write-time
+   merging. Read side `PHILONT_CASE_RECALL` (default off): up to 3 cases whose goal overlaps the current
+   message (Jaccard > 0, no fill) rendered as one line each under "Earlier runs of similar tasks". This is
+   the Memento form of memory — the run itself with its outcome, written by the mechanism layer — offered as
+   a verifiable alternative to distilled prose. Metrics `case.recorded.{success,failure}`, `case.inject.turns`.
+5. `agent-memory/src/extractor.ts` — **novelty gate** (default on, `PHILONT_EXTRACTOR_NOVELTY_GATE=off`):
+   an extracted fact identical to the stored value for its key, or a near-verbatim duplicate (token Jaccard
+   ≥ 0.9) of another active fact in the namespace, is skipped and audited as `store_fact_skipped_duplicate`.
+   Same-key different-value writes still take the supersede path. Exp 96 is the evidence that novelty is
+   the right selection criterion; the gate is deliberately narrow because exp 105 found growth itself harmless.
+6. `server/scripts/learning-ab.ts` + `learning-ab.tasks.json` — **the before/after harness**: runs the
+   headless agent over a fixed task bank under a baseline and a treatment env, `--runs` times each (default
+   2), every run in a fresh sandbox HOME with memory accumulating across the bank; writes per-task outcomes,
+   the sandbox's `learning_metrics`, and `report.md` with per-task agreement across runs next to the
+   configuration difference. Reading rule printed in the report: an effect smaller than the within-config
+   disagreement is not a result.
+
 ## 3b. The shipped TypeScript predictor replayed on the exported ledger
 
 Same protocol as the offline study (time order, warm on the first 70% = 19,269 calls, score the last

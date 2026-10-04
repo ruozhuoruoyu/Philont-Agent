@@ -888,6 +888,12 @@ export const internalAudit = new AuditLog();
 // the recent failure streak (offline AUROC 89.8 on this product's ledger, philosophers exp 100), records the
 // (P(fail), outcome) pair to metrics + audit, drives nothing. See server/src/failure_predictor.ts and
 // docs/design/memory_interface_evidence.md. Controller id `failure_predictor`.
+/** PHILONT_CASE_RECALL (2026-10-04, default OFF): render judge-verified similar cases in the memory prefix. */
+export function caseRecallEnabled(): boolean {
+  const v = (process.env.PHILONT_CASE_RECALL ?? '').trim().toLowerCase();
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+}
+
 export const failurePredictor: FailurePredictor | null = (() => {
   if (failurePredictorMode() === 'off') return null;
   const fp = new FailurePredictor({
@@ -7036,6 +7042,34 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
     lines.push('');
   }
 
+  // 2026-10-04: judge-verified cases of similar earlier runs (PHILONT_CASE_RECALL, default OFF). A case is
+  // (goal, tools that ran and whether each succeeded, judge verdict) — a fact written by the mechanism layer,
+  // not a lesson distilled by a model. Retrieval is Jaccard over the goal with score > 0 only: when nothing
+  // is similar the section is absent (exp 103: unrelated recall is not neutral; Memento 2's void case).
+  // Rendered compactly: K=3, one line per case. This is a prompt-side coupling; the measurement that
+  // decides whether it stays is scripts/learning-ab.ts with the flag on/off, two runs each.
+  if (caseRecallEnabled() && recallQuery) {
+    try {
+      const matches = memory.cases.search(recallQuery, { k: 3 });
+      if (matches.length > 0) {
+        memory.metrics.increment('case.inject.turns');
+        lines.push('');
+        lines.push('## Earlier runs of similar tasks (judge-verified)');
+        lines.push('(What actually ran last time and how it ended. Reuse what succeeded; do not repeat a failed path unchanged.)');
+        for (const c of matches) {
+          const okTools = c.trace.filter((t) => t.ok).map((t) => t.toolName);
+          const badTools = c.trace.filter((t) => !t.ok).map((t) => t.toolName);
+          const tools = c.tools.join(' → ');
+          const tail = c.verdict === 'failure' && c.evidence ? ` — ${c.evidence.slice(0, 160)}` : '';
+          lines.push(`· [${c.verdict}] "${c.goal.slice(0, 140)}" → ${tools || '(no tools)'}${badTools.length ? ` (failed calls: ${[...new Set(badTools)].join(', ')})` : ''}${okTools.length === 0 ? ' (no call succeeded)' : ''}${tail}`);
+        }
+        lines.push('');
+      }
+    } catch (e) {
+      console.warn('[case-recall] skipped:', (e as Error)?.message);
+    }
+  }
+
   // P1: negatives cap 20 (OFF) → 5 (ON, relevance-selected). Floor stays min(5,corpus) naturally.
   const negatives = relevanceOn
     ? selectRelevantSkills(memory.skills, recallQuery, {
@@ -8482,6 +8516,24 @@ function shadowLearningJudge(
         // window, and day-keyed in the metrics store so the daily self-check still sees the day's verdicts
         // after a restart — the boot-time check runs 8s in, when every in-memory window is empty.
         recordJudgeVerdict(v.outcome);
+        // 2026-10-04: the run itself, as a judge-verified case (goal, tool trace, verdict) — the structured
+        // record Memento / philosophers both use in place of distilled prose. Only success/failure are
+        // cases. Append-only; nothing is merged at write time. Read side: PHILONT_CASE_RECALL (prefix).
+        if (v.outcome === 'success' || v.outcome === 'failure') {
+          try {
+            memory.cases.record({
+              sessionId,
+              goal,
+              trace: trace.map((t) => ({ toolName: t.toolName, ok: t.ok })),
+              verdict: v.outcome,
+              basis: v.basis ?? null,
+              evidence: v.evidence ?? null,
+            });
+            memory.metrics.increment(`case.recorded.${v.outcome}`);
+          } catch (e) {
+            console.warn('[case-store] record failed, ignored:', (e as Error)?.message);
+          }
+        }
         try {
           const ymd = utcDateString(Date.now());
           memory.metrics.increment(`judge.day.total.${ymd}`);
