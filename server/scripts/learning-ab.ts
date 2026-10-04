@@ -55,6 +55,7 @@ const { values: opt } = parseArgs({
     timeout: { type: 'string', default: '600' },
     holdout: { type: 'string', default: '' },
     shuffle: { type: 'boolean', default: false },
+    'score-only': { type: 'string', default: '' },
     out: { type: 'string' },
     help: { type: 'boolean', default: false },
   },
@@ -64,7 +65,19 @@ if (opt.help || !opt.bank) {
   process.exit(opt.help ? 0 : 3);
 }
 
-interface Task { id: string; task: string; family?: string }
+interface Task { id: string; task: string; family?: string; /** regex the final answer must match to count as correct */ expect?: string }
+
+/** Correctness: the answer text (answer.txt written by headless) matched against the task's `expect` regex. null = no expectation. */
+function scoreAnswer(t: Task, taskOut: string): boolean | null {
+  if (!t.expect) return null;
+  const p = join(taskOut, 'answer.txt');
+  if (!existsSync(p)) return false;
+  try {
+    return new RegExp(t.expect, 'i').test(readFileSync(p, 'utf8'));
+  } catch {
+    return null;
+  }
+}
 const bank: Task[] = JSON.parse(readFileSync(resolve(opt.bank!), 'utf8'));
 const holdoutFamilies = new Set((opt.holdout ?? '').split(',').map((x) => x.trim()).filter(Boolean));
 const evolution = bank.filter((t) => !holdoutFamilies.has(t.family ?? ''));
@@ -103,7 +116,7 @@ function modelLabel(): string {
   return 'unknown';
 }
 const timeoutSec = Math.max(30, Number(opt.timeout));
-const outDir = resolve(opt.out ?? `learning-ab-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+const outDir = resolve(opt['score-only'] || opt.out || `learning-ab-${new Date().toISOString().replace(/[:.]/g, '-')}`);
 mkdirSync(outDir, { recursive: true });
 
 function parseKv(s: string): Record<string, string> {
@@ -119,7 +132,7 @@ const configs: { name: string; env: Record<string, string> }[] = [
   { name: 'treatment', env: parseKv(opt.config ?? '') },
 ];
 
-interface RunResult { outcomeType: string; elapsedMs: number; error: string | null }
+interface RunResult { outcomeType: string; elapsedMs: number; error: string | null; correct?: boolean | null }
 
 function runTask(sandbox: string, env: Record<string, string>, t: Task, runOut: string): RunResult {
   const ws = join(sandbox, 'ws', t.id);
@@ -140,20 +153,25 @@ function runTask(sandbox: string, env: Record<string, string>, t: Task, runOut: 
   };
   const r = spawnSync(
     process.execPath,
-    [join(__dirname, '..', 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(__dirname, '..', 'src', 'headless.ts'), '--task', t.task, '--workspace', ws, '--output', taskOut, '--timeout', String(timeoutSec)],
+    // --memory-db is REQUIRED: headless defaults to a fresh DB under each task's --output dir, which would
+    // silence the learning layer across tasks (found 2026-10-04 in the first real-model round: all learning
+    // metrics read 0 because every task had its own empty DB). One DB per sandbox = memory accumulates
+    // across the bank within a run, which is the thing under test.
+    [join(__dirname, '..', 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(__dirname, '..', 'src', 'headless.ts'), '--task', t.task, '--workspace', ws, '--output', taskOut, '--timeout', String(timeoutSec), '--memory-db', sandboxDb(sandbox)],
     { env: childEnv, encoding: 'utf8', timeout: (timeoutSec + 60) * 1000, maxBuffer: 64 * 1024 * 1024 },
   );
   writeFileSync(join(taskOut, 'stdout.log'), (r.stdout ?? '') + '\n' + (r.stderr ?? ''), 'utf8');
   const resPath = join(taskOut, 'result.json');
   if (existsSync(resPath)) {
     const j = JSON.parse(readFileSync(resPath, 'utf8'));
-    return { outcomeType: j.outcomeType ?? 'unknown', elapsedMs: j.elapsedMs ?? 0, error: j.error ?? null };
+    return { outcomeType: j.outcomeType ?? 'unknown', elapsedMs: j.elapsedMs ?? 0, error: j.error ?? null, correct: scoreAnswer(t, taskOut) };
   }
   return { outcomeType: r.status === 0 ? 'unknown' : 'error', elapsedMs: 0, error: `headless exited ${r.status}` };
 }
 
+const sandboxDb = (sandbox: string) => join(sandbox, '.philont', 'memory', 'memory.sqlite');
 function dumpMetrics(sandbox: string): Record<string, number> {
-  const dbPath = join(sandbox, '.philont', 'memory', 'memory.sqlite');
+  const dbPath = sandboxDb(sandbox);
   if (!existsSync(dbPath)) return {};
   const h = openMemoryDb(dbPath);
   try {
@@ -163,10 +181,21 @@ function dumpMetrics(sandbox: string): Record<string, number> {
   }
 }
 
-const results: Record<string, Record<number, Record<string, RunResult>>> = {};
-const metrics: Record<string, Record<number, Record<string, number>>> = {};
-const orders: Record<number, string[]> = {};
+let results: Record<string, Record<number, Record<string, RunResult>>> = {};
+let metrics: Record<string, Record<number, Record<string, number>>> = {};
+let orders: Record<number, string[]> = {};
+if (opt['score-only']) {
+  // Re-score a finished run directory: outcomes/metrics from its results.json, correctness from answer.txt
+  // against the CURRENT bank's `expect` (so expectations can be added after the fact). Report is rewritten in place.
+  const prev = JSON.parse(readFileSync(join(resolve(opt['score-only']), 'results.json'), 'utf8'));
+  results = prev.results; metrics = prev.metrics; orders = prev.orders ?? {};
+  for (const cfg of configs) for (const run of Object.keys(results[cfg.name] ?? {})) for (const t of bank) {
+    const r = results[cfg.name][Number(run)][t.id];
+    if (r) r.correct = scoreAnswer(t, join(resolve(opt['score-only']), cfg.name, `run${run}`, t.id));
+  }
+}
 for (const cfg of configs) {
+  if (opt['score-only']) break;
   results[cfg.name] = {};
   metrics[cfg.name] = {};
   for (let run = 1; run <= runs; run++) {
@@ -200,15 +229,16 @@ lines.push('');
 lines.push(`bank: ${bank.length} tasks (evolution ${evolution.length}, held-out ${holdout.length}${holdoutFamilies.size ? ` = families ${[...holdoutFamilies].join(',')}` : ''}) · runs per config: ${runs} · shuffle: ${opt.shuffle ? 'on' : 'off'} · model: ${modelLabel()}`);
 lines.push(`treatment env: ${JSON.stringify(configs[1].env)} · baseline env: ${JSON.stringify(configs[0].env)}`);
 lines.push('');
-lines.push('| config | run | in-distribution completed | held-out completed | mean s/task | timeouts | errors |');
-lines.push('|---|---|---|---|---|---|---|');
+lines.push('| config | run | in-distribution completed | ID correct | held-out completed | held-out correct | mean s/task | timeouts | errors |');
+lines.push('|---|---|---|---|---|---|---|---|---|');
 for (const cfg of configs) {
   for (let run = 1; run <= runs; run++) {
     const all = results[cfg.name][run];
     const idRs = evolution.map((t) => all[t.id]).filter(Boolean);
     const hoRs = holdout.map((t) => all[t.id]).filter(Boolean);
     const rs = [...idRs, ...hoRs];
-    lines.push(`| ${cfg.name} | ${run} | ${idRs.filter(ok).length} / ${idRs.length} | ${hoRs.length ? `${hoRs.filter(ok).length} / ${hoRs.length}` : '-'} | ${(rs.reduce((s, r) => s + r.elapsedMs, 0) / Math.max(1, rs.length) / 1000).toFixed(0)} | ${rs.filter((r) => r.outcomeType === 'timeout').length} | ${rs.filter((r) => r.outcomeType === 'error').length} |`);
+    const corr = (xs: RunResult[]) => { const g = xs.filter((r) => r.correct != null); return g.length ? `${g.filter((r) => r.correct).length} / ${g.length}` : '-'; };
+    lines.push(`| ${cfg.name} | ${run} | ${idRs.filter(ok).length} / ${idRs.length} | ${corr(idRs)} | ${hoRs.length ? `${hoRs.filter(ok).length} / ${hoRs.length}` : '-'} | ${corr(hoRs)} | ${(rs.reduce((s, r) => s + r.elapsedMs, 0) / Math.max(1, rs.length) / 1000).toFixed(0)} | ${rs.filter((r) => r.outcomeType === 'timeout').length} | ${rs.filter((r) => r.outcomeType === 'error').length} |`);
   }
 }
 if (opt.shuffle) {
@@ -221,7 +251,7 @@ lines.push('');
 lines.push(`| task | ${configs.map((c) => Array.from({ length: runs }, (_, i) => `${c.name} r${i + 1}`).join(' | ')).join(' | ')} |`);
 lines.push(`|---|${configs.map(() => Array.from({ length: runs }, () => '---').join('|')).join('|')}|`);
 for (const t of [...evolution, ...holdout]) {
-  const cells = configs.flatMap((c) => Array.from({ length: runs }, (_, i) => results[c.name][i + 1][t.id]?.outcomeType ?? '-'));
+  const cells = configs.flatMap((c) => Array.from({ length: runs }, (_, i) => { const r = results[c.name]?.[i + 1]?.[t.id]; return r ? `${r.outcomeType}${r.correct == null ? '' : r.correct ? ' ✓' : ' ✗'}` : '-'; }));
   lines.push(`| ${t.id}${holdoutFamilies.has(t.family ?? '') ? ' (held-out)' : ''} | ${cells.join(' | ')} |`);
 }
 lines.push('');
