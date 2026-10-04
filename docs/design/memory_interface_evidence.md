@@ -142,10 +142,10 @@ sandbox). Round 1 is kept as the "fresh memory per task" reference.
 | ab1b | CASE_RECALL + NO_FILL | 8/8, 8/8 / 8/8, 8/8 | 5.2, 5.4 / 5.7, 7.2 | 0 / 9, 9 | cases injected on 9 of 10 turns, no efficiency change |
 | ab2 | CASE_RECALL | 8/8, 8/8 / 8/8, 8/8 | 6.5, 2.9 / 6.1, 5.7 | 0 / 9, 9 | baseline runs differ 2x from each other |
 | ab3 | NO_FILL | 8/8, 8/8 / 7/8, 8/8 | 5.0, 5.1 / 6.1, 4.3 | 0 / 0 | no skill recall fired in either arm (bundled skills do not match these goals) |
-| ab4 | all + KEEP_BEST=on | see addendum | | | |
+| ab4 | CASE_RECALL + NO_FILL + KEEP_BEST=on | 8/8, 8/8 / 8/8, 8/8 | 6.4, 5.1 / 5.8, 4.7 | 0 / 9, 9 | treatment slightly faster/fewer failures (0.2/0.0 vs 0.4/0.1 per task), opposite sign to ab1b; keep-best and safety-scan metrics 0 (no skill was authored or repaired) |
 
 What the data say: (1) the bank is at ceiling for this model (13 of 14 runs 8/8 correct), so correctness
-cannot show a learning effect; (2) within-configuration run-to-run variation in call counts (2–3x; one task
+cannot show a learning effect (17 of 18 runs 8/8 with ab4); (2) within-configuration run-to-run variation in call counts (2–3x; one task
 11/13/4/6) exceeds every configuration difference; (3) the mechanisms work as designed — the judge records
 4–9 success cases per 10-turn run, case recall injects on 9/10 turns, the predictor scores every call in
 shadow (P(fail) ≥ 0.5 once per run, and that call succeeded; failure rate of the bank ≈ 4%), reflection
