@@ -298,6 +298,38 @@ Flag decisions (final): `PHILONT_SKILL_RECALL_NO_FILL` on (default); `PHILONT_CA
 `PHILONT_SKILL_KEEP_BEST` shadow; `PHILONT_FAILURE_PREDICTOR` shadow (P(fail) ≥ 0.5 fired once per run, never
 on a failure — this bank's failure rate per call is ~3%); safety scan on with the narrowed rules.
 
+## 3i. SOTA self-improvement methods head to head (2026-10-06, philosophers exp 113)
+
+Same bank (LifelongAgentBench OS), same protocol (5 rounds, script-judged), two locally served models, eight
+arms around one plain ReAct agent, three task orders × 120 tasks, paired within order.
+
+| arm | Qwen3.5-27B Δ vs plain (3 orders) | Qwen2.5-7B Δ vs plain |
+|---|---|---|
+| experience replay (similar successful trajectories) | **+5.8** (3/3) | **+5.3** (2/3) |
+| Agent Workflow Memory (induced workflows) | **+4.2** (3/3) | **+5.3** (2/3) |
+| Memento case bank (task, plan, reward) | **+3.9** (3/3) | −4.7 |
+| ACE evolving playbook | +1.7 (2/3, 4× tokens) | −1.4 |
+| Reflexion (failure reflections) | +0.6 | **−7.2** (0/3) |
+| ReasoningBank (distilled memory items) | −0.6 | −3.6 |
+| acceptance-feedback loop (checker clauses → one repair turn; outside the protocol) | **+20.0** (72 gained / 0 lost) | +5.6 (repairs <15%) |
+
+Plain ReAct: 27B 65.6, 7B 38.1; the benchmark's published 8B replay gain (0.43→0.50) is reproduced in size.
+No arm shows a within-stream learning curve.
+
+**Where philont stands.** philont's learning layer writes reflection prose (routing rules, playbooks, skill
+text) — the family that does not win at 27B and is harmful at 7B. Its measured net win (§3f) is retrieval
+hygiene, not content. Run through the local 27B, philont was wall-clock-bound (≈26k-token prompt, ~50 s per
+call, 18–21 of 28 tasks hit the 300 s wall; 7B cannot drive its tool protocol), so its accuracy there is not a
+capability number; the fair rerun needs a 900 s wall or a trimmed prefix.
+
+**Recommendations for the self-evolution loop.** (1) Store experience as structured trajectories / induced
+workflows retrieved by task similarity (replay + AWM form), not as reflection prose; keep the judge-verified
+case store but render its *trace*, not a summary. (2) Build the in-task acceptance–repair primitive: wherever a
+real acceptance signal exists (tests, checker exit code, user correction), feed the failing points back for one
+repair turn and re-check — the only mechanism here that moved a frontier-class model by more than noise.
+(3) Trim the per-call prefix so philont can be evaluated on local models at all. Flags unchanged
+(NO_FILL on; CASE_RECALL off; KEEP_BEST shadow; predictor shadow; safety scan on).
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's
