@@ -259,6 +259,45 @@ with two couplings: prompt text vs a verification turn the task must pass before
 candidate-set-vs-prompt contrast of exp 104/110 in tool-agent form). If the gate wins, it becomes a philont
 controller (answer-time regen with the applicable conventions) and the convention store a memory table.
 
+## 3h. LifelongAgentBench OS, batches 4–7 (2026-10-05): seven learning forms, one ceiling, one conclusion
+
+All against the same-order new-default baseline (base_n: 48/60 and 40/60 on orders s1/s2). Paired counts are
+only-arm-correct / only-base-correct; "non-timeout" compares tasks where neither side hit the 240 s wall
+(batches 5–7 ran under heavier concurrency, which inflated timeouts).
+
+| arm | mechanism | s1 | s2 | paired | non-timeout |
+|---|---|---|---|---|---|
+| convp | distilled acceptance conventions as prompt | 48 | 38 | 3/3, 2/4 | 34 vs 33, 27 vs 28 |
+| hedge | fixed convention text (prompt-engineering ceiling) | 44 | 38 | 2/6, 2/4 | 17 vs 18, 17 vs 17 |
+| verify | self-written acceptance script, fix turn on failure | 45 | 39 | 1/4, 2/3 | 28 vs 27, 25 vs 25 |
+| verifyconv | + distilled conventions | 43 | 38 | 0/5, 2/4 | 24 vs 25, 13 vs 14 |
+| verifycases | + the real checker's failing clauses of similar earlier tasks | 44/54 | 40/57 | 2/3, 3/2 | 29 vs 30, 25 vs 26 |
+| **feedback** | **the real checker's failing clauses fed back for one fix turn** (ceiling, not the benchmark protocol) | **54** | **58** | **7/1, 18/0** | **29 vs 25, 38 vs 24** |
+
+Self-written verifiers said OK on 8–20 tasks per run that the real checker failed, whatever they were
+conditioned on. Conclusions:
+
+1. **No learning form moved accuracy** on this bank for glm-5.3 — cases, reflection skills/playbooks,
+   failure cases, convention prompts, fixed conventions, three self-verifier variants. The model does not lack
+   procedure.
+2. **The one paired net win is the retrieval fix** (relevance pool + no-fill): 48 vs 44 (4/0), 40 vs 37 (5/2),
+   half the timeouts. It is hygiene on the read side, now the default (c881f4e).
+3. **Failures are acceptance-convention mismatches and are repairable with the right signal**: with the real
+   checker's failing clauses, 28 of 35 failures were repaired (54/60, 58/60). But that signal did not transfer
+   across tasks in any form tried: each task's checker conventions are its own, and similar tasks' clauses do
+   not predict a new task's checks.
+4. **Implication for self-evolution on frontier models**: the lever is the acceptance signal, not the memory
+   form. The product primitive worth building is an **in-task acceptance–repair loop** — wherever a real
+   acceptance signal exists (tests, a checker exit code, a user correction, a downstream error), feed the
+   failing points back into one repair turn of the same task and re-check. Cross-task memory stays for
+   retrieval hygiene (relevance, no-fill, judge calibration), not for score.
+5. Evaluation discipline that held: two orders per configuration (order effect 7–12 points), same-order
+   pairing, non-timeout comparison under uneven load, no result below ~4 tasks of 60.
+
+Flag decisions (final): `PHILONT_SKILL_RECALL_NO_FILL` on (default); `PHILONT_CASE_RECALL` off;
+`PHILONT_SKILL_KEEP_BEST` shadow; `PHILONT_FAILURE_PREDICTOR` shadow (P(fail) ≥ 0.5 fired once per run, never
+on a failure — this bank's failure rate per call is ~3%); safety scan on with the narrowed rules.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's
