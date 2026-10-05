@@ -271,7 +271,7 @@ only-arm-correct / only-base-correct; "non-timeout" compares tasks where neither
 | hedge | fixed convention text (prompt-engineering ceiling) | 44 | 38 | 2/6, 2/4 | 17 vs 18, 17 vs 17 |
 | verify | self-written acceptance script, fix turn on failure | 45 | 39 | 1/4, 2/3 | 28 vs 27, 25 vs 25 |
 | verifyconv | + distilled conventions | 43 | 38 | 0/5, 2/4 | 24 vs 25, 13 vs 14 |
-| verifycases | + the real checker's failing clauses of similar earlier tasks | 44/54 | 40/57 | 2/3, 3/2 | 29 vs 30, 25 vs 26 |
+| verifycases | + the real checker's failing clauses of similar earlier tasks | 47 | 41 | 2/3, 3/2 | 31 vs 32, 26 vs 27 |
 | **feedback** | **the real checker's failing clauses fed back for one fix turn** (ceiling, not the benchmark protocol) | **54** | **58** | **7/1, 18/0** | **29 vs 25, 38 vs 24** |
 
 Self-written verifiers said OK on 8–20 tasks per run that the real checker failed, whatever they were
