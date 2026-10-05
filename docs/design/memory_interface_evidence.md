@@ -227,6 +227,38 @@ Flags: NO_FILL default on; CASE_RECALL off; KEEP_BEST shadow (no skill repair oc
 60–179, base vs full, two orders) is running to see whether a longer stream or more accumulated failure cases
 changes any of this.
 
+## 3g. LifelongAgentBench OS, batch 3 (2026-10-05): 120-task stream under the new default
+
+base = new default (relevance pool fixed, NO_FILL on); full = + CASE_RECALL + exit-code truth cases + KEEP_BEST.
+Tasks 60–179, same order per seed.
+
+| run | correct | thirds (40 each) | timeouts | playbook.inject.turns | reflect.new_skill | cases (succ+fail) |
+|---|---|---|---|---|---|---|
+| base L1 / L2 | 70.0 / 73.3 | 72-62-75 / 75-78-68 | 34 / 28 | 106 / 35 | 18 / 14 | 75+4 / 83+2 (judge) |
+| full L1 / L2 | 66.7 / 72.5 | 68-58-75 / 75-82-60 | 27 / 20 | 99 / 118 | 24 / 7 | 80+40 / 87+33 (exit code) |
+
+Same-order pairs: L1 only-base 8 / only-full 4; L2 8 / 7. Judge said success on 15–28 tasks per run that the
+checker failed (18–33%).
+
+1. No learning curve in 120 tasks in any run. 2. With the relevance pool fixed, the shipped learning layer
+is finally active — playbooks selected by relevance on 35–118 turns, 7–24 reflection-authored task-family
+skills, 119 turns of case injection in full — and accuracy is unchanged. For a model of this strength on these
+tasks, telling it how it did it before (skill, playbook, case, failure case) carries no information.
+3. Where the failures are: not procedure but the **checker's conventions** — an unnamed "status file" is
+`status.txt` in the named directory (or `/status.txt`), "permissions 770" means exactly 770 (the agent set
+2770), the report goes to the stated path. These are environment-specific, unknown to the model, and
+derivable from the failing acceptance clause — the dimension the model lacks (philosophers spec item 9).
+4. "Hitting the same wall N times" appears in 14–23 answers per run because the recurrence detector treats
+similar tasks as one task; those tasks are 75–80% correct, so it is report noise, not a failure cause.
+5. The judge still records only successes; failures enter the store only through the external signal.
+
+Flags unchanged (CASE_RECALL off — 8 runs of injection with no effect; KEEP_BEST shadow — no repairs).
+Next (batch 4, harness-side first): acceptance-convention learning — run the failing task's acceptance
+clauses one by one, distil {when, rule, check} from the failing ones, apply to later tasks by trigger words,
+with two couplings: prompt text vs a verification turn the task must pass before it is accepted (the
+candidate-set-vs-prompt contrast of exp 104/110 in tool-agent form). If the gate wins, it becomes a philont
+controller (answer-time regen with the applicable conventions) and the convention store a memory table.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's
