@@ -28,7 +28,7 @@ import { resolve, join, dirname } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { AuthRequest } from './chat-handler.js';
 import { safeSessionId } from './safe_session_id.js';
-import { runAcceptance, repairPrompt, type AcceptanceResult } from './acceptance_check.js';
+import { runAcceptance, repairPrompt, diagnoseAcceptance, type AcceptanceResult } from './acceptance_check.js';
 
 // ── argv parsing ─────────────────────────────────────────────────────────────
 
@@ -309,7 +309,9 @@ async function run(): Promise<RunResult> {
     logLine('acceptance', `check #1: ${check.passed ? 'PASS' : 'FAIL'} exit=${check.exitCode} timedOut=${check.timedOut}`);
     while (!check.passed && acceptance.repairs < acceptanceRepairs && lastOutcome.outcomeType !== 'error') {
       acceptance.repairs++;
-      await sendWithAuthReplay(repairPrompt(taskText, check, acceptance.repairs, acceptanceRepairs), `acceptance repair ${acceptance.repairs}`);
+      const failing = await diagnoseAcceptance(acceptanceCmd, check, acceptanceTimeoutSec * 1000);
+      if (failing.length) logLine('acceptance', `diagnosis: ${failing.length} failing clause(s): ${failing.join(' ; ').slice(0, 400)}`);
+      await sendWithAuthReplay(repairPrompt(taskText, check, acceptance.repairs, acceptanceRepairs, failing), `acceptance repair ${acceptance.repairs}`);
       check = await runAcceptance(acceptanceCmd, acceptanceTimeoutSec * 1000);
       acceptance.attempts.push({ exitCode: check.exitCode, timedOut: check.timedOut, output: check.output, durationMs: check.durationMs });
       logLine('acceptance', `check #${acceptance.attempts.length}: ${check.passed ? 'PASS' : 'FAIL'} exit=${check.exitCode} timedOut=${check.timedOut}`);
