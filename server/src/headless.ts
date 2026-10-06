@@ -28,6 +28,7 @@ import { resolve, join, dirname } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { AuthRequest } from './chat-handler.js';
 import { safeSessionId } from './safe_session_id.js';
+import { runAcceptance, repairPrompt, type AcceptanceResult } from './acceptance_check.js';
 
 // ── argv parsing ─────────────────────────────────────────────────────────────
 
@@ -46,6 +47,11 @@ const HELP = `philont headless —— 无头单任务 runner
   --timeout <sec>        硬墙钟超时,秒(默认 1200)
   --max-auth-rounds <n>  自动批准授权请求的最大轮数(默认 20)
   --preamble <path|none> benchmark 前言:文件路径覆盖默认,'none' 关闭
+  --acceptance-cmd <sh>  验收命令(2026-10-06):本轮结束后用与 shell 工具相同的 shell 程序执行(PHILONT_SHELL_BIN 生效),
+                         exit 0 = 接受;否则把输出原样回传给同一会话再修一轮,再验,最多 --acceptance-repairs 次;
+                         验收结果作为 case 的裁决写进记忆(basis acceptance_cmd),result.json 带 acceptance 字段
+  --acceptance-repairs <n>  验收失败后的修正轮数上限(默认 1)
+  --acceptance-timeout <sec> 验收命令超时(默认 60)
   --autonomous           保留 idle 自主循环(默认关闭 PHILONT_AUTONOMOUS=0)
   -h, --help             显示本帮助
 
@@ -68,6 +74,9 @@ try {
       timeout: { type: 'string' },
       'max-auth-rounds': { type: 'string' },
       preamble: { type: 'string' },
+      'acceptance-cmd': { type: 'string' },
+      'acceptance-repairs': { type: 'string' },
+      'acceptance-timeout': { type: 'string' },
       autonomous: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -110,6 +119,11 @@ const timeoutSec = Number(opt.timeout ?? '1200');
 const maxAuthRounds = Number(opt['max-auth-rounds'] ?? '20');
 if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) fail('--timeout 必须是正数');
 if (!Number.isFinite(maxAuthRounds) || maxAuthRounds < 1) fail('--max-auth-rounds 必须 ≥ 1');
+const acceptanceCmd = (opt['acceptance-cmd'] ?? '').trim();
+const acceptanceRepairs = Number(opt['acceptance-repairs'] ?? '1');
+const acceptanceTimeoutSec = Number(opt['acceptance-timeout'] ?? '60');
+if (acceptanceCmd && (!Number.isFinite(acceptanceRepairs) || acceptanceRepairs < 0)) fail('--acceptance-repairs 必须 ≥ 0');
+if (acceptanceCmd && (!Number.isFinite(acceptanceTimeoutSec) || acceptanceTimeoutSec <= 0)) fail('--acceptance-timeout 必须是正数');
 
 // Benchmark preamble: inject "complete autonomously, do not ask questions" constraints to
 // prevent the agent from blocking on a clarifying question when unattended (headless mode
@@ -206,6 +220,12 @@ process.chdir(workspace);
 
 // ── Run ──────────────────────────────────────────────────────────────────────
 
+interface AcceptanceSummary {
+  passed: boolean;
+  attempts: { exitCode: number | null; timedOut: boolean; output: string; durationMs: number }[];
+  repairs: number;
+}
+
 interface RunResult {
   outcomeType: string;
   text: string;
@@ -213,6 +233,7 @@ interface RunResult {
   authRounds: number;
   elapsedMs: number;
   error?: string;
+  acceptance?: AcceptanceSummary;
 }
 
 async function run(): Promise<RunResult> {
@@ -255,29 +276,63 @@ async function run(): Promise<RunResult> {
   // "auto-approve" — resend handleChatSend with an approval message, which causes philont's
   // pendingAuth mechanism to resume the suspended tool loop. Different (tool, cap, domain)
   // combinations each trigger a request on first encounter, so the loop may run multiple rounds.
-  while (round < maxAuthRounds) {
-    authRequested = false;
-    finalText = '';
-    const message = round === 0 ? fullPrompt : '允许';
-    logLine('send', round === 0 ? '(task prompt)' : '(auth approval: allow)');
+  // Shared by the task turn and the acceptance-repair turns (each is one user message to the same session).
+  const sendWithAuthReplay = async (firstMessage: string, label: string): Promise<void> => {
+    let localRound = 0;
+    while (localRound < maxAuthRounds) {
+      authRequested = false;
+      finalText = '';
+      const message = localRound === 0 ? firstMessage : '允许';
+      logLine('send', localRound === 0 ? `(${label})` : '(auth approval: allow)');
+      const result = await ch.handleChatSend(sessionId, message, onDelta, onAuth, onStatus, onTrace);
+      lastOutcome = (result?.outcome ?? {}) as { outcomeType?: string; text?: string };
+      lastAuditEvents = result?.auditEvents ?? 0;
+      localRound++;
+      round++;
+      if (!authRequested) break; // no pending auth → turn truly finished
+      logLine('auth', `round ${round}: pending auth detected, replaying approval`);
+    }
+    if (localRound >= maxAuthRounds && authRequested) {
+      logLine('warn', `reached --max-auth-rounds=${maxAuthRounds}, stopped replay (may be incomplete)`);
+    }
+  };
+  await sendWithAuthReplay(fullPrompt, 'task prompt');
 
-    const result = await ch.handleChatSend(
-      sessionId,
-      message,
-      onDelta,
-      onAuth,
-      onStatus,
-      onTrace,
-    );
-    lastOutcome = (result?.outcome ?? {}) as { outcomeType?: string; text?: string };
-    lastAuditEvents = result?.auditEvents ?? 0;
-    round++;
-
-    if (!authRequested) break; // no pending auth → turn truly finished
-    logLine('auth', `round ${round}: pending auth detected, replaying approval`);
-  }
-  if (round >= maxAuthRounds && authRequested) {
-    logLine('warn', `reached --max-auth-rounds=${maxAuthRounds}, stopped replay (may be incomplete)`);
+  // ── Acceptance–repair loop (2026-10-06, see acceptance_check.ts) ─────────────────────────────────────
+  // A real acceptance signal is the one lever that moved a frontier-class model in the 2026-10 measurements;
+  // paraphrased lessons did not. So: run the check, hand its output back verbatim, re-check, bounded repairs.
+  let acceptance: AcceptanceSummary | undefined;
+  if (acceptanceCmd) {
+    acceptance = { passed: false, attempts: [], repairs: 0 };
+    let check: AcceptanceResult = await runAcceptance(acceptanceCmd, acceptanceTimeoutSec * 1000);
+    acceptance.attempts.push({ exitCode: check.exitCode, timedOut: check.timedOut, output: check.output, durationMs: check.durationMs });
+    logLine('acceptance', `check #1: ${check.passed ? 'PASS' : 'FAIL'} exit=${check.exitCode} timedOut=${check.timedOut}`);
+    while (!check.passed && acceptance.repairs < acceptanceRepairs && lastOutcome.outcomeType !== 'error') {
+      acceptance.repairs++;
+      await sendWithAuthReplay(repairPrompt(taskText, check, acceptance.repairs, acceptanceRepairs), `acceptance repair ${acceptance.repairs}`);
+      check = await runAcceptance(acceptanceCmd, acceptanceTimeoutSec * 1000);
+      acceptance.attempts.push({ exitCode: check.exitCode, timedOut: check.timedOut, output: check.output, durationMs: check.durationMs });
+      logLine('acceptance', `check #${acceptance.attempts.length}: ${check.passed ? 'PASS' : 'FAIL'} exit=${check.exitCode} timedOut=${check.timedOut}`);
+    }
+    acceptance.passed = check.passed;
+    // The acceptance verdict is ground truth the learning judge does not have: record it as the session's case
+    // (basis acceptance_cmd) so retrieval and calibration see the real outcome, and count it.
+    try {
+      ch.memory.metrics.increment(`acceptance.check.${acceptance.passed ? 'pass' : 'fail'}`);
+      if (acceptance.repairs > 0) ch.memory.metrics.increment(`acceptance.repair.${acceptance.passed ? 'fixed' : 'unfixed'}`);
+      ch.memory.cases.record({
+        sessionId,
+        goal: taskText,
+        trace: [{ toolName: 'acceptance_cmd', ok: acceptance.passed }],
+        verdict: acceptance.passed ? 'success' : 'failure',
+        basis: 'acceptance_cmd',
+        evidence: acceptance.passed
+          ? `acceptance check passed after ${acceptance.repairs} repair(s)`
+          : `acceptance check failed after ${acceptance.repairs} repair(s): ${check.output.slice(-400)}`,
+      });
+    } catch (e) {
+      logLine('warn', `acceptance case/metrics write failed: ${String(e)}`);
+    }
   }
 
   // Finalize: trigger fact/skill extraction + reflection write-back to memory layer
@@ -309,6 +364,7 @@ async function run(): Promise<RunResult> {
     auditEvents: lastAuditEvents,
     authRounds: round,
     elapsedMs,
+    acceptance,
   };
 }
 
@@ -362,6 +418,7 @@ async function main(): Promise<void> {
         model: process.env[`${(process.env.LLM_PROVIDER ?? '').toUpperCase()}_MODEL`] ?? null,
         provider: process.env.LLM_PROVIDER ?? null,
         error: result.error ?? null,
+        acceptance: result.acceptance ?? null,
         finishedAt: new Date().toISOString(),
       },
       null,

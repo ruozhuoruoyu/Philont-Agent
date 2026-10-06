@@ -246,6 +246,19 @@ const SPECS: readonly ControllerSpec[] = [
     countable: true,
     envSwitch: 'PHILONT_SKILL_SAFETY_SCAN',
   },
+  {
+    id: 'acceptance_gate',
+    failureMode:
+      'the agent declares a task done and the only verdict is its own (or the learning judge\'s, which said success on 21–33% of tasks the real checker failed); nothing mechanical re-checks and nothing feeds the real failure back for a repair',
+    module: 'server/src/acceptance_check.ts',
+    entry: 'runAcceptance + repairPrompt (loop in headless.ts --acceptance-cmd)',
+    layer: 'answer-time',
+    shape: 'regen',
+    firesWhen:
+      'after the task turn, when an acceptance command (test runner, checker script, downstream validator) exits non-zero: its output is handed back verbatim as the next user message and the check re-runs, up to --acceptance-repairs times; the fire count is the number of repair turns (metrics acceptance.repair.fixed/unfixed). Measured 2026-10-05/06: +11/+17 of 60 tasks for philont on glm-5.3, 72 gained / 0 lost of 360 for a plain agent on Qwen3.5-27B; a 7B model repairs <15% — the gate needs a real signal and a model that can act on it',
+    countable: true,
+    envSwitch: '--acceptance-cmd (headless option)',
+  },
 ];
 
 function makeController(spec: ControllerSpec): Controller {
