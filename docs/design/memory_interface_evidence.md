@@ -348,6 +348,30 @@ philont's scaffold is marginally better than plain ReAct at the repair step (+2/
 direct answer to "does philont beat AWM / Memento / ACE": no net win and no net loss in accuracy, a real loss
 in cost. The gains these methods show at 27B (+4–6) and 7B (+5 for structured memory) vanish here.
 
+## 3k. The acceptance–repair loop, shipped and measured (2026-10-06)
+
+Shipped: `headless --acceptance-cmd <sh> [--acceptance-repairs n] [--acceptance-timeout s]` (acceptance_check.ts).
+After the task turn the command runs through the same shell program as the `shell` tool; on a non-zero exit its
+output — or, for a silent `&&` chain, the clauses that fail when run one by one (v2 diagnosis) — is handed back
+verbatim as the next user message, the check re-runs, up to n repairs. The verdict is recorded as the session's
+case (basis `acceptance_cmd`) and as metrics `acceptance.check.*` / `acceptance.repair.*`; controller
+`acceptance_gate`. Tests: server 1852/1852.
+
+Measured so far (glm-5.3, LifelongAgentBench OS, same 60 tasks × 2 orders as §3f):
+- v1 (exit code only), 300 s wall: 42 / 41 — the loop fired on 8 / 3 of ~18 failures (the wall was spent before
+  the check) and the agent, told only "exit code 1", repaired 1 / 0. With a 600 s wall (partial, 47 / 45 tasks):
+  39 / 36 correct, repairs 7 / 8, fixed 3 / 1. The harness-side loop that named the failing clauses had repaired
+  28 of 35 (§3h). The missing piece was the diagnosis, not the loop → v2 names the failing clauses; a 1200 s run
+  is in progress.
+- ScienceWorld (philosophers exp 114, `sw --accept` = score 100): philont stock 90.9 → with the loop 94.9 adapt;
+  first-episode perfect tasks 6/10 → 9/10. The loop is an in-episode effect (the score is a real signal).
+
+Decomposition on ScienceWorld, a world the model does not know (one run per arm, 80 episodes): plain agent 40;
+plain agent that sees the legal-action list 57 (+17 tool affordance); philont with a fresh memory per episode 84
+(+27 in-episode machinery); philont with its cross-episode memory 91 (**+7, the first positive measurement of the
+learning layer**, at the edge of single-run noise); + acceptance loop 95. The learning layer's gain ranks behind
+tool affordance and in-episode machinery, and appears only where the model lacks the world's mechanics.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's
