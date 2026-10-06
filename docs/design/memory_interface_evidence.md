@@ -330,6 +330,24 @@ repair turn and re-check — the only mechanism here that moved a frontier-class
 (3) Trim the per-call prefix so philont can be evaluated on local models at all. Flags unchanged
 (NO_FILL on; CASE_RECALL off; KEEP_BEST shadow; predictor shadow; safety scan on).
 
+## 3j. philont vs the methods on the same model (glm-5.3, same 60 tasks × 2 orders)
+
+| arm | s1 | s2 | paired vs plain ReAct | s/task |
+|---|---|---|---|---|
+| philont + real acceptance feedback | **54** | **58** | 8/1, 17/0 | 239 / 223 |
+| plain ReAct + acceptance feedback | **52** | **54** | 8/3, 13/0 | 28 / 29 |
+| philont new default | 48 | 40 | 3/2, 1/2 | 189 / 182 |
+| ReAct + Memento / Reflexion / ReasoningBank / ACE / AWM / replay | 44–48 | 38–43 | all within ±5, signs inconsistent | 22–29 |
+| plain ReAct | 47 | 41 | — | 27 / 24 |
+| philont shipped (old default) | 44 | 37 | 1/5, 1/5 | 204 / 207 |
+
+On a frontier-class model, philont's learning layer and every published self-improvement method tie with a
+memoryless ReAct agent; philont's new default equals plain ReAct in accuracy at seven times the latency, and
+the old default was 3–4 tasks below it (the relevance bug). The only separation is the acceptance-repair loop;
+philont's scaffold is marginally better than plain ReAct at the repair step (+2/+4, within noise). This is the
+direct answer to "does philont beat AWM / Memento / ACE": no net win and no net loss in accuracy, a real loss
+in cost. The gains these methods show at 27B (+4–6) and 7B (+5 for structured memory) vanish here.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's
