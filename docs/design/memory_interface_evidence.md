@@ -372,6 +372,34 @@ plain agent that sees the legal-action list 57 (+17 tool affordance); philont wi
 learning layer**, at the edge of single-run noise); + acceptance loop 95. The learning layer's gain ranks behind
 tool affordance and in-episode machinery, and appears only where the model lacks the world's mechanics.
 
+## 3l. Verifier-centric self-improvement, tested (2026-10-07, philosophers exp 115)
+
+Method under test: the learning layer accumulates an **executable check bank** grown only from real failures
+(the checker's failing clauses), bound but never rewritten by the model, executed before acceptance with one
+repair turn; plus the shipped acceptance loop; plus a learned "when to verify" gate.
+
+| setting | plain | check bank | ACE playbook | replay / cases | real-feedback ceiling |
+|---|---|---|---|---|---|
+| LAB OS (conventions differ per task), 60 × 2 | 47 / 41 | 43 / 40 | — | — | 52 / 54 |
+| ConvStream (8 templates, stable unstated conventions), 100 × 2 | 77 / 65 | **87 / 79** | **84 / 88** | 77–78 / 72–78 | 94 / 94 |
+
+On ConvStream both failure-derived forms show the first within-stream curves of the study (ACE 75→95, bank
+70→85); replay and cases do not. Per template: on the two conventions the model never guesses (unnamed
+status file, literal mode) success memories score **0%**, failure-derived learning 38–64%, real feedback 82–86%.
+The budget gate reaches AUROC 0.67 (judge alone 0.57) and is dropped: run every available check.
+
+**philont's native acceptance loop v2** (headless `--acceptance-cmd`, clause-level diagnosis, 1200 s wall):
+**59/60 and 56/60** on the LAB tasks (repairs 14→13 fixed, 19→15), above the harness-side loop (54/58) and far
+above the stock agent (48/40). v1 with only the exit code repaired 6/32.
+
+Implications for philont: (1) keep the acceptance loop on wherever a mechanical signal exists — it is the
+only primitive that moved a frontier model, and diagnosis granularity is what makes it work; (2) the
+cross-task learning layer should hold two kinds of memory with different triggers — success trajectories /
+workflows for what the model can do, and failure-derived rules or executable checks for what it does not know
+to check — and the second only pays where failures recur (a user's conventions, a codebase's tests), not on a
+stream of unrelated tasks; (3) reflection prose remains the weakest form of either; a check bank or ACE-style
+counted rules are the forms with evidence.
+
 ## 4. From the 2026 self-improvement literature, what this adds and what it repeats
 
 philont's post-mortem already absorbed the verification hierarchy, SEAL-style sealed audits, RSEA's
