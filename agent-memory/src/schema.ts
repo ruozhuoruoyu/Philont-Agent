@@ -20,7 +20,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
 } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 50;
+export const SCHEMA_VERSION = 51;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -657,6 +657,23 @@ const DDL_TABLE_MEMORY_CASES = `
     );
     CREATE INDEX IF NOT EXISTS idx_memory_cases_created ON memory_cases(created_at);
     CREATE INDEX IF NOT EXISTS idx_memory_cases_verdict ON memory_cases(verdict, created_at);
+`;
+
+/** v51 (2026-10-08): acceptance conventions learned from failed checks — failure-side learning family. See conventions.ts. */
+const DDL_TABLE_MEMORY_CONVENTIONS = `
+    CREATE TABLE IF NOT EXISTS memory_conventions (
+      id         TEXT PRIMARY KEY,
+      env_key    TEXT NOT NULL DEFAULT 'default',
+      rule       TEXT NOT NULL,
+      source     TEXT,
+      trigger    TEXT NOT NULL DEFAULT '',
+      helpful    INTEGER NOT NULL DEFAULT 0,
+      harmful    INTEGER NOT NULL DEFAULT 0,
+      seen       INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_conventions_env ON memory_conventions(env_key, updated_at);
 `;
 
 /** Hoisted from its migration so reconcileColumnsWithDdl can see the table; the migration still executes it. */
@@ -1456,6 +1473,11 @@ function migrateV49ToV50(db: Database.Database): void {
   db.exec(DDL_TABLE_MEMORY_CASES);
 }
 
+/** v51: acceptance conventions table (failure-side learning; see conventions.ts). */
+function migrateV50ToV51(db: Database.Database): void {
+  db.exec(DDL_TABLE_MEMORY_CONVENTIONS);
+}
+
 /**
  * The CREATE TABLE text is the truth about which columns exist; the migrations are the path that was
  * walked to get there. When a shipped migration is edited after databases have walked it, the two
@@ -1469,7 +1491,7 @@ function migrateV49ToV50(db: Database.Database): void {
  * Every CREATE TABLE text this module owns. A table created inside a migration and never listed here
  * would be invisible to the reconcile — schema.test scans the source for exactly that.
  */
-export const ALL_TABLE_DDL: readonly string[] = [DDL_BASE, DDL_V3_DEPENDENT, DDL_TABLE_ROUTING_RULES, DDL_TABLE_MEMORY_INITIATIVES, DDL_TABLE_PUSH_SUBSCRIPTIONS, DDL_TABLE_MEMORY_PLANS, DDL_TABLE_REASONING_SESSIONS, DDL_TABLE_DEFERRED_PUSHES, DDL_TABLE_CONFIG_RULES, DDL_TABLE_MEMORY_CASES];
+export const ALL_TABLE_DDL: readonly string[] = [DDL_BASE, DDL_V3_DEPENDENT, DDL_TABLE_ROUTING_RULES, DDL_TABLE_MEMORY_INITIATIVES, DDL_TABLE_PUSH_SUBSCRIPTIONS, DDL_TABLE_MEMORY_PLANS, DDL_TABLE_REASONING_SESSIONS, DDL_TABLE_DEFERRED_PUSHES, DDL_TABLE_CONFIG_RULES, DDL_TABLE_MEMORY_CASES, DDL_TABLE_MEMORY_CONVENTIONS];
 
 export function reconcileColumnsWithDdl(db: Database.Database, ddl: string): string[] {
   const healed: string[] = [];
@@ -1773,6 +1795,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 50) {
     migrateV49ToV50(db);
+  }
+  if (current < 51) {
+    migrateV50ToV51(db);
   }
   reconcileColumnsWithDdl(db, ALL_TABLE_DDL.join('\n'));
 

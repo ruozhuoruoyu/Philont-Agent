@@ -29,6 +29,8 @@ import { parseArgs } from 'node:util';
 import type { AuthRequest } from './chat-handler.js';
 import { safeSessionId } from './safe_session_id.js';
 import { runAcceptance, repairPrompt, diagnoseAcceptance, type AcceptanceResult } from './acceptance_check.js';
+import { distilPrompt, parseRules, renderConventions, MAX_RULES_SHOWN } from './acceptance_rules.js';
+import { callAuxLLM } from '@agent/tools';
 
 // ── argv parsing ─────────────────────────────────────────────────────────────
 
@@ -47,6 +49,8 @@ const HELP = `philont headless —— 无头单任务 runner
   --timeout <sec>        硬墙钟超时,秒(默认 1200)
   --max-auth-rounds <n>  自动批准授权请求的最大轮数(默认 20)
   --preamble <path|none> benchmark 前言:文件路径覆盖默认,'none' 关闭
+  --acceptance-rules     验收失败时蒸馏环境约定规则并计数,后续任务按相关性注入(2026-10-08;亦可 PHILONT_ACCEPTANCE_RULES=1)
+  --env-key <k>          约定规则的环境键(默认 default;亦可 PHILONT_ENV_KEY)
   --acceptance-cmd <sh>  验收命令(2026-10-06):本轮结束后用与 shell 工具相同的 shell 程序执行(PHILONT_SHELL_BIN 生效),
                          exit 0 = 接受;否则把输出原样回传给同一会话再修一轮,再验,最多 --acceptance-repairs 次;
                          验收结果作为 case 的裁决写进记忆(basis acceptance_cmd),result.json 带 acceptance 字段
@@ -75,6 +79,8 @@ try {
       'max-auth-rounds': { type: 'string' },
       preamble: { type: 'string' },
       'acceptance-cmd': { type: 'string' },
+      'acceptance-rules': { type: 'boolean' },
+      'env-key': { type: 'string' },
       'acceptance-repairs': { type: 'string' },
       'acceptance-timeout': { type: 'string' },
       autonomous: { type: 'boolean' },
@@ -122,6 +128,10 @@ if (!Number.isFinite(maxAuthRounds) || maxAuthRounds < 1) fail('--max-auth-round
 const acceptanceCmd = (opt['acceptance-cmd'] ?? '').trim();
 const acceptanceRepairs = Number(opt['acceptance-repairs'] ?? '1');
 const acceptanceTimeoutSec = Number(opt['acceptance-timeout'] ?? '60');
+// 2026-10-08: failure-side learning around the acceptance loop (acceptance_rules.ts); also PHILONT_ACCEPTANCE_RULES=1.
+const acceptanceRules = Boolean(opt['acceptance-rules']) || ['1', 'on', 'true'].includes((process.env.PHILONT_ACCEPTANCE_RULES ?? '').trim().toLowerCase());
+const envKey = (opt['env-key'] ?? process.env.PHILONT_ENV_KEY ?? 'default').trim() || 'default';
+if (acceptanceRules && !acceptanceCmd) fail('--acceptance-rules 需要 --acceptance-cmd');
 if (acceptanceCmd && (!Number.isFinite(acceptanceRepairs) || acceptanceRepairs < 0)) fail('--acceptance-repairs 必须 ≥ 0');
 if (acceptanceCmd && (!Number.isFinite(acceptanceTimeoutSec) || acceptanceTimeoutSec <= 0)) fail('--acceptance-timeout 必须是正数');
 
@@ -224,6 +234,8 @@ interface AcceptanceSummary {
   passed: boolean;
   attempts: { exitCode: number | null; timedOut: boolean; output: string; durationMs: number }[];
   repairs: number;
+  /** 2026-10-08: failure-side learning — conventions shown before the task and learned from its first failed check. */
+  conventions?: { shown: number; learned: number };
 }
 
 interface RunResult {
@@ -296,7 +308,24 @@ async function run(): Promise<RunResult> {
       logLine('warn', `reached --max-auth-rounds=${maxAuthRounds}, stopped replay (may be incomplete)`);
     }
   };
-  await sendWithAuthReplay(fullPrompt, 'task prompt');
+  // 2026-10-08: show the environment's learned acceptance conventions that apply to this task (failure-side
+  // learning family). Which ones were shown is remembered so the task's first-check outcome can credit them.
+  let shownRuleIds: string[] = [];
+  let promptToSend = fullPrompt;
+  if (acceptanceRules) {
+    try {
+      const rules = ch.memory.conventions.select(envKey, taskText, MAX_RULES_SHOWN);
+      if (rules.length > 0) {
+        shownRuleIds = rules.map((r) => r.id);
+        promptToSend = fullPrompt + renderConventions(rules);
+        ch.memory.metrics.increment('conventions.inject.turns');
+        logLine('conventions', `shown ${rules.length} rule(s) for env=${envKey}: ${rules.map((r) => r.rule.slice(0, 80)).join(' | ')}`);
+      }
+    } catch (e) {
+      logLine('warn', `conventions select failed: ${String(e)}`);
+    }
+  }
+  await sendWithAuthReplay(promptToSend, 'task prompt');
 
   // ── Acceptance–repair loop (2026-10-06, see acceptance_check.ts) ─────────────────────────────────────
   // A real acceptance signal is the one lever that moved a frontier-class model in the 2026-10 measurements;
@@ -307,9 +336,12 @@ async function run(): Promise<RunResult> {
     let check: AcceptanceResult = await runAcceptance(acceptanceCmd, acceptanceTimeoutSec * 1000);
     acceptance.attempts.push({ exitCode: check.exitCode, timedOut: check.timedOut, output: check.output, durationMs: check.durationMs });
     logLine('acceptance', `check #1: ${check.passed ? 'PASS' : 'FAIL'} exit=${check.exitCode} timedOut=${check.timedOut}`);
+    const firstCheck = check;
+    let firstFailing: string[] = [];
     while (!check.passed && acceptance.repairs < acceptanceRepairs && lastOutcome.outcomeType !== 'error') {
       acceptance.repairs++;
       const failing = await diagnoseAcceptance(acceptanceCmd, check, acceptanceTimeoutSec * 1000);
+      if (acceptance.repairs === 1) firstFailing = failing;
       if (failing.length) logLine('acceptance', `diagnosis: ${failing.length} failing clause(s): ${failing.join(' ; ').slice(0, 400)}`);
       await sendWithAuthReplay(repairPrompt(taskText, check, acceptance.repairs, acceptanceRepairs, failing), `acceptance repair ${acceptance.repairs}`);
       check = await runAcceptance(acceptanceCmd, acceptanceTimeoutSec * 1000);
@@ -317,6 +349,28 @@ async function run(): Promise<RunResult> {
       logLine('acceptance', `check #${acceptance.attempts.length}: ${check.passed ? 'PASS' : 'FAIL'} exit=${check.exitCode} timedOut=${check.timedOut}`);
     }
     acceptance.passed = check.passed;
+    // 2026-10-08: failure-side learning. Credit the shown conventions with the FIRST check's outcome (that is
+    // what they could have influenced), then, if the first check failed, distil ≤ 2 environment-general rules
+    // from its failing clauses and store them for later tasks in this environment.
+    if (acceptanceRules) {
+      try {
+        if (shownRuleIds.length) ch.memory.conventions.feedback(shownRuleIds, firstCheck.passed);
+        acceptance.conventions = { shown: shownRuleIds.length, learned: 0 };
+        if (!firstCheck.passed) {
+          if (firstFailing.length === 0) firstFailing = await diagnoseAcceptance(acceptanceCmd, firstCheck, acceptanceTimeoutSec * 1000);
+          const text = await callAuxLLM({ system: 'You write environment conventions for an autonomous agent. Output only the requested lines.', user: distilPrompt(taskText, firstFailing, firstCheck.output), maxTokens: 400, fallbackToMain: true });
+          const rules = parseRules(text);
+          for (const rule of rules) {
+            const rec = ch.memory.conventions.record({ envKey, rule, source: firstFailing.slice(0, 3).join(' ; ') || firstCheck.output.slice(-300), trigger: taskText });
+            if (rec) acceptance.conventions.learned++;
+          }
+          ch.memory.metrics.increment('conventions.learned', rules.length);
+          logLine('conventions', `learned ${rules.length} rule(s) for env=${envKey}: ${rules.join(' | ').slice(0, 300)}`);
+        }
+      } catch (e) {
+        logLine('warn', `conventions learning failed: ${String(e)}`);
+      }
+    }
     // The acceptance verdict is ground truth the learning judge does not have: record it as the session's case
     // (basis acceptance_cmd) so retrieval and calibration see the real outcome, and count it.
     try {

@@ -38,6 +38,7 @@ import { ConfigRuleStore } from './config_rules.js';
 import { PushSubscriptionStore } from './push_subscriptions.js';
 import { DeferredPushStore } from './deferred_pushes.js';
 import { CaseStore } from './cases.js';
+import { ConventionStore } from './conventions.js';
 import { ReasoningStore } from './reasoning.js';
 import { ScheduleOutcomeStore } from './schedule_outcomes.js';
 import { PlanFileStore } from './plan_files.js';
@@ -47,6 +48,8 @@ import { BackupRunner, type BackupConfig } from './backup.js';
 export { MemoryStore } from './store.js';
 export { DeferredPushStore } from './deferred_pushes.js';
 export { CaseStore, CASE_RETAIN_MAX, renderCaseTrajectory } from './cases.js';
+export { ConventionStore, CONVENTION_RETAIN_MAX_PER_ENV, CONVENTION_RETIRE_MARGIN } from './conventions.js';
+export type { Convention, ConventionInput, ConventionMatch } from './conventions.js';
 export type { Case, CaseInput, CaseMatch, CaseToolStep, CaseVerdict } from './cases.js';
 export type { DeferredPush, DeferredPushSeverity, DeferredPushExpirySummary, FoldedReports } from './deferred_pushes.js';
 export { NotesStore } from './notes.js';
@@ -664,6 +667,8 @@ export interface MemoryHandle {
   deferredPushes: DeferredPushStore;
   /** v50 (2026-10-04): judge-verified cases — (goal, tool trace, verdict) per run */
   cases: CaseStore;
+  /** v51 (2026-10-08): acceptance conventions learned from failed checks (failure-side learning family) */
+  conventions: ConventionStore;
   /** v21: run trace for repeated schedule firings (2026-05-17) */
   scheduleOutcomes: ScheduleOutcomeStore;
   /** v22 Phase 13 (2026-05-17): per-project plan.md work notes (LLM-perspective accumulation layer) */
@@ -917,6 +922,7 @@ export function openMemoryDb(
     pushSubscriptions: new PushSubscriptionStore(db),
     deferredPushes: new DeferredPushStore(db),
     cases: new CaseStore(db),
+    conventions: new ConventionStore(db),
     scheduleOutcomes: new ScheduleOutcomeStore(db),
     planFiles: new PlanFileStore(),
     reasoning: new ReasoningStore(db),
