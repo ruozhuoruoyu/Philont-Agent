@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Learning layer measured against the 2026 self-improvement field, and rebuilt around what moved
+  the needle** (philosophers experiments 100–116; `docs/design/memory_interface_evidence.md`,
+  `docs/design/rsi_survey_2026.md`). On LifelongAgentBench OS every memory form — ours and every
+  published method — tied with a memoryless agent on the same model; the one lever that moved a
+  frontier-class model was feeding the *real* acceptance check's failure back for a bounded repair
+  turn. Shipped, each behind a flag or in shadow unless stated:
+  - `headless --acceptance-cmd` acceptance–repair loop (clause-level diagnosis of silent `&&`
+    chains; verdict recorded as a judge-independent case; controller `acceptance_gate`), and
+    `--acceptance-rules` / `PHILONT_ACCEPTANCE_RULES`: environment-keyed conventions distilled from
+    failed checks, shown on later tasks and credited with each task's first-check outcome
+    (schema v51, `memory_conventions`).
+  - Judge-verified **cases** (schema v50, `memory_cases`): the run itself with its verdict, recorded
+    at turn close; `PHILONT_CASE_RECALL` renders similar earlier runs, `PHILONT_CASE_REPLAY=success`
+    renders similar *successful* runs as compact trajectories (what was actually run). Default off.
+  - Pre-call **failure predictor** (`PHILONT_FAILURE_PREDICTOR`, shadow by default): P(fail) from tool
+    identity and the recent failure streak, logged against the real outcome; drives nothing yet.
+  - Learn-time gates: **keep-best** recipe revision (`PHILONT_SKILL_KEEP_BEST`, shadow) and a
+    **self-authored skill safety scan** (`PHILONT_SKILL_SAFETY_SCAN`, default on: destructive,
+    exfiltrating or gate-disabling commands quarantine the skill as deprecated).
+  - Skill recall: the relevance pull was starved (FTS on the whole multi-word query returned
+    nothing), so every slot came from the popularity fill — the "same six skills every turn". The
+    pull now ranks the whole small corpus, and `PHILONT_SKILL_RECALL_NO_FILL` is **default on**: a
+    section holds only what matched. Set it to `0` to restore the fill.
+  - `PHILONT_SHELL_BIN`: an explicit shell program for the shell/process tools (test harnesses that
+    redirect commands into a container). Unset in production.
+  - `scripts/learning-ab.ts`: paired A/B harness for the learning layer with held-out tasks.
+
 - **Hours of autonomous work no longer collapse to one line, and a silent owner still gets one
   digest.** The mailbox's series rule deleted every older pending report when a newer one arrived;
   a morning of forty-five auto-advance rounds reached the owner as the newest card only. A deferred
