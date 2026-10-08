@@ -118,6 +118,7 @@ import {
   type RecentMessage,
   type Schedule,
   type TsToolCallSummary,
+  renderCaseTrajectory,
 } from '@agent/memory';
 import type { Tool } from '@agent/policy';
 import { dirname, join } from 'node:path';
@@ -888,6 +889,36 @@ export const internalAudit = new AuditLog();
 // the recent failure streak (offline AUROC 89.8 on this product's ledger, philosophers exp 100), records the
 // (P(fail), outcome) pair to metrics + audit, drives nothing. See server/src/failure_predictor.ts and
 // docs/design/memory_interface_evidence.md. Controller id `failure_predictor`.
+/**
+ * PHILONT_CASE_REPLAY (2026-10-08, default OFF): render similar earlier *successful* runs as compact
+ * trajectories (what was actually run, step by step) instead of the one-line case summary.
+ *   off      — not rendered (PHILONT_CASE_RECALL decides whether the one-line form appears)
+ *   success  — top-3 successful cases as trajectories; failures are not shown (exp 115: failure cases
+ *              hurt a weaker reader — Memento 6:19 on ConvStream s2)
+ *   all      — successes as trajectories plus failures as one-liners
+ * Evidence: philosophers exp 116 (AppWorld, +7/+10 paired, both orders) and 115 (ConvStream, +7/+11).
+ */
+export function caseReplayMode(): 'off' | 'success' | 'all' {
+  const v = (process.env.PHILONT_CASE_REPLAY ?? '').trim().toLowerCase();
+  if (v === 'all') return 'all';
+  if (v === '1' || v === 'on' || v === 'true' || v === 'success') return 'success';
+  return 'off';
+}
+
+/** The excerpt of a tool call's input that a replayed trajectory shows: the shell command / code itself, else a compact JSON of the arguments. */
+export function caseStepInput(toolName: string, toolInput: unknown): string | undefined {
+  if (toolInput === undefined || toolInput === null) return undefined;
+  const obj = toolInput as Record<string, unknown>;
+  const primary = typeof obj === 'object' ? (obj.command ?? obj.code ?? obj.script ?? obj.query ?? obj.url ?? obj.path) : undefined;
+  if (typeof primary === 'string' && primary.trim()) return primary.replace(/\s+/g, ' ').trim().slice(0, 300);
+  try {
+    const j = typeof toolInput === 'string' ? toolInput : JSON.stringify(toolInput);
+    return j ? j.replace(/\s+/g, ' ').slice(0, 300) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** PHILONT_CASE_RECALL (2026-10-04, default OFF): render judge-verified similar cases in the memory prefix. */
 export function caseRecallEnabled(): boolean {
   const v = (process.env.PHILONT_CASE_RECALL ?? '').trim().toLowerCase();
@@ -7084,7 +7115,35 @@ export function buildMemoryPrefix(recallQuery: string, signalBus?: TurnSignalBus
   // is similar the section is absent (exp 103: unrelated recall is not neutral; Memento 2's void case).
   // Rendered compactly: K=3, one line per case. This is a prompt-side coupling; the measurement that
   // decides whether it stays is scripts/learning-ab.ts with the flag on/off, two runs each.
-  if (caseRecallEnabled() && recallQuery) {
+  const replayMode = caseReplayMode();
+  if (replayMode !== 'off' && recallQuery) {
+    try {
+      const wins = memory.cases.search(recallQuery, { k: 3, verdicts: ['success'] });
+      const losses = replayMode === 'all' ? memory.cases.search(recallQuery, { k: 2, verdicts: ['failure'] }) : [];
+      if (wins.length > 0 || losses.length > 0) {
+        memory.metrics.increment('case.replay.turns');
+        lines.push('');
+        if (wins.length > 0) {
+          lines.push('## Earlier successful runs of similar tasks (verified) — what was actually run');
+          lines.push('(Reuse the approach and the exact calls that worked; adapt names/values to this task; still verify results yourself.)');
+          let budget = 2400;
+          for (const c of wins) {
+            const txt = renderCaseTrajectory(c, Math.min(900, budget));
+            lines.push(txt);
+            budget -= txt.length;
+            if (budget <= 120) break;
+          }
+        }
+        if (losses.length > 0) {
+          lines.push('## Earlier failed runs of similar tasks (do not repeat unchanged)');
+          for (const c of losses) lines.push(`· [failure] "${c.goal.slice(0, 140)}" → ${c.tools.join(' → ') || '(no tools)'}${c.evidence ? ` — ${c.evidence.slice(0, 160)}` : ''}`);
+        }
+        lines.push('');
+      }
+    } catch (e) {
+      console.warn('[case-replay] skipped:', (e as Error)?.message);
+    }
+  } else if (caseRecallEnabled() && recallQuery) {
     try {
       const matches = memory.cases.search(recallQuery, { k: 3 });
       if (matches.length > 0) {
@@ -8491,7 +8550,7 @@ function shadowLearningJudge(
   messages: ReadonlyArray<{ role: string; content: unknown }>,
   bus:
     | {
-        inTurnRecords?: Array<{ toolName: string; success: boolean; resultText?: string }>;
+        inTurnRecords?: Array<{ toolName: string; success: boolean; resultText?: string; toolInput?: unknown }>;
         honesty?: unknown;
         carriedExploreGoal?: string;
       }
@@ -8560,7 +8619,8 @@ function shadowLearningJudge(
             memory.cases.record({
               sessionId,
               goal,
-              trace: trace.map((t) => ({ toolName: t.toolName, ok: t.ok })),
+              // 2026-10-08: content excerpts travel with the step (trajectory replay, PHILONT_CASE_REPLAY).
+              trace: records.map((r) => ({ toolName: r.toolName, ok: r.success, input: caseStepInput(r.toolName, r.toolInput), output: (r.resultText ?? '').replace(/\s+/g, ' ').slice(0, 200) })),
               verdict: v.outcome,
               basis: v.basis ?? null,
               evidence: v.evidence ?? null,

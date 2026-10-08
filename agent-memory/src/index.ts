@@ -46,7 +46,7 @@ import { BackupRunner, type BackupConfig } from './backup.js';
 
 export { MemoryStore } from './store.js';
 export { DeferredPushStore } from './deferred_pushes.js';
-export { CaseStore, CASE_RETAIN_MAX } from './cases.js';
+export { CaseStore, CASE_RETAIN_MAX, renderCaseTrajectory } from './cases.js';
 export type { Case, CaseInput, CaseMatch, CaseToolStep, CaseVerdict } from './cases.js';
 export type { DeferredPush, DeferredPushSeverity, DeferredPushExpirySummary, FoldedReports } from './deferred_pushes.js';
 export { NotesStore } from './notes.js';

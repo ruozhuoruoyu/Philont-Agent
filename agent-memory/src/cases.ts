@@ -27,6 +27,16 @@ export type CaseVerdict = 'success' | 'failure';
 export interface CaseToolStep {
   toolName: string;
   ok: boolean;
+  /**
+   * 2026-10-08 (trajectory replay): the step's input excerpt (shell command, code, or the tool's main
+   * argument) and output excerpt. Optional: a case without them still renders as the one-line
+   * (goal → tools → verdict) summary. Bounded at write time (INPUT_MAX / OUTPUT_MAX) so a case stays
+   * a compact record, not a transcript. Why content matters: on AppWorld / ConvStream (philosophers
+   * exp 115/116) replaying *what was actually run* in similar successful tasks is the one memory form
+   * that wins on a weaker model (+7/+10 paired); tool-name-only traces cannot carry that information.
+   */
+  input?: string;
+  output?: string;
 }
 
 export interface CaseInput {
@@ -75,12 +85,57 @@ export const CASE_RETAIN_MAX = 5000;
 const GOAL_MAX = 2000;
 const EVIDENCE_MAX = 500;
 const TRACE_MAX_STEPS = 60;
+const INPUT_MAX = 300;
+const OUTPUT_MAX = 200;
+
+function clip(v: unknown, max: number): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const t = v.replace(/\s+/g, ' ').trim();
+  return t ? t.slice(0, max) : undefined;
+}
+
+function normStep(t: { toolName: unknown; ok: unknown; input?: unknown; output?: unknown }): CaseToolStep {
+  const step: CaseToolStep = { toolName: String(t.toolName), ok: !!t.ok };
+  const input = clip(t.input, INPUT_MAX);
+  const output = clip(t.output, OUTPUT_MAX);
+  if (input) step.input = input;
+  if (output) step.output = output;
+  return step;
+}
+
+/**
+ * Compact trajectory text for prompt injection: the goal, then one line per step that has content
+ * (`tool: input → output`). Steps without content are folded into a tool-name list. Bounded by
+ * `maxChars` (default 900) — the tail is dropped, the head (how the task was approached) is kept.
+ */
+export function renderCaseTrajectory(c: Case, maxChars = 900): string {
+  const lines: string[] = [`· Task: "${c.goal.slice(0, 160)}"`];
+  const bare: string[] = [];
+  for (const st of c.trace) {
+    if (st.input) {
+      lines.push(`    ${st.toolName}${st.ok ? '' : ' (failed)'}: ${st.input}${st.output ? ` → ${st.output}` : ''}`);
+    } else {
+      bare.push(st.toolName + (st.ok ? '' : '!'));
+    }
+  }
+  if (lines.length === 1) lines.push(`    tools: ${c.tools.join(' → ') || '(none)'}`);
+  else if (bare.length) lines.push(`    (other calls: ${bare.slice(0, 12).join(', ')})`);
+  let out = '';
+  for (const l of lines) {
+    if (out.length + l.length + 1 > maxChars) {
+      out += '\n    …';
+      break;
+    }
+    out += (out ? '\n' : '') + l;
+  }
+  return out;
+}
 
 function rowToCase(r: CaseRow): Case {
   let trace: CaseToolStep[] = [];
   try {
     const parsed = JSON.parse(r.trace_json);
-    if (Array.isArray(parsed)) trace = parsed.filter((t) => t && typeof t.toolName === 'string').map((t) => ({ toolName: String(t.toolName), ok: !!t.ok }));
+    if (Array.isArray(parsed)) trace = parsed.filter((t) => t && typeof t.toolName === 'string').map((t) => normStep(t));
   } catch {
     trace = [];
   }
@@ -103,7 +158,7 @@ export class CaseStore {
   /** Append a case. Returns null (and writes nothing) for a blank goal or an empty trace. */
   record(input: CaseInput, now: number = Date.now()): Case | null {
     const goal = (input.goal ?? '').replace(/\s+/g, ' ').trim().slice(0, GOAL_MAX);
-    const trace = (input.trace ?? []).slice(0, TRACE_MAX_STEPS).map((t) => ({ toolName: String(t.toolName), ok: !!t.ok }));
+    const trace = (input.trace ?? []).slice(0, TRACE_MAX_STEPS).map((t) => normStep(t));
     if (!goal || trace.length === 0) return null;
     if (input.verdict !== 'success' && input.verdict !== 'failure') return null;
     const tools: string[] = [];

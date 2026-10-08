@@ -63,3 +63,37 @@ test('retention: the store is bounded; the oldest cases are trimmed', () => {
   const oldest = cases.recent(CASE_RETAIN_MAX).at(-1)!;
   assert.ok(oldest.createdAt >= 1_000_000 + 25, 'the first 25 (oldest) were trimmed');
 });
+
+test('trajectory replay (2026-10-08): input/output excerpts are stored, bounded, and rendered compactly', async () => {
+  const { renderCaseTrajectory } = await import('../src/cases.js');
+  const { cases } = openMemoryDb(':memory:');
+  const long = 'x'.repeat(1000);
+  const c = cases.record({
+    sessionId: 's2',
+    goal: 'reset venmo friends to match my phone contacts',
+    trace: [
+      { toolName: 'shell', ok: true, input: 'aw exec: print(apis.api_docs.show_api_descriptions(app_name="venmo"))', output: '[{"name": "login", ...}]' },
+      { toolName: 'shell', ok: false, input: long, output: 'Traceback: KeyError' },
+      { toolName: 'readFile', ok: true },
+    ],
+    verdict: 'success',
+  });
+  assert.ok(c);
+  assert.equal(c!.trace[0].input!.startsWith('aw exec: print('), true);
+  assert.equal(c!.trace[1].input!.length, 300, 'input is clipped at 300 chars');
+  assert.equal(c!.trace[1].output, 'Traceback: KeyError');
+  assert.equal(c!.trace[2].input, undefined, 'a step without content stays bare');
+  const txt = renderCaseTrajectory(c!, 900);
+  assert.match(txt, /^· Task: "reset venmo friends/);
+  assert.match(txt, /shell: aw exec: print\(apis\.api_docs/);
+  assert.match(txt, /shell \(failed\): x+/);
+  assert.match(txt, /other calls: readFile/);
+  assert.ok(txt.length <= 900 + 8, `bounded: ${txt.length}`);
+  // the stored row round-trips through rowToCase with the excerpts
+  const again = cases.search('venmo friends phone contacts', { k: 1, verdicts: ['success'] });
+  assert.equal(again.length, 1);
+  assert.equal(again[0].trace[0].output, '[{"name": "login", ...}]');
+  // a legacy case without excerpts renders as the tools line
+  const bare = cases.record({ sessionId: 's3', goal: 'list files', trace: [{ toolName: 'shell', ok: true }], verdict: 'success' });
+  assert.match(renderCaseTrajectory(bare!), /tools: shell/);
+});
