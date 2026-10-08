@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The acceptance loop, inside the conversation.** The 2026-10 measurements say the one lever that
+  moves a capable model is a *real* acceptance signal fed back for a bounded repair; headless had it
+  from a benchmark checker, a chat had none. Two layers now supply it without a checker:
+  - **Artifact read-back** (`artifact_readback.ts`, controller `artifact_readback`, default on,
+    `PHILONT_ARTIFACT_READBACK=0` disables): before the final reply of a turn that ran an effect tool,
+    every file a tool wrote and every produced-file path the reply names is read back from disk —
+    missing, empty, or a docx/xlsx/pptx/pdf/json that does not open structurally — and the
+    differences are handed back verbatim for one regeneration. Paths the owner's own message named
+    are never treated as the reply's claims. The honesty gate checks that a write tool ran; this
+    checks what it left on disk.
+  - **Owner verdict** (`owner_verdict.ts`, controller `owner_verdict`): a short message within two
+    hours of the previous reply that is an unmistakable acceptance (whole-message "好的"/"ok") or a
+    rejection the aux model confirms ("不对，少了第三章") is recorded as that reply's verdict — on
+    its case (schema v52 `memory_cases.owner_verdict`), and against the learning judge's and the
+    honesty gate's own calls (`judge.vs_owner.*`, `honesty.vs_owner.*`: the truth column both
+    lacked). A rejection makes the next turn an explicit repair of the previous reply.
+  Not yet: criteria extracted from the owner's words ("three sheets") run as read-only checks —
+  the layer that needs the self-authored-verifier safeguards first.
+
 - **Learning layer measured against the 2026 self-improvement field, and rebuilt around what moved
   the needle** (philosophers experiments 100–116; `docs/design/memory_interface_evidence.md`,
   `docs/design/rsi_survey_2026.md`). On LifelongAgentBench OS every memory form — ours and every

@@ -40,6 +40,8 @@ const EXPECTED_IDS = [
   'skill_keep_best',
   'skill_safety_scan',
   'acceptance_gate',
+  'artifact_readback',
+  'owner_verdict',
 ];
 
 test('enumeration: every existing gate is registered exactly once', () => {
@@ -72,6 +74,7 @@ test('enumeration: the two per-call deciders are enumerated but not fire-counted
     countable.sort(),
     [
       'announced_tool',
+      'artifact_readback',
       'citation_grounding',
       'conscience',
       'empty_conclusion',
@@ -80,6 +83,7 @@ test('enumeration: the two per-call deciders are enumerated but not fire-counted
       'honesty',
       'acceptance_gate',
       'numeric_grounding',
+      'owner_verdict',
       'output_format',
       'skill_keep_best',
       'skill_safety_scan',
@@ -165,7 +169,7 @@ test('logRegisteredControllers emits a one-line summary of the registry', () => 
   const lines: string[] = [];
   logRegisteredControllers((m) => lines.push(m));
   assert.equal(lines.length, 1);
-  assert.ok(lines[0].includes('15 controllers registered'));
+  assert.ok(lines[0].includes('17 controllers registered'));
   assert.ok(lines[0].includes('fire-counted:'));
   assert.ok(lines[0].includes('enumerated-only:'));
   assert.ok(lines[0].includes('plan_protocol'));

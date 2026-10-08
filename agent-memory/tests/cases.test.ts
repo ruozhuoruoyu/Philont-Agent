@@ -97,3 +97,16 @@ test('trajectory replay (2026-10-08): input/output excerpts are stored, bounded,
   const bare = cases.record({ sessionId: 's3', goal: 'list files', trace: [{ toolName: 'shell', ok: true }], verdict: 'success' });
   assert.match(renderCaseTrajectory(bare!), /tools: shell/);
 });
+
+test('a case carries the owner\'s verdict once given, and judgeVsOwner tabulates judge × owner (2026-10-08)', () => {
+  const h = openMemoryDb(':memory:');
+  const a = h.cases.record({ sessionId: 's', goal: 'write the report', trace: [{ toolName: 'writeFile', ok: true }], verdict: 'success', basis: 'llm', evidence: 'x' })!;
+  const b = h.cases.record({ sessionId: 's', goal: 'fix the build', trace: [{ toolName: 'shell', ok: false }], verdict: 'failure', basis: 'llm', evidence: 'y' })!;
+  assert.equal(h.cases.get(a.id)?.ownerVerdict, null);
+  assert.equal(h.cases.setOwnerVerdict(a.id, 'rejected'), true);
+  assert.equal(h.cases.setOwnerVerdict(b.id, 'accepted'), true);
+  assert.equal(h.cases.setOwnerVerdict('nope', 'accepted'), false);
+  assert.equal(h.cases.get(a.id)?.ownerVerdict, 'rejected');
+  assert.deepEqual(h.cases.judgeVsOwner(), { 'success/rejected': 1, 'failure/accepted': 1 });
+  h.close();
+});

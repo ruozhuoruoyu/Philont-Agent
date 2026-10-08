@@ -128,9 +128,11 @@ Deliberately **not** absorbed:
 2. **Legacy rules.** The 1000+ rules written before today carry no signature and so have no negative
    edge beyond unproven-decay; they will leave through decay, not contradiction. That is acceptable —
    none of them ever reached `validated` either.
-3. **Judge calibration** stays deferred: it needs a per-turn truth column, and none exists beyond the
-   deterministic rails already applied. An owner-correction signal would provide one; building a
-   confidence table before that source exists would be data nothing consumes.
+3. **Judge calibration** has its truth column since 2026-10-08: the owner's verdict on a reply
+   (`owner_verdict.ts`) is recorded against the judge's and the honesty gate's own calls
+   (`judge.vs_owner.*`, `honesty.vs_owner.*`). Two weeks of those counters answer the Phase 1 kill
+   gate; a confidence output on the judge is worth adding only once they show the judge's successes
+   are mostly accepted.
 4. **The development discipline itself**: a finding needs ≥2 distinct tasks before a patch, one
    module per patch, review that judges mechanism not score, replay on fixtures before ship. This
    is what ModularRSI automates; done by hand it is what stops the same class from shipping twice.

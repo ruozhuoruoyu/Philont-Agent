@@ -247,6 +247,31 @@ const SPECS: readonly ControllerSpec[] = [
     envSwitch: 'PHILONT_SKILL_SAFETY_SCAN',
   },
   {
+    id: 'artifact_readback',
+    failureMode:
+      'the reply describes a file as produced, saved or ready and the file is missing, empty or will not open — the honesty gate only checks that a write tool RAN, not that what it left on disk is what the reply says (production: "generated the report → can\'t open file")',
+    module: 'server/src/artifact_readback.ts',
+    entry: 'checkTurnArtifacts',
+    layer: 'answer-time',
+    shape: 'regen',
+    firesWhen:
+      'before the final reply of a turn that ran an effect tool: every file a tool wrote this turn, and every produced-file path the reply names, is read back from disk — missing, 0 bytes, or a docx/xlsx/pptx/pdf/json that does not open structurally; the differences are handed back verbatim and the reply regenerated once. PHILONT_ARTIFACT_READBACK=0 disables',
+    countable: true,
+    envSwitch: 'PHILONT_ARTIFACT_READBACK',
+  },
+  {
+    id: 'owner_verdict',
+    failureMode:
+      'work with no mechanical oracle (advice, writing, plans) has no acceptance signal, and "不对 / 重来" from the owner is processed as a new task — nothing records that the previous reply failed, so neither the judge nor the honesty gate ever learns its own false-positive rate',
+    module: 'server/src/owner_verdict.ts',
+    entry: 'detectOwnerVerdict',
+    layer: 'answer-time',
+    shape: 'decide',
+    firesWhen:
+      'a short owner message within 2h of the previous reply is an unmistakable acceptance (whole-message "好的" / "ok") or a rejection candidate the aux model confirms against the reply; the verdict is recorded on the case, counted against the judge\'s and the honesty gate\'s own calls (judge.vs_owner.*, honesty.vs_owner.*), and a rejection makes the next turn a repair of the previous reply',
+    countable: true,
+  },
+  {
     id: 'acceptance_gate',
     failureMode:
       'the agent declares a task done and the only verdict is its own (or the learning judge\'s, which said success on 21–33% of tasks the real checker failed); nothing mechanical re-checks and nothing feeds the real failure back for a repair',

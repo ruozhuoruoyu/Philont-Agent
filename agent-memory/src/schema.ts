@@ -20,7 +20,7 @@ import {
   DEFAULT_CONSTITUTION_RED_LINES,
 } from './constitution_defaults.js';
 
-export const SCHEMA_VERSION = 51;
+export const SCHEMA_VERSION = 52;
 
 /**
  * Canonical id for the bootstrap root pursuit. Used consistently by v7 migration and empty-DB init
@@ -653,7 +653,9 @@ const DDL_TABLE_MEMORY_CASES = `
       verdict    TEXT NOT NULL CHECK(verdict IN ('success','failure')),
       basis      TEXT,
       evidence   TEXT,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      -- v52 (2026-10-08): the owner's own verdict on the reply (accepted/rejected), the judge's truth column.
+      owner_verdict TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_memory_cases_created ON memory_cases(created_at);
     CREATE INDEX IF NOT EXISTS idx_memory_cases_verdict ON memory_cases(verdict, created_at);
@@ -1478,6 +1480,11 @@ function migrateV50ToV51(db: Database.Database): void {
   db.exec(DDL_TABLE_MEMORY_CONVENTIONS);
 }
 
+/** v52: cases carry the owner's verdict on the reply (owner_verdict.ts). */
+function migrateV51ToV52(db: Database.Database): void {
+  addColumnIfMissing(db, 'memory_cases', 'owner_verdict', 'TEXT');
+}
+
 /**
  * The CREATE TABLE text is the truth about which columns exist; the migrations are the path that was
  * walked to get there. When a shipped migration is edited after databases have walked it, the two
@@ -1798,6 +1805,9 @@ export function initSchema(db: Database.Database): void {
   }
   if (current < 51) {
     migrateV50ToV51(db);
+  }
+  if (current < 52) {
+    migrateV51ToV52(db);
   }
   reconcileColumnsWithDdl(db, ALL_TABLE_DDL.join('\n'));
 

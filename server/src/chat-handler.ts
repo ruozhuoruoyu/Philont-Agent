@@ -336,6 +336,44 @@ import { maybeRunReflection, buildCrossTurnEvidence, playbooksContradictedThisTu
 import { playbookSignature } from '@agent/memory';
 import { userAsksProgressStatus, statusQuestionGateReason } from './status_question.js';
 import { tokenOfTargetRef, ownerMentionedToken, OWNER_RECENT_USER_WINDOW_MS, OWNER_RECENT_ASSISTANT_WINDOW_MS } from './owner_recent.js';
+import { artifactReadbackEnabled, checkTurnArtifacts, renderReadbackDirective } from './artifact_readback.js';
+import { detectOwnerVerdict, renderRejectionDirective, OWNER_VERDICT_WINDOW_MS } from './owner_verdict.js';
+
+/**
+ * What the previous turn of a session ended with — the half of the owner-verdict loop that the next
+ * message is judged against (owner_verdict.ts). Set at turn close; the shadow judge adds its verdict and
+ * the case id when they arrive; consumed (deleted) by the first verdict read against it.
+ */
+interface LastTurnSummary {
+  ts: number;
+  replyExcerpt: string;
+  honestyFired: boolean;
+  judgeOutcome?: string;
+  caseId?: string | null;
+}
+const lastTurnSummary = new Map<string, LastTurnSummary>();
+/**
+ * Tools whose input is kept on the turn ledger (http / deep_explore / shell since 2026-05-17 for trace
+ * summaries; the file tools since 2026-10-08 so artifact read-back knows what the turn wrote). Everything
+ * else stays name-only — bloat and privacy, see InTurnToolRecord.toolInput.
+ */
+const TOOL_INPUT_RETAINED: ReadonlySet<string> = new Set(['http', 'deep_explore', 'shell', 'writeFile', 'patch', 'appendJournal', 'downloadFile', 'moveFile', 'deleteFile']);
+function noteTurnClosed(sessionId: string, replyExcerpt: string, honestyFired: boolean): void {
+  const prev = lastTurnSummary.get(sessionId);
+  const now = Date.now();
+  // A judge verdict that landed seconds before the close belongs to this turn; anything older does not.
+  const carry = prev && now - prev.ts < 60_000 ? { judgeOutcome: prev.judgeOutcome, caseId: prev.caseId } : {};
+  lastTurnSummary.set(sessionId, { ts: now, replyExcerpt, honestyFired, ...carry });
+}
+function noteTurnJudged(sessionId: string, judgeOutcome: string, caseId: string | null): void {
+  const prev = lastTurnSummary.get(sessionId);
+  if (prev && Date.now() - prev.ts < 10 * 60_000) {
+    prev.judgeOutcome = judgeOutcome;
+    if (caseId) prev.caseId = caseId;
+  } else {
+    lastTurnSummary.set(sessionId, { ts: Date.now(), replyExcerpt: '', honestyFired: false, judgeOutcome, caseId });
+  }
+}
 
 /** A playbook this old, shown this often, whose failure has not recurred in the ledger window, is retired. */
 const PLAYBOOK_RETIRE_AGE_MS = Number(process.env.PHILONT_PLAYBOOK_RETIRE_DAYS ?? 90) * 24 * 60 * 60_000;
@@ -8614,9 +8652,10 @@ function shadowLearningJudge(
         // 2026-10-04: the run itself, as a judge-verified case (goal, tool trace, verdict) — the structured
         // record Memento / philosophers both use in place of distilled prose. Only success/failure are
         // cases. Append-only; nothing is merged at write time. Read side: PHILONT_CASE_RECALL (prefix).
+        noteTurnJudged(sessionId, v.outcome, null);
         if (v.outcome === 'success' || v.outcome === 'failure') {
           try {
-            memory.cases.record({
+            const rec = memory.cases.record({
               sessionId,
               goal,
               // 2026-10-08: content excerpts travel with the step (trajectory replay, PHILONT_CASE_REPLAY).
@@ -8626,6 +8665,7 @@ function shadowLearningJudge(
               evidence: v.evidence ?? null,
             });
             memory.metrics.increment(`case.recorded.${v.outcome}`);
+            noteTurnJudged(sessionId, v.outcome, rec?.id ?? null);
           } catch (e) {
             console.warn('[case-store] record failed, ignored:', (e as Error)?.message);
           }
@@ -9810,6 +9850,9 @@ export async function handleChatSend(
   // Phase 11 (2026-05-14): per-turn messages reference for plan_review tool to check
   // "most recent assistant text" when detecting the self-review section.
   activeSessionMessages.set(sessionId, messages);
+  if (signalBus.ownerRejectedPrevious) {
+    pushGateDirective(messages, renderRejectionDirective(signalBus.ownerRejectedPrevious));
+  }
 
   // Layer 0 global timeline appends user message (placed in outer to ensure pending paths are also persisted)
   memory.raw.appendMessage({
@@ -9880,6 +9923,12 @@ export async function handleChatSend(
     const toolSummary = summarizeTurnTools(signalBus.inTurnRecords ?? []);
     console.log(
       `[turn] session=${safeSessionId(sessionId)} done outcome=${result.outcome.outcomeType} durationMs=${dur} auditEvents=${result.auditEvents} ${toolSummary} ${textPreview}`,
+    );
+    // 2026-10-08: what the next message may be a verdict on (owner_verdict.ts).
+    noteTurnClosed(
+      sessionId,
+      String((result.outcome as { text?: unknown }).text ?? '').slice(0, 1200),
+      signalBus.honesty !== undefined,
     );
 
     // Phase 12 cont (2026-05-17): scheduled sessions automatically capture the current turn outcome to
@@ -10308,6 +10357,45 @@ async function handleChatSendInner(
   // 2026-09-21: a bare status question runs nothing — see status_question.ts. Read tools stay open.
   signalBus.statusQuestionTurn = userAsksProgressStatus(userMessage);
   signalBus.statusQuestionText = signalBus.statusQuestionTurn ? userMessage : undefined;
+  signalBus.userMessageText = userMessage;
+  // 2026-10-08 owner verdict (owner_verdict.ts): is this short message the owner's verdict on the previous
+  // reply? Recorded against the case, the judge and the honesty gate; a rejection makes this turn a repair.
+  try {
+    const last = lastTurnSummary.get(sessionId);
+    if (last && !pendingAuth.get(sessionId) && !pendingQuestion.get(sessionId) && Date.now() - last.ts <= OWNER_VERDICT_WINDOW_MS) {
+      const det = await detectOwnerVerdict({
+        message: userMessage,
+        previousReply: last.replyExcerpt,
+        ask: isAuxLLMConfigured() ? (req) => callAuxLLM({ ...req, fallbackToMain: false }) : undefined,
+      });
+      if (det.verdict !== 'none') {
+        memory.metrics.increment(`acceptance.owner.${det.verdict}`);
+        memory.metrics.increment(`judge.vs_owner.${last.judgeOutcome ?? 'none'}.${det.verdict}`);
+        memory.metrics.increment(`honesty.vs_owner.${last.honestyFired ? 'fired' : 'passed'}.${det.verdict}`);
+        if (last.caseId) {
+          try { memory.cases.setOwnerVerdict(last.caseId, det.verdict); } catch { /* bookkeeping only */ }
+        }
+        recordControllerFire('owner_verdict');
+        internalAudit.append('self_domain_write', {
+          source: 'owner_verdict',
+          origin: 'Internal',
+          toolName: `owner_${det.verdict}`,
+          sessionId,
+          basis: det.basis,
+          judgeOutcome: last.judgeOutcome ?? null,
+          honestyFired: last.honestyFired,
+          caseId: last.caseId ?? null,
+        });
+        console.log(
+          `[owner-verdict] session=${safeSessionId(sessionId)} ${det.verdict} (${det.basis}) — previous reply: judge=${last.judgeOutcome ?? 'none'} honesty=${last.honestyFired ? 'fired' : 'passed'}`,
+        );
+        if (det.verdict === 'rejected') signalBus.ownerRejectedPrevious = userMessage;
+        lastTurnSummary.delete(sessionId); // one verdict per reply
+      }
+    }
+  } catch (e) {
+    console.warn('[owner-verdict] detection failed, ignored:', (e as Error)?.message);
+  }
   if (signalBus.statusQuestionTurn) {
     console.log(`[status-question-gate] session=${safeSessionId(sessionId)} armed: execute/write tools refused this turn`);
   }
@@ -12490,6 +12578,10 @@ interface TurnSignalBus {
   /** 2026-09-21: the owner asked how things stand; execute/write tools are refused this turn (status_question.ts). */
   statusQuestionTurn?: boolean;
   statusQuestionText?: string;
+  /** 2026-10-08: the owner's message this turn (artifact read-back excludes paths the owner named). */
+  userMessageText?: string;
+  /** 2026-10-08: the owner rejected the previous reply with these words; this turn is a repair (owner_verdict.ts). */
+  ownerRejectedPrevious?: string;
   /** Wire send time supplied by the channel; may precede receipt by an entire long agent turn. */
   inboundSentAtMs?: number;
   authInboundDisposition?: PendingAuthInboundDisposition;
@@ -13770,7 +13862,7 @@ async function runToolLoop(
       toolName: call.name,
       success: result.success,
       resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
-      toolInput: call.name === 'http' || call.name === 'deep_explore' || call.name === 'shell' ? actualInput : undefined,
+      toolInput: TOOL_INPUT_RETAINED.has(call.name) ? actualInput : undefined,
     });
     rememberFormalVerificationEvidence(sessionId, call.name, actualInput, result);
     // WS5: a successful use_skill makes that skill the turn's active linked skill, so the
@@ -13842,6 +13934,8 @@ async function runToolLoop(
   // One counter for the whole claim-grounding chain: the point of merging four gates is one
   // regeneration per turn, not up to three stacked on each other.
   let claimGroundingAttempts = 0;
+  // 2026-10-08: artifact read-back regeneration budget; cap=1 (artifact_readback.ts).
+  let artifactReadbackAttempts = 0;
   // Phase 18 WS2: carries a stop_and_report verdict from the ViabilityGate to the final emit so the outcome
   // class is downgraded deterministically (independent of whether the regen dropped the continuation pitch).
   let viabilityStopPending = false;
@@ -15055,6 +15149,41 @@ async function runToolLoop(
         }
       }
 
+      // 2026-10-08 artifact read-back (artifact_readback.ts): the acceptance loop's first layer in the
+      // conversation. Files this turn wrote, and produced files the reply names, are read back from disk;
+      // a difference is handed back verbatim and the reply regenerated once.
+      if (artifactReadbackAttempts < 1 && artifactReadbackEnabled()) {
+        try {
+          const rb = await checkTurnArtifacts({
+            replyText: response.content,
+            records: inTurnRecords,
+            userMessage: signalBus.userMessageText,
+          });
+          if (rb.checked > 0) memory.metrics.increment(rb.issues.length > 0 ? 'acceptance.readback.fired' : 'acceptance.readback.clean');
+          if (rb.issues.length > 0) {
+            artifactReadbackAttempts++;
+            for (const i of rb.issues) memory.metrics.increment(`acceptance.readback.${i.kind}`);
+            recordControllerFire('artifact_readback');
+            audit.append('self_domain_write', {
+              source: 'artifact_readback',
+              origin: 'Internal',
+              toolName: 'artifact_readback_fired',
+              sessionId,
+              issues: rb.issues.map((i) => `${i.kind}:${i.path}`),
+            });
+            console.warn(
+              `[artifact-readback] session=${safeSessionId(sessionId)} ${rb.issues.length} of ${rb.checked} file(s) do not match the reply: ` +
+                rb.issues.map((i) => `${i.path} (${i.kind})`).join(', '),
+            );
+            onTrace?.({ kind: 'loop-control', tier: 4, text: `产物读回:${rb.issues.length} 个文件与回复不符,打回重写` });
+            pushGateDirective(messages, renderReadbackDirective(rb.issues));
+            continue;
+          }
+        } catch (e) {
+          console.warn('[artifact-readback] skipped:', (e as Error)?.message);
+        }
+      }
+
       // Force deep_explore before emitting a flat answer. This is the path a flat-searching model
       // actually takes (it opened with a tool call, so handleChatSendInner's copy of this check was
       // never reached) — without it, an owner who explicitly approved the engine gets a flat answer.
@@ -15665,7 +15794,7 @@ async function runToolLoop(
         toolName: call.name,
         success: result.success,
         resultText: result.success ? (result.output ?? '') : (result.error ?? result.output ?? ''),
-        toolInput: call.name === 'http' || call.name === 'deep_explore' || call.name === 'shell' ? actualInput2 : undefined,
+        toolInput: TOOL_INPUT_RETAINED.has(call.name) ? actualInput2 : undefined,
       });
       rememberFormalVerificationEvidence(sessionId, call.name, actualInput2, result);
       if (result.success && mechanicalRetryTool === call.name) {

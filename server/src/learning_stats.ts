@@ -169,6 +169,17 @@ export function renderLearningStats(memory: MemoryHandle, windowDays = 7): strin
         );
       }
     } catch { /* report what we have */ }
+    // The acceptance loop inside the conversation (2026-10-08): artifact read-back (layer A) and the owner's
+    // verdict (layer C). `judge.vs_owner.*` / `honesty.vs_owner.*` are the truth columns those two gates
+    // never had: a judge `success` the owner then rejected is a judge false positive.
+    const vsOwner = snap.filter((r) => r.key.startsWith('judge.vs_owner.')).map((r) => `${r.key.slice('judge.vs_owner.'.length)}=${r.count}`).join(' ');
+    const honestyVsOwner = snap.filter((r) => r.key.startsWith('honesty.vs_owner.')).map((r) => `${r.key.slice('honesty.vs_owner.'.length)}=${r.count}`).join(' ');
+    lines.push(
+      `  acceptance in conversation: artifact read-back fired=${get('acceptance.readback.fired')} clean=${get('acceptance.readback.clean')} ` +
+        `(missing=${get('acceptance.readback.missing')} empty=${get('acceptance.readback.empty')} corrupt=${get('acceptance.readback.corrupt')}); ` +
+        `owner verdicts accepted=${get('acceptance.owner.accepted')} rejected=${get('acceptance.owner.rejected')}; ` +
+        `judge×owner [${vsOwner || 'none yet'}]; honesty×owner [${honestyVsOwner || 'none yet'}] — a judge success the owner rejected is a judge false positive`,
+    );
     const draftsTested = get('learning.draft_validation.verified') + get('learning.draft_validation.no_effect')
       + get('learning.draft_validation.different_failure') + get('learning.draft_validation.inconclusive');
     if (draftsTested > 0 || get('learning.draft_validation.not-attempted') > 0) {

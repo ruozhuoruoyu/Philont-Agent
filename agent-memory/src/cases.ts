@@ -61,6 +61,8 @@ export interface Case {
   basis: string | null;
   evidence: string | null;
   createdAt: number;
+  /** 2026-10-08: the owner's own verdict on the reply this case came from (owner_verdict.ts); null until they give one. */
+  ownerVerdict: 'accepted' | 'rejected' | null;
 }
 
 export interface CaseMatch extends Case {
@@ -78,6 +80,7 @@ interface CaseRow {
   basis: string | null;
   evidence: string | null;
   created_at: number;
+  owner_verdict?: string | null;
 }
 
 /** Hard cap on stored cases; oldest beyond it are deleted on write. */
@@ -149,6 +152,7 @@ function rowToCase(r: CaseRow): Case {
     basis: r.basis,
     evidence: r.evidence,
     createdAt: r.created_at,
+    ownerVerdict: r.owner_verdict === 'accepted' || r.owner_verdict === 'rejected' ? r.owner_verdict : null,
   };
 }
 
@@ -172,6 +176,21 @@ export class CaseStore {
       .run(id, input.sessionId, goal, JSON.stringify(trace), tools.join(' '), input.verdict, input.basis ?? null, (input.evidence ?? null)?.slice(0, EVIDENCE_MAX) ?? null, now);
     this.trim();
     return this.get(id)!;
+  }
+
+  /** Record the owner's verdict on the reply this case came from. Returns false when the case is unknown. */
+  setOwnerVerdict(id: string, verdict: 'accepted' | 'rejected'): boolean {
+    return this.db.prepare(`UPDATE memory_cases SET owner_verdict = ? WHERE id = ?`).run(verdict, id).changes > 0;
+  }
+
+  /** Judge verdict × owner verdict, over cases that have both — the judge's calibration table. */
+  judgeVsOwner(): Record<string, number> {
+    const rows = this.db.prepare(
+      `SELECT verdict, owner_verdict AS owner, COUNT(*) AS n FROM memory_cases WHERE owner_verdict IS NOT NULL GROUP BY verdict, owner_verdict`,
+    ).all() as Array<{ verdict: string; owner: string; n: number }>;
+    const out: Record<string, number> = {};
+    for (const r of rows) out[`${r.verdict}/${r.owner}`] = r.n;
+    return out;
   }
 
   get(id: string): Case | null {
