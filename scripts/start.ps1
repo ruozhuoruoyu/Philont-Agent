@@ -41,6 +41,24 @@ if (-not (Test-Path 'launcher/dist/index.js') -or -not (Test-Path 'web-ui/dist')
     exit 1
 }
 
+# The agent packages are `file:` dependencies consumed through their dist/ — the server runs its own
+# source via tsx, but every `@agent/*` import resolves to compiled output. After a git pull that adds an
+# export, a stale dist fails at boot with "does not provide an export named ..." (2026-10-08:
+# renderCaseTrajectory). Refuse to start when any package's src is newer than its dist, and say which.
+$stale = @()
+foreach ($pkg in 'agent-policy', 'agent-tools', 'agent-mcp', 'agent-plugins', 'agent-memory') {
+    $entry = Join-Path $pkg 'dist/src/index.js'
+    if (-not (Test-Path $entry)) { $stale += "$pkg (no dist)"; continue }
+    $built = (Get-Item $entry).LastWriteTimeUtc
+    $newest = Get-ChildItem -Path (Join-Path $pkg 'src') -Recurse -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($newest -and $newest.LastWriteTimeUtc -gt $built) { $stale += "$pkg (src newer than dist)" }
+}
+if ($stale.Count -gt 0) {
+    Write-Host ("Stale build: " + ($stale -join ', ') + ". Run .\scripts\build-all.ps1 after a git pull, then start again.") -ForegroundColor Red
+    exit 1
+}
+
 # Make the managed Python interpreter available to philont (document / z3 tools).
 # setx only reaches new shells; loading from the manifest guarantees this launch
 # has it regardless of when the env var propagates.
