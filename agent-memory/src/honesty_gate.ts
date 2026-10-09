@@ -1666,6 +1666,32 @@ export function isAttributedSizeClaim(text: string, raw: string): boolean {
   }
 }
 
+/**
+ * Is this figure about a FILE at all? 2026-10-09 prod, 22:28–22:36: the owner asked whether an 8-GPU
+ * server could run DeepSeek V4; the reply's "84GB" was the usable VRAM per card. The gate compared it
+ * with this turn's `dir` output, found no such number, ruled it a fabricated FILE size, and — after the
+ * rewrite necessarily said 84GB again — withheld the whole reply. Three turns in a row, including the
+ * owner's "what claim is unsupported?", ended in the ledger-only fallback. A size the gate can check is
+ * a size a tool produced: a file written, inspected, listed. Memory, VRAM, weights, bandwidth, disks are
+ * not in the ledger and never will be.
+ */
+const SIZE_HARDWARE_RE =
+  /显存|内存|VRAM|HBM|\bRAM\b|GPU|带宽|硬盘|磁盘|SSD|容量|权重|参数|模型|数据集|训练|推理|每卡|单卡|\d\s*卡|GB\/s|memory|weights?|params?|parameters|model|dataset|bandwidth|capacity|disk|storage/i;
+const SIZE_FILE_RE =
+  /文件|file|\.(?:docx|xlsx|pptx|pdf|json|md|txt|csv|zip|py|png|jpe?g|mp4|wav|log|tex)\b|字节|bytes?|保存|写入|生成|导出|下载|附件|输出|大小|size|wrote|saved|written|download/i;
+
+export function isFileSizeClaimContext(text: string, raw: string): boolean {
+  const idx = text.indexOf(raw);
+  if (idx < 0) return true;
+  const window = text.slice(Math.max(0, idx - 40), idx) + ' ' + text.slice(idx + raw.length, idx + raw.length + 24);
+  const fileish = SIZE_FILE_RE.test(window);
+  if (SIZE_HARDWARE_RE.test(window) && !fileish) return false;
+  // A GB-scale figure in prose with no file word near it is a capacity, a model, a quota — not a file
+  // this turn produced. Byte/KB/MB figures keep the old behaviour: those are what file tools print.
+  if (/G(?:i)?B$/i.test(raw.trim()) && !fileish) return false;
+  return true;
+}
+
 /** The figure appears verbatim (ignoring spaces / thousands separators / case) in ANY tool output this turn. */
 function sizeClaimQuotedVerbatim(outputs: string, raw: string): boolean {
   const norm = (s: string) => s.replace(/[\s,]+/g, '').toLowerCase();
@@ -1679,7 +1705,10 @@ export function findUnsourcedSizeClaim(
 ): SizeClaim | null {
   const allOutputsRaw = toolOutputs.map((r) => r.content).join('\n');
   const claims = extractSizeClaims(text).filter(
-    (c) => !isAttributedSizeClaim(text, c.raw) && !sizeClaimQuotedVerbatim(allOutputsRaw, c.raw),
+    (c) =>
+      isFileSizeClaimContext(text, c.raw) &&
+      !isAttributedSizeClaim(text, c.raw) &&
+      !sizeClaimQuotedVerbatim(allOutputsRaw, c.raw),
   );
   if (claims.length === 0) return null;
 

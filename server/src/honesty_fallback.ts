@@ -40,9 +40,34 @@ function firstFactLine(content: string): string {
  *    tools actually returned. The model's SUMMARY is what was rejected, not the tool output, so the
  *    output can be quoted as-is — that is exactly the material a claim must be built on.
  */
+/** What the gate rejected, so the owner can see WHICH sentence cost the reply (2026-10-09). */
+export interface RejectedClaim {
+  reason: string;
+  claim?: string;
+}
+
+/**
+ * The pass-2 action for a given verdict. A reply whose only sin is one unsourced FIGURE is flagged
+ * and published, not withheld: prod 2026-10-09 withheld three replies in a row over "84GB" (a VRAM
+ * figure the gate took for a file size), including the answer to "what claim is unsupported?". A
+ * number can be marked in place; a fabricated run or delivery cannot.
+ */
+export function honestyPassTwoAction(reason: string): 'flag' | 'fallback' {
+  return reason === 'fabricated_size_claim' ? 'flag' : 'fallback';
+}
+
+/** The caveat appended to a published reply whose figure the ledger could not source. */
+export function renderUnsourcedFigureCaveat(claim: string | undefined, language: 'zh' | 'en' = 'zh'): string {
+  const c = (claim ?? '').trim();
+  return language === 'en'
+    ? `\n\n⚠ The figure ${c ? `"${c}" ` : ''}above has no source in this turn's tool outputs — please verify it before relying on it.`
+    : `\n\n⚠ 上文${c ? `「${c}」` : '的数字'}在本回合工具输出里没有来源，使用前请自行核对。`;
+}
+
 export function renderHonestyFallback(
   records: ReadonlyArray<LedgerRecord>,
   language: 'zh' | 'en' = 'zh',
+  rejected?: RejectedClaim,
 ): string {
   const en = language === 'en';
   const ok = records.filter((r) => classifyToolResult(r.content) === 'ok');
@@ -58,6 +83,16 @@ export function renderHonestyFallback(
       ? 'The summary written for this turn made a claim the tool ledger does not support, and the rewrite ' +
         'made it again — so it is not being published. What the tools actually did:'
       : '本轮生成的总结里有工具账本不支持的结论，重写后仍然如此，因此不予发布。以下是工具实际做了什么：',
+    // Name the sentence that cost the reply. Without it the owner reads "unsupported claim", asks which,
+    // and gets the same fallback again (prod 2026-10-09 22:34).
+    ...(rejected
+      ? [
+          '',
+          en
+            ? `Rejected claim: ${rejected.claim ? `"${rejected.claim}"` : rejected.reason} (${rejected.reason})`
+            : `被拦下的说法：${rejected.claim ? `「${rejected.claim}」` : rejected.reason}（${rejected.reason}）`,
+        ]
+      : []),
     '',
     en
       ? `- ${ok.length} succeeded (${names(ok)})`

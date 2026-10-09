@@ -165,7 +165,7 @@ import {
   renderSkillOffer,
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
-import { renderHonestyFallback } from './honesty_fallback.js';
+import { renderHonestyFallback, honestyPassTwoAction, renderUnsourcedFigureCaveat } from './honesty_fallback.js';
 import { classifyAuthIntent, matchOfferedAuthWord } from './auth_intent.js';
 import { authRequestCode, isBarePredeliveryAuthReply, matchScopedAuthReply } from './auth_request_id.js';
 import { classifyExploreControlReply, decideResumeBatch, resolveExploreTarget } from './explore_control.js';
@@ -235,7 +235,7 @@ import {
   isSelfReferentialMetaQuestion,
   type IntentDecision,
 } from './intent_router.js';
-import { looksLikeCleanupIntent } from './intent_router.js';
+import { looksLikeCleanupIntent, messageRelatesToGoal } from './intent_router.js';
 import {
   extractCleanupTargets,
   matchesCleanupTarget,
@@ -8549,6 +8549,23 @@ export function resolveRecallInput(
   return `${base}\nCurrent instruction: ${message}`;
 }
 
+/**
+ * Does this message have anything to do with the session bound to the owner? True when no session is
+ * bound (nothing to be unrelated to). Used by the force-continue, the recall query and the learning
+ * judge, so an unrelated question (prod 2026-10-09 21:56: a licensing-clause question under a bound
+ * "why does nobody notice philont" session) is neither advanced into, recalled against, nor judged by
+ * the old tree.
+ */
+function messageRelatesToBoundExplore(sessionId: string, message: string): boolean {
+  const s = focusedReasoningSession(sessionId);
+  if (!s) return true;
+  let claims: string[] = [];
+  try {
+    claims = computeFrontier(memory.reasoning.getNodes(s.id)).slice(0, 20).map((n) => n.claim);
+  } catch { /* the goal alone still decides */ }
+  return messageRelatesToGoal(message, s.goal, claims);
+}
+
 /** Current concrete work target shared by skill recall and the learning judge. */
 function activeWorkGoalForSession(sessionId: string): string | undefined {
   try {
@@ -8614,7 +8631,15 @@ function shadowLearningJudge(
     const lastRouted = carriedIntent.get(sessionId);
     const lastRoutedFresh =
       lastRouted && Date.now() - lastRouted.ts <= INTENT_CARRY_TTL_MS ? lastRouted.goal : undefined;
-    const activeWorkGoal = activeWorkGoalForSession(sessionId);
+    // A stale tree leaf may not confiscate a turn that neither advanced the tree nor talked about it
+    // (prod 2026-10-09 21:34: a contract-review turn judged "failure" against "did you investigate
+    // Show HN / Reddit distribution?").
+    const judgedMessage = bus?.carriedExploreGoal ?? userMessage ?? '';
+    const activeWorkGoal =
+      records.some((r) => isDeepExploreAdvanceRecord({ toolName: r.toolName, toolInput: r.toolInput as Record<string, unknown> | undefined })) ||
+      messageRelatesToBoundExplore(sessionId, judgedMessage)
+        ? activeWorkGoalForSession(sessionId)
+        : undefined;
     const resolved = resolveJudgeGoal(
       bus?.carriedExploreGoal,
       userMessage,
@@ -9795,9 +9820,12 @@ export async function handleChatSend(
   // Resolved once: activeWorkGoalForSession walks the plan table and computes the reasoning frontier,
   // so calling it again just to log it doubles that work on every turn.
   const recallActiveWork = activeWorkGoalForSession(sessionId);
+  // An unrelated message is not a continuation of the bound tree, whatever the router's selfContained
+  // flag says about "prior context" (2026-10-09).
+  const recallRelates = messageRelatesToBoundExplore(sessionId, signalBus.carriedExploreGoal ?? userMessage);
   const recallInput = resolveRecallInput(
     userMessage,
-    recallActiveWork,
+    recallRelates ? recallActiveWork : undefined,
     signalBus.carriedExploreGoal,
     intentDecision?.selfContained,
   );
@@ -11820,14 +11848,21 @@ async function handleChatSendInner(
               `[honesty] session=${safeSessionId(sessionId)} pass=2 action=accept_medium branch=zero-tool ` +
               `reason=${second.reason}`,
             );
+          } else if (second && honestyPassTwoAction(second.reason) === 'flag') {
+            firstTextContent += renderUnsourcedFigureCaveat(second.matchedClaim, statusLang === 'en' ? 'en' : 'zh');
+            memory.metrics.increment('honesty.second_pass_flagged');
+            console.warn(
+              `[honesty] session=${safeSessionId(sessionId)} pass=2 action=flagged branch=zero-tool reason=${second.reason} claim="${second.matchedClaim}"`,
+            );
           } else if (second) {
             firstTextContent = renderHonestyFallback(
               extractRecentToolResults(messages),
               statusLang === 'en' ? 'en' : 'zh',
+              { reason: second.reason, claim: second.matchedClaim },
             );
             memory.metrics.increment('honesty.second_pass_fallback');
             console.error(
-              `[honesty] session=${safeSessionId(sessionId)} pass=2 action=fallback branch=zero-tool reason=${second.reason}`,
+              `[honesty] session=${safeSessionId(sessionId)} pass=2 action=fallback branch=zero-tool reason=${second.reason} claim="${second.matchedClaim}"`,
             );
           } else {
             console.log(`[honesty] session=${safeSessionId(sessionId)} pass=2 action=accept branch=zero-tool`);
@@ -11884,6 +11919,7 @@ async function handleChatSendInner(
       selfReferentialMeta: !!signalBus.selfReferentialMeta,
       userAsksStatus: !!signalBus.userAsksExploreStatus,
       proposedReasoningAdvance,
+      topicMatches: messageRelatesToBoundExplore(sessionId, signalBus.carriedExploreGoal ?? signalBus.userMessage ?? ''),
     })) {
       const forced = await decideForcedDeepExploreCall(sessionId, '', signalBus, turnStartTs);
       if (forced) {
@@ -12454,6 +12490,18 @@ export async function decideForcedDeepExploreCall(
   const activeExplore = hasOwnedActiveExploreSession(sessionId);
   const forceMessage = signalBus.carriedExploreGoal ?? signalBus.userMessage ?? '';
   const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
+  const topicMatches = messageRelatesToBoundExplore(sessionId, forceMessage);
+  if (
+    !topicMatches &&
+    signalBus.intentDecision?.route === 'deep_explore' &&
+    signalBus.intentDecision.selfContained === false &&
+    activeExplore &&
+    !deepExploreRanThisTurn
+  ) {
+    console.warn(
+      `[force-continue] session=${safeSessionId(sessionId)} deep_explore route but the message does not relate to the bound session — not forcing a round`,
+    );
+  }
 
   // A live binding plus a contextual deep-explore route is an instruction to advance THAT tree. The ask
   // tier is intentionally skipped for an active session, so without this branch the route had no actuator:
@@ -12467,6 +12515,7 @@ export async function decideForcedDeepExploreCall(
       alreadyForced: !!signalBus.forcedDeepExploreContinue,
       selfReferentialMeta: metaQuestion,
       userAsksStatus: !!signalBus.userAsksExploreStatus,
+      topicMatches,
     })
   ) {
     signalBus.forcedDeepExploreContinue = true;
@@ -14681,14 +14730,26 @@ async function runToolLoop(
             `[honesty] session=${safeSessionId(sessionId)} pass=2 action=accept_medium branch=tool-loop ` +
             `reason=${secondHonesty.reason}`,
           );
+        } else if (secondHonesty && honestyPassTwoAction(secondHonesty.reason) === 'flag') {
+          response = {
+            ...response,
+            content: response.content + renderUnsourcedFigureCaveat(secondHonesty.matchedClaim, statusLang === 'en' ? 'en' : 'zh'),
+          };
+          memory.metrics.increment('honesty.second_pass_flagged');
+          console.warn(
+            `[honesty] session=${safeSessionId(sessionId)} pass=2 action=flagged branch=tool-loop reason=${secondHonesty.reason} claim="${secondHonesty.matchedClaim}"`,
+          );
         } else if (secondHonesty) {
           response = {
             ...response,
-            content: renderHonestyFallback(secondRecords, statusLang === 'en' ? 'en' : 'zh'),
+            content: renderHonestyFallback(secondRecords, statusLang === 'en' ? 'en' : 'zh', {
+              reason: secondHonesty.reason,
+              claim: secondHonesty.matchedClaim,
+            }),
           };
           memory.metrics.increment('honesty.second_pass_fallback');
           console.error(
-            `[honesty] session=${safeSessionId(sessionId)} pass=2 action=fallback branch=tool-loop reason=${secondHonesty.reason}`,
+            `[honesty] session=${safeSessionId(sessionId)} pass=2 action=fallback branch=tool-loop reason=${secondHonesty.reason} claim="${secondHonesty.matchedClaim}"`,
           );
         } else {
           console.log(`[honesty] session=${safeSessionId(sessionId)} pass=2 action=accept branch=tool-loop`);

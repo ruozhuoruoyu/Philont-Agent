@@ -144,6 +144,15 @@ export function shouldForceRoutedDeepExploreContinue(opts: {
   alreadyForced: boolean;
   selfReferentialMeta: boolean;
   userAsksStatus: boolean;
+  /**
+   * 2026-10-09: does the owner's message have anything to do with the bound session? The router's
+   * selfContained=false means "depends on prior context" — but the prior context can be a contract the
+   * owner just uploaded, not the reasoning tree. Prod 21:56: a clause-by-clause question about a
+   * licensing agreement was routed deep_explore:deliberate and force-continued the "why does nobody
+   * notice philont" session, which searched GitHub star statistics before the clause got an answer.
+   * Absent (older callers) ⇒ true.
+   */
+  topicMatches?: boolean;
 }): boolean {
   return opts.decision?.route === 'deep_explore' &&
     opts.decision.selfContained === false &&
@@ -151,7 +160,47 @@ export function shouldForceRoutedDeepExploreContinue(opts: {
     !opts.advanceRanThisTurn &&
     !opts.alreadyForced &&
     !opts.selfReferentialMeta &&
-    !opts.userAsksStatus;
+    !opts.userAsksStatus &&
+    opts.topicMatches !== false;
+}
+
+// ── Does a message relate to the bound reasoning session? ─────────────────────────────────────────
+//
+// A deterministic floor, not an intent classifier: a short cue ("继续", "ok", "换个角度") always relates;
+// a longer message relates when it shares content tokens with the session goal or its open claims.
+// CJK text has no word boundaries, so it is compared on character bigrams with the function-word
+// bigrams removed; Latin text on words of three or more letters.
+
+const CJK_STOP_BIGRAMS = new Set([
+  '的是', '这个', '那个', '可以', '我们', '你们', '他们', '是否', '一个', '还是', '应该', '进行', '需要', '没有',
+  '什么', '怎么', '如何', '问题', '一下', '但是', '因为', '所以', '如果', '这样', '那样', '已经', '现在', '然后',
+  '或者', '以及', '对于', '关于', '就是', '不是', '可能', '一些', '这些', '那些', '其他', '其中', '通过', '作为',
+  '不能', '不要', '不用', '有没', '不会', '只是', '而且', '并且', '时候', '方面', '情况', '内容', '部分', '一样',
+]);
+
+export function contentTokens(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(/[A-Za-z][A-Za-z0-9_+.-]{2,}/g)) out.add(m[0].toLowerCase());
+  const cjk = text.replace(/[^一-鿿]+/g, ' ');
+  for (const run of cjk.split(' ')) {
+    for (let i = 0; i + 1 < run.length; i++) {
+      const bg = run.slice(i, i + 2);
+      if (!CJK_STOP_BIGRAMS.has(bg)) out.add(bg);
+    }
+  }
+  return out;
+}
+
+/** Short cue ⇒ true; otherwise ≥ 2 shared content tokens with the goal or any open claim. */
+export function messageRelatesToGoal(message: string, goal: string, claims: readonly string[] = []): boolean {
+  const m = (message ?? '').trim();
+  if (m.length <= 12) return true;
+  const mine = contentTokens(m);
+  if (mine.size === 0) return true;
+  const theirs = contentTokens([goal, ...claims].join('\n'));
+  let shared = 0;
+  for (const t of mine) if (theirs.has(t)) shared += 1;
+  return shared >= 2;
 }
 
 /** Run the routed reasoning call before the model's first batch of unrelated tools reaches other gates. */
@@ -163,6 +212,7 @@ export function shouldPreemptWithRoutedDeepExplore(opts: {
   selfReferentialMeta: boolean;
   userAsksStatus: boolean;
   proposedReasoningAdvance: boolean;
+  topicMatches?: boolean;
 }): boolean {
   return !opts.proposedReasoningAdvance && shouldForceRoutedDeepExploreContinue(opts);
 }

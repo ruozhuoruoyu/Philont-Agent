@@ -502,3 +502,34 @@ test('the ask-tier auto choice arms exactly one session, and only within the car
   assert.equal(takeArmedAutoAdvance(stale, 'owner-a', now), false);
   assert.equal(stale.has('owner-a'), false, 'an expired arming is cleared, not left to accumulate');
 });
+
+test('messageRelatesToGoal: short cues relate; a long unrelated question does not; a related one does (2026-10-09)', async () => {
+  const { messageRelatesToGoal } = await import('../src/intent_router.js');
+  const goal = '为什么philont无人关注呢？';
+  const claims = [
+    '是否发生过任何刻意分发动作（Show HN、Reddit、社区、newsletter、演示），效果如何？',
+    'philont 目前对外是否可发现——是否存在公开仓库、文档站、博客或任何网络足迹？',
+  ];
+  for (const cue of ['继续', 'ok', '换个角度', '继续下一轮', '自主探索']) {
+    assert.equal(messageRelatesToGoal(cue, goal, claims), true, cue);
+  }
+  const contract =
+    '第一条，相关业务有说明："相关业务收入"指被许可人因向第三方客户提供实际使用TileRT的人工智能推理、Token、MaaS或相关服务而取得的实际收入。但这个还是不明确，应该是使用TileRT所产生的直接业务收入吧';
+  assert.equal(messageRelatesToGoal(contract, goal, claims), false, 'a licensing clause is not the attention question');
+  assert.equal(messageRelatesToGoal('那 Show HN 和 Reddit 这种分发动作到底做过没有？', goal, claims), true);
+  assert.equal(messageRelatesToGoal('philont 的公开仓库和文档站现在到底有没有网络足迹', goal, claims), true);
+});
+
+test('an unrelated message is not force-continued into the bound tree', () => {
+  const base = {
+    decision: { route: 'deep_explore', domain: 'deliberate', confidence: 0.8, reason: 'contextual', selfContained: false } as IntentDecision,
+    hasActiveSession: true,
+    advanceRanThisTurn: false,
+    alreadyForced: false,
+    selfReferentialMeta: false,
+    userAsksStatus: false,
+  };
+  assert.equal(shouldForceRoutedDeepExploreContinue(base), true, 'absent ⇒ the old behaviour');
+  assert.equal(shouldForceRoutedDeepExploreContinue({ ...base, topicMatches: true }), true);
+  assert.equal(shouldForceRoutedDeepExploreContinue({ ...base, topicMatches: false }), false);
+});

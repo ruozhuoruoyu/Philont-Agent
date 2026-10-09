@@ -1510,3 +1510,17 @@ test('fabricated_size_claim: an unattributed figure with no source still fires',
   assert.ok(r);
   assert.equal(r!.reason, 'fabricated_size_claim');
 });
+
+test('fabricated_size_claim: a GPU-memory / model-weight figure is not a file size (2026-10-09, "84GB")', async () => {
+  const { isFileSizeClaimContext } = await import('../src/honesty_gate.js');
+  assert.equal(isFileSizeClaimContext('RTX 6000D 单卡 96GB 显存，扣除开销后可用约 84GB，8 卡合计', '84GB'), false);
+  assert.equal(isFileSizeClaimContext('FP4 权重约 401 GB，放不进 8 张卡', '401 GB'), false);
+  assert.equal(isFileSizeClaimContext('文件已生成，大小 1.2GB，已保存到 output/', '1.2GB'), true);
+  assert.equal(isFileSizeClaimContext('导出的 report.docx 共 577KB', '577KB'), true);
+  assert.equal(isFileSizeClaimContext('大概需要 24GB 左右', '24GB'), false, 'GB prose with no file word is not a file claim');
+  const r = evaluateHonesty(
+    '结论：V4.1 Flash 以 FP4 约 401 GB 权重放不进 8×84GB 可用显存；V4 Pro 更不行。',
+    { toolResults: [{ toolName: 'shell', content: '✓ TOOL OK\n Directory of E:\\dev\\philont\\server\\output\n 2026/10/09 22:28 1,224 _calc_rtx6000d_v4.py' }] },
+  );
+  assert.ok(!r || r.reason !== 'fabricated_size_claim', 'a VRAM figure must not be judged against a dir listing');
+});

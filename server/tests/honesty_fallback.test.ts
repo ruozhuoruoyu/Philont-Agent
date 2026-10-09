@@ -55,3 +55,14 @@ test('a credential-shaped tool output line is withheld, not published to the cha
   const ok = renderHonestyFallback([{ toolName: 'shell', content: '✓ TOOL OK\nBuilt Lrc.K13.Region3Sum' }], 'en');
   assert.match(ok, /Built Lrc\.K13\.Region3Sum/);
 });
+
+test('the fallback names the rejected claim, and a lone unsourced figure is flagged rather than withheld (2026-10-09)', async () => {
+  const { honestyPassTwoAction, renderUnsourcedFigureCaveat } = await import('../src/honesty_fallback.js');
+  const text = renderHonestyFallback([], 'zh', { reason: 'fabricated_execution_claim', claim: '本地编译' });
+  assert.match(text, /被拦下的说法：「本地编译」（fabricated_execution_claim）/);
+  assert.match(renderHonestyFallback([], 'en', { reason: 'fabricated_execution_claim' }), /Rejected claim: fabricated_execution_claim/);
+  assert.equal(honestyPassTwoAction('fabricated_size_claim'), 'flag');
+  assert.equal(honestyPassTwoAction('fabricated_execution_claim'), 'fallback');
+  assert.match(renderUnsourcedFigureCaveat('84GB', 'zh'), /「84GB」在本回合工具输出里没有来源/);
+  assert.match(renderUnsourcedFigureCaveat(undefined, 'en'), /has no source in this turn's tool outputs/);
+});

@@ -45,6 +45,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   google, symbolab and searx to evaluate `max(2,−5,3)` and `σ(4)` — fifteen minutes of fetches.
   `pariGp` and `magnitude` are on the deliberate tool list under a per-round cap
   (`PHILONT_DEEP_EXPLORE_DELIBERATE_PARI_CALLS`, default 6); z3 stays formal-only.
+- **The honesty gate withheld three replies in a row over a VRAM figure.** The owner asked whether an
+  8-GPU server could run DeepSeek V4; the reply's "84GB" (usable memory per card) was compared with
+  this turn's `dir` listing, ruled a fabricated FILE size, and — since the rewrite necessarily said
+  84GB again — replaced by the ledger-only fallback, which named neither the sentence nor the number.
+  The owner's "which claim is unsupported?" got the same fallback. Three changes: a size figure is a
+  file-size claim only in file context (`isFileSizeClaimContext`: memory / VRAM / weights / bandwidth
+  vocabulary, or a GB-scale figure with no file word near it, is not one); the fallback names the
+  rejected claim; and a reply whose only pass-2 verdict is an unsourced figure is published with a
+  caveat naming it (`honestyPassTwoAction` = flag) instead of withheld — a number can be marked in
+  place, a fabricated run cannot.
+- **An unrelated question was force-continued into the bound reasoning session.** A clause-by-clause
+  question about a licensing agreement was routed deep_explore:deliberate (selfContained=false: it
+  depended on the uploaded contract, not on any tree) and advanced the "why does nobody notice
+  philont" session — a web search on GitHub star statistics — before the clause got its answer; the
+  recall query and the learning judge likewise used the stale tree leaf as the goal (judged
+  "failure": no distribution investigation happened). `messageRelatesToGoal` (short cue ⇒ related;
+  otherwise ≥ 2 shared content tokens with the goal or an open claim) now gates the force-continue,
+  the preempt, the recall query and the judge's active-work goal.
 - **The honesty gate's size-claim check flagged a quotation.** "24GB" was the paper appendix's own
   wording (main.tex line 410), compared against this turn's `ls` numbers and ruled fabricated —
   rewrite, judge=failure, reflection withheld. A figure attributed to a document (论文/原文/附录/the
