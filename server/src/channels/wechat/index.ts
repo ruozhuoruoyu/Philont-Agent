@@ -56,6 +56,7 @@ import { extractUserSection, recordFilterCall } from '../../output_section_filte
 import { runConscienceGate } from '../../conscience_gate.js';
 import { recordControllerFire } from '../../controller_registry.js';
 import { renderForWeChat, renderAuthPromptForWeChat } from './wechat_render.js';
+import { clipAtBoundary } from '../../text_clip.js';
 import { explainSuspension } from '../../suspend_detector.js';
 import { currentPhraseLang } from '../../response_language.js';
 import type { FoldedReports } from '@agent/memory';
@@ -447,7 +448,13 @@ export function makeDispatcher(opts: {
     // quota left, so statuses stop after the cap regardless of throttle windows.
     const progress = createProgressRelay({
       send: async (text) => {
-        const result = await outbound.sendText(replyTo, renderForWeChat(text).slice(0, 900));
+        // 2026-10-09: a progress message is capped at 900 chars so it cannot eat the allowance, but the
+        // cap used to be a bare slice — four deliberation reports in one day stopped mid-sentence and read
+        // as broken summaries. Cut at a sentence boundary and say where the rest is.
+        const marker = currentPhraseLang('wechat') === 'en'
+          ? '\n… (truncated — the full report follows in the reply)'
+          : '\n……（已截断，完整内容见本轮回复）';
+        const result = await outbound.sendText(replyTo, clipAtBoundary(renderForWeChat(text), 900, marker));
         return result.chunksFailed === 0 && !result.remainder &&
           (result.chunksSent > 0 || result.chunksDeduped > 0);
       },

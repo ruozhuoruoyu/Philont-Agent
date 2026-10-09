@@ -102,6 +102,7 @@ import { decidePhaseTransition, goalNeedsDecision, classifyGoal, looksDeductive 
 import { recallRelevanceEnabled, selectRelevantSkills } from './skill_recall.js';
 import { safeSessionId } from './safe_session_id.js';
 import { currentPhraseLang } from './response_language.js';
+import { clipAtBoundary } from './text_clip.js';
 import { stepDownEffort, adapterStats } from './llm-adapter.js';
 import { MECHANICAL_FIX_NAMESPACE, mechanicalFixLearningEnabled } from './mechanical_fix_learning.js';
 
@@ -907,6 +908,110 @@ export function webDedupEnabled(): boolean {
 }
 
 const sessionWebKeys = new Map<string, Set<string>>();
+
+// ── What the prover actually read, kept for the reviewers ─────────────────────────────────────────
+//
+// 2026-10-09: deliberate reviewers lost the web on 2026-06-29 (re-fetch storms) and were told to judge
+// "against the CITED evidence" — but all they received was the prover's argument text. The pages the
+// prover fetched lived in tool outputs nobody handed over. Prod: node 59c1bd57 was refused three times
+// in forty minutes, every refusal saying "本会话事实库/笔记中无 HAT、GEM 原文…当前环境未提供
+// webSearch/webFetch…readFile papers/hat.pdf ENOENT" — the reviewers refuted for lack of ACCESS, not
+// on the merits, and the two were indistinguishable. Each round now records the retrieval results
+// (webFetch / webSearch / readFile) per session; the skeptic prompt carries the excerpts the argument
+// cites first, then the newest, within a character budget.
+
+export interface RetrievedEvidence {
+  tool: string;
+  /** URL / path / query — what the argument would cite. */
+  key: string;
+  excerpt: string;
+  at: number;
+}
+const RETRIEVAL_TOOLS: ReadonlySet<string> = new Set(['webFetch', 'webSearch', 'readFile']);
+const RETRIEVED_MAX_ENTRIES = 40;
+const RETRIEVED_EXCERPT_CHARS = 2400;
+const RETRIEVED_PROMPT_BUDGET_CHARS = 12_000;
+const sessionRetrievedEvidence = new Map<string, RetrievedEvidence[]>();
+
+/** The citable key of a retrieval call, or null for any other tool. */
+export function retrievalKeyOf(name: string, input: Record<string, unknown>): string | null {
+  if (!RETRIEVAL_TOOLS.has(name)) return null;
+  const raw = name === 'webFetch' ? input.url : name === 'readFile' ? input.path : input.query;
+  const key = typeof raw === 'string' ? raw.trim() : '';
+  return key ? key : null;
+}
+
+/** Record one successful retrieval for a session (newest last; a repeated key replaces its entry). */
+export function rememberRetrievedEvidence(
+  store: Map<string, RetrievedEvidence[]>,
+  sessionId: string,
+  tool: string,
+  input: Record<string, unknown>,
+  output: string,
+  now = Date.now(),
+): void {
+  const key = retrievalKeyOf(tool, input);
+  if (!key) return;
+  const text = (output ?? '').trim();
+  // Dedup stubs ("⚠ DUPLICATE … was already run") and near-empty results carry nothing to review.
+  if (text.length < 80 || text.startsWith('⚠')) return;
+  const entries = (store.get(sessionId) ?? []).filter((e) => !(e.tool === tool && e.key === key));
+  entries.push({ tool, key, excerpt: text.slice(0, RETRIEVED_EXCERPT_CHARS), at: now });
+  while (entries.length > RETRIEVED_MAX_ENTRIES) entries.shift();
+  store.set(sessionId, entries);
+}
+
+/** Wrap a tool runner so every successful retrieval is remembered for the session's reviewers. */
+export function withEvidenceCapture(
+  delegate: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>,
+  sessionId: string,
+  store: Map<string, RetrievedEvidence[]> = sessionRetrievedEvidence,
+): (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult> {
+  return async (name, input) => {
+    const result = await delegate(name, input);
+    if (result.ok && RETRIEVAL_TOOLS.has(name)) rememberRetrievedEvidence(store, sessionId, name, input, result.output);
+    return result;
+  };
+}
+
+/**
+ * The prompt section handed to reviewers: entries the argument cites (by key) first, then the newest,
+ * until the budget is spent. Empty string when nothing was retrieved.
+ */
+export function renderRetrievedEvidence(
+  entries: readonly RetrievedEvidence[],
+  argument: string | null,
+  budgetChars = RETRIEVED_PROMPT_BUDGET_CHARS,
+): string {
+  if (!entries.length) return '';
+  const arg = argument ?? '';
+  const cited = entries.filter((e) => arg.includes(e.key));
+  const rest = entries.filter((e) => !arg.includes(e.key)).sort((a, b) => b.at - a.at);
+  const lines: string[] = [
+    '',
+    '## Evidence the prover retrieved this session (verbatim excerpts)',
+    'This is the material the argument was built from — judge the claim AGAINST IT. You have no web access here; ' +
+      'do not refute a claim merely because you could not open its source yourself. If what the argument relies on ' +
+      'is not in these excerpts and not in memory, say UNVERIFIABLE.',
+  ];
+  let spent = lines.join('\n').length;
+  for (const e of [...cited, ...rest]) {
+    const block = `\n### ${e.tool}: ${e.key}\n${e.excerpt}`;
+    if (spent + block.length > budgetChars) {
+      const room = budgetChars - spent - 40;
+      if (room > 200) lines.push(`\n### ${e.tool}: ${e.key}\n${e.excerpt.slice(0, room)}…`);
+      break;
+    }
+    lines.push(block);
+    spent += block.length;
+  }
+  return lines.join('\n');
+}
+
+/** For tests / status: what the reviewers of this session would see. */
+export function retrievedEvidenceFor(sessionId: string): readonly RetrievedEvidence[] {
+  return sessionRetrievedEvidence.get(sessionId) ?? [];
+}
 
 /** Normalized dedup key for a webFetch/webSearch call, or null for any other tool. */
 export function webDedupKey(name: string, input: Record<string, unknown>): string | null {
@@ -2055,12 +2160,12 @@ export function renderSessionSubject(
     ? `\nmode: ${mode}${
         mode === 'formal'
           ? ' (pariGp / z3Verify / magnitude; no web)'
-          : ' (webSearch / webFetch / memory; NO pariGp, z3 or magnitude)'
+          : ' (webSearch / webFetch / memory, plus a small pariGp/magnitude budget for arithmetic; no z3)'
       }`
     : '';
   const mismatch =
     mode === 'deliberate' && looksDeductive(goal ?? '')
-      ? `\n⚠ this goal reads as a proof/derivation but the session cannot compute or verify anything. ` +
+      ? `\n⚠ this goal reads as a proof/derivation but the session only has a small arithmetic budget and no z3. ` +
         `To fix it: deep_explore({action:"continue", mode:"formal"}).`
       : '';
   // The hand-off offer. deep_explore_autoadvance.ts has advanced sessions on its own since it was
@@ -2289,7 +2394,21 @@ export const DELIBERATE_RESEARCH_ALLOW: ReadonlySet<string> = new Set([
   'get_fact',
   'list_facts',
   'readFile',
+  // 2026-10-09: a deliberate session had NO compute tool, while the checkable-object tooth still refused
+  // to settle an identity "never machine-checked". Prod: the model went to api.mathjs.org, a wolframalpha
+  // DEMO appid, bing, duckduckgo, brave, google, symbolab and searx to evaluate max(2,−5,3) and σ(4) —
+  // fifteen minutes of fetches for arithmetic. Small computations belong to pariGp/magnitude (sandboxed,
+  // pure); the per-round cap (DELIBERATE_PARI_CALLS) keeps a research round from turning into a prover.
+  'pariGp',
+  'magnitude',
 ]);
+
+/** pariGp calls one DELIBERATE round may run (env PHILONT_DEEP_EXPLORE_DELIBERATE_PARI_CALLS, default 6, range 0-20; 0 = none). */
+export const DELIBERATE_PARI_CALLS = (() => {
+  const n = Number(process.env.PHILONT_DEEP_EXPLORE_DELIBERATE_PARI_CALLS);
+  return Number.isInteger(n) && n >= 0 && n <= 20 ? n : 6;
+})();
+const DELIBERATE_PARI_TIMEOUT_MS = 30_000;
 
 /** Same node enum, deliberation vocabulary. */
 const DELIBERATE_KIND_LABEL: Record<ReasoningNodeKind, string> = {
@@ -2363,6 +2482,7 @@ export function renderDeliberatePrompt(session: ReasoningSession, nodes: Reasoni
   lines.push('  · For a FACTUAL sub-question use basis="empirical" (default) — cite an external source. For a VALUE-laden one ("what should I prefer / which fits ME"), use basis="preferential" and ground it in the USER\'s own values/data (searchNotes / getFact / readFile) — an external citation cannot settle what the user wants.');
   lines.push('- webSearch / webFetch / fetchUrl: gather external evidence; read the actual source, do not settle on a snippet alone.');
   lines.push('- searchNotes / searchKB / getFact / listFacts / readFile: the USER’s own data and your memory — often the most decisive evidence (their constraints, preferences, prior facts). Check these BEFORE the open web.');
+  lines.push(`- pariGp(script) / magnitude: SMALL computations a finding depends on (arithmetic, a sigmoid, a max, a z-score, a quick enumeration). Use these — NEVER a web calculator, search engine or "DEMO" API for a number. At most ${DELIBERATE_PARI_CALLS} pariGp calls per round; this is a research session, not a prover.`);
   lines.push('');
   lines.push('## How to deliberate (discipline)');
   lines.push('1. **Decompose first.** Round 1 must split the question into 2–5 concrete, answerable sub-questions — do NOT browse before there is a tree.');
@@ -2437,8 +2557,9 @@ export function buildDeliberateSkepticPrompt(
     lines.push('- Only when the conclusion clearly and fairly follows from the user\'s OWN stated values/data → verdict HOLDS.');
   } else {
     lines.push('- You may use webSearch / webFetch / readFile / memory recall to CHECK whether the cited evidence actually says what is claimed, and whether a contradicting source exists.');
-    lines.push('- REFUTE if: the conclusion is not actually supported by the cited evidence; the evidence is missing, weak, or misread; a contradicting source exists; or the reasoning is motivated (cherry-picked) rather than balanced.');
-    lines.push('- **If you are unsure it is genuinely evidence-backed → verdict REFUTED** (a finding requires real support; any doubt fails).');
+    lines.push('- REFUTE if: the conclusion is not actually supported by the cited evidence; the evidence is weak or misread; a contradicting source exists; or the reasoning is motivated (cherry-picked) rather than balanced.');
+    lines.push('- **If you are unsure on the MERITS → verdict REFUTED** (a finding requires real support; any doubt fails).');
+    lines.push('- **If the cited source is simply out of your reach** (no web access here; not in the retrieved excerpts below; not in memory) → verdict UNVERIFIABLE, not REFUTED. An inaccessible source is not a refuted claim; reserve REFUTED for a gap you can actually name.');
     lines.push('- Only when the conclusion is clearly and fairly supported by the cited evidence → verdict HOLDS.');
   }
   lines.push('');
@@ -2446,7 +2567,21 @@ export function buildDeliberateSkepticPrompt(
   lines.push('First briefly state your reasons (if refuting, name the specific gap / missing or contradicting evidence), then on a **single final line** output one of:');
   lines.push('VERDICT: REFUTED');
   lines.push('VERDICT: HOLDS');
+  if (!preferential) lines.push('VERDICT: UNVERIFIABLE');
   return lines.join('\n');
+}
+
+/**
+ * The metered-channel form of a full report. 2026-10-09: WeChat delivered the whole deliberation report
+ * as a progress message and cut it at 900 characters with no marker — four reports in one day stopped
+ * mid-sentence. The report's sections are ordered head → established → ruled out → open, so a boundary
+ * clip keeps the verdict and the established findings; the full text follows in the turn's reply.
+ */
+export function renderReportDigest(report: string, max = 820, lang: 'zh' | 'en' = currentPhraseLang()): string {
+  const trailer = lang === 'en'
+    ? '\n… (digest — the full report follows in the reply)'
+    : '\n……（摘要；完整报告见本轮回复）';
+  return clipAtBoundary(report, max, trailer);
 }
 
 /** Wrap-up report for DELIBERATE mode (evidence-backed findings / ruled out / open). */
@@ -2727,6 +2862,11 @@ export interface SkepticVerdict {
   refuted: boolean;
   /** Core objection when refuting (empty string when the verdict is HOLDS) */
   reason: string;
+  /**
+   * 2026-10-09: the reviewer could not reach the cited evidence (no access, not in the excerpts, not in
+   * memory). Counted as an abstention, not a refutation — an inaccessible source is not a refuted claim.
+   */
+  unverifiable?: boolean;
 }
 
 export interface VerificationTally {
@@ -2735,6 +2875,8 @@ export interface VerificationTally {
   refutedCount: number;
   /** Number of reviewers who gave a parseable verdict (abstentions / parse failures are not counted) */
   validVotes: number;
+  /** Reviewers who answered UNVERIFIABLE (could not reach the evidence); not in validVotes. */
+  unverifiableCount?: number;
   topObjection: string | null;
   /** Cumulative LLM tokens spent on this verification run (counted against the session budget to prevent silent token burn) */
   tokensSpent: number;
@@ -2857,6 +2999,9 @@ export function parseSkepticVerdict(text: string): SkepticVerdict | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i];
     if (!isVerdictLine(l)) continue;
+    if (/无法核验|无法验证|unverifiable|cannot verify|could not verify/i.test(l)) {
+      return { refuted: false, reason: extractObjection(text), unverifiable: true };
+    }
     if (/证伪|推翻|refut|reject/i.test(l)) return { refuted: true, reason: extractObjection(text) };
     if (/维持|通过|成立|hold|uphold|accept/i.test(l)) return { refuted: false, reason: '' };
   }
@@ -2880,16 +3025,24 @@ function extractObjection(text: string): string {
  * accept (avoid degrading everything on infrastructure failures).
  */
 export function tallyVerdicts(verdicts: Array<SkepticVerdict | null>): VerificationTally {
-  const valid = verdicts.filter((v): v is SkepticVerdict => v !== null);
+  const answered = verdicts.filter((v): v is SkepticVerdict => v !== null);
+  const unverifiable = answered.filter((v) => v.unverifiable === true);
+  const valid = answered.filter((v) => v.unverifiable !== true);
   const refuted = valid.filter((v) => v.refuted);
   const validVotes = valid.length;
   const refutedCount = refuted.length;
-  const confirmed = validVotes === 0 ? true : refutedCount * 2 < validVotes;
+  // All abstentions (infrastructure) → accept. But reviewers who ANSWERED "I could not reach the
+  // evidence" are not an outage: when nobody could check it, the finding is not established — it stays
+  // open with the objection naming what was out of reach, so the prover attaches it next time.
+  const confirmed = validVotes === 0 ? unverifiable.length === 0 : refutedCount * 2 < validVotes;
   return {
     confirmed,
     refutedCount,
     validVotes,
-    topObjection: refuted[0]?.reason ?? null,
+    unverifiableCount: unverifiable.length,
+    topObjection: refuted[0]?.reason ?? (validVotes === 0 && unverifiable.length
+      ? `no reviewer could reach the cited evidence: ${unverifiable[0].reason || 'source not available in this session'}`
+      : null),
     tokensSpent: 0,
   };
 }
@@ -2914,9 +3067,10 @@ const SKEPTIC_PARI_TIMEOUT_MS = 20_000;
 /** Per-reviewer wrapper: counts pariGp calls, clamps their timeout, refuses past the cap. Pure; exported for tests. */
 export function limitReviewerCompute(
   delegate: (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult>,
-  limits: { maxCalls: number; timeoutMs: number } = { maxCalls: SKEPTIC_PARI_CALLS, timeoutMs: SKEPTIC_PARI_TIMEOUT_MS },
+  limits: { maxCalls: number; timeoutMs: number; label?: string } = { maxCalls: SKEPTIC_PARI_CALLS, timeoutMs: SKEPTIC_PARI_TIMEOUT_MS },
 ): (name: string, input: Record<string, unknown>) => Promise<MiniLoopToolRunResult> {
   let calls = 0;
+  const label = limits.label ?? 'review';
   return async (name, input) => {
     if (name !== 'pariGp') return delegate(name, input);
     if (calls >= limits.maxCalls) {
@@ -2924,8 +3078,10 @@ export function limitReviewerCompute(
         ok: false,
         output: '',
         error:
-          `Reviewer compute budget spent (${limits.maxCalls} pariGp call(s) per review). ` +
-          `Judge from what you have already computed and the argument as written; do not retry.`,
+          `Compute budget spent (${limits.maxCalls} pariGp call(s) per ${label}). ` +
+          (label === 'review'
+            ? `Judge from what you have already computed and the argument as written; do not retry.`
+            : `Work from what you have already computed; record what the numbers showed, do not retry.`),
       };
     }
     calls += 1;
@@ -2946,7 +3102,7 @@ export async function runAdversarialVerification(opts: {
   onStatus?: (text: string) => void;
   abortSignal?: AbortSignal;
 }): Promise<VerificationTally> {
-  if (opts.count <= 0) return { confirmed: true, refutedCount: 0, validVotes: 0, topObjection: null, tokensSpent: 0 };
+  if (opts.count <= 0) return { confirmed: true, refutedCount: 0, validVotes: 0, unverifiableCount: 0, topObjection: null, tokensSpent: 0 };
   const runs = Array.from({ length: opts.count }, (_, i) =>
     runMiniAgentLoop({
       systemPrompt: opts.systemPrompt,
@@ -3387,6 +3543,7 @@ export function makeReasoningToolRunner(
             console.warn(
               `[deep-explore] settle refused by reviewers node=${nodeId} session=${safeSessionId(sessionId)} ` +
                 `${tally.refutedCount}/${tally.validVotes} refuted` +
+                (tally.unverifiableCount ? ` (${tally.unverifiableCount} could not reach the evidence)` : '') +
                 (tally.topObjection ? `: ${tally.topObjection.replace(/\s+/g, ' ').slice(0, 300)}` : ''),
             );
             noteSettleAttempt(sessionId, {
@@ -3566,7 +3723,7 @@ export interface DeepExploreDeps {
   /** Per-round progress summary sink. Unlike onStatus (per-iteration pings, console-only), this
    *  carries the round's milestone summary (nodes expanded / lemmas proved) to the user-facing
    *  status stream so multi-minute rounds are not silent. */
-  onMilestone?: (text: string) => void;
+  onMilestone?: (text: string, opts?: { digest?: string }) => void;
   /** Completed plan/filesystem work that may settle a still-open tree node. The tree remains the
    * source of proof status: this evidence is surfaced for an explicit reason_record, never used
    * to auto-prove a node by fuzzy text matching. */
@@ -3675,7 +3832,9 @@ export function createDeepExploreTool(
         .map((n) => n.claim);
       const sys =
         AGENT_SELF_REFERENCE_NOTE + '\n\n' +
-        profile.buildSkepticPrompt(node.claim, argument, session.goal, session.assumptions, provedClaims, basis);
+        profile.buildSkepticPrompt(node.claim, argument, session.goal, session.assumptions, provedClaims, basis) +
+        // Deliberate reviewers have no web (2026-06-29); hand them what the prover retrieved (2026-10-09).
+        (profile.id === 'deliberate' ? renderRetrievedEvidence(retrievedEvidenceFor(session.id), argument) : '');
       // Skeptics get the profile's research tools minus pariGp.
       // 2026-06-08: pariGp is excluded — skeptics burned their whole budget retrying malformed PARI/GP
       // scripts instead of reviewing; z3 covers rigorous formal refutation.
@@ -3783,7 +3942,7 @@ export function createDeepExploreTool(
         userMessage: 'Run the grounding search for the goal/question above and output ONLY the JSON array of cards.',
         llm: miniLoopLLM,
         toolDefs: webDefs,
-        toolRunner: withSessionWebDedup(subTurnToolRunner, session.id), // 2026-06-29: dedup the single grounding pass too; the general runner CAN reach web; the per-round reasoning whitelist still cannot
+        toolRunner: withSessionWebDedup(withEvidenceCapture(subTurnToolRunner, session.id), session.id), // 2026-06-29: dedup the single grounding pass too; the general runner CAN reach web; the per-round reasoning whitelist still cannot
         maxIters: LIT_GROUNDING_MAX_ITERS,
         toolWhitelist: WEB_TOOL_NAMES,
         onStatus: deps.onStatus,
@@ -3973,7 +4132,7 @@ export function createDeepExploreTool(
       makeReasoningToolRunner(
         reasoning,
         session.id,
-        subTurnToolRunner,
+        withEvidenceCapture(subTurnToolRunner, session.id), // what this round reads, the reviewers get to read too
         buildVerifyProved(session, ctrl.signal, profile),
         actions,
         profile,
@@ -3987,6 +4146,10 @@ export function createDeepExploreTool(
         treeVersion: () => reasoningTreeVersion(reasoning.getNodes(session.id)),
       },
     );
+    // A deliberate round may compute, but only a little (see DELIBERATE_RESEARCH_ALLOW).
+    const roundRunner = profile.id === 'deliberate'
+      ? limitReviewerCompute(boundRunner, { maxCalls: DELIBERATE_PARI_CALLS, timeoutMs: DELIBERATE_PARI_TIMEOUT_MS, label: 'round' })
+      : boundRunner;
     let result;
     const thinkingOnlyBefore = adapterStats.thinkingOnlyRetries;
     try {
@@ -3995,7 +4158,7 @@ export function createDeepExploreTool(
         userMessage,
         llm: miniLoopLLM,
         toolDefs: rt.toolDefs,
-        toolRunner: boundRunner,
+        toolRunner: roundRunner,
         maxIters,
         toolWhitelist: rt.whitelist,
         onStatus: deps.onStatus,
@@ -4123,7 +4286,7 @@ export function createDeepExploreTool(
       // for why a terminal deliberate session is unsafe when the user has other open sessions.
       reasoning.setSessionStatus(session.id, 'answered');
       const report = profile.renderReport(session, after, 'answered');
-      deps.onMilestone?.(report); // persist the conclusion as a chat bubble so it is not lost
+      deps.onMilestone?.(report, { digest: renderReportDigest(report) }); // persist the conclusion as a chat bubble so it is not lost
       return { success: true, output: report };
     }
     if (answerConditionsMet && deliberateSoftAnswerEnabled()) {
@@ -4134,7 +4297,7 @@ export function createDeepExploreTool(
       if (!deliveredBefore || substantive) {
         sessionLastSoftAnswerRound.set(session.id, roundsRun);
         const report = profile.renderReport(session, after, 'answered');
-        deps.onMilestone?.(report); // persist the conclusion as a chat bubble so it is not lost
+        deps.onMilestone?.(report, { digest: renderReportDigest(report) }); // persist the conclusion as a chat bubble so it is not lost
         return {
           success: true,
           output:
@@ -4244,7 +4407,7 @@ export function createDeepExploreTool(
       makeReasoningToolRunner(
         reasoning,
         session.id,
-        subTurnToolRunner,
+        withEvidenceCapture(subTurnToolRunner, session.id),
         buildVerifyProved(session, ctrl.signal, profile),
         actions,
         profile,
@@ -4258,7 +4421,12 @@ export function createDeepExploreTool(
       },
     );
     // Diverge browses-instead-of-generating backstop: cap web lookups so the round must decompose.
-    const cappedRunner = withWebCallCap(boundRunner, { cap: DIVERGE_WEB_CAP, webTools: WEB_TOOL_NAMES });
+    const cappedRunner = withWebCallCap(
+      profile.id === 'deliberate'
+        ? limitReviewerCompute(boundRunner, { maxCalls: DELIBERATE_PARI_CALLS, timeoutMs: DELIBERATE_PARI_TIMEOUT_MS, label: 'round' })
+        : boundRunner,
+      { cap: DIVERGE_WEB_CAP, webTools: WEB_TOOL_NAMES },
+    );
     let result;
     const thinkingOnlyBefore = adapterStats.thinkingOnlyRetries;
     try {
@@ -4563,8 +4731,8 @@ export function createDeepExploreTool(
         if (modeMismatch) {
           noteParts.push(
             `⚠ Domain check — you asked for mode="deliberate", but this goal reads as a proof/derivation. ` +
-              `A deliberate session has webSearch / webFetch / memory and NO pariGp, z3Verify or magnitude, ` +
-              `so it cannot compute or verify anything. If that is not what you meant, switch it without ` +
+              `A deliberate session has webSearch / webFetch / memory and only a small pariGp/magnitude budget ` +
+              `(no z3Verify), so it cannot carry a proof. If that is not what you meant, switch it without ` +
               `losing the tree: deep_explore({action:"continue", mode:"formal"}).`,
           );
         }
@@ -4600,7 +4768,7 @@ export function createDeepExploreTool(
           console.warn(`[deep-explore] session ${session.id} mode ${from} → ${params.mode} (tree kept)`);
           deps.onMilestone?.(
             `Session domain changed ${from} → ${params.mode}. The tree is untouched; from this round on the ` +
-              `tools are ${params.mode === 'formal' ? 'pariGp / z3Verify / magnitude (no web)' : 'webSearch / webFetch / memory (no verifier)'}.`,
+              `tools are ${params.mode === 'formal' ? 'pariGp / z3Verify / magnitude (no web)' : 'webSearch / webFetch / memory, plus a small pariGp/magnitude budget (no z3)'}.`,
           );
         }
         if (!session) {
@@ -4735,7 +4903,7 @@ export function createDeepExploreTool(
         if (!session) return { success: true, output: 'No deep-explore session to finalize.' };
         selectSession(owner, session, resolved.source ?? 'sole');
         const report = (PROFILES[session.mode] ?? FORMAL_PROFILE).renderReport(session, reasoning.getNodes(session.id));
-        deps.onMilestone?.(report); // persist as a chat bubble so the conclusion is not lost
+        deps.onMilestone?.(report, { digest: renderReportDigest(report) }); // persist as a chat bubble so the conclusion is not lost
         return { success: true, output: report };
       }
 

@@ -3508,15 +3508,17 @@ let deepExploreAdvanceSession: ((session: ReasoningSession) => Promise<ToolResul
  * bubble (its onStatus is an ephemeral status line, cleared at turn end); other channels (WeChat) use
  * onStatus, which they deliver as a real message. currentSessionId/onStatus come from the ALS.
  */
-function deliverDeepExploreMilestone(text: string): void {
+function deliverDeepExploreMilestone(text: string, opts?: { digest?: string }): void {
   const sid = currentSessionId();
   const webuiSend = sid ? webuiClients.get(sid) : undefined;
   if (webuiSend) {
     webuiSend({ type: 'milestone', text });
     return;
   }
+  // A metered channel (WeChat) gets the digest when the sender provided one (2026-10-09); the full text
+  // still reaches the owner in the turn's reply.
   const s = currentTurnStatus();
-  if (s) s(text, { kind: 'milestone' });
+  if (s) s(opts?.digest ?? text, { kind: 'milestone' });
 }
 
 export const DEEP_EXPLORE_VERIFY_TOOL_NAMES = new Set([

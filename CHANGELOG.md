@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-10-09 — a day's production log on glm5.3-flash-b30t)
+
+- **GLM thinking was never on the wire.** `glm*` resolved to the empty OpenAI-compat profile, so the
+  endpoint's default-on thinking ran until `max_tokens` on every call — 31 "thinking consumed the whole
+  16000-token budget" retries in one day, one of them 32000 thinking tokens on a 61-token prompt — and
+  "retrying at effort=low" changed nothing. New `GlmProfile` (`server/src/providers/glm.ts`): the
+  toggle is pinned on both wire formats, `effort=low` is thinking OFF (GLM has no effort knob), high/max
+  raise `max_tokens` to `PHILONT_LLM_REASONING_MAX_TOKENS`; the adapter's thinking-only retry goes
+  straight to thinking off on a profile without an effort knob (`supportsEffort`).
+- **The aux ladder never turned thinking off for GLM.** Every aux call walked 256 → 512 → 1024 and threw
+  with `content_chars=0, reasoning_chars=4315`: the ladder only disabled thinking when the reasoning
+  was *invisible*. A reply with no content and a visible reasoning block (`thinkingStarved`) now takes
+  the same path — thinking off at the same budget, then the decisive budget — and `glm` is on the
+  aux thinking-off list from the first call. This is what made the skill-relevance selector fail on
+  nearly every turn and the idle consolidator time out.
+- **A reply the output limit cut was shipped as a finished one.** The text path dropped
+  `stop_reason`. Both adapters now ask the model once to continue from where it stopped and join the
+  halves (`joinContinuation` drops a restarted last line); a reply still cut after that ends with
+  `TRUNCATION_MARKER`, and `LLMResponse` carries `stopReason` / `truncated`.
+  `PHILONT_LLM_CONTINUE_ON_CAP=0` disables the extra request.
+- **Owner-facing text was cut mid-sentence with no marker**: the WeChat progress relay (`slice(0, 900)`
+  — four deliberation reports in one day), the auto-advance milestone template (claims at 120 chars,
+  next step at 160, the end-of-session summary at 600). `clipAtBoundary` (`server/src/text_clip.ts`)
+  cuts at a sentence/line boundary and appends a marker; deep_explore hands metered channels a
+  `renderReportDigest` of the full report (the web-ui bubble keeps the whole text).
+- **Deliberate reviewers refuted for lack of access, not on the merits.** They lost the web on
+  2026-06-29 and were told to judge "against the cited evidence" — but only got the prover's argument
+  text; the fetched pages lived in tool outputs nobody handed over (node 59c1bd57: refused three
+  times in forty minutes, every refusal "本会话事实库/笔记中无 HAT、GEM 原文…"). Each round now records
+  its retrievals (`withEvidenceCapture`: webFetch / webSearch / readFile, 40 entries, 2400 chars each);
+  the skeptic prompt carries the excerpts the argument cites first (`renderRetrievedEvidence`). A
+  reviewer may answer `VERDICT: UNVERIFIABLE`: an abstention, not a refutation; when *nobody* could
+  reach the evidence the finding stays open with that objection instead of passing fail-open.
+- **A deliberate session had no compute tool while the checkable-object tooth demanded a machine
+  check.** The model went to api.mathjs.org, a wolframalpha DEMO appid, bing, duckduckgo, brave,
+  google, symbolab and searx to evaluate `max(2,−5,3)` and `σ(4)` — fifteen minutes of fetches.
+  `pariGp` and `magnitude` are on the deliberate tool list under a per-round cap
+  (`PHILONT_DEEP_EXPLORE_DELIBERATE_PARI_CALLS`, default 6); z3 stays formal-only.
+- **The honesty gate's size-claim check flagged a quotation.** "24GB" was the paper appendix's own
+  wording (main.tex line 410), compared against this turn's `ls` numbers and ruled fabricated —
+  rewrite, judge=failure, reflection withheld. A figure attributed to a document (论文/原文/附录/the
+  paper/reported/…), quoted, or present verbatim in any tool output this turn is a quote, not a
+  measurement (`isAttributedSizeClaim`). An unattributed figure with no source still fires.
+
 ### Added
 
 - **The acceptance loop, inside the conversation.** The 2026-10 measurements say the one lever that

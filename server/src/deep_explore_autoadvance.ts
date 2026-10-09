@@ -19,6 +19,7 @@ import { computeFrontier, chainProgress, describeChainProgress, describeSettleRe
 import { startProgressTicker } from './task_progress.js';
 import type { ReasoningStore, ReasoningSession } from '@agent/memory';
 import type { ToolResult } from '@agent/policy';
+import { clipAtBoundary } from './text_clip.js';
 import {
   scoreTrajectory,
   traitTunedContract,
@@ -348,7 +349,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
           pauseReasons.delete(s.id);
           deps.reasoning.setAutoPause(s.id, null);
           notify(
-            `✅ 自动推进结束:"${s.goal.slice(0, 50)}" 状态=${fresh?.status ?? 'closed'}。\n${(out?.output ?? '').slice(0, 600)}`,
+            `✅ 自动推进结束:"${s.goal.slice(0, 50)}" 状态=${fresh?.status ?? 'closed'}。\n${clipAtBoundary(out?.output ?? '', 600)}`,
             { important: true },
           );
         } else {
@@ -374,7 +375,8 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
                 // "没产出是为啥？" and the model, unable to see this card, answered about something else.
                 ? `本轮有新记录（见下），但未推进当前目标节点；连续 ${fresh.noProgressRounds} 轮无实质进展。`
                 : `本轮未确认有效进展，连续无进展记录为 ${fresh.noProgressRounds} 轮。`) +
-            (newlySettled.length ? `\n本轮新增记录：${newlySettled.slice(0, 2).map((n) => n.claim.slice(0, 120)).join('；')}` : '') +
+            // 2026-10-09: claims are whole propositions; a bare 120-char slice read as a cut-off summary.
+            (newlySettled.length ? `\n本轮新增记录：${newlySettled.slice(0, 2).map((n) => clipAtBoundary(n.claim, 120)).join('；')}` : '') +
             // Prod 2026-09-15 14:45 → 15:14: two rounds on the depth-2 target, the model claimed proves_target
             // both times, the tree recorded nothing — the verifier refused the proof. The owner read "no progress".
             // 2026-09-17: say WHICH gate refused it and what it objected to; a proof the reviewers threw
@@ -390,7 +392,7 @@ export function createAutoAdvanceLoop(deps: AutoAdvanceDeps): AutoAdvanceLoop {
             })() +
             // The one number that cannot be gamed by splitting: did the root → target chain get shorter.
             (fresh.frontierTargetNodeId ? `\n${describeChainProgress(chainProgress(nodes, previous, fresh.frontierTargetNodeId))}` : '') +
-            `\n下一步：${next ? next.claim.slice(0, 160) : '检查剩余开放节点和停止条件'}。`, { progress: 'milestone' });
+            `\n下一步：${next ? clipAtBoundary(next.claim, 160) : '检查剩余开放节点和停止条件'}。`, { progress: 'milestone' });
         }
       }
     } catch (e) {

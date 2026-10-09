@@ -1640,11 +1640,47 @@ const SIZE_PRODUCING_TOOLS: ReadonlySet<string> = new Set([
   'shell',
 ]);
 
+/**
+ * A size figure the reply QUOTES rather than measures. 2026-10-09 prod: "24GB" was the paper's own
+ * appendix text (main.tex line 410, read in an earlier turn); the gate compared it with this turn's
+ * stat/ls numbers, found no match and ruled it fabricated — a rewrite, a failed judge verdict and a
+ * withheld reflection for a correctly attributed quotation. Attribution words in the 40 characters
+ * before the figure, or quotation marks around it, mark a quote.
+ */
+const SIZE_ATTRIBUTION_RE =
+  /(论文|原文|作者|文中|文献|附录|引文|摘要|报告称|所述|提到|写道|写的是|据|按|according to|the paper|the authors?|reported|states?|quotes?|quoted|cited|says|said|wrote|mentions?|claims?)/i;
+const OPEN_QUOTES = '"“「『‘\'`《';
+const CLOSE_QUOTES = '"”」』’\'`》';
+
+export function isAttributedSizeClaim(text: string, raw: string): boolean {
+  let from = 0;
+  for (;;) {
+    const idx = text.indexOf(raw, from);
+    if (idx < 0) return false;
+    const before = text.slice(Math.max(0, idx - 40), idx);
+    if (SIZE_ATTRIBUTION_RE.test(before)) return true;
+    const prev = before.replace(/\s+$/, '').slice(-1);
+    const after = text.slice(idx + raw.length).replace(/^\s+/, '').slice(0, 1);
+    if (prev && OPEN_QUOTES.includes(prev) && after && CLOSE_QUOTES.includes(after)) return true;
+    from = idx + raw.length;
+  }
+}
+
+/** The figure appears verbatim (ignoring spaces / thousands separators / case) in ANY tool output this turn. */
+function sizeClaimQuotedVerbatim(outputs: string, raw: string): boolean {
+  const norm = (s: string) => s.replace(/[\s,]+/g, '').toLowerCase();
+  const needle = norm(raw);
+  return needle.length > 0 && norm(outputs).includes(needle);
+}
+
 export function findUnsourcedSizeClaim(
   text: string,
   toolOutputs: ReadonlyArray<ToolResultRecord>,
 ): SizeClaim | null {
-  const claims = extractSizeClaims(text);
+  const allOutputsRaw = toolOutputs.map((r) => r.content).join('\n');
+  const claims = extractSizeClaims(text).filter(
+    (c) => !isAttributedSizeClaim(text, c.raw) && !sizeClaimQuotedVerbatim(allOutputsRaw, c.raw),
+  );
   if (claims.length === 0) return null;
 
   // 2026-05-20 false-positive fix: the baseline for size claims can only come from tools that produce file sizes.

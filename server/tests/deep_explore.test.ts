@@ -1207,7 +1207,11 @@ test('toolAllow: deliberate allows web + user data, formal excludes web', () => 
   // formal keeps the math verify tools and NO web
   assert.ok(FORMAL_PROFILE.toolAllow.has('z3Verify'));
   assert.ok(!FORMAL_PROFILE.toolAllow.has('webSearch'), 'formal must not allow web in the loop');
-  assert.ok(!DELIBERATE_PROFILE.toolAllow.has('pariGp'), 'deliberate has no formal compute tools');
+  // 2026-10-09: a deliberate round may compute a LITTLE (capped pariGp / magnitude) — prod spent fifteen
+  // minutes fetching web calculators for max(2,−5,3). z3 stays formal-only.
+  assert.ok(DELIBERATE_PROFILE.toolAllow.has('pariGp'), 'deliberate may compute a little');
+  assert.ok(DELIBERATE_PROFILE.toolAllow.has('magnitude'));
+  assert.ok(!DELIBERATE_PROFILE.toolAllow.has('z3Verify'), 'deliberate carries no proof verifier');
 });
 
 test('settlePrecheck: deliberate requires evidence to settle; formal never blocks', () => {
@@ -1236,7 +1240,8 @@ test('renderDeliberatePrompt: question vocabulary + evidence discipline, no math
   assert.match(p, /evidence/i);
   assert.match(p, /Established findings/);
   assert.match(p, /该不该接这个 offer/);
-  assert.ok(!/pariGp|magnitude|lemma\b|z3Verify/.test(p), 'deliberate prompt must not carry math tooling');
+  assert.ok(!/lemma\b|z3Verify/.test(p), 'deliberate prompt must not carry proof tooling');
+  assert.match(p, /NEVER a web calculator/, 'small computations go to pariGp/magnitude, not the web (2026-10-09)');
 });
 
 test('buildDeliberateSkepticPrompt: an evidence reviewer, not a proof-gap reviewer', () => {
@@ -2097,7 +2102,7 @@ test('a reviewer may run pariGp a bounded number of times, each clamped to a sho
   assert.equal((await run('pariGp', { script: 'print(2)' })).ok, true);
   const third = await run('pariGp', { script: 'print(3)' });
   assert.equal(third.ok, false);
-  assert.match(third.error!, /Reviewer compute budget spent \(2 pariGp call\(s\) per review\)/);
+  assert.match(third.error!, /Compute budget spent \(2 pariGp call\(s\) per review\)/);
   assert.equal((await run('z3Verify', { smt: '(check-sat)' })).ok, true, 'other tools are not counted');
   assert.deepEqual(seen.map((c) => [c.name, c.timeoutMs]), [['pariGp', 20_000], ['pariGp', 20_000], ['z3Verify', undefined]]);
   // Each reviewer gets its own budget.

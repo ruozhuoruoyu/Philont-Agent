@@ -53,19 +53,19 @@ test('the round subject names the mode, so browsing has a visible reason', () =>
 
   const deliberate = renderSessionSubject(LRC_GOAL, 'sess-1', 'deliberate');
   assert.match(deliberate, /mode: deliberate/);
-  assert.match(deliberate, /NO pariGp/);
+  assert.match(deliberate, /small pariGp\/magnitude budget/);
 });
 
 test('a proof goal filed as deliberate is flagged, with the one-line correction', () => {
   const s = renderSessionSubject(LRC_GOAL, 'sess-1', 'deliberate');
-  assert.match(s, /cannot compute or verify/);
+  assert.match(s, /small arithmetic budget and no z3/);
   assert.match(s, /mode:"formal"/);
 });
 
 test('no mismatch note when the pairing is coherent', () => {
   const research = '对比几家云厂商的托管 Postgres，给出选型建议。';
-  assert.doesNotMatch(renderSessionSubject(research, 'sess-2', 'deliberate'), /cannot compute/);
-  assert.doesNotMatch(renderSessionSubject(LRC_GOAL, 'sess-3', 'formal'), /cannot compute/);
+  assert.doesNotMatch(renderSessionSubject(research, 'sess-2', 'deliberate'), /small arithmetic budget/);
+  assert.doesNotMatch(renderSessionSubject(LRC_GOAL, 'sess-3', 'formal'), /small arithmetic budget/);
 });
 
 test('the subject line stays usable when no mode is supplied', () => {
@@ -107,12 +107,12 @@ const CVECTOR_GOAL =
 test('a caller-chosen deliberate on a deductive goal is a detectable mismatch', () => {
   assert.equal(looksDeductive(CVECTOR_GOAL), true, 'the goal names a conjecture');
   // the pairing the engine must flag: deductive goal + the profile that cannot compute
-  assert.match(renderSessionSubject(CVECTOR_GOAL, 'sess-7', 'deliberate'), /cannot compute or verify/);
-  assert.doesNotMatch(renderSessionSubject(CVECTOR_GOAL, 'sess-7', 'formal'), /cannot compute or verify/);
+  assert.match(renderSessionSubject(CVECTOR_GOAL, 'sess-7', 'deliberate'), /small arithmetic budget and no z3/);
+  assert.doesNotMatch(renderSessionSubject(CVECTOR_GOAL, 'sess-7', 'formal'), /small arithmetic budget and no z3/);
 });
 
 test('a genuine survey goal filed as deliberate stays quiet', () => {
   const survey = '调研一下目前主流的向量数据库，给出选型建议。';
   assert.equal(looksDeductive(survey), false);
-  assert.doesNotMatch(renderSessionSubject(survey, 'sess-8', 'deliberate'), /cannot compute or verify/);
+  assert.doesNotMatch(renderSessionSubject(survey, 'sess-8', 'deliberate'), /small arithmetic budget and no z3/);
 });

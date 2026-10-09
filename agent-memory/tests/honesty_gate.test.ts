@@ -1469,3 +1469,44 @@ test('reasoning terminal detection respects clause-local negation before tight m
     '辅助引理未证所以我不声称已证',
   ]) assert.equal(findReasoningTerminalClaim(text), null, text);
 });
+
+// ── 2026-10-09: a QUOTED size figure is not a measurement ───────────────────────────────────────
+// Prod: "24GB" was the paper appendix's own wording (main.tex line 410, read in an earlier turn); the gate
+// compared it with this turn's ls numbers and ruled it fabricated — rewrite, judge=failure, reflection
+// withheld, for a correctly attributed quotation.
+
+test('fabricated_size_claim: a figure attributed to a document (论文/原文/附录…) is a quote, not a claim', async () => {
+  const { isAttributedSizeClaim } = await import('../src/honesty_gate.js');
+  assert.equal(isAttributedSizeClaim('"24 GB" 一词不是本地测量值，而是论文附录（main.tex 第 410 行）作者的原文', '24 GB'), true);
+  assert.equal(isAttributedSizeClaim('论文附录写的是 24GB 显存', '24GB'), true);
+  assert.equal(isAttributedSizeClaim('the paper reports 24 GB of VRAM', '24 GB'), true);
+  assert.equal(isAttributedSizeClaim('文件大小 577KB,正常', '577KB'), false);
+  const r = evaluateHonesty(
+    '核验报告补一条出处说明："24 GB" 一词不是本地测量值，而是论文附录（main.tex 第 410 行）作者的原文。',
+    { toolResults: [{ toolName: 'shell', content: '✓ TOOL OK\n2026/10/09  10:29   295382 0-main.pdf' }] },
+  );
+  assert.ok(!r || r.reason !== 'fabricated_size_claim');
+});
+
+test('fabricated_size_claim: a figure that appears verbatim in ANY tool output this turn is sourced', () => {
+  // The number came from a fetched page / a read file, not from a size tool — still not invented.
+  const r = evaluateHonesty(
+    '附录提到训练需要 24 GB 显存。',
+    {
+      toolResults: [
+        { toolName: 'webFetch', content: '✓ TOOL OK\n... last-layer training fits in 24 GB of GPU memory ...' },
+        { toolName: 'inspectPath', content: '✓ TOOL OK\n{"size": 295382}' },
+      ],
+    },
+  );
+  assert.ok(!r || r.reason !== 'fabricated_size_claim');
+});
+
+test('fabricated_size_claim: an unattributed figure with no source still fires', () => {
+  const r = evaluateHonesty(
+    '文件已生成，大小 256,115 B。',
+    { toolResults: [{ toolName: 'inspectPath', content: '✓ TOOL OK\n{"size": 295382}' }] },
+  );
+  assert.ok(r);
+  assert.equal(r!.reason, 'fabricated_size_claim');
+});
