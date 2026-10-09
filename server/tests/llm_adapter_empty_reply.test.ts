@@ -82,7 +82,9 @@ test('a normal reply is never retried', async () => {
       const adapter = createLLMAdapter();
       await adapter.send([{ role: 'user', content: 'go' }] as never);
       assert.equal(f.calls.length, 1);
-      assert.equal(f.calls[0].thinking, undefined, 'and no thinking field is invented for a model that needs none');
+      // 2026-10-09: GLM thinks by default, so its profile now PINS the toggle on every call (on at the
+      // default effort) — the field is no longer "invented", it is the one decision the wire needs.
+      assert.deepEqual(f.calls[0].thinking, { type: 'enabled' }, 'the GLM profile pins the thinking toggle');
     } finally {
       f.restore();
     }

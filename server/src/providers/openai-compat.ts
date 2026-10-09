@@ -2,7 +2,7 @@
  * OpenAI-compatible provider profiles.
  *
  * 2026-06-07: covers the providers wired through OpenAICompatAdapter
- * (openai / minimax / glm / kimi / gemini). Most have no thinking mode and fall
+ * (openai / minimax / kimi / gemini; glm has its own profile since 2026-10-09). Most have no thinking mode and fall
  * back to BaseProfile behaviour. Kimi / Moonshot DO support a thinking toggle in
  * the same DeepSeek-OpenAI wire shape (extra_body.thinking + top-level
  * reasoning_effort), so we model just that family here.
@@ -58,7 +58,7 @@ export class KimiProfile extends BaseProfile {
 }
 
 /**
- * Plain OpenAI-compat profile for openai / glm / gemini / minimax — no thinking
+ * Plain OpenAI-compat profile for openai / gemini / minimax — no thinking
  * wire fields, max_tokens = base. Identical to BaseProfile but named for clarity
  * in logs/selection.
  */

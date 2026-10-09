@@ -11,7 +11,17 @@ import { resolveProfile, type ProviderProfile } from './providers/index.js';
 export type NativeMessage = Anthropic.MessageParam;
 
 export type LLMResponse =
-  | { type: 'text'; content: string }
+  | {
+      type: 'text';
+      content: string;
+      /**
+       * 2026-10-09: the provider's stop reason, surfaced so a caller can tell a finished reply from one
+       * the output limit cut. `truncated` is set when the text is STILL cut after the adapter's one
+       * continuation request — the content then ends with TRUNCATION_MARKER.
+       */
+      stopReason?: string | null;
+      truncated?: boolean;
+    }
   | { type: 'toolCalls'; calls: Array<{ id: string; name: string; input: Record<string, unknown> }>; assistantMessage: NativeMessage };
 
 /**
@@ -429,14 +439,61 @@ export function thinkingOnlyAtCap(r: { stop_reason?: string | null; content: Rea
 export function planThinkingOnlyRetry(
   reasoning: ReasoningConfig | undefined,
   maxTokens: number,
+  /**
+   * False for a profile with a plain on/off thinking toggle (GLM): "one notch less effort" is not a
+   * thing it can send, so the retry goes straight to thinking off. Prod 2026-10-09: 31 retries "at
+   * effort=low/medium" on glm5.3-flash-b30t changed nothing on the wire and thought the doubled
+   * budget away again.
+   */
+  effortKnob = true,
 ): { reasoning: ReasoningConfig; maxTokens: number } | null {
   if (reasoning?.enabled === false) return null; // thinking was off; this is some other failure
-  const lower = stepDownEffort(reasoning) ?? { enabled: false };
+  const lower = (effortKnob ? stepDownEffort(reasoning) : null) ?? { enabled: false };
   return { reasoning: lower, maxTokens: Math.min(65536, Math.max(maxTokens, 256) * 2) };
 }
 
 /** Process-wide counters a caller can diff around a call to learn what the adapter had to do for it. */
-export const adapterStats = { thinkingOnlyRetries: 0 };
+export const adapterStats = { thinkingOnlyRetries: 0, continuations: 0 };
+
+// ── A text reply the output limit cut ──────────────────────────────────────────────────────────────
+//
+// 2026-10-09: the text path dropped stop_reason, so a reply cut at max_tokens (thinking had eaten most
+// of the budget) reached the gates, the output filter and the channel as a finished reply — the owner
+// saw summaries that stopped mid-sentence with nothing marking the cut. The adapter now asks the model
+// ONCE to continue from where it stopped and joins the two halves; if the continuation is cut too, the
+// text carries TRUNCATION_MARKER so nobody downstream mistakes it for the whole reply.
+
+/** Sent as the user turn after the cut assistant turn. */
+export const CONTINUATION_PROMPT =
+  'Your previous message was cut off by the output length limit. Continue EXACTLY from where it stopped: ' +
+  'do not repeat anything already written, do not restart, summarize or apologize — output only the remaining text.';
+
+/** Appended when the reply is still cut after the continuation. Bilingual: the adapter does not know the owner's language. */
+export const TRUNCATION_MARKER = '\n\n…（回复在此被输出长度上限截断 / reply cut here by the output limit）';
+
+/** PHILONT_LLM_CONTINUE_ON_CAP=0 disables the continuation request (the marker is still appended). */
+export function continueOnCapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.PHILONT_LLM_CONTINUE_ON_CAP ?? '').trim().toLowerCase();
+  return !(raw === '0' || raw === 'off' || raw === 'false' || raw === 'no');
+}
+
+/**
+ * Join a cut reply and its continuation. Models often restart the last line they were cut in; when the
+ * continuation begins with a suffix of the head (12–240 chars), that overlap is dropped once.
+ */
+export function joinContinuation(head: string, tail: string): string {
+  const t = tail.replace(/^\s+/, '');
+  if (!t) return head;
+  const h = head.replace(/\s+$/, '');
+  const maxOverlap = Math.min(240, h.length, t.length);
+  for (let n = maxOverlap; n >= 12; n--) {
+    if (t.startsWith(h.slice(h.length - n))) return h + t.slice(n);
+  }
+  // No overlap: a cut inside a word or a CJK run joins directly; a cut at whitespace keeps one space.
+  const headEndsWs = /\s$/.test(head);
+  const tailStartsWs = /^\s/.test(tail);
+  return head + (headEndsWs || tailStartsWs ? (headEndsWs ? '' : ' ') : '') + t;
+}
 
 /** Read the marker sendWithTransientRetry leaves on a far-side timeout it refused to repeat. */
 export function errorIsFarSideTimeout(e: unknown): boolean {
@@ -696,14 +753,17 @@ class AnthropicAdapter implements LLMAdapter {
       // `output_config` and `thinking:{type:'disabled'}` (DeepSeek extension) are not in
       // the Anthropic SDK's typed surface, so a typed literal would not compile. The shape
       // is correct on the wire; we keep the cast localized with this comment.
-      const buildParams = (w: typeof wire, mt: number): Record<string, unknown> => ({
+      const buildParams = (w: typeof wire, mt: number, msgs: NativeMessage[] = safeMessages): Record<string, unknown> => ({
         model: this.model,
         max_tokens: mt,
-        messages: safeMessages,
+        messages: msgs,
         ...(anthropicTools?.length ? { tools: anthropicTools } : {}),
         ...(w.anthropicParams ?? {}),
       });
       const createParams = buildParams(wire, maxTokens);
+      // The wire/budget the FINAL response was produced with — a continuation must use the same ones.
+      let wireInUse = wire;
+      let maxInUse = maxTokens;
       // 2026-06-07: the SDK refuses a NON-streaming request whose max_tokens implies a
       // >10-min completion: it throws "Streaming is required …" locally (before sending) when
       //   (60*60*1000 * max_tokens) / 128000 > 600000ms  ⇔  max_tokens > 21333.
@@ -724,7 +784,9 @@ class AnthropicAdapter implements LLMAdapter {
         opts?.signal,
       );
       response = await dispatch(createParams, maxTokens);
-      const retryPlan = thinkingOnlyAtCap(response) ? planThinkingOnlyRetry(effReasoning, maxTokens) : null;
+      const retryPlan = thinkingOnlyAtCap(response)
+        ? planThinkingOnlyRetry(effReasoning, maxTokens, this.profile.supportsEffort(this.model))
+        : null;
       if (retryPlan) {
         adapterStats.thinkingOnlyRetries += 1;
         console.warn(
@@ -734,6 +796,35 @@ class AnthropicAdapter implements LLMAdapter {
         );
         const wire2 = this.profile.buildReasoningWire(this.model, retryPlan.reasoning);
         response = await dispatch(buildParams(wire2, retryPlan.maxTokens), retryPlan.maxTokens);
+        wireInUse = wire2;
+        maxInUse = retryPlan.maxTokens;
+      }
+      // A text reply the limit cut: ask once for the rest (see CONTINUATION_PROMPT).
+      const hasToolUse = response.content.some((c) => c.type === 'tool_use');
+      const firstText = response.content.filter((c): c is Anthropic.TextBlock => c.type === 'text').map((c) => c.text).join('');
+      if (!hasToolUse && response.stop_reason === 'max_tokens' && firstText.trim() && continueOnCapEnabled()) {
+        adapterStats.continuations += 1;
+        console.warn(
+          `[llm-adapter] anthropic: text reply cut at max_tokens=${maxInUse} after ${firstText.length} chars ` +
+            `(stop_reason=max_tokens); asking the model once to continue from where it stopped`,
+        );
+        const contMessages: NativeMessage[] = [
+          ...safeMessages,
+          { role: 'assistant', content: response.content },
+          { role: 'user', content: CONTINUATION_PROMPT },
+        ];
+        const cont = await dispatch(buildParams(wireInUse, maxInUse, contMessages), maxInUse);
+        const contText = cont.content.filter((c): c is Anthropic.TextBlock => c.type === 'text').map((c) => c.text).join('');
+        const joined = joinContinuation(firstText, contText);
+        const stillCut = cont.stop_reason === 'max_tokens';
+        response = {
+          ...response,
+          stop_reason: stillCut ? 'max_tokens' : cont.stop_reason,
+          content: [{ type: 'text', text: stillCut ? joined + TRUNCATION_MARKER : joined, citations: null } as Anthropic.TextBlock],
+        } as Anthropic.Message;
+        if (stillCut) {
+          console.warn(`[llm-adapter] anthropic: reply STILL cut after the continuation (max_tokens=${maxInUse}); marking it truncated`);
+        }
       }
     } catch (e: unknown) {
       // 400 + "too large" / "context length exceeded" → normalise to ContextTooLargeError
@@ -827,7 +918,12 @@ class AnthropicAdapter implements LLMAdapter {
       };
     }
 
-    return { type: 'text', content: text };
+    return {
+      type: 'text',
+      content: text,
+      stopReason: response.stop_reason ?? null,
+      ...(response.stop_reason === 'max_tokens' && text.endsWith(TRUNCATION_MARKER) ? { truncated: true } : {}),
+    };
   }
 }
 
@@ -1138,6 +1234,8 @@ class OpenAICompatAdapter implements LLMAdapter {
       return Math.min(65536, Math.max(maxTokens * 2, 32000));
     })();
     let emptyRetried = false;
+    // The cut first half of a text reply while its continuation request is in flight (see CONTINUATION_PROMPT).
+    let continuationHead: string | null = null;
     // Retry transient network failures (fetch failed / connection reset) + 5xx/429 — a failed POST
     // produced no completion, so re-issuing is safe. 4xx (except 408/429) and aborts propagate.
     for (;;) {
@@ -1216,6 +1314,25 @@ class OpenAICompatAdapter implements LLMAdapter {
     if (!msg) {
       throw new Error(`${this.cfg.name}: invalid response shape (no choices)`);
     }
+    const finishReason = data.choices?.[0]?.finish_reason;
+
+    if (continuationHead !== null) {
+      // The continuation of a cut reply: join it to the first half; tool calls in it are not honoured
+      // (the model was asked for the remaining TEXT). Still cut → mark it so nobody downstream
+      // mistakes it for the whole reply.
+      const contText = msg.content ?? '';
+      const joined = joinContinuation(continuationHead, contText);
+      const stillCut = finishReason === 'length';
+      if (stillCut) {
+        console.warn(`[llm-adapter] ${this.cfg.name} reply STILL cut after the continuation (max_tokens=${body.max_tokens}); marking it truncated`);
+      }
+      return {
+        type: 'text',
+        content: stillCut ? joined + TRUNCATION_MARKER : joined,
+        stopReason: finishReason ?? null,
+        ...(stillCut ? { truncated: true } : {}),
+      };
+    }
 
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       // Backfill as Anthropic blocks so chat-handler history stays in a single format
@@ -1259,6 +1376,21 @@ class OpenAICompatAdapter implements LLMAdapter {
 
     // Same defence as AnthropicAdapter: rescue <tool_call> embedded in text.
     const text = msg.content ?? '';
+    // A text reply the limit cut: ask once for the rest (see CONTINUATION_PROMPT).
+    if (text.trim() && finishReason === 'length' && continueOnCapEnabled()) {
+      adapterStats.continuations += 1;
+      console.warn(
+        `[llm-adapter] ${this.cfg.name} text reply cut at max_tokens=${body.max_tokens} after ${text.length} chars ` +
+          `(finish_reason=length); asking the model once to continue from where it stopped`,
+      );
+      continuationHead = text;
+      body.messages = [
+        ...openaiMsgs,
+        { role: 'assistant', content: text, ...(msg.reasoning_content ? { reasoning_content: msg.reasoning_content } : {}) },
+        { role: 'user', content: CONTINUATION_PROMPT },
+      ];
+      continue;
+    }
     const embedded = parseTextEmbeddedToolCalls(text);
     if (embedded && embedded.length > 0) {
       const blocks: Anthropic.ContentBlock[] = embedded.map((c) => ({
@@ -1301,7 +1433,7 @@ class OpenAICompatAdapter implements LLMAdapter {
       );
     }
 
-    return { type: 'text', content: text };
+    return { type: 'text', content: text, stopReason: finishReason ?? null };
     }
   }
 }

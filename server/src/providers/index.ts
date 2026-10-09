@@ -15,16 +15,19 @@ import { BaseProfile, type ProviderProfile } from './base.js';
 import { DeepSeekProfile, deepseekSupportsThinking } from './deepseek.js';
 import { AnthropicNativeProfile, isClaudeModel } from './anthropic-native.js';
 import { KimiProfile, OpenAICompatProfile, isKimiModel } from './openai-compat.js';
+import { GlmProfile, isGlmModel } from './glm.js';
 
 export * from './base.js';
 export { DeepSeekProfile, deepseekSupportsThinking } from './deepseek.js';
 export { AnthropicNativeProfile, isClaudeModel } from './anthropic-native.js';
 export { KimiProfile, OpenAICompatProfile, isKimiModel } from './openai-compat.js';
+export { GlmProfile, isGlmModel, glmThinkingEnabled } from './glm.js';
 
 // Singletons — profiles are stateless/declarative, safe to share.
 const DEEPSEEK = new DeepSeekProfile();
 const ANTHROPIC_NATIVE = new AnthropicNativeProfile();
 const KIMI = new KimiProfile();
+const GLM = new GlmProfile();
 const OPENAI_COMPAT = new OpenAICompatProfile();
 const BASE = new BaseProfile();
 
@@ -35,7 +38,9 @@ export function resolveProfile(model: string): ProviderProfile {
   if (m.startsWith('deepseek') || deepseekSupportsThinking(m)) return DEEPSEEK;
   if (isClaudeModel(m)) return ANTHROPIC_NATIVE;
   if (isKimiModel(m)) return KIMI;
-  // openai / glm / gemini / minimax and anything else → no thinking wire.
+  // glm* thinks by default and must have the toggle pinned (2026-10-09).
+  if (isGlmModel(m)) return GLM;
+  // openai / gemini / minimax and anything else → no thinking wire.
   if (m) return OPENAI_COMPAT;
   return BASE;
 }

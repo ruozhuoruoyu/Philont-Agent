@@ -78,6 +78,14 @@ export class AuxLLMError extends Error {
      * call for opposite remedies. See INVISIBLE_THINKING in the retry ladder.
      */
     public readonly emptyOutput?: boolean,
+    /**
+     * The budget was spent on a thinking block we CAN see and no content came back at all. Prod
+     * 2026-10-09, glm5.3-flash-b30t: every aux call walked 256 → 512 → 1024 and threw with
+     * `content_chars=0, reasoning_chars=4315` — the model reasoned for the whole budget and never
+     * started the answer. More budget feeds the same thinking; turning thinking off is the remedy,
+     * exactly as for the invisible case. See the retry ladder.
+     */
+    public readonly thinkingStarved?: boolean,
   ) {
     super(message);
     this.name = 'AuxLLMError';
@@ -185,6 +193,9 @@ function auxThinkingDisabled(model: string): boolean {
   if (m.startsWith('deepseek-v') && !m.startsWith('deepseek-v3')) return true;
   if (m === 'deepseek-reasoner') return true;
   if (m.includes('kimi') || m.includes('moonshot')) return true;
+  // GLM 4.5+ thinks by default on both wire formats and accepts the same thinking:{type} toggle. Prod
+  // 2026-10-09: with GLM absent from this list every aux call spent its whole budget on reasoning_content.
+  if (m.includes('glm')) return true;
   return false;
 }
 
@@ -362,7 +373,11 @@ export async function callAuxLLM(request: AuxLLMRequest): Promise<string> {
           // off. A hard-coded family list silently misses every model nobody has added yet, which is
           // the whole point of reacting to the SIGNATURE instead: this path needs no name.
           const invisibleThinking = isOutputTruncation(e) && e.emptyOutput === true;
-          if (invisibleThinking) sawInvisibleThinking = true;
+          // Visible thinking that ate the budget is the same failure with the reasoning returned
+          // (prod 2026-10-09: `content_chars=0, reasoning_chars=4315` on every call). Same remedy:
+          // mode first at the same budget, then the decisive budget if the endpoint ignored the mode.
+          const thinkingStarved = isOutputTruncation(e) && e.thinkingStarved === true;
+          if (invisibleThinking || thinkingStarved) sawInvisibleThinking = true;
           // ONE rule decides the next budget. Once this call has seen a reply with no content and no
           // reasoning, doubling is the wrong step for the rest of the call whatever the next failure
           // looks like — prod 2026-09-03 spent its three attempts the unlucky way: attempt 1 came back
@@ -378,10 +393,13 @@ export async function callAuxLLM(request: AuxLLMRequest): Promise<string> {
           // Mode first, at the SAME budget: the signature says the budget was spent producing
           // nothing, so more of it is not indicated, and changing two things at once hides which one
           // worked.
-          if (invisibleThinking && attempt.disableThinking !== true) {
+          if ((invisibleThinking || thinkingStarved) && attempt.disableThinking !== true) {
             console.warn(
-              `[aux-llm] budget spent with no content and no reasoning at max_tokens=` +
-                `${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; retrying with thinking disabled (same budget)`,
+              invisibleThinking
+                ? `[aux-llm] budget spent with no content and no reasoning at max_tokens=` +
+                  `${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; retrying with thinking disabled (same budget)`
+                : `[aux-llm] budget spent on a thinking block with no content at max_tokens=` +
+                  `${attempt.maxTokens ?? DEFAULT_MAX_TOKENS}; retrying with thinking disabled (same budget)`,
             );
             attempt = { ...attempt, disableThinking: true };
             continue;
@@ -585,6 +603,7 @@ async function callOpenAICompatible(
       'output_truncated',
       undefined,
       (content?.length ?? 0) === 0 && reasoningChars === 0,
+      (content?.length ?? 0) === 0 && reasoningChars > 0,
     );
   }
   if (typeof content !== 'string' || content.length === 0) {
@@ -596,6 +615,7 @@ async function callOpenAICompatible(
       finishReason === 'length' ? 'output_truncated' : 'invalid_response',
       undefined,
       reasoningChars === 0,
+      finishReason === 'length' && reasoningChars > 0,
     );
   }
   return content;
@@ -716,6 +736,9 @@ async function callAnthropicCompatible(
       `Aux LLM (anthropic) output truncated (stop_reason=max_tokens, content_chars=${text?.length ?? 0}, ` +
         `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
       'output_truncated',
+      undefined,
+      (text?.length ?? 0) === 0 && reasoningChars === 0,
+      (text?.length ?? 0) === 0 && reasoningChars > 0,
     );
   }
   if (typeof text !== 'string' || text.length === 0) {
@@ -726,6 +749,9 @@ async function callAnthropicCompatible(
       `Aux LLM (anthropic) returned empty content (stop_reason=${stopReason}, ` +
         `reasoning_chars=${reasoningChars}, max_tokens=${req.maxTokens ?? DEFAULT_MAX_TOKENS})`,
       stopReason === 'max_tokens' ? 'output_truncated' : 'invalid_response',
+      undefined,
+      reasoningChars === 0,
+      stopReason === 'max_tokens' && reasoningChars > 0,
     );
   }
   return text;

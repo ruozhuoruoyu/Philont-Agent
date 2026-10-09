@@ -39,6 +39,12 @@ export interface ProviderProfile {
   buildReasoningWire(model: string, reasoning: ReasoningConfig | undefined): ReasoningWire;
   /** Effective max_tokens given reasoning. `base` = the configured PHILONT_LLM_MAX_TOKENS. */
   resolveMaxTokens(model: string, reasoning: ReasoningConfig | undefined, base: number): number;
+  /**
+   * True if `model` has a graded effort knob (DeepSeek output_config.effort / reasoning_effort). A
+   * profile without one (GLM: a plain on/off toggle) tells the adapter's thinking-only retry to skip
+   * the effort ladder and go straight to thinking off — "one notch less" is not a thing it can send.
+   */
+  supportsEffort(model: string): boolean;
 }
 
 /**
@@ -58,6 +64,10 @@ export class BaseProfile implements ProviderProfile {
 
   resolveMaxTokens(_model: string, _reasoning: ReasoningConfig | undefined, base: number): number {
     return base;
+  }
+
+  supportsEffort(model: string): boolean {
+    return this.supportsThinking(model);
   }
 }
 

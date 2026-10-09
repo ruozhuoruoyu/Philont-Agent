@@ -244,13 +244,15 @@ describe('aux-llm', () => {
           (e: unknown) => {
             const err = e as AuxLLMError;
             assert.equal(err.kind, 'output_truncated');
-            assert.match(err.message, /finish_reason=length, content_chars=0, reasoning_chars=31, max_tokens=1024/);
+            // 2026-10-09: reasoning with no content is thinking starvation — the ladder now tries
+            // thinking off at the same budget, then the decisive budget, and reports THAT attempt.
+            assert.match(err.message, /finish_reason=length, content_chars=0, reasoning_chars=31, max_tokens=16384/);
             return true;
           },
         );
         assert.deepEqual(
           fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
-          [256, 512, 1024],
+          [256, 256, 16_384],
         );
       } finally {
         fakeFetch.restore();
@@ -322,18 +324,70 @@ describe('aux-llm', () => {
       }
     });
 
-    it('a truncation that DID return reasoning still walks the token ladder', async () => {
+    it('a budget spent on VISIBLE reasoning with no content is retried with thinking off, then decisively', async () => {
+      // Prod 2026-10-09, glm5.3-flash-b30t as aux: every call walked 256 → 512 → 1024 and threw with
+      // `content_chars=0, reasoning_chars=4315`. The reasoning was visible, so the ladder read it as
+      // "the model produced output and ran out of room" and kept doubling — but the model had not
+      // started the answer at all; it was thinking for the whole budget. That is the invisible-thinking
+      // failure with the thinking returned, and it takes the same path: mode first at the same budget,
+      // then the one budget this endpoint answers at.
+      setAuxEnv(undefined, undefined, 'some-new-thinking-model-nobody-listed');
+      const fakeFetch = mockFetch((call) => {
+        const body = call.body as { max_tokens: number; thinking?: { type: string } };
+        if (body.thinking?.type === 'disabled') {
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: 'the answer' }, finish_reason: 'stop' }],
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: '', reasoning_content: 'a long thought' }, finish_reason: 'length' }],
+        }), { status: 200 });
+      });
+      try {
+        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 256 }), 'the answer');
+        const sent = fakeFetch.calls.map((c) => c.body as { max_tokens: number; thinking?: { type: string } });
+        assert.deepEqual(sent.map((b) => b.max_tokens), [256, 256], 'same budget, only the mode changed');
+        assert.equal(sent[0].thinking, undefined);
+        assert.equal(sent[1].thinking?.type, 'disabled');
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('visible thinking that survives thinking-off jumps to the decisive budget, not the ladder', async () => {
+      setAuxEnv(undefined, undefined, 'some-endpoint-that-ignores-thinking-disabled');
+      const fakeFetch = mockFetch((call) => {
+        const body = call.body as { max_tokens: number };
+        if (body.max_tokens >= 16_384) {
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: 'the answer' }, finish_reason: 'stop' }],
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: '', reasoning_content: 'a long thought' }, finish_reason: 'length' }],
+        }), { status: 200 });
+      });
+      try {
+        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 256 }), 'the answer');
+        const sent = fakeFetch.calls.map((c) => (c.body as { max_tokens: number }).max_tokens);
+        assert.deepEqual(sent, [256, 256, 16_384], 'not 256 / 512 / 1024');
+      } finally {
+        fakeFetch.restore();
+      }
+    });
+
+    it('partial CONTENT cut by the budget still walks the token ladder', async () => {
       // The other failure wearing the same finish_reason: the model really did produce output and ran
       // out of room. More budget is the right answer there, and must stay the answer.
       setAuxEnv(undefined, undefined, 'some-new-thinking-model-nobody-listed');
       const fakeFetch = mockFetch(() => new Response(JSON.stringify({
-        choices: [{ message: { content: '', reasoning_content: 'partial thought' }, finish_reason: 'length' }],
+        choices: [{ message: { content: '{"partial":', reasoning_content: 'partial thought' }, finish_reason: 'length' }],
       }), { status: 200 }));
       try {
-        await assert.rejects(() => callAuxLLM({ user: 'q', maxTokens: 256 }));
+        await assert.rejects(() => callAuxLLM({ user: 'q', maxTokens: 256, requireComplete: true }));
         const sent = fakeFetch.calls.map((c) => c.body as { max_tokens: number; thinking?: { type: string } });
         assert.deepEqual(sent.map((b) => b.max_tokens), [256, 512, 1024]);
-        assert.ok(sent.every((b) => b.thinking === undefined), 'visible reasoning is not the invisible-thinking case');
+        assert.ok(sent.every((b) => b.thinking === undefined), 'an answer that started is not a thinking problem');
       } finally {
         fakeFetch.restore();
       }
@@ -372,17 +426,18 @@ describe('aux-llm', () => {
       }
     });
 
-    it('a GLM model gets no thinking field on the first call — the same decision the main path makes', () => {
-      // server/src/providers resolves glm* to OpenAICompatProfile, which sends no thinking wire at
-      // all — and on this endpoint sending it changed nothing (prod: still empty). Two layers decide
-      // "how do I talk to this model"; they should not decide it differently.
+    it('a GLM model gets thinking disabled on the first call — the same decision the main path makes', () => {
+      // 2026-10-09: server/src/providers now resolves glm* to GlmProfile (thinking pinned on the wire,
+      // off at low effort); aux is the cheap path, so it pins thinking OFF from the first call instead
+      // of discovering it three truncations later. Two layers decide "how do I talk to this model";
+      // they should not decide it differently.
       setAuxEnv(undefined, undefined, 'glm5.3-flash-b30t');
       const fakeFetch = mockFetch(() => new Response(JSON.stringify({
         choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
       }), { status: 200 }));
       return callAuxLLM({ user: 'q', maxTokens: 256 }).then(() => {
         const body = fakeFetch.calls[0].body as { thinking?: { type: string } };
-        assert.equal(body.thinking, undefined);
+        assert.equal(body.thinking?.type, 'disabled');
       }).finally(() => fakeFetch.restore());
     });
 
@@ -391,12 +446,12 @@ describe('aux-llm', () => {
       const fakeFetch = mockFetch((call) => {
         const maxTokens = (call.body as { max_tokens: number }).max_tokens;
         if (maxTokens === 256) {
-          // Reasoning came back, so the model really did generate and run out of room — the case a
-          // bigger budget answers. (A reply with NEITHER content nor reasoning is a different
-          // failure and takes the thinking-off path; see the test above.)
+          // Content came back, so the model really did start the answer and ran out of room — the
+          // case a bigger budget answers. (A reply with NO content, with or without reasoning, is a
+          // thinking problem and takes the thinking-off path; see the tests above.)
           return new Response(JSON.stringify({
             choices: [{
-              message: { content: '', reasoning_content: 'partial thought' },
+              message: { content: '{"partial":', reasoning_content: 'partial thought' },
               finish_reason: 'length',
             }],
           }), { status: 200 });
@@ -404,7 +459,7 @@ describe('aux-llm', () => {
         return makeOpenAIResponse('selected');
       });
       try {
-        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 256 }), 'selected');
+        assert.equal(await callAuxLLM({ user: 'q', maxTokens: 256, requireComplete: true }), 'selected');
         assert.deepEqual(
           fakeFetch.calls.map((call) => (call.body as { max_tokens: number }).max_tokens),
           [256, 512],

@@ -105,3 +105,51 @@ test('Kimi supports thinking; plain OpenAI-compat does not', () => {
   assert.equal(plain.supportsThinking('gpt-4o'), false);
   assert.deepEqual(plain.buildReasoningWire('gpt-4o', { enabled: true, effort: 'max' }), {});
 });
+
+// ── GLM (2026-10-09) ──────────────────────────────────────────────────────────────────────────────
+// Prod: glm5.3-flash-b30t over the Anthropic protocol resolved to OpenAICompatProfile (empty wire), so
+// the endpoint's default-on thinking ran until max_tokens on every call — 31 thinking-only retries in a
+// day, one of them 32000 thinking tokens on a 61-token prompt — and "retrying at effort=low" changed
+// nothing on the wire.
+
+import { GlmProfile } from '../src/providers/index.js';
+import { planThinkingOnlyRetry as adapterPlan } from '../src/llm-adapter.js';
+
+test('resolveProfile: glm* gets the GLM profile, not the empty OpenAI-compat wire', () => {
+  assert.equal(resolveProfile('glm5.3-flash-b30t').name, 'glm');
+  assert.equal(resolveProfile('GLM-4.5-air').name, 'glm');
+  assert.equal(resolveProfile('gpt-4o').name, 'openai-compat');
+});
+
+test('GLM: the thinking toggle is ALWAYS pinned, on both wire formats, with no budget_tokens', () => {
+  const p = new GlmProfile();
+  const on = p.buildReasoningWire('glm5.3-flash-b30t', { enabled: true, effort: 'high' });
+  assert.deepEqual(on.anthropicParams?.thinking, { type: 'enabled' });
+  assert.deepEqual(on.openaiExtraBody?.thinking, { type: 'enabled' });
+  assert.equal(on.openaiTopLevel, undefined, 'GLM has no effort knob to send');
+  const dflt = p.buildReasoningWire('glm5.3-flash-b30t', undefined);
+  assert.deepEqual(dflt.anthropicParams?.thinking, { type: 'enabled' }, 'no config still pins the field');
+  const off = p.buildReasoningWire('glm5.3-flash-b30t', { enabled: false });
+  assert.deepEqual(off.anthropicParams?.thinking, { type: 'disabled' });
+  assert.deepEqual(off.openaiExtraBody?.thinking, { type: 'disabled' });
+});
+
+test('GLM: low effort IS thinking off — the only cheap variant the model has', () => {
+  const p = new GlmProfile();
+  const low = p.buildReasoningWire('glm5.3-flash-b30t', { enabled: true, effort: 'low' });
+  assert.deepEqual(low.anthropicParams?.thinking, { type: 'disabled' });
+  assert.equal(p.resolveMaxTokens('glm5.3-flash-b30t', { enabled: true, effort: 'low' }, BASE), BASE);
+  assert.equal(p.resolveMaxTokens('glm5.3-flash-b30t', { enabled: true, effort: 'max' }, BASE), 32000);
+  assert.equal(p.resolveMaxTokens('glm5.3-flash-b30t', { enabled: true, effort: 'medium' }, BASE), BASE);
+  assert.equal(p.supportsEffort('glm5.3-flash-b30t'), false);
+});
+
+test('thinking-only retry on a profile without an effort knob goes straight to thinking off', () => {
+  // With the knob: max → high (one notch). Without it: off — the only change the wire can carry.
+  const withKnob = adapterPlan({ enabled: true, effort: 'max' }, 16000, true);
+  assert.deepEqual(withKnob?.reasoning, { enabled: true, effort: 'high' });
+  const noKnob = adapterPlan({ enabled: true, effort: 'max' }, 16000, false);
+  assert.deepEqual(noKnob?.reasoning, { enabled: false });
+  assert.equal(noKnob?.maxTokens, 32000);
+  assert.equal(adapterPlan({ enabled: false }, 16000, false), null, 'thinking was already off — some other failure');
+});
