@@ -236,6 +236,64 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  linux-installer:
+    # The macOS/Linux counterpart of the Windows installer job: install.sh from an empty user
+    # environment (portable Node.js, checksum-verified; build; stable launcher command), then boot
+    # the installed copy through the launcher and drive the real Web UI. --source-dir builds the
+    # commit under test instead of downloading a ref, so pull requests are covered too.
+    name: Linux one-line install & browser workflow
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install from an empty user environment
+        env:
+          PHILONT_PYENV_DIR: ${{ runner.temp }}/philont-pyenv
+        run: |
+          set -euo pipefail
+          bash website/install.sh --install-dir "$RUNNER_TEMP/Philont" --source-dir "$GITHUB_WORKSPACE" --no-launch
+          test -x "$RUNNER_TEMP/Philont/runtime/node/bin/node" || { echo 'Installer did not provision portable Node.js.'; exit 1; }
+          test -x "$RUNNER_TEMP/Philont/philont" || { echo 'Installer did not create the stable launcher command.'; exit 1; }
+
+      - name: Launch installed copy and exercise the browser workflow
+        env:
+          PHILONT_HOME: ${{ runner.temp }}/philont-home
+          PHILONT_NO_OPEN: "1"
+          PHILONT_LAUNCHER_QUIET: "1"
+          PHILONT_E2E_BASE_URL: http://127.0.0.1:20267
+          PHILONT_E2E_AGENT_URL: http://127.0.0.1:21266
+        run: |
+          set -euo pipefail
+          launcher_log="$RUNNER_TEMP/philont-linux-launcher.log"
+          "$RUNNER_TEMP/Philont/philont" > "$launcher_log" 2>&1 &
+          launcher_pid=$!
+          cleanup() {
+            kill -TERM "$launcher_pid" 2>/dev/null || true
+            wait "$launcher_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          ready=0
+          for i in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:20267/api/launcher/status >/dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then cat "$launcher_log"; exit 1; fi
+          # The installed copy's own Node runs the e2e, exactly as the Windows job does.
+          export PATH="$RUNNER_TEMP/Philont/runtime/node/bin:$PATH"
+          (cd "$RUNNER_TEMP/Philont/web-ui" && npm run test:e2e)
+
+      - name: Upload Linux diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-installer-diagnostics
+          path: |
+            ${{ runner.temp }}/philont-linux-launcher.log
+            ${{ runner.temp }}/Philont/web-ui/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
   typecheck:
     name: Type-check server & web-ui
     runs-on: ubuntu-latest

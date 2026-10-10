@@ -28,7 +28,9 @@ if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
 
 const copyButton = document.querySelector('[data-copy]');
 copyButton?.addEventListener('click', async () => {
-  const commands = 'irm https://philont.ai/install.ps1 | iex';
+  const commands = navigator.platform.startsWith('Win')
+    ? 'irm https://philont.ai/install.ps1 | iex'
+    : 'curl -fsSL https://philont.ai/install.sh | bash';
   const status = document.querySelector('[data-copy-status]');
   try {
     await navigator.clipboard.writeText(commands);

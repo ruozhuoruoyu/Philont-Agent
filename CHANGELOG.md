@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-10-10 — onboarding)
+
+- **One-line install for macOS and Linux** (`website/install.sh`, served at
+  `https://philont.ai/install.sh`): the counterpart of `install.ps1`. Downloads a pinned,
+  checksum-verified portable Node.js (no sudo, no version manager), the source for a ref (default
+  `main`) or a local checkout (`--source-dir`, used by CI), builds with `scripts/build-all.sh`, writes
+  a stable `philont` launcher command and starts the setup page. A previous install is moved aside and
+  restored if the build fails. CI exercises it from an empty user environment on Linux and drives the
+  real Web UI through the installed copy, as the Windows job does. Measured on a warm npm cache: clean
+  clone → built in 24 s; launcher ready in 2 s; agent answering in 1 s after the key is saved.
+- DEPLOYMENT.md's "tested on Windows only" warning was stale: Linux and macOS have been built and
+  booted in CI on every push for a while. It now says what CI covers and what it does not.
+
 ### Fixed (2026-10-09 — a day's production log on glm5.3-flash-b30t)
 
 - **GLM thinking was never on the wire.** `glm*` resolved to the empty OpenAI-compat profile, so the

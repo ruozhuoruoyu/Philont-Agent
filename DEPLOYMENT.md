@@ -11,13 +11,14 @@ This guide covers three ways to run Philont:
 > TypeScript. The Rust crates (`agent-core`, `agent-node`) are dormant and are
 > **not** part of the build or runtime.
 
-> ### ⚠️ Platform status — please read first
+> ### Platform status
 >
-> Philont is developed and **tested on Windows only**. macOS and Linux are **adapted in the code**
-> (OS-specific paths, shells, and native modules are branched per platform) but have **not been tested
-> by the author** — expect rough edges. The runtime is cross-platform in principle; it just hasn't had
-> real mileage outside Windows yet. If you run it on macOS/Linux, please open an issue or PR — whether
-> you hit a problem **or** get it working cleanly. Verified-on reports are as valuable as bug reports.
+> Philont is developed on **Windows** and dogfooded there daily. **Linux and macOS (Apple Silicon)** are
+> built and booted in CI on every push: a build + boot smoke on both, a full clean install through the
+> launcher with a real-browser chat on macOS, and the one-line installers (`install.ps1` on Windows,
+> `install.sh` on Linux) exercised from an empty user environment. What CI does not cover is daily
+> mileage with real models on macOS/Linux — if you run it there, an issue or PR saying "works" or
+> "broke here" is as valuable as a bug report.
 
 ---
 
@@ -68,18 +69,36 @@ the tool returns a clear "not installed" error rather than crashing.
 > doc libs) but **not** PARI/GP, z3-solver, or Playwright browsers. If you rely on deep-reasoning compute,
 > formal verification, or browser automation in a container, add the matching line to your Dockerfile.
 
-### The one-command path
+### The one-line install (no system Node.js, no sudo)
+
+```bash
+# macOS / Linux
+curl -fsSL https://philont.ai/install.sh | bash
+```
+
+```powershell
+# Windows PowerShell
+irm https://philont.ai/install.ps1 | iex
+```
+
+Both download a pinned, checksum-verified portable Node.js, build the current `main`, and start
+the launcher, which opens the setup page (model endpoint + API key). Program files live under
+`~/.local/share/philont` (macOS: `~/Library/Application Support/Philont`, Windows:
+`%LOCALAPPDATA%\Philont`); keys and memory under `~/.philont`. Re-run the same command to upgrade.
+`install.sh --help` lists `--install-dir`, `--ref`, `--source-dir` and `--no-launch`.
+
+### The one-command path from a checkout
 
 ```bash
 git clone https://github.com/ruozhuoruoyu/Philont-Agent.git
 cd Philont-Agent
-cp .env.example .env          # then edit .env and set ANTHROPIC_API_KEY
-./scripts/start.sh            # Windows: .\scripts\start.ps1
+./scripts/build-all.sh        # Windows: .\scripts\build-all.ps1
+./scripts/start.sh            # Windows: .\scripts\start.ps1  (opens the setup page; or put the key in ~/.philont/.env)
 ```
 
-`start.sh` builds every package in dependency order, starts the launcher, and
-opens your browser to the setup wizard. From there the launcher supervises the
-server and Web UI.
+`build-all.sh` builds every package in dependency order (run it again after every `git pull`;
+`start.sh` refuses to start on a stale build and names the package). `start.sh` starts the
+launcher, which opens your browser to the setup wizard and supervises the server and Web UI.
 
 ### The manual path (more control)
 

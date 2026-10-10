@@ -37,6 +37,14 @@ irm https://philont.ai/install.ps1 | iex
 
 Philont installs under `%LOCALAPPDATA%\Philont`, creates a Start menu shortcut, and opens the local setup wizard. Your model keys and memory remain under `%USERPROFILE%\.philont`; they are not stored in the program directory.
 
+### macOS / Linux — same thing, one line
+
+```bash
+curl -fsSL https://philont.ai/install.sh | bash
+```
+
+Downloads a pinned, checksum-verified portable Node.js (no sudo, no version manager), builds `main`, and opens the setup page. Program files go under `~/.local/share/philont` (macOS: `~/Library/Application Support/Philont`); keys and memory under `~/.philont`. Re-run to upgrade; `install.sh --help` for `--install-dir`, `--ref`, `--no-launch`.
+
 ### From source — Windows, macOS, or Linux
 
 **Prerequisite:** Node.js ≥ 20 and an Anthropic- or OpenAI-compatible API key. No Rust toolchain — the runtime is pure TypeScript.
