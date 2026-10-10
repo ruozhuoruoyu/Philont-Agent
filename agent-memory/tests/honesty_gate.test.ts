@@ -1470,57 +1470,64 @@ test('reasoning terminal detection respects clause-local negation before tight m
   ]) assert.equal(findReasoningTerminalClaim(text), null, text);
 });
 
-// ── 2026-10-09: a QUOTED size figure is not a measurement ───────────────────────────────────────
-// Prod: "24GB" was the paper appendix's own wording (main.tex line 410, read in an earlier turn); the gate
-// compared it with this turn's ls numbers and ruled it fabricated — rewrite, judge=failure, reflection
-// withheld, for a correctly attributed quotation.
+// ── 2026-10-10: the size-claim floor is the ledger, and everything else is provisional ─────────
+// Prod 2026-10-09: "84GB" (usable VRAM per card) and "24 GB" (a figure quoted from a paper) were ruled
+// fabricated FILE sizes because the gate compared every figure with this turn's dir listing. A keyword
+// list for "is this about a file" was tried and withdrawn the same day. Now: a sentence that names a
+// file the turn's size tools touched is decided here; any other unmatched figure is PROVISIONAL and the
+// caller confirms it with the aux model (what does the sentence assert?) or drops it.
 
-test('fabricated_size_claim: a figure attributed to a document (论文/原文/附录…) is a quote, not a claim', async () => {
-  const { isAttributedSizeClaim } = await import('../src/honesty_gate.js');
-  assert.equal(isAttributedSizeClaim('"24 GB" 一词不是本地测量值，而是论文附录（main.tex 第 410 行）作者的原文', '24 GB'), true);
-  assert.equal(isAttributedSizeClaim('论文附录写的是 24GB 显存', '24GB'), true);
-  assert.equal(isAttributedSizeClaim('the paper reports 24 GB of VRAM', '24 GB'), true);
-  assert.equal(isAttributedSizeClaim('文件大小 577KB,正常', '577KB'), false);
+test('ledgerFileNames / claimSentence: names from size-tool outputs and inputs; the clause that carries the figure', async () => {
+  const { ledgerFileNames, claimSentence } = await import('../src/honesty_gate.js');
+  const names = ledgerFileNames([
+    { toolName: 'shell', content: '✓ TOOL OK\n2026/05/03  23:21        18 DeepSeek_V4.docx' },
+    { toolName: 'writeFile', content: '✓ TOOL OK\nWrote 1102 bytes', toolInput: { path: 'E:\\dev\\out\\_calc.py' } },
+    { toolName: 'webFetch', content: '✓ TOOL OK\nreport.pdf is 3 MB' },
+  ]);
+  assert.deepEqual(names.sort(), ['_calc.py', 'deepseek_v4.docx'], 'web tools are not size producers');
+  assert.equal(claimSentence('转换成功！DeepSeek_V4.docx 已保存,文件大小 577KB,格式正常。下一步……', '577KB'), 'DeepSeek_V4.docx 已保存,文件大小 577KB,格式正常。');
+});
+
+test('floor: a figure in a sentence that names a ledger file is decided without confirmation', () => {
+  const r = evaluateHonesty(
+    '转换成功！DeepSeek_V4.docx 已保存,文件大小 577KB,格式正常。',
+    { toolResults: [{ toolName: 'shell', content: '✓ TOOL OK\n2026/05/03  23:21        18 DeepSeek_V4.docx' }] },
+  );
+  assert.equal(r?.reason, 'fabricated_size_claim');
+  assert.equal(r?.confirm, undefined, 'the ledger names the file; nothing to ask');
+});
+
+test('window: a VRAM figure the ledger cannot match is PROVISIONAL, carrying the sentence and the ledger', () => {
+  const r = evaluateHonesty(
+    '结论：V4.1 Flash 以 FP4 约 401 GB 权重放不进 8×84GB 可用显存；V4 Pro 更不行。',
+    { toolResults: [{ toolName: 'shell', content: '✓ TOOL OK\n Directory of E:\\dev\\philont\\server\\output\n 2026/10/09 22:28 1,224 _calc_rtx6000d_v4.py' }] },
+  );
+  assert.equal(r?.reason, 'fabricated_size_claim');
+  assert.equal(r?.confirm?.kind, 'file_size');
+  assert.equal(r?.confirm?.figure, '401 GB');
+  assert.match(r?.confirm?.sentence ?? '', /84GB/);
+  assert.deepEqual(r?.confirm?.ledgerFiles, ['_calc_rtx6000d_v4.py']);
+  assert.match(r?.confirm?.ledgerExcerpt ?? '', /1,224/);
+});
+
+test('window: a figure quoted from a document read earlier is provisional too — the model, not a word list, decides', () => {
   const r = evaluateHonesty(
     '核验报告补一条出处说明："24 GB" 一词不是本地测量值，而是论文附录（main.tex 第 410 行）作者的原文。',
     { toolResults: [{ toolName: 'shell', content: '✓ TOOL OK\n2026/10/09  10:29   295382 0-main.pdf' }] },
   );
-  assert.ok(!r || r.reason !== 'fabricated_size_claim');
+  assert.equal(r?.reason, 'fabricated_size_claim');
+  assert.ok(r?.confirm, 'main.tex is not a file this turn touched, so the floor does not decide');
 });
 
-test('fabricated_size_claim: a figure that appears verbatim in ANY tool output this turn is sourced', () => {
-  // The number came from a fetched page / a read file, not from a size tool — still not invented.
+test('a figure that appears verbatim in ANY tool output this turn is sourced, no verdict at all', () => {
   const r = evaluateHonesty(
     '附录提到训练需要 24 GB 显存。',
     {
       toolResults: [
-        { toolName: 'webFetch', content: '✓ TOOL OK\n... last-layer training fits in 24 GB of GPU memory ...' },
+        { toolName: 'webFetch', content: '✓ TOOL OK\n... fits in 24 GB of GPU memory ...' },
         { toolName: 'inspectPath', content: '✓ TOOL OK\n{"size": 295382}' },
       ],
     },
   );
   assert.ok(!r || r.reason !== 'fabricated_size_claim');
-});
-
-test('fabricated_size_claim: an unattributed figure with no source still fires', () => {
-  const r = evaluateHonesty(
-    '文件已生成，大小 256,115 B。',
-    { toolResults: [{ toolName: 'inspectPath', content: '✓ TOOL OK\n{"size": 295382}' }] },
-  );
-  assert.ok(r);
-  assert.equal(r!.reason, 'fabricated_size_claim');
-});
-
-test('fabricated_size_claim: a GPU-memory / model-weight figure is not a file size (2026-10-09, "84GB")', async () => {
-  const { isFileSizeClaimContext } = await import('../src/honesty_gate.js');
-  assert.equal(isFileSizeClaimContext('RTX 6000D 单卡 96GB 显存，扣除开销后可用约 84GB，8 卡合计', '84GB'), false);
-  assert.equal(isFileSizeClaimContext('FP4 权重约 401 GB，放不进 8 张卡', '401 GB'), false);
-  assert.equal(isFileSizeClaimContext('文件已生成，大小 1.2GB，已保存到 output/', '1.2GB'), true);
-  assert.equal(isFileSizeClaimContext('导出的 report.docx 共 577KB', '577KB'), true);
-  assert.equal(isFileSizeClaimContext('大概需要 24GB 左右', '24GB'), false, 'GB prose with no file word is not a file claim');
-  const r = evaluateHonesty(
-    '结论：V4.1 Flash 以 FP4 约 401 GB 权重放不进 8×84GB 可用显存；V4 Pro 更不行。',
-    { toolResults: [{ toolName: 'shell', content: '✓ TOOL OK\n Directory of E:\\dev\\philont\\server\\output\n 2026/10/09 22:28 1,224 _calc_rtx6000d_v4.py' }] },
-  );
-  assert.ok(!r || r.reason !== 'fabricated_size_claim', 'a VRAM figure must not be judged against a dir listing');
 });

@@ -330,6 +330,7 @@ export type { RefutableGoal } from './refutable_goal.js';
 export type {
   EvidenceLevel,
   HonestyEvaluation,
+  HonestyConfirmation,
   EvaluateOptions as HonestyEvaluateOptions,
   HonestySessionSnapshot,
 } from './honesty_gate.js';

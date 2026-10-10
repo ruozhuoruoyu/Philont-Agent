@@ -355,6 +355,11 @@ export interface HonestyEvaluation {
   unknownCount: number;
   /** Explanation text for chat-handler to compose reminder message */
   evidence: string;
+  /**
+   * Present when the deterministic floor could not decide and the verdict is PROVISIONAL: the caller
+   * must confirm it with the aux model (what does the sentence assert?) or drop it. See HonestyConfirmation.
+   */
+  confirm?: HonestyConfirmation;
 }
 
 /**
@@ -1213,6 +1218,18 @@ export function evaluateHonesty(
       evidence:
         `Your claimed "${fabricated.raw}" (approximately ${fabricated.bytes} bytes)` +
         ` has no corresponding number in this turn's tool outputs — may have been fabricated. Go back and check the actual numbers from the most recent stat / dir / ls.`,
+      // The floor decided only when the sentence names a ledger file; otherwise the caller confirms.
+      ...(fabricated.namesLedgerFile
+        ? {}
+        : {
+            confirm: {
+              kind: 'file_size' as const,
+              sentence: fabricated.sentence,
+              figure: fabricated.raw,
+              ledgerFiles: fabricated.ledgerFiles,
+              ledgerExcerpt: fabricated.ledgerExcerpt,
+            },
+          }),
     };
   }
 
@@ -1641,55 +1658,56 @@ const SIZE_PRODUCING_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * A size figure the reply QUOTES rather than measures. 2026-10-09 prod: "24GB" was the paper's own
- * appendix text (main.tex line 410, read in an earlier turn); the gate compared it with this turn's
- * stat/ls numbers, found no match and ruled it fabricated — a rewrite, a failed judge verdict and a
- * withheld reflection for a correctly attributed quotation. Attribution words in the 40 characters
- * before the figure, or quotation marks around it, mark a quote.
+ * What the size-claim branch cannot decide on its own, handed to the caller to CONFIRM with the aux
+ * model (2026-10-10). House rule for reading the agent's own output: a deterministic floor from ledger
+ * ground truth, and the model consulted only inside the window the floor opens, asked what the sentence
+ * ASSERTS — never whether it is true. The floor here is "the sentence names a file this turn's tools
+ * touched" (then the figure IS about a file and is compared with the ledger). Any other figure the ledger
+ * cannot match — "84GB" of VRAM, "2MB per token", "24 GB" quoted from a paper — is provisional: the
+ * caller asks whether the sentence states it as the size of a file this turn produced or inspected, and
+ * drops the verdict when the answer is no or the model is unavailable. Keyword lists for "is this about a
+ * file" were tried on 2026-10-09 and withdrawn the same day: a list cannot tell VRAM from a download.
  */
-const SIZE_ATTRIBUTION_RE =
-  /(论文|原文|作者|文中|文献|附录|引文|摘要|报告称|所述|提到|写道|写的是|据|按|according to|the paper|the authors?|reported|states?|quotes?|quoted|cited|says|said|wrote|mentions?|claims?)/i;
-const OPEN_QUOTES = '"“「『‘\'`《';
-const CLOSE_QUOTES = '"”」』’\'`》';
-
-export function isAttributedSizeClaim(text: string, raw: string): boolean {
-  let from = 0;
-  for (;;) {
-    const idx = text.indexOf(raw, from);
-    if (idx < 0) return false;
-    const before = text.slice(Math.max(0, idx - 40), idx);
-    if (SIZE_ATTRIBUTION_RE.test(before)) return true;
-    const prev = before.replace(/\s+$/, '').slice(-1);
-    const after = text.slice(idx + raw.length).replace(/^\s+/, '').slice(0, 1);
-    if (prev && OPEN_QUOTES.includes(prev) && after && CLOSE_QUOTES.includes(after)) return true;
-    from = idx + raw.length;
-  }
+export interface HonestyConfirmation {
+  kind: 'file_size';
+  /** The sentence of the reply that carries the figure. */
+  sentence: string;
+  /** The figure as written ("84GB"). */
+  figure: string;
+  /** Files this turn's size-producing tools touched (names only; empty when none were named). */
+  ledgerFiles: string[];
+  /** The size-producing tool outputs the figure was compared with, abbreviated. */
+  ledgerExcerpt: string;
 }
 
-/**
- * Is this figure about a FILE at all? 2026-10-09 prod, 22:28–22:36: the owner asked whether an 8-GPU
- * server could run DeepSeek V4; the reply's "84GB" was the usable VRAM per card. The gate compared it
- * with this turn's `dir` output, found no such number, ruled it a fabricated FILE size, and — after the
- * rewrite necessarily said 84GB again — withheld the whole reply. Three turns in a row, including the
- * owner's "what claim is unsupported?", ended in the ledger-only fallback. A size the gate can check is
- * a size a tool produced: a file written, inspected, listed. Memory, VRAM, weights, bandwidth, disks are
- * not in the ledger and never will be.
- */
-const SIZE_HARDWARE_RE =
-  /显存|内存|VRAM|HBM|\bRAM\b|GPU|带宽|硬盘|磁盘|SSD|容量|权重|参数|模型|数据集|训练|推理|每卡|单卡|\d\s*卡|GB\/s|memory|weights?|params?|parameters|model|dataset|bandwidth|capacity|disk|storage/i;
-const SIZE_FILE_RE =
-  /文件|file|\.(?:docx|xlsx|pptx|pdf|json|md|txt|csv|zip|py|png|jpe?g|mp4|wav|log|tex)\b|字节|bytes?|保存|写入|生成|导出|下载|附件|输出|大小|size|wrote|saved|written|download/i;
+const FILENAME_RE =
+  /[\w\-\u4e00-\u9fff.()\[\]]+\.(?:docx|xlsx|pptx|pdf|json|md|txt|csv|tsv|zip|7z|tar|gz|py|js|ts|html?|xml|ya?ml|png|jpe?g|gif|svg|webp|mp4|mp3|wav|log|tex|bib|ipynb|sql|db)(?![A-Za-z0-9])/gi;
 
-export function isFileSizeClaimContext(text: string, raw: string): boolean {
+/** File names (lower-cased basenames) that appear in the size-producing tools' inputs and outputs this turn. */
+export function ledgerFileNames(toolOutputs: ReadonlyArray<ToolResultRecord>): string[] {
+  const names = new Set<string>();
+  for (const r of toolOutputs) {
+    if (!SIZE_PRODUCING_TOOLS.has(r.toolName)) continue;
+    const input = typeof r.toolInput === 'string' ? r.toolInput : r.toolInput ? JSON.stringify(r.toolInput) : '';
+    for (const m of `${r.content}\n${input}`.matchAll(FILENAME_RE)) {
+      const base = m[0].split(/[\\/]/).pop() ?? m[0];
+      names.add(base.toLowerCase());
+    }
+  }
+  return [...names];
+}
+
+/** The sentence (clause) of `text` that contains `raw`. */
+export function claimSentence(text: string, raw: string): string {
   const idx = text.indexOf(raw);
-  if (idx < 0) return true;
-  const window = text.slice(Math.max(0, idx - 40), idx) + ' ' + text.slice(idx + raw.length, idx + raw.length + 24);
-  const fileish = SIZE_FILE_RE.test(window);
-  if (SIZE_HARDWARE_RE.test(window) && !fileish) return false;
-  // A GB-scale figure in prose with no file word near it is a capacity, a model, a quota — not a file
-  // this turn produced. Byte/KB/MB figures keep the old behaviour: those are what file tools print.
-  if (/G(?:i)?B$/i.test(raw.trim()) && !fileish) return false;
-  return true;
+  if (idx < 0) return raw;
+  const before = text.slice(0, idx);
+  const after = text.slice(idx + raw.length);
+  const startCut = Math.max(before.lastIndexOf('\n'), before.lastIndexOf('。'), before.lastIndexOf('！'), before.lastIndexOf('？'), before.lastIndexOf('. '));
+  const endRel = after.search(/[。！？\n]|\. /);
+  const start = startCut < 0 ? 0 : startCut + 1;
+  const end = endRel < 0 ? text.length : idx + raw.length + endRel + 1;
+  return text.slice(start, end).trim();
 }
 
 /** The figure appears verbatim (ignoring spaces / thousands separators / case) in ANY tool output this turn. */
@@ -1699,17 +1717,20 @@ function sizeClaimQuotedVerbatim(outputs: string, raw: string): boolean {
   return needle.length > 0 && norm(outputs).includes(needle);
 }
 
+export interface UnsourcedSizeClaim extends SizeClaim {
+  sentence: string;
+  /** The floor: the sentence names a file this turn's tools touched, so the figure is about a file. */
+  namesLedgerFile: boolean;
+  ledgerFiles: string[];
+  ledgerExcerpt: string;
+}
+
 export function findUnsourcedSizeClaim(
   text: string,
   toolOutputs: ReadonlyArray<ToolResultRecord>,
-): SizeClaim | null {
+): UnsourcedSizeClaim | null {
   const allOutputsRaw = toolOutputs.map((r) => r.content).join('\n');
-  const claims = extractSizeClaims(text).filter(
-    (c) =>
-      isFileSizeClaimContext(text, c.raw) &&
-      !isAttributedSizeClaim(text, c.raw) &&
-      !sizeClaimQuotedVerbatim(allOutputsRaw, c.raw),
-  );
+  const claims = extractSizeClaims(text).filter((c) => !sizeClaimQuotedVerbatim(allOutputsRaw, c.raw));
   if (claims.length === 0) return null;
 
   // 2026-05-20 false-positive fix: the baseline for size claims can only come from tools that produce file sizes.
@@ -1735,10 +1756,16 @@ export function findUnsourcedSizeClaim(
     // No tool output to compare → cannot disprove. Let other branches handle (unknown / completion).
     return null;
   }
+  const ledgerFiles = ledgerFileNames(outputsForNumbers);
+  const ledgerExcerpt = allOutputs.replace(/\s+/g, ' ').slice(0, 600);
   for (const claim of claims) {
     const tolerance = Math.max(claim.bytes * 0.05, 200);
     const matched = sourceNumbers.some((n) => Math.abs(n - claim.bytes) <= tolerance);
-    if (!matched) return claim;
+    if (matched) continue;
+    const sentence = claimSentence(text, claim.raw);
+    const lower = sentence.toLowerCase();
+    const namesLedgerFile = ledgerFiles.some((f) => lower.includes(f));
+    return { ...claim, sentence, namesLedgerFile, ledgerFiles, ledgerExcerpt };
   }
   return null;
 }

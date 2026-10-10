@@ -166,6 +166,7 @@ import {
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
 import { renderHonestyFallback, honestyPassTwoAction, renderUnsourcedFigureCaveat } from './honesty_fallback.js';
+import { confirmProvisionalHonesty } from './honesty_confirm.js';
 import { classifyAuthIntent, matchOfferedAuthWord } from './auth_intent.js';
 import { authRequestCode, isBarePredeliveryAuthReply, matchScopedAuthReply } from './auth_request_id.js';
 import { classifyExploreControlReply, decideResumeBatch, resolveExploreTarget } from './explore_control.js';
@@ -8566,6 +8567,25 @@ function messageRelatesToBoundExplore(sessionId: string, message: string): boole
   return messageRelatesToGoal(message, s.goal, claims);
 }
 
+/**
+ * Resolve a PROVISIONAL honesty verdict (2026-10-10): the gate's size-claim floor decides only when the
+ * sentence names a file this turn's tools touched; anything else the ledger cannot match is handed to
+ * the aux model to say what the sentence asserts. Cleared or unavailable ⇒ no verdict — a figure the
+ * gate cannot classify is not a lie it can prove (prod 2026-10-09: "84GB" of VRAM withheld three replies).
+ */
+async function resolveHonesty(sessionId: string, v: HonestyEvaluation | null): Promise<HonestyEvaluation | null> {
+  if (!v?.confirm) return v;
+  const outcome = await confirmProvisionalHonesty(
+    v,
+    isAuxLLMConfigured() ? (req) => callAuxLLM({ ...req, fallbackToMain: false }) : undefined,
+  );
+  memory.metrics.increment(`honesty.confirm.${outcome.verdict}`);
+  console.warn(
+    `[honesty] session=${safeSessionId(sessionId)} provisional ${v.reason} claim="${v.matchedClaim}" → ${outcome.verdict} (basis=${outcome.basis})`,
+  );
+  return outcome.evaluation;
+}
+
 /** Current concrete work target shared by skill recall and the learning judge. */
 function activeWorkGoalForSession(sessionId: string): string | undefined {
   try {
@@ -11738,7 +11758,7 @@ async function handleChatSendInner(
           announceStallRaw === 'false' || announceStallRaw === 'no'
         );
         const honestySessionEnabled = process.env.PHILONT_HONESTY_SESSION !== '0';
-        const honestyPatterns = evaluateHonesty(firstTextContent, {
+        const honestyPatterns = await resolveHonesty(sessionId, evaluateHonesty(firstTextContent, {
           toolResults: recentToolResults,
           userMessage: signalBus.userMessage,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
@@ -11754,7 +11774,7 @@ async function handleChatSendInner(
                 fabricatedExecClaim: honestySessionStore.get(sessionId).fabricatedExecClaim,
               }
             : undefined,
-        });
+        }));
         const honesty = honestyPatterns;
         // Fold this turn into the session latch. This site (the zero-tool first response) evaluated the gate
         // but NEVER wrote back — so a fabrication caught here armed nothing and did not even bump the
@@ -11834,14 +11854,14 @@ async function handleChatSendInner(
             );
           }
           firstTextContent = regen.content;
-          const second = evaluateHonesty(firstTextContent, {
+          const second = await resolveHonesty(sessionId, evaluateHonesty(firstTextContent, {
             toolResults: extractRecentToolResults(messages),
             userMessage: signalBus.userMessage,
             reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
             detectAnnouncementStall: announceStallEnabled,
             skillDeleteSucceededThisTurn,
             turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
-          });
+          }));
           // High only — see the tool-loop pass for why a 'medium' verdict must not cost the whole reply.
           if (second && second.severity !== 'high') {
             console.warn(
@@ -14510,7 +14530,7 @@ async function runToolLoop(
         // per-iteration recentToolResults window resets whenever a gate injects a string user message, so an
         // early successful forget_skill can drop out of view and false-fire the skill_forget branch on a
         // restated claim. inTurnRecords is the whole-turn ledger and does not reset.
-        const honesty = evaluateHonesty(response.content, {
+        const honesty = await resolveHonesty(sessionId, evaluateHonesty(response.content, {
           toolResults: recentToolResults,
           userMessage: signalBus.userMessage,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
@@ -14520,7 +14540,7 @@ async function runToolLoop(
           // per-iteration window (prod: replyWithMedia succeeded, gate still cried "ZERO tool calls").
           turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
           session: honestySessionSnapshot(),
-        });
+        }));
         // The session-claim adjudicator used to live here, inline, and nowhere else — which is how a
         // fabricated session sailed through the zero-tool exit on 2026-07-28 while the identical claim was
         // caught here two turns earlier. It is now a rule in the claim-grounding chain, evaluated the same
@@ -14713,7 +14733,7 @@ async function runToolLoop(
         // that option exists to close (the per-iteration window resets when a gate injects a reminder,
         // so a successful forget_skill looks like no call at all) — and here a false positive does not
         // merely nudge, it DELETES the reply.
-        const secondHonesty = evaluateHonesty(response.content, {
+        const secondHonesty = await resolveHonesty(sessionId, evaluateHonesty(response.content, {
           toolResults: secondRecords,
           userMessage: signalBus.userMessage,
           reasoningState: ownerReasoning ? memory.reasoning.summarizeSession(ownerReasoning.id) : null,
@@ -14721,7 +14741,7 @@ async function runToolLoop(
           skillDeleteSucceededThisTurn,
           turnHadAnyToolCall: (signalBus.inTurnRecords ?? []).length > 0,
           session: honestySessionSnapshot(),
-        });
+        }));
         // Only a HIGH verdict is worth throwing the answer away for. 'medium' means "claimed done without
         // an observation tool confirming it" — replacing a whole reply, possibly full of correct work, with
         // a ledger paragraph would turn a detector's borderline call into the user's loss.

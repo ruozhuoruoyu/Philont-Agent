@@ -49,12 +49,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   8-GPU server could run DeepSeek V4; the reply's "84GB" (usable memory per card) was compared with
   this turn's `dir` listing, ruled a fabricated FILE size, and — since the rewrite necessarily said
   84GB again — replaced by the ledger-only fallback, which named neither the sentence nor the number.
-  The owner's "which claim is unsupported?" got the same fallback. Three changes: a size figure is a
-  file-size claim only in file context (`isFileSizeClaimContext`: memory / VRAM / weights / bandwidth
-  vocabulary, or a GB-scale figure with no file word near it, is not one); the fallback names the
-  rejected claim; and a reply whose only pass-2 verdict is an unsourced figure is published with a
-  caveat naming it (`honestyPassTwoAction` = flag) instead of withheld — a number can be marked in
-  place, a fabricated run cannot.
+  The owner's "which claim is unsupported?" got the same fallback. Three changes. The size-claim
+  branch now follows the house rule for reading the agent's own output: a deterministic FLOOR from
+  ledger ground truth (the sentence names a file this turn's size tools touched ⇒ the figure is about
+  a file and is compared with the ledger), and for any other unmatched figure a PROVISIONAL verdict
+  (`HonestyEvaluation.confirm`) that the caller confirms with the aux model, asked only what the
+  sentence asserts (`honesty_confirm.ts`) — cleared or unavailable drops it. A keyword list for "is
+  this about a file" was tried and withdrawn the same day: a list cannot tell VRAM from a download.
+  The fallback names the rejected claim. And a reply whose only pass-2 verdict is an unsourced figure
+  is published with a caveat naming it (`honestyPassTwoAction` = flag) instead of withheld — a number
+  can be marked in place, a fabricated run cannot.
 - **An unrelated question was force-continued into the bound reasoning session.** A clause-by-clause
   question about a licensing agreement was routed deep_explore:deliberate (selfContained=false: it
   depended on the uploaded contract, not on any tree) and advanced the "why does nobody notice
@@ -66,8 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The honesty gate's size-claim check flagged a quotation.** "24GB" was the paper appendix's own
   wording (main.tex line 410), compared against this turn's `ls` numbers and ruled fabricated —
   rewrite, judge=failure, reflection withheld. A figure attributed to a document (论文/原文/附录/the
-  paper/reported/…), quoted, or present verbatim in any tool output this turn is a quote, not a
-  measurement (`isAttributedSizeClaim`). An unattributed figure with no source still fires.
+  paper/reported/…) is now part of the aux confirmation question above; a figure present verbatim in
+  any tool output this turn is sourced and never judged.
 
 ### Added
 
