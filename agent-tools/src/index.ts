@@ -67,6 +67,7 @@ export {
   probeAuxLLM,
   auxLLMHealth,
   AuxLLMError,
+  auxStats,
 } from './utils/aux-llm.js';
 export type { AuxLLMRequest, AuxLLMCaller } from './utils/aux-llm.js';
 

@@ -13,6 +13,16 @@ import type { HonestyEvaluation, HonestyConfirmation } from '@agent/memory';
 
 export type AskFn = (req: { system: string; user: string; maxTokens: number; requireComplete?: boolean }) => Promise<string | null>;
 
+/**
+ * Master switch for the honesty gate (2026-10-10). Default ON; PHILONT_HONESTY_GATE=0/off/false/no drops
+ * every verdict before it can intercept, regenerate or confirm anything. It exists for ablation runs that
+ * measure what the gate buys on a benchmark — not for production, where the gate is the safety belt.
+ */
+export function honestyGateEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = (env.PHILONT_HONESTY_GATE ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+}
+
 export function buildSizeConfirmPrompt(c: HonestyConfirmation): { system: string; user: string } {
   return {
     system:

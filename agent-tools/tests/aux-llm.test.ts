@@ -9,6 +9,7 @@ import {
   auxLLMHealth,
   probeAuxLLM,
   AuxLLMError,
+  auxStats,
   type AuxLLMCaller,
   type AuxLLMRequest,
 } from '../src/utils/aux-llm.js';
@@ -925,5 +926,61 @@ describe('callAuxLLM — reporting enough to diagnose an empty reply', () => {
     } finally {
       fakeFetch.restore();
     }
+  });
+});
+
+describe('auxStats — usage reported by the aux provider is summed process-wide', () => {
+  beforeEach(clearEnv);
+  afterEach(clearEnv);
+
+  it('openai path: prompt/completion tokens add up across calls', async () => {
+    setAuxEnv();
+    const before = { ...auxStats };
+    const fakeFetch = mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 300, completion_tokens: 12 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    try {
+      await callAuxLLM({ user: 'a' });
+      await callAuxLLM({ user: 'b' });
+    } finally {
+      fakeFetch.restore();
+    }
+    assert.equal(auxStats.calls - before.calls, 2);
+    assert.equal(auxStats.inputTokens - before.inputTokens, 600);
+    assert.equal(auxStats.outputTokens - before.outputTokens, 24);
+  });
+
+  it('anthropic path: input/output tokens are counted; a reply without usage counts the call only', async () => {
+    setAuxEnv('https://neolink.vnet.com/api', 'sk-ant-test', 'deepseek-v4-flash');
+    process.env.AUX_LLM_PROTOCOL = 'anthropic';
+    const before = { ...auxStats };
+    let n = 0;
+    const fakeFetch = mockFetch(() => {
+      n++;
+      return new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text: 'y' }],
+          stop_reason: 'end_turn',
+          ...(n === 1 ? { usage: { input_tokens: 40, output_tokens: 3 } } : {}),
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    try {
+      await callAuxLLM({ user: 'q' });
+      await callAuxLLM({ user: 'r' });
+    } finally {
+      fakeFetch.restore();
+    }
+    assert.equal(auxStats.calls - before.calls, 2);
+    assert.equal(auxStats.inputTokens - before.inputTokens, 40);
+    assert.equal(auxStats.outputTokens - before.outputTokens, 3);
   });
 });

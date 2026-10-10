@@ -452,8 +452,20 @@ export function planThinkingOnlyRetry(
   return { reasoning: lower, maxTokens: Math.min(65536, Math.max(maxTokens, 256) * 2) };
 }
 
-/** Process-wide counters a caller can diff around a call to learn what the adapter had to do for it. */
-export const adapterStats = { thinkingOnlyRetries: 0, continuations: 0 };
+/**
+ * Process-wide counters a caller can diff around a call to learn what the adapter had to do for it.
+ * The token counters (2026-10-10) are what a cost column is made of: headless writes them into result.json
+ * so a benchmark run reports tokens per task next to its pass/fail, instead of seconds alone.
+ */
+export const adapterStats = { thinkingOnlyRetries: 0, continuations: 0, calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+
+/** Add one provider response's reported usage to adapterStats; a response without usage still counts as a call. */
+export function recordAdapterUsage(u: { input?: number; output?: number; cacheRead?: number } | undefined): void {
+  adapterStats.calls += 1;
+  adapterStats.inputTokens += u?.input ?? 0;
+  adapterStats.outputTokens += u?.output ?? 0;
+  adapterStats.cacheReadTokens += u?.cacheRead ?? 0;
+}
 
 // ── A text reply the output limit cut ──────────────────────────────────────────────────────────────
 //
@@ -771,18 +783,23 @@ class AnthropicAdapter implements LLMAdapter {
       // every turn. Above the threshold, stream and reassemble via finalMessage() — same
       // Anthropic.Message shape, so all downstream handling (content blocks, stop_reason,
       // usage, thinking-block echo) is unchanged. Small requests keep the non-streaming path.
-      const dispatch = (params: Record<string, unknown>, mt: number) => sendWithTransientRetry<Anthropic.Message>(
-        async () =>
-          mt > NONSTREAMING_MAX_TOKENS
-            ? await this.client.messages
-                .stream(params as unknown as Anthropic.MessageStreamParams, { signal: opts?.signal })
-                .finalMessage()
-            : await this.client.messages.create(
-                params as unknown as Anthropic.MessageCreateParamsNonStreaming,
-                { signal: opts?.signal },
-              ),
-        opts?.signal,
-      );
+      const dispatch = async (params: Record<string, unknown>, mt: number): Promise<Anthropic.Message> => {
+        const message = await sendWithTransientRetry<Anthropic.Message>(
+          async () =>
+            mt > NONSTREAMING_MAX_TOKENS
+              ? await this.client.messages
+                  .stream(params as unknown as Anthropic.MessageStreamParams, { signal: opts?.signal })
+                  .finalMessage()
+              : await this.client.messages.create(
+                  params as unknown as Anthropic.MessageCreateParamsNonStreaming,
+                  { signal: opts?.signal },
+                ),
+          opts?.signal,
+        );
+        const u = (message as { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null } }).usage;
+        recordAdapterUsage({ input: u?.input_tokens, output: u?.output_tokens, cacheRead: u?.cache_read_input_tokens ?? undefined });
+        return message;
+      };
       response = await dispatch(createParams, maxTokens);
       const retryPlan = thinkingOnlyAtCap(response)
         ? planThinkingOnlyRetry(effReasoning, maxTokens, this.profile.supportsEffort(this.model))
@@ -1294,10 +1311,20 @@ class OpenAICompatAdapter implements LLMAdapter {
        * `prompt=2689 completion=4096` settled it in one line: a 2.7k prompt against a model that
        * generated the entire budget and returned none of it.
        */
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+        prompt_tokens_details?: { cached_tokens?: number };
+      };
       // MiniMax business-level error
       base_resp?: { status_code: number; status_msg: string };
     };
+    recordAdapterUsage({
+      input: data.usage?.prompt_tokens,
+      output: data.usage?.completion_tokens,
+      cacheRead: data.usage?.prompt_tokens_details?.cached_tokens,
+    });
 
     if (data.base_resp && data.base_resp.status_code !== 0) {
       throw new Error(

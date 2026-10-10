@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSizeConfirmPrompt, parseSizeConfirmation, confirmProvisionalHonesty } from '../src/honesty_confirm.js';
+import { buildSizeConfirmPrompt, parseSizeConfirmation, confirmProvisionalHonesty, honestyGateEnabled } from '../src/honesty_confirm.js';
 import type { HonestyEvaluation } from '@agent/memory';
 
 const provisional: HonestyEvaluation = {
@@ -61,4 +61,11 @@ test('a verdict the floor decided passes through without any model call', async 
   assert.equal(out.verdict, 'confirmed');
   assert.equal(asked, 0);
   assert.equal((await confirmProvisionalHonesty(null, undefined)).evaluation, null);
+});
+
+test('honestyGateEnabled: on by default, off only for the explicit off spellings (an ablation switch, not a tuning knob)', () => {
+  assert.equal(honestyGateEnabled({}), true);
+  assert.equal(honestyGateEnabled({ PHILONT_HONESTY_GATE: '1' }), true);
+  assert.equal(honestyGateEnabled({ PHILONT_HONESTY_GATE: 'maybe' }), true);
+  for (const off of ['0', 'off', 'false', 'no', ' OFF ']) assert.equal(honestyGateEnabled({ PHILONT_HONESTY_GATE: off }), false, off);
 });

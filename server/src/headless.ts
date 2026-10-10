@@ -30,7 +30,7 @@ import type { AuthRequest } from './chat-handler.js';
 import { safeSessionId } from './safe_session_id.js';
 import { runAcceptance, repairPrompt, diagnoseAcceptance, type AcceptanceResult } from './acceptance_check.js';
 import { distilPrompt, parseRules, renderConventions, MAX_RULES_SHOWN } from './acceptance_rules.js';
-import { callAuxLLM } from '@agent/tools';
+import { callAuxLLM, auxStats } from '@agent/tools';
 
 // ── argv parsing ─────────────────────────────────────────────────────────────
 
@@ -460,7 +460,9 @@ async function main(): Promise<void> {
   if (timer) clearTimeout(timer);
 
   // result.json: run metadata (agent benchmarks and similar evaluators read workspace side effects;
-  // this is philont's own run ledger — token counts are not yet exposed by the philont LLM adapter)
+  // this is philont's own run ledger). `usage` (2026-10-10) is the cost column: main-model and aux-model
+  // calls and tokens for the whole run, from the adapters' process-wide counters.
+  const { adapterStats } = await import('./llm-adapter.js');
   writeFileSync(
     join(outputDir, 'result.json'),
     JSON.stringify(
@@ -475,6 +477,10 @@ async function main(): Promise<void> {
         provider: process.env.LLM_PROVIDER ?? null,
         error: result.error ?? null,
         acceptance: result.acceptance ?? null,
+        usage: {
+          main: { calls: adapterStats.calls, inputTokens: adapterStats.inputTokens, outputTokens: adapterStats.outputTokens, cacheReadTokens: adapterStats.cacheReadTokens },
+          aux: { calls: auxStats.calls, inputTokens: auxStats.inputTokens, outputTokens: auxStats.outputTokens },
+        },
         finishedAt: new Date().toISOString(),
       },
       null,

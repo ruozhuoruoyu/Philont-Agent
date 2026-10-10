@@ -481,6 +481,18 @@ interface OpenAIChatResponse {
   error?: { message?: string; type?: string };
 }
 
+/**
+ * Process-wide usage counters for the aux model (2026-10-10). The aux path is a real cost a benchmark run
+ * must report next to the main model's: headless writes these into result.json.
+ */
+export const auxStats = { calls: 0, inputTokens: 0, outputTokens: 0 };
+
+function recordAuxUsage(input: number | undefined, output: number | undefined): void {
+  auxStats.calls += 1;
+  auxStats.inputTokens += input ?? 0;
+  auxStats.outputTokens += output ?? 0;
+}
+
 /** `prompt=N completion=M` for an error message; empty when the provider reported no usage. */
 function renderUsage(usage: OpenAIChatResponse['usage']): string {
   if (!usage) return ', usage=not-reported';
@@ -590,6 +602,7 @@ async function callOpenAICompatible(
       'http_error',
     );
   }
+  recordAuxUsage(json.usage?.prompt_tokens, json.usage?.completion_tokens);
 
   const choice = json.choices?.[0];
   const content = choice?.message?.content;
@@ -624,6 +637,7 @@ async function callOpenAICompatible(
 interface AnthropicMessagesResponse {
   content?: Array<{ type?: string; text?: string; thinking?: string }>;
   stop_reason?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
   error?: { message?: string; type?: string };
 }
 
@@ -725,6 +739,7 @@ async function callAnthropicCompatible(
       'http_error',
     );
   }
+  recordAuxUsage(json.usage?.input_tokens, json.usage?.output_tokens);
 
   const text = json.content?.find((b) => b.type === 'text')?.text;
   const stopReason = json.stop_reason ?? 'missing';

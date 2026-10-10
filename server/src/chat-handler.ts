@@ -166,7 +166,7 @@ import {
 } from '@agent/memory';
 import { honestySessionStore } from './honesty_session_state.js';
 import { renderHonestyFallback, honestyPassTwoAction, renderUnsourcedFigureCaveat } from './honesty_fallback.js';
-import { confirmProvisionalHonesty } from './honesty_confirm.js';
+import { confirmProvisionalHonesty, honestyGateEnabled } from './honesty_confirm.js';
 import { classifyAuthIntent, matchOfferedAuthWord } from './auth_intent.js';
 import { authRequestCode, isBarePredeliveryAuthReply, matchScopedAuthReply } from './auth_request_id.js';
 import { classifyExploreControlReply, decideResumeBatch, resolveExploreTarget } from './explore_control.js';
@@ -8574,6 +8574,7 @@ function messageRelatesToBoundExplore(sessionId: string, message: string): boole
  * gate cannot classify is not a lie it can prove (prod 2026-10-09: "84GB" of VRAM withheld three replies).
  */
 async function resolveHonesty(sessionId: string, v: HonestyEvaluation | null): Promise<HonestyEvaluation | null> {
+  if (!honestyGateEnabled()) return null;
   if (!v?.confirm) return v;
   const outcome = await confirmProvisionalHonesty(
     v,
