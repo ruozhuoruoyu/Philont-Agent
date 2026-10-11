@@ -253,6 +253,20 @@ async function run(): Promise<RunResult> {
   const ch = await import('./chat-handler.js');
 
   const log: string[] = [];
+  // External MCP servers mount asynchronously (chat-handler is fire-and-forget about it). A benchmark whose
+  // only tool comes from an MCP server must not send the task before that tool exists, so when servers are
+  // configured, wait until every one is connected or failed, bounded by PHILONT_MCP_WAIT_MS (default 15 s).
+  if (ch.getMcpStatus().configured > 0) {
+    const waitMs = Number(process.env.PHILONT_MCP_WAIT_MS ?? '15000') || 15000;
+    const t0 = Date.now();
+    while (Date.now() - t0 < waitMs) {
+      const st = ch.getMcpStatus();
+      if (st.servers.every((s) => (s.state as string) === 'connected' || (s.state as string) === 'failed')) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const st = ch.getMcpStatus();
+    process.stderr.write(`[headless] mcp wait ${Date.now() - t0}ms: ${st.summary}\n`);
+  }
   const logLine = (tag: string, text: string) => {
     // Owner-local wall clock (AGENT_TIMEZONE), same as the tee'd console log — a run log is read by a
     // human, and forcing them to re-add their UTC offset to every line is a tax with no upside.
