@@ -19,6 +19,7 @@
 
 import { currentPhraseLang } from './response_language.js';
 import type { ToolTraceEntry } from '@agent/memory';
+import { patternMatchesCall as patternMatchesCallInput, toolNameMatches as toolNameMatchesPattern } from '@agent/memory';
 import {
   READBACK_JUDGE_SYSTEM,
   READBACK_SYSTEM,
@@ -1389,6 +1390,16 @@ export async function runPlanExecuteLoop(
   let livePlanId: string | null = null;
   const rules: LoopRule[] = plan.rules ?? [];
   activeRules = rules;
+  // Tools the plan itself declares as readbacks (evidence / invariant patterns). In an environment whose only
+  // tool is an execute-class REPL (AppWorld's `shell` + `aw`), nothing is classified read, yet the model can
+  // still name how the world is read back; those tools join the read-only sub-run whitelist, and a call that
+  // matches a readback pattern is not counted as the step's "last write".
+  const readbackPatterns = rules.filter((r) => r.kind === 'evidence' || r.kind === 'invariant').flatMap((r) => r.applies);
+  const readbackTools = new Set([...knownTools].filter((t) => readbackPatterns.some((p) => toolNameMatchesPattern(p.tool, t))));
+  const subRunWhitelist: ReadonlySet<string> | undefined =
+    readOnlyWhitelist || readbackTools.size > 0 ? new Set([...(readOnlyWhitelist ?? []), ...readbackTools]) : undefined;
+  const isReadbackCall = (c: { name: string; input: Record<string, unknown> }): boolean =>
+    readbackPatterns.some((p) => patternMatchesCallInput(p, c.name, c.input));
   try {
     livePlanId = deps.planTracker?.create(plan.deliverables, plan.steps, guideUrls[0] ?? '', rules) ?? null;
   } catch { livePlanId = null; }
@@ -1400,6 +1411,7 @@ export async function runPlanExecuteLoop(
   let budgetExhausted = false;
   // Shape used by the readback checks over the full-output trace (last successful write, then a matching read).
   const isActionRec = (c: { name: string; input: Record<string, unknown> }): boolean => {
+    if (isReadbackCall(c)) return false;
     const cls = deps.classifyCall?.(c.name, c.input);
     if (cls?.capability !== undefined) return (cls.capability === 'write' || cls.capability === 'execute') && cls.domain !== 'self';
     return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
@@ -1415,7 +1427,7 @@ export async function runPlanExecuteLoop(
     toolDefs: deps.toolDefs,
     toolRunner: stepToolRunner,
     maxIters: 4,
-    toolWhitelist: readOnlyWhitelist,
+    toolWhitelist: subRunWhitelist,
     toolBlacklist: deps.toolBlacklist,
     abortSignal: budgetSignal(capMs),
   });
@@ -1455,7 +1467,7 @@ export async function runPlanExecuteLoop(
         toolDefs: deps.toolDefs,
         toolRunner: stepToolRunner,
         maxIters: 5,
-        toolWhitelist: readOnlyWhitelist,
+        toolWhitelist: subRunWhitelist,
         toolBlacklist: deps.toolBlacklist,
         abortSignal: budgetSignal(3 * 60_000),
       });

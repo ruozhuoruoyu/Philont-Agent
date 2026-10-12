@@ -233,3 +233,17 @@ test('loop: LOCATE reads the guide from a document tool when no URL is given', a
   assert.ok(deps.lines.some((l) => /LOCATE: 1 document\(s\) read/.test(l)), deps.lines.join('\n'));
   assert.notEqual(r.outcome, 'aborted');
 });
+
+test('loop: an execute-class REPL is both write and readback — a call matching the evidence pattern is not the "last write"', async () => {
+  const rules = [{ id: 'row-exists', kind: 'evidence', condition: 'the roster shows the new row', applies: [{ tool: 'shell', args: 'show_rows|print\\(rows' }], covers: ['onboard'] }];
+  const deps = fakeDeps({
+    draft: JSON.stringify({ deliverables: [{ id: 'onboard', description: 'add the new hire row' }], steps: [{ id: 's', description: 'add via shell', covers: ['onboard'] }], rules }),
+    execCalls: [{ name: 'shell', input: { command: 'aw exec add_row()' } }, { name: 'shell', input: { command: 'aw exec print(rows)' } }],
+  }, { judge: 'yes' });
+  deps.toolDefs = [{ name: 'shell', description: 'run a command', parameters: '{}' }];
+  deps.classifyCall = () => ({ capability: 'execute', domain: 'local' });
+  const r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  assert.equal(r.outcomes[0].status, 'done', deps.lines.join('\n'));
+  assert.equal(r.outcomes[0].verified, true);
+  assert.ok(!deps.lines.some((l) => /forcing one/.test(l)), 'the model\'s own readback counted');
+});
