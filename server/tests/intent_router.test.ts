@@ -533,3 +533,19 @@ test('an unrelated message is not force-continued into the bound tree', () => {
   assert.equal(shouldForceRoutedDeepExploreContinue({ ...base, topicMatches: true }), true);
   assert.equal(shouldForceRoutedDeepExploreContinue({ ...base, topicMatches: false }), false);
 });
+
+test('classifyIntent: PHILONT_INTENT_ROUTE_OVERRIDE pins the route without calling the classifier', async () => {
+  const prev = process.env.PHILONT_INTENT_ROUTE_OVERRIDE;
+  const prevOn = process.env.PHILONT_INTENT_ROUTER;
+  process.env.PHILONT_INTENT_ROUTE_OVERRIDE = 'plan';
+  delete process.env.PHILONT_INTENT_ROUTER;
+  try {
+    let called = 0;
+    const d = await classifyIntent('How much did I spend on venmo this month?', { call: async () => { called++; return '{"route":"direct","confidence":0.9}'; } });
+    assert.equal(d?.route, 'plan');
+    assert.equal(called, 0);
+  } finally {
+    if (prev === undefined) delete process.env.PHILONT_INTENT_ROUTE_OVERRIDE; else process.env.PHILONT_INTENT_ROUTE_OVERRIDE = prev;
+    if (prevOn === undefined) delete process.env.PHILONT_INTENT_ROUTER; else process.env.PHILONT_INTENT_ROUTER = prevOn;
+  }
+});

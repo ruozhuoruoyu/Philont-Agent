@@ -293,6 +293,12 @@ export async function classifyIntent(
   deps: ClassifyIntentDeps = {},
 ): Promise<IntentDecision | null> {
   if (!intentRouterEnabled()) return null;
+  // Evaluation control, unset in normal use: pin the route so a mechanism is measured on every task rather than on
+  // whichever tasks the router happens to send it this run (the same AppWorld task routed plan once, direct next).
+  const pinned = process.env.PHILONT_INTENT_ROUTE_OVERRIDE;
+  if (pinned === 'plan' || pinned === 'direct') {
+    return { route: pinned, confidence: 1, reason: 'route pinned by PHILONT_INTENT_ROUTE_OVERRIDE', selfContained: true };
+  }
   // Deterministic short-circuit: a pure cleanup/cancel command is direct execution — skip the aux
   // call and never let it route to plan/deep_explore (which stall a trivial deletion).
   if (looksLikeCleanupIntent(userMessage)) {
