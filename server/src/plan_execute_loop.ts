@@ -1775,9 +1775,17 @@ export async function runPlanExecuteLoop(
     //   action-type    → ≥1 successful EXTERNAL action (e.g. http POST) — zero attempts = FAILED;
     //   read-type      → the step's read rule (unchanged).
     const stepVerdicts: string[] = [];
+    // A deliverable that later steps also cover is not settled by this one: this step is part of the work, not
+    // its end. Settling it here marked the final answer done after the first of six steps (fetch the date), and
+    // the skip rule then skipped the five that do the work (AppWorld 21abae1_3, route pinned to plan).
+    const laterCovers = new Set(plan.steps.slice(plan.steps.indexOf(step) + 1).flatMap((s) => s.covers));
     for (const dId of step.covers.length > 0 ? step.covers : []) {
       const cur = outcomes.get(dId);
       if (!cur) continue;
+      if (laterCovers.has(dId)) {
+        stepVerdicts.push(`${dId}=pending (later steps cover it)`);
+        continue;
+      }
       const dText = `${plan.deliverables.find((x) => x.id === dId)?.description ?? ''} ${step.description}`;
       let dOk: boolean;
       let dEvidence: string;

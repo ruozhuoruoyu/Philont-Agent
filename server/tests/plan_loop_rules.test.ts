@@ -357,3 +357,19 @@ test('loop: every loop log line carries its elapsed time', async () => {
   const loopLines = deps.lines.filter((l) => l.startsWith('[plan-loop'));
   assert.ok(loopLines.length > 0 && loopLines.every((l) => /^\[plan-loop \+\d+s\]/.test(l)), loopLines.join('\n'));
 });
+
+test('loop: a deliverable that later steps also cover is not settled (or skipped past) by the first step', async () => {
+  const draft = JSON.stringify({
+    deliverables: [{ id: 'answer', description: 'create the onboarding issue for the new hire' }],
+    steps: [
+      { id: 's1', description: 'look up the new hire with jira__search', covers: ['answer'] },
+      { id: 's2', description: 'create the onboarding issue with jira__create_issue', covers: ['answer'] },
+    ],
+    rules: [],
+  });
+  const deps = fakeDeps({ draft, execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }] });
+  await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  assert.ok(deps.lines.some((l) => /EXECUTE s1: deliverables answer=pending/.test(l)), deps.lines.join('\n'));
+  assert.ok(!deps.lines.some((l) => /EXECUTE s2: skipped/.test(l)), deps.lines.join('\n'));
+  assert.ok(deps.lines.some((l) => /EXECUTE s2: deliverables answer=done/.test(l)), deps.lines.join('\n'));
+});
