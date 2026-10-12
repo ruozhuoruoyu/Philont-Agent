@@ -11715,7 +11715,8 @@ async function handleChatSendInner(
                     system:
                       'Compare a plan against its guide. List guide requirements (mandatory actions of the flow ' +
                       'being asked for) NOT covered by any deliverable. Output ONLY JSON: {"gaps":["<one line each>"]} ' +
-                      '(empty array when fully covered). Reference-only guide content is not a gap.',
+                      '(empty array when fully covered). Reference-only guide content is not a gap, nor is an instruction about how ' +
+                      'to work (working style, autonomy) — only an outcome the flow must produce.',
                     user:
                       `# Guide\n${guideText.slice(0, 16_000)}\n\n# Deliverables\n` +
                       deliverables.map((d) => `- ${d.id}: ${d.description}`).join('\n'),

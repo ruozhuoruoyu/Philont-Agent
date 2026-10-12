@@ -183,7 +183,7 @@ test('loop: a guard resolved satisfied by a read-only sub-run lets the gated cal
     resolveText: 'VERDICT: SATISFIED — authorization email id 9',
   });
   const r = await runPlanExecuteLoop('Handle today\'s emails per the SOP', ['https://x/guide'], deps);
-  assert.ok(deps.lines.some((l) => /RESOLVE authz \(before execute\): satisfied/.test(l)), deps.lines.join('\n'));
+  assert.ok(deps.lines.some((l) => /RESOLVE authz \(at-action \(jira__create_issue\)\): satisfied/.test(l)), deps.lines.join('\n'));
   assert.ok(!deps.lines.some((l) => /rule-guard BLOCKED/.test(l)));
   assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'done');
 });
@@ -196,7 +196,7 @@ test('loop: a guard with no successful read is unresolved and keeps refusing; no
     resolveReads: false,
   });
   const r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
-  assert.ok(deps.lines.some((l) => /RESOLVE authz \(before execute\): unresolved/.test(l)), 'a verdict without a read is unresolved');
+  assert.ok(deps.lines.some((l) => /RESOLVE authz \(at-action \(jira__create_issue\)\): unresolved/.test(l)), 'a verdict without a read is unresolved');
   assert.ok(deps.lines.some((l) => /rule-guard BLOCKED jira__create_issue \(authz: unresolved\)/.test(l)));
   assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'failed');
   assert.ok(/authz/.test(r.reply), 'the reply names the unverified guard');
@@ -273,12 +273,12 @@ test('loop: the rule judge clears a pattern match only with a definite "no"; "un
   }
 });
 
-test('loop: a guard is re-checked at the moment of the action (the world changed since RESOLVE)', async () => {
+test('loop: a guard is re-checked at each gated attempt (the world changed since the last check)', async () => {
   const deps = fakeDeps({
     draft: DRAFT([{ id: 'after-work', kind: 'guard', condition: 'complete only after the onboarding issue exists', applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }], covers: ['offboard'] }]),
-    execCalls: [{ name: 'jira__create_issue', input: { summary: 'OFFBOARD-x' } }],
-  });
-  // RESOLVE before execute says NOT_SATISFIED, the at-action re-check says SATISFIED.
+    execCalls: [{ name: 'jira__create_issue', input: { summary: 'OFFBOARD-x' } }, { name: 'jira__create_issue', input: { summary: 'OFFBOARD-x' } }],
+  }, { judge: 'unclear' });
+  // The first check says NOT_SATISFIED (call refused), the second says SATISFIED (call allowed).
   let resolveRuns = 0;
   const base = deps.llm.send.bind(deps.llm);
   deps.llm = {
@@ -296,9 +296,9 @@ test('loop: a guard is re-checked at the moment of the action (the world changed
     },
   };
   const r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
-  assert.ok(deps.lines.some((l) => /RESOLVE after-work \(before execute\): not_satisfied/.test(l)), deps.lines.join('\n'));
+  assert.ok(deps.lines.some((l) => /RESOLVE after-work \(at-action \(jira__create_issue\)\): not_satisfied/.test(l)), deps.lines.join('\n'));
   assert.ok(deps.lines.some((l) => /RESOLVE after-work \(at-action \(jira__create_issue\)\): satisfied/.test(l)));
-  assert.ok(!deps.lines.some((l) => /rule-guard BLOCKED/.test(l)));
+  assert.equal(deps.lines.filter((l) => /rule-guard BLOCKED/.test(l)).length, 1);
   assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'done');
 });
 
@@ -318,4 +318,42 @@ test('loop: past the per-step refusal budget the sub-run is told to stop', async
   const firstStepEnd = deps.lines.findIndex((l) => /EXECUTE s: tools=/.test(l));
   const blocked = deps.lines.slice(0, firstStepEnd).filter((l) => /rule-forbid BLOCKED/.test(l)).length;
   assert.equal(blocked, 4, deps.lines.join('\n'));
+});
+
+test('loop: a guard already shown by tool output gathered this turn is satisfied without a sub-run', async () => {
+  const draft = JSON.stringify({
+    deliverables: [{ id: 'look', description: 'search the onboarding issue' }, { id: 'offboard', description: 'execute the offboarding' }],
+    steps: [{ id: 's1', description: 'search with jira__search', covers: ['look'] }, { id: 's2', description: 'offboard', covers: ['offboard'] }],
+    rules: [{ id: 'authz', kind: 'guard', condition: 'written authorization is on file', applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }], covers: ['offboard'] }],
+  });
+  const deps = fakeDeps({ draft, execCalls: [{ name: 'jira__search', input: { jql: 'x' } }, { name: 'jira__create_issue', input: { summary: 'OFFBOARD-1' } }] },
+    { judge: 'yes', toolOutputs: { jira__search: 'AUTH-7: written authorization from the department head' } });
+  let resolveCalls = 0;
+  const base = deps.llm.send.bind(deps.llm);
+  deps.llm = { async send(system, m, t, o) { if (system === RESOLVE_SYSTEM) resolveCalls++; return base(system, m, t, o); } };
+  const r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  assert.ok(deps.lines.some((l) => /RESOLVE authz .*satisfied — shown by tool output already gathered/.test(l)), deps.lines.join('\n'));
+  assert.equal(resolveCalls, 0);
+  assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'done');
+});
+
+test('loop: tools the plan forbids outright are not offered to a guard sub-run; with none left the guard is unresolved at once', async () => {
+  const rules = [
+    { id: 'authz', kind: 'guard', condition: 'written authorization is on file', applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }], covers: ['offboard'] },
+    { id: 'no-search', kind: 'forbid', condition: 'use only the issue tracker create call', applies: [{ tool: 'jira__search' }, { tool: 'google_mail__search_emails' }, { tool: 'handbook__readFile' }] },
+  ];
+  const deps = fakeDeps({ draft: DRAFT(rules), execCalls: [{ name: 'jira__create_issue', input: { summary: 'OFFBOARD-1' } }] }, { judge: 'unclear' });
+  let resolveCalls = 0;
+  const base = deps.llm.send.bind(deps.llm);
+  deps.llm = { async send(system, m, t, o) { if (system === RESOLVE_SYSTEM) resolveCalls++; return base(system, m, t, o); } };
+  await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  assert.equal(resolveCalls, 0, deps.lines.join('\n'));
+  assert.ok(deps.lines.some((l) => /RESOLVE authz .*unresolved — no read tool is available/.test(l)), deps.lines.join('\n'));
+});
+
+test('loop: every loop log line carries its elapsed time', async () => {
+  const deps = fakeDeps({ draft: DRAFT([]), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }] });
+  await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  const loopLines = deps.lines.filter((l) => l.startsWith('[plan-loop'));
+  assert.ok(loopLines.length > 0 && loopLines.every((l) => /^\[plan-loop \+\d+s\]/.test(l)), loopLines.join('\n'));
 });

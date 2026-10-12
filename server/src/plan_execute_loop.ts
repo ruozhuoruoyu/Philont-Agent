@@ -870,6 +870,8 @@ const DRAFT_SYSTEM = [
   '- One deliverable per REQUIRED action: every literal action in the user task AND every mandatory',
   '  requirement (MUST/必须/required, numbered steps of the flow being asked for) in the guide.',
   '- Guide content that is reference material (not asked for) is NOT a deliverable.',
+  '- A requirement about HOW to work (act on your own, print outputs, small chunks, read docs first)',
+  '  is NOT a deliverable either: it describes the work, it is not an outcome of it. Fewer deliverables run faster.',
   '- Each step covers ≥1 deliverable id. Keep ≤ 12 deliverables, ≤ 14 steps.',
   '- "rules" are what the mechanism enforces; use them for every sentence of the guide that is not a plain step:',
   '  guard     = a condition that must be verified BEFORE an action ("only if…", "requires written approval",',
@@ -921,6 +923,9 @@ export async function runPlanExecuteLoop(
   const deadlineMs = deps.deadlineMs ?? 15 * 60_000;
   const startedAt = now();
   const timeLeft = () => deadlineMs - (now() - startedAt);
+  const planningShareMs = Math.max(3 * 60_000, deadlineMs * 0.3);
+  // Every loop line carries its elapsed time: without it a run that ends out of budget cannot be split into phases.
+  const log = (m: string) => deps.log(m.replace(/^\[plan-loop\]/, () => `[plan-loop +${Math.round((now() - startedAt) / 1000)}s]`));
   // Hard per-call ceiling. The adapter's own call timeout can reach 439s+ (formula-clamped up to
   // 900s) and transient retries triple it — prod: ONE hung llm.send blocked 13+ min of silence and
   // the turn deadline killed everything. Every loop LLM call gets min(cap, remaining budget).
@@ -938,7 +943,7 @@ export async function runPlanExecuteLoop(
   for (const url of guideUrls) {
     const text = await deps.fetchGuide(url);
     if (text) guideTexts.push(text);
-    deps.log(`[plan-loop] GUIDE_READ ${url} → ${text ? `${text.length} chars` : 'FAILED'}`);
+    log(`[plan-loop] GUIDE_READ ${url} → ${text ? `${text.length} chars` : 'FAILED'}`);
   }
   if (guideTexts.length === 0 && guideUrls.length > 0) {
     return fail(
@@ -987,14 +992,14 @@ export async function runPlanExecuteLoop(
         toolBlacklist: deps.toolBlacklist,
         abortSignal: budgetSignal(3 * 60_000),
       });
-      deps.log(`[plan-loop] LOCATE: ${located.length} document(s) read (${loc.toolCallHistory.length} calls)${readOnlyWhitelist ? '' : ' — no read-only classification, whitelist off'}`);
+      log(`[plan-loop] LOCATE: ${located.length} document(s) read (${loc.toolCallHistory.length} calls)${readOnlyWhitelist ? '' : ' — no read-only classification, whitelist off'}`);
     } catch (e) {
-      deps.log(`[plan-loop] LOCATE failed (${(e as Error).message?.slice(0, 80)})`);
+      log(`[plan-loop] LOCATE failed (${(e as Error).message?.slice(0, 80)})`);
     }
     guideTexts.push(...located);
   }
   if (guideTexts.length === 0) {
-    deps.log('[plan-loop] GUIDE: none located — the task text itself is the spec (tier 3)');
+    log('[plan-loop] GUIDE: none located — the task text itself is the spec (tier 3)');
     guideTexts.push(task);
   }
   const guideText = guideTexts.join('\n\n---\n\n').slice(0, 60_000);
@@ -1020,12 +1025,12 @@ export async function runPlanExecuteLoop(
     const guideHash = guideContentHash(guideText);
     if (installed && installed.source?.contentHash === guideHash) {
       compiledSpec = installed;
-      deps.log(
+      log(
         `[plan-loop] spec: reusing installed spec.json for ${installed.service.name} ` +
           `(${installed.endpoints.length} endpoints, ${installed.rules.length} rules, hash=${guideHash}) — no recompile`,
       );
     } else if (installed) {
-      deps.log(
+      log(
         `[plan-loop] spec: installed spec.json for ${installed.service.name} is STALE ` +
           `(built from hash=${installed.source?.contentHash ?? 'none'}, guide is now ${guideHash}) — not trusting it`,
       );
@@ -1040,7 +1045,7 @@ export async function runPlanExecuteLoop(
     if (compiledSpec) guideApi = specToGuideApi(compiledSpec);
   }
   if (!compiledSpec) {
-    deps.log(
+    log(
       specCompileEnabled()
         ? '[plan-loop] spec: NONE (no installed spec.json, and the compile failed/was unavailable) — ' +
           'rule filter + spec guards are INERT this run; only the regex anchor applies'
@@ -1050,17 +1055,17 @@ export async function runPlanExecuteLoop(
   } else if (!compiledSpec.endpoints.some((e) => e.auth)) {
     // Same reason: a spec compiled before per-endpoint auth existed carries no auth facts, so the missing-
     // credential check cannot fire. That is deliberate (no check beats a wrong one) but must not be silent.
-    deps.log(
+    log(
       `[plan-loop] spec: ${compiledSpec.service.name} has no per-endpoint auth marks (older spec) — ` +
         'the missing-credential check is DORMANT; recompile the spec to enable it',
     );
   }
   const endpointRegistry = buildEndpointRegistry(guideApi);
   if (guideApi.hosts.length) {
-    deps.log(`[plan-loop] endpoint anchor: hosts=[${guideApi.hosts.join(',')}] endpoints=${guideApi.endpoints.length}`);
+    log(`[plan-loop] endpoint anchor: hosts=[${guideApi.hosts.join(',')}] endpoints=${guideApi.endpoints.length}`);
     const check = anchorSelfCheck(guideText, guideApi);
     if (check.suspicious) {
-      deps.log(
+      log(
         `[plan-loop] ⚠ anchor self-check: guide shows ~${check.evidenceLines} documented-call lines ` +
           `but only ${check.anchored} endpoints anchored — extractor blind spot likely; ` +
           `the model may improvise calls the guard cannot vet`,
@@ -1121,7 +1126,7 @@ export async function runPlanExecuteLoop(
           ruleJudgeCache.set(key, v);
         }
         if (v === 'no') {
-          deps.log(`[plan-loop] rule-${b.rule.kind} ${b.rule.id} does not govern ${name} (judge) — allowed`);
+          log(`[plan-loop] rule-${b.rule.kind} ${b.rule.id} does not govern ${name} (judge) — allowed`);
           continue;
         }
       }
@@ -1130,7 +1135,7 @@ export async function runPlanExecuteLoop(
     }
     if (blocking) {
       stepRuleBlocks++;
-      deps.log(`[plan-loop] rule-${blocking.rule.kind} BLOCKED ${name} (${blocking.rule.id}: ${blocking.why})`);
+      log(`[plan-loop] rule-${blocking.rule.kind} BLOCKED ${name} (${blocking.rule.id}: ${blocking.why})`);
       currentTrace.push({ toolName: name, input, success: false, at: now(), output: '' });
       return { ok: false, output: '', error: ruleBlockMessage(blocking, name) };
     }
@@ -1153,7 +1158,7 @@ export async function runPlanExecuteLoop(
     for (const [guardName, run] of guards) {
       const rej = run();
       if (rej) {
-        deps.log(
+        log(
           `[plan-loop] ${guardName}-guard BLOCKED ${name} → ${String(input.url ?? input.message ?? '').slice(0, 80)}`,
         );
         return { ok: false, output: '', error: rej.error };
@@ -1182,12 +1187,12 @@ export async function runPlanExecuteLoop(
         where = ' (unparseable url)';
       }
     }
-    deps.log(
+    log(
       `[plan-loop] tool ${name}${where} → ${res.ok ? 'ok' : `FAIL ${String(res.error ?? '').replace(/\s+/g, ' ').slice(0, 140)}`}`,
     );
     if (name === 'http') {
       const diag = describeAuthCall(input, res);
-      if (diag) deps.log(`[plan-loop] auth-call: ${diag}`);
+      if (diag) log(`[plan-loop] auth-call: ${diag}`);
       if (diag && res.ok && diag.includes('credInResp=true')) credentialCaptured = true;
       if (res.ok) {
         try {
@@ -1230,7 +1235,14 @@ export async function runPlanExecuteLoop(
     // Budget check: with < 5 min left there is no room for verify churn AND execution — take the
     // current plan (or the mechanically-adopted one) straight to EXECUTE.
     if (plan && timeLeft() < 5 * 60_000) {
-      deps.log(`[plan-loop] VERIFY budget check: ${Math.round(timeLeft() / 1000)}s left — proceeding with current plan`);
+      log(`[plan-loop] VERIFY budget check: ${Math.round(timeLeft() / 1000)}s left — proceeding with current plan`);
+      break;
+    }
+    // Planning may use at most a share of the whole budget. A revision round costs a draft plus a review, and
+    // runs that spent most of their time revising ended with the work itself out of time (AppWorld v2b: 8 of 8
+    // plan-routed tasks timed out with 2–3 steps done). Coverage left open is reported, not chased.
+    if (plan && now() - startedAt > planningShareMs) {
+      log(`[plan-loop] VERIFY planning share used (${Math.round((now() - startedAt) / 1000)}s) — proceeding with current plan`);
       break;
     }
     deps.onStatus?.(round === 0 ? 'drafting plan…' : `revising plan (round ${round + 1})…`);
@@ -1261,11 +1273,11 @@ export async function runPlanExecuteLoop(
     try {
       draftText = await llmText(deps.llm, DRAFT_SYSTEM, user, budgetSignal(180_000));
     } catch (e) {
-      deps.log(`[plan-loop] DRAFT call aborted/failed (${(e as Error).message?.slice(0, 60)})`);
+      log(`[plan-loop] DRAFT call aborted/failed (${(e as Error).message?.slice(0, 60)})`);
     }
     const draft = parseDraftJson(draftText, knownTools);
     if (!draft) {
-      deps.log(`[plan-loop] DRAFT round ${round + 1}: unparseable output`);
+      log(`[plan-loop] DRAFT round ${round + 1}: unparseable output`);
       gapsNote = 'Your previous output was not valid JSON in the required shape. Output ONLY the JSON object.';
       continue;
     }
@@ -1307,7 +1319,7 @@ export async function runPlanExecuteLoop(
     const persistedGaps = gapTexts.filter((g) => raisedBefore(g, prevGapTexts));
     prevContestedTexts = auxContested;
     prevGapTexts = gapTexts;
-    deps.log(
+    log(
       `[plan-loop] VERIFY round ${round + 1}: deliverables=${draft.deliverables.length} rules=${draft.rules?.length ?? 0} ` +
       `detGaps=${cov.gaps.filter((g) => g.mandatory).length} auxGaps=${auxGapsRaw ? auxGaps.length : 'n/a'}` +
       ((draft.ruleProblems?.length ?? 0) > 0 ? ` ruleProblems=${draft.ruleProblems!.length}` : '') +
@@ -1350,7 +1362,7 @@ export async function runPlanExecuteLoop(
   }
   // Execute the best plan the loop produced, not merely the last one it happened to draft.
   if (bestPlan && bestGapCount < unresolvedGaps.length) {
-    deps.log(
+    log(
       `[plan-loop] VERIFY: keeping the best round (${bestGapCount} gap(s)) over the last (${unresolvedGaps.length})`,
     );
     plan = bestPlan;
@@ -1385,18 +1397,18 @@ export async function runPlanExecuteLoop(
     };
     const adoptable = [...lastMandatoryGaps].filter((g) => {
       if (/\$\{?[A-Z][A-Z0-9_]{2,}\}?/.test(g.text)) {
-        deps.log(`[plan-loop] adoption skipped ($VAR snippet, not executable here): ${g.text.slice(0, 80)}`);
+        log(`[plan-loop] adoption skipped ($VAR snippet, not executable here): ${g.text.slice(0, 80)}`);
         return false;
       }
       if (isSpecRule(g.text)) {
-        deps.log(`[plan-loop] adoption skipped (spec rule, injected as constraint instead): ${g.text.slice(0, 80)}`);
+        log(`[plan-loop] adoption skipped (spec rule, injected as constraint instead): ${g.text.slice(0, 80)}`);
         return false;
       }
       // Prose that DESCRIBES an action is not an instruction to perform one. Without this, a sentence
       // documenting field names becomes a step told to "DO IT NOW — http POST" (see isActionableInstruction).
       // This is the filter that survives when isSpecRule cannot run — it needs no compiled spec.
       if (!isActionableInstruction(g.text)) {
-        deps.log(`[plan-loop] adoption skipped (describes, does not command — reported as a gap): ${g.text.slice(0, 80)}`);
+        log(`[plan-loop] adoption skipped (describes, does not command — reported as a gap): ${g.text.slice(0, 80)}`);
         return false;
       }
       return true;
@@ -1423,9 +1435,9 @@ export async function runPlanExecuteLoop(
       }
       const adopted = new Set(adopt.map((a) => a.text));
       unresolvedGaps = unresolvedGaps.filter((g) => !adopted.has(g));
-      deps.log(`[plan-loop] VERIFY exhausted — mechanically adopted ${adopt.length} mandatory item(s) into the plan; ${unresolvedGaps.length} gap(s) remain reported`);
+      log(`[plan-loop] VERIFY exhausted — mechanically adopted ${adopt.length} mandatory item(s) into the plan; ${unresolvedGaps.length} gap(s) remain reported`);
     } else {
-      deps.log(`[plan-loop] VERIFY rounds exhausted with ${unresolvedGaps.length} gap(s) — proceeding, will report`);
+      log(`[plan-loop] VERIFY rounds exhausted with ${unresolvedGaps.length} gap(s) — proceeding, will report`);
     }
   }
 
@@ -1456,12 +1468,18 @@ export async function runPlanExecuteLoop(
   const readbackTools = new Set([...knownTools].filter((t) => readbackPatterns.some((p) => toolNameMatchesPattern(p.tool, t))));
   const subRunWhitelist: ReadonlySet<string> | undefined =
     readOnlyWhitelist || readbackTools.size > 0 ? new Set([...(readOnlyWhitelist ?? []), ...readbackTools]) : undefined;
+  // What a read-only sub-run is SHOWN: the whitelist alone only refuses after the model has picked a tool, and a
+  // tool the plan forbids outright is refused every time — AppWorld v2b: a guide allowing only the REPL made every
+  // guard sub-run walk listDir/readFile/glob/env into refusals until its budget ran out. Those tools are not offered.
+  const wholeToolForbidden = (t: string): boolean =>
+    rules.some((r) => r.kind === 'forbid' && r.applies.some((p) => !p.args && toolNameMatchesPattern(p.tool, t)));
+  const subRunDefs = deps.toolDefs.filter((t) => (!subRunWhitelist || subRunWhitelist.has(t.name)) && !wholeToolForbidden(t.name));
   const isReadbackCall = (c: { name: string; input: Record<string, unknown> }): boolean =>
     readbackPatterns.some((p) => patternMatchesCallInput(p, c.name, c.input));
   try {
     livePlanId = deps.planTracker?.create(plan.deliverables, plan.steps, guideUrls[0] ?? '', rules) ?? null;
   } catch { livePlanId = null; }
-  if (livePlanId) deps.log(`[plan-loop] live plan ${livePlanId} created`);
+  if (livePlanId) log(`[plan-loop] live plan ${livePlanId} created`);
   const trackStep = (stepId: string, status: 'doing' | 'done' | 'blocked', evidence?: string) => {
     if (!livePlanId) return;
     try { deps.planTracker?.markStep(livePlanId, stepId, status, evidence); } catch { /* best-effort */ }
@@ -1482,7 +1500,7 @@ export async function runPlanExecuteLoop(
       `# Expected observation\n${rule.condition}\n\n# Read it back with\n${rule.applies.map((p) => `- ${p.tool}${p.args ? ` (args matching /${p.args}/)` : ''}`).join('\n')}\n\n` +
       `# Task context\n${task.slice(0, 2000)}`,
     llm: deps.llm,
-    toolDefs: deps.toolDefs,
+    toolDefs: subRunDefs,
     toolRunner: stepToolRunner,
     maxIters: 4,
     toolWhitelist: subRunWhitelist,
@@ -1499,59 +1517,62 @@ export async function runPlanExecuteLoop(
     }
   };
 
-  // ── RESOLVE (v2): every guard is checked with READ tools before any step it gates can run ──
-  // The verdict is parsed from a fixed line; the floor is at least one successful read — a verdict with
-  // nothing read is 'unresolved' and keeps the gated calls refused. The same check runs again at the moment a
-  // gated action is attempted (see stepToolRunner), because the world may have changed since.
+  // ── RESOLVE (v2): a guard is checked when a call it gates is attempted, not up front ──
+  // Up-front checking resolved every guard before any work — most gate calls that are never made, and conditions
+  // about the work itself ("only after X is done") cannot hold before the work starts. At the moment of the call:
+  // first the tool output already gathered this turn is judged against the condition (an independent judge that
+  // sees only tool text); only if that is not a definite yes does a read-only sub-run look. The floor stays: a
+  // verdict grounded in no successful tool output is 'unresolved' and the gated call stays refused.
   resolveGuard = async (rule: LoopRule, why: string): Promise<void> => {
-    const savedTrace = currentTrace;
-    const savedBlocks = stepRuleBlocks;
-    currentTrace = [];
-    inResolve = true;
     let verdict: ReturnType<typeof parseGuardVerdict> = 'unresolved';
     let note = '';
-    try {
-      const r = await runMiniAgentLoop({
-        systemPrompt: RESOLVE_SYSTEM,
-        userMessage:
-          `# Condition to check\n${rule.condition}\n\n# It gates\n${rule.applies.map((p) => `- ${p.tool}${p.args ? ` (${p.args})` : ''}`).join('\n')}\n\n` +
-          (stepNotes.length > 0 ? `# Work done so far\n${stepNotes.slice(-6).join('\n')}\n\n` : '') +
-          `# Task context\n${task.slice(0, 3000)}\n\n# Guide excerpt\n${guideText.slice(0, 8000)}`,
-        llm: deps.llm,
-        toolDefs: deps.toolDefs,
-        toolRunner: stepToolRunner,
-        maxIters: 5,
-        toolWhitelist: subRunWhitelist,
-        toolBlacklist: deps.toolBlacklist,
-        abortSignal: budgetSignal(3 * 60_000),
-      });
-      const readOk = r.toolCallHistory.some((c) => c.ok);
-      verdict = readOk ? parseGuardVerdict(r.finalText) : 'unresolved';
-      note = (r.finalText.match(/VERDICT\s*:[^\n]*/i)?.[0] ?? r.finalText).replace(/\s+/g, ' ').slice(0, 200) + (readOk ? '' : ' [no successful read]');
-    } catch (e) {
-      note = `resolve sub-run failed: ${(e as Error).message?.slice(0, 80)}`;
-    } finally {
-      inResolve = false;
-      currentTrace = savedTrace;
-      stepRuleBlocks = savedBlocks;
+    const seen = readCorpus.slice(1).slice(-8).join('\n---\n').slice(-6000);
+    if (seen && deps.readbackJudge) {
+      let v: 'yes' | 'no' | 'unclear' = 'unclear';
+      try { v = await deps.readbackJudge(rule.condition, seen); } catch { v = 'unclear'; }
+      if (v === 'yes') {
+        verdict = 'satisfied';
+        note = 'shown by tool output already gathered this turn';
+      }
+    }
+    if (verdict !== 'satisfied' && subRunDefs.length === 0) {
+      note = note || 'no read tool is available to check it';
+    } else if (verdict !== 'satisfied') {
+      const savedTrace = currentTrace;
+      const savedBlocks = stepRuleBlocks;
+      currentTrace = [];
+      inResolve = true;
+      try {
+        const r = await runMiniAgentLoop({
+          systemPrompt: RESOLVE_SYSTEM,
+          userMessage:
+            `# Condition to check\n${rule.condition}\n\n# It gates\n${rule.applies.map((p) => `- ${p.tool}${p.args ? ` (${p.args})` : ''}`).join('\n')}\n\n` +
+            (stepNotes.length > 0 ? `# Work done so far\n${stepNotes.slice(-6).join('\n')}\n\n` : '') +
+            `# Task context\n${task.slice(0, 3000)}\n\n# Guide excerpt\n${guideText.slice(0, 8000)}`,
+          llm: deps.llm,
+          toolDefs: subRunDefs,
+          toolRunner: stepToolRunner,
+          maxIters: 4,
+          toolWhitelist: subRunWhitelist,
+          toolBlacklist: deps.toolBlacklist,
+          abortSignal: budgetSignal(2 * 60_000),
+        });
+        const readOk = r.toolCallHistory.some((c) => c.ok);
+        verdict = readOk ? parseGuardVerdict(r.finalText) : 'unresolved';
+        note = (r.finalText.match(/VERDICT\s*:[^\n]*/i)?.[0] ?? r.finalText).replace(/\s+/g, ' ').slice(0, 200) + (readOk ? '' : ' [no successful read]');
+      } catch (e) {
+        note = `resolve sub-run failed: ${(e as Error).message?.slice(0, 80)}`;
+      } finally {
+        inResolve = false;
+        currentTrace = savedTrace;
+        stepRuleBlocks = savedBlocks;
+      }
     }
     rule.resolution = verdict;
     rule.resolutionEvidence = note;
-    deps.log(`[plan-loop] RESOLVE ${rule.id} (${why}): ${verdict} — ${note}`);
+    log(`[plan-loop] RESOLVE ${rule.id} (${why}): ${verdict} — ${note}`);
     trackStep(rule.id, verdict === 'unresolved' ? 'blocked' : 'done', `${verdict}: ${note}`.slice(0, 200));
   };
-  for (const rule of rules) {
-    if (rule.kind !== 'guard') continue;
-    if (deps.abortSignal?.aborted) break;
-    if (timeLeft() < 90_000) {
-      rule.resolution = 'unresolved';
-      rule.resolutionEvidence = 'time budget exhausted before the guard could be checked';
-      deps.log(`[plan-loop] RESOLVE ${rule.id}: unresolved (no time)`);
-      continue;
-    }
-    deps.onStatus?.(`checking guard: ${rule.id}`);
-    await resolveGuard(rule, 'before execute');
-  }
   for (const step of plan.steps) {
     if (deps.abortSignal?.aborted) break;
     // Budget check: leave ≥ 45s headroom for the CLOSE + report. Stopping here (with the remaining
@@ -1559,7 +1580,7 @@ export async function runPlanExecuteLoop(
     // in which case the work already done is never reported and the plan is never recorded.
     if (timeLeft() < 45_000) {
       budgetExhausted = true;
-      deps.log(`[plan-loop] EXECUTE budget exhausted (${Math.round(timeLeft() / 1000)}s left) — stopping; remaining steps not attempted`);
+      log(`[plan-loop] EXECUTE budget exhausted (${Math.round(timeLeft() / 1000)}s left) — stopping; remaining steps not attempted`);
       for (const dId of step.covers) {
         const cur = outcomes.get(dId);
         if (cur && cur.status === 'not-attempted') {
@@ -1571,7 +1592,7 @@ export async function runPlanExecuteLoop(
     // Skip the whole mini-loop when every covered deliverable is already done (an earlier step
     // covered the same ids) — each skipped step saves a 2-8 iteration weak-model loop.
     if (step.covers.length > 0 && step.covers.every((id) => outcomes.get(id)?.status === 'done')) {
-      deps.log(`[plan-loop] EXECUTE ${step.id}: skipped — all covered deliverables already done`);
+      log(`[plan-loop] EXECUTE ${step.id}: skipped — all covered deliverables already done`);
       stepNotes.push(`- ${step.id}: SKIPPED (already satisfied by earlier steps)`);
       trackStep(step.id, 'done', 'skipped — already satisfied by earlier steps');
       continue;
@@ -1701,7 +1722,7 @@ export async function runPlanExecuteLoop(
       !ledgerSatisfies &&
       timeLeft() > 90_000
     ) {
-      deps.log(`[plan-loop] EXECUTE ${step.id}: zero relevant attempts for an action/schedule deliverable — forced retry`);
+      log(`[plan-loop] EXECUTE ${step.id}: zero relevant attempts for an action/schedule deliverable — forced retry`);
       result = await runStep(
         `\n\n# MANDATORY — your previous run made ZERO attempts at the required ${needsSched ? 'schedule call' : 'action'}.` +
         `\nIn THIS run you MUST call the concrete tool (${needsSched ? 'schedule_reminder' : 'http POST with the real endpoint and body'}) BEFORE finishing.` +
@@ -1737,7 +1758,7 @@ export async function runPlanExecuteLoop(
         : actionAttempts.length > 0
           ? `all ${actionAttempts.length} action call(s) failed: ${actionAttempts.map(describeCall).join(', ').slice(0, 90)}`
           : (result.error ?? 'no successful tool call');
-    deps.log(
+    log(
       `[plan-loop] EXECUTE ${step.id}: tools=${result.toolCallHistory.length} ok=${okCalls.length} ` +
       `actions=${okActions.length}/${actionAttempts.length} ` +
       `iters=${result.itersUsed}${result.error ? ` error=${result.error}` : ''} → ${stepSucceeded ? 'done' : 'failed'}`,
@@ -1771,7 +1792,7 @@ export async function runPlanExecuteLoop(
         for (const rule of evRules) {
           let entry = findReadback(rule, currentTrace, lastWriteIndex(traceAsHistory(), isActionRec) + 1);
           if (!entry && timeLeft() > 90_000) {
-            deps.log(`[plan-loop] EXECUTE ${step.id}: no readback for ${rule.id} — forcing one`);
+            log(`[plan-loop] EXECUTE ${step.id}: no readback for ${rule.id} — forcing one`);
             try { await runReadback(rule, 2 * 60_000); } catch { /* counted as no readback below */ }
             entry = findReadback(rule, currentTrace, lastWriteIndex(traceAsHistory(), isActionRec) + 1);
           }
@@ -1860,7 +1881,7 @@ export async function runPlanExecuteLoop(
     // DELIVERABLE-level verdict, which can differ (prod: a "vote" step logged → done off ok reads
     // while its vote deliverable was ❌ because no upvote POST landed). Log both to avoid misreading.
     if (stepVerdicts.length > 0) {
-      deps.log(`[plan-loop] EXECUTE ${step.id}: deliverables ${stepVerdicts.join(', ')}`);
+      log(`[plan-loop] EXECUTE ${step.id}: deliverables ${stepVerdicts.join(', ')}`);
     }
   }
 
@@ -1871,7 +1892,7 @@ export async function runPlanExecuteLoop(
     if (uniq.length > 0) {
       try {
         deps.recordOperationalKnowledge(uniq.map((l) => `${l} — verified working this run (use {credential-id} placeholder for auth)`));
-        deps.log(`[plan-loop] cookbook: ${uniq.length} verified call(s) recorded`);
+        log(`[plan-loop] cookbook: ${uniq.length} verified call(s) recorded`);
       } catch { /* cookbook is best-effort */ }
     }
   }
@@ -1912,7 +1933,7 @@ export async function runPlanExecuteLoop(
           ` — 定时例程将直接使用它,不再重抓 guide;清除该服务时会一并删除。`;
       }
     } catch (e) {
-      deps.log(`[plan-loop] service-skill emission failed (ignored): ${(e as Error)?.message ?? String(e)}`);
+      log(`[plan-loop] service-skill emission failed (ignored): ${(e as Error)?.message ?? String(e)}`);
     }
   }
 
@@ -1938,9 +1959,10 @@ export async function runPlanExecuteLoop(
     const v = await judgeReadback(rule, entry);
     if (v === 'no') { invariantFailed = true; invariantNotes.push(`${rule.id}: VIOLATED — readback does not show "${rule.condition.slice(0, 80)}"`); }
     else invariantNotes.push(`${rule.id}: ${v === 'yes' ? 'holds' : 'read back (unjudged)'}`);
-    deps.log(`[plan-loop] INVARIANT ${rule.id}: ${v}`);
+    log(`[plan-loop] INVARIANT ${rule.id}: ${v}`);
   }
-  const unresolvedGuards = rules.filter((r) => r.kind === 'guard' && r.resolution !== 'satisfied' && r.resolution !== 'not_satisfied');
+  // Only guards that were checked and stayed open: a guard whose gated call was never attempted refused nothing.
+  const unresolvedGuards = rules.filter((r) => r.kind === 'guard' && r.resolution === 'unresolved');
   const list = [...outcomes.values()];
   const done = list.filter((o) => o.status === 'done').length;
   const outcome: PlanLoopResult['outcome'] =
