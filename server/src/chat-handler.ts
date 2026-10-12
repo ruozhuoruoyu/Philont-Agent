@@ -389,7 +389,7 @@ import {
 } from './autonomous_progress_inject.js';
 import { computeFrontier, createDeepExploreTool } from './deep_explore.js';
 import { TURN_HARD_DEADLINE_MS } from './turn_deadline.js';
-import { READBACK_JUDGE_SYSTEM, parseReadbackVerdict } from './plan_loop_rules.js';
+import { READBACK_JUDGE_SYSTEM, RULE_APPLIES_SYSTEM, parseReadbackVerdict } from './plan_loop_rules.js';
 import { selectSkillsToForget } from './forget_skill.js';
 import {
   classifyGrantReply,
@@ -3372,7 +3372,13 @@ const subTurnToolRunner = async (
 }> => {
   try {
     {
-      const check = subLoopPolicyEnabled() ? getSubLoopChecker() : getSubLoopFloorChecker();
+      // PHILONT_AUTO_GRANT=1 (unattended sandbox) passes every matrix denial in the main loop; a sub-task must
+      // follow the same rule or the plan loop — whose work all runs in sub-tasks — can do nothing a main turn
+      // could (benchmark 2026-10-12: every shell / MCP write inside the plan loop refused). The floor checker
+      // still applies: catastrophic commands, sensitive paths, credential exfiltration stay refused.
+      const check = process.env.PHILONT_AUTO_GRANT === '1'
+        ? getSubLoopFloorChecker()
+        : subLoopPolicyEnabled() ? getSubLoopChecker() : getSubLoopFloorChecker();
       const denial = await check({
         toolName: name,
         approval: 'never',
@@ -11611,6 +11617,22 @@ async function handleChatSendInner(
             const n = parseInt(process.env.PHILONT_PLAN_LOOP_STEP_ITERS ?? '', 10);
             return Number.isFinite(n) && n >= 2 && n <= 40 ? n : undefined;
           })(),
+          // v2 rule judge: does this guard/forbid govern this concrete call? Only a definite 'no' clears a pattern match.
+          ruleJudge: isAuxLLMConfigured()
+            ? async (kind, condition, toolName, inputJson) => {
+                try {
+                  const out = await callAuxLLM({
+                    system: RULE_APPLIES_SYSTEM,
+                    user: `# Rule (${kind})\n${condition}\n\n# Tool call\n${toolName} ${inputJson}\n\nAnswer: yes / no / unclear`,
+                    maxTokens: 20,
+                    fallbackToMain: false,
+                  });
+                  return parseReadbackVerdict(out);
+                } catch {
+                  return 'unclear';
+                }
+              }
+            : undefined,
           // v2 readback judge: shown only the tool text and the expected observation; answers yes/no/unclear.
           readbackJudge: isAuxLLMConfigured()
             ? async (condition, text) => {

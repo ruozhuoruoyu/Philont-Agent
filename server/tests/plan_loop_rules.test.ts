@@ -183,7 +183,7 @@ test('loop: a guard resolved satisfied by a read-only sub-run lets the gated cal
     resolveText: 'VERDICT: SATISFIED — authorization email id 9',
   });
   const r = await runPlanExecuteLoop('Handle today\'s emails per the SOP', ['https://x/guide'], deps);
-  assert.ok(deps.lines.some((l) => /RESOLVE authz: satisfied/.test(l)), deps.lines.join('\n'));
+  assert.ok(deps.lines.some((l) => /RESOLVE authz \(before execute\): satisfied/.test(l)), deps.lines.join('\n'));
   assert.ok(!deps.lines.some((l) => /rule-guard BLOCKED/.test(l)));
   assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'done');
 });
@@ -196,7 +196,7 @@ test('loop: a guard with no successful read is unresolved and keeps refusing; no
     resolveReads: false,
   });
   const r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
-  assert.ok(deps.lines.some((l) => /RESOLVE authz: unresolved/.test(l)), 'a verdict without a read is unresolved');
+  assert.ok(deps.lines.some((l) => /RESOLVE authz \(before execute\): unresolved/.test(l)), 'a verdict without a read is unresolved');
   assert.ok(deps.lines.some((l) => /rule-guard BLOCKED jira__create_issue \(authz: unresolved\)/.test(l)));
   assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'failed');
   assert.ok(/authz/.test(r.reply), 'the reply names the unverified guard');
@@ -246,4 +246,76 @@ test('loop: an execute-class REPL is both write and readback — a call matching
   assert.equal(r.outcomes[0].status, 'done', deps.lines.join('\n'));
   assert.equal(r.outcomes[0].verified, true);
   assert.ok(!deps.lines.some((l) => /forcing one/.test(l)), 'the model\'s own readback counted');
+});
+
+
+test('parseRules: a guard/forbid pattern with no args covering much of the tool list is too broad', () => {
+  const r = parseRules([
+    { id: 'no-ask', kind: 'forbid', condition: 'do not ask the user anything', applies: [{ tool: '*' }] },
+    { id: 'jira-only', kind: 'forbid', condition: 'never touch jira without a ticket', applies: [{ tool: 'jira__*' }] },
+    { id: 'broad-but-filtered', kind: 'forbid', condition: 'never send offboarding notices', applies: [{ tool: '*', args: 'OFFBOARD' }] },
+  ], TOOLS, new Set(), slug);
+  assert.deepEqual(r.rules.map((x) => x.id), ['jira-only', 'broad-but-filtered']);
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /no-ask.*covers 5 of 5 tools/);
+});
+
+test('loop: the rule judge clears a pattern match only with a definite "no"; "unclear" keeps the block', async () => {
+  const rules = [{ id: 'own-work', kind: 'forbid', condition: 'act fully on your own', applies: [{ tool: 'jira__create_issue' }] }];
+  for (const [verdict, expectBlocked] of [['no', false], ['unclear', true]] as const) {
+    const deps = fakeDeps({ draft: DRAFT(rules), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }] });
+    const asked: string[] = [];
+    deps.ruleJudge = async (kind, condition, tool) => { asked.push(`${kind}:${tool}`); return verdict; };
+    const r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+    assert.ok(asked.includes('forbid:jira__create_issue'), 'the judge saw the concrete call');
+    assert.equal(deps.lines.some((l) => /rule-forbid BLOCKED/.test(l)), expectBlocked, deps.lines.join('\n'));
+    if (!expectBlocked) assert.equal(r.outcomes.find((o) => o.id === 'onboard')?.status, 'done');
+  }
+});
+
+test('loop: a guard is re-checked at the moment of the action (the world changed since RESOLVE)', async () => {
+  const deps = fakeDeps({
+    draft: DRAFT([{ id: 'after-work', kind: 'guard', condition: 'complete only after the onboarding issue exists', applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }], covers: ['offboard'] }]),
+    execCalls: [{ name: 'jira__create_issue', input: { summary: 'OFFBOARD-x' } }],
+  });
+  // RESOLVE before execute says NOT_SATISFIED, the at-action re-check says SATISFIED.
+  let resolveRuns = 0;
+  const base = deps.llm.send.bind(deps.llm);
+  deps.llm = {
+    async send(system, messages, toolDefs, opts) {
+      if (system === RESOLVE_SYSTEM) {
+        const first = !messages.some((m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((b) => b.type === 'tool_result'));
+        if (first) {
+          resolveRuns++;
+          return { type: 'toolCalls', calls: [{ id: `r${resolveRuns}`, name: 'jira__search', input: { jql: 'ONBOARD' } }],
+            assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: `r${resolveRuns}`, name: 'jira__search', input: {} }] as never } };
+        }
+        return { type: 'text', content: resolveRuns === 1 ? 'VERDICT: NOT_SATISFIED — no issue yet' : 'VERDICT: SATISFIED — issue ONBOARD-1 found' };
+      }
+      return base(system, messages, toolDefs, opts);
+    },
+  };
+  const r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  assert.ok(deps.lines.some((l) => /RESOLVE after-work \(before execute\): not_satisfied/.test(l)), deps.lines.join('\n'));
+  assert.ok(deps.lines.some((l) => /RESOLVE after-work \(at-action \(jira__create_issue\)\): satisfied/.test(l)));
+  assert.ok(!deps.lines.some((l) => /rule-guard BLOCKED/.test(l)));
+  assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'done');
+});
+
+test('loop: past the per-step refusal budget the sub-run is told to stop', async () => {
+  // Alternate two forbidden tools so the mini-loop's own same-failure breaker (3 identical failures) does not fire first.
+  const many = Array.from({ length: 7 }, (_, i) => (i % 2 === 0
+    ? { name: 'jira__create_issue', input: { summary: `OFFBOARD-${i}` } }
+    : { name: 'google_mail__send_email', input: { subject: `OFFBOARD notice ${i}` } }));
+  const deps = fakeDeps({
+    draft: JSON.stringify({ deliverables: [{ id: 'offboard', description: 'execute the offboarding' }], steps: [{ id: 's', description: 'offboard', covers: ['offboard'] }],
+      rules: [{ id: 'no-off', kind: 'forbid', condition: 'never offboard without written authorization',
+        applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }, { tool: 'google_mail__send_email', args: 'OFFBOARD' }] }] }),
+    execCalls: many,
+  });
+  await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  // The budget is per step: inside the first step exactly 4 refusals, then the STOP message (not logged as a refusal).
+  const firstStepEnd = deps.lines.findIndex((l) => /EXECUTE s: tools=/.test(l));
+  const blocked = deps.lines.slice(0, firstStepEnd).filter((l) => /rule-forbid BLOCKED/.test(l)).length;
+  assert.equal(blocked, 4, deps.lines.join('\n'));
 });

@@ -25,7 +25,8 @@ import {
   READBACK_SYSTEM,
   RESOLVE_SYSTEM,
   findReadback,
-  findRuleBlock,
+  findRuleBlocks,
+  RULE_APPLIES_SYSTEM,
   lastWriteIndex,
   parseGuardVerdict,
   parseReadbackVerdict,
@@ -802,6 +803,11 @@ export interface PlanLoopDeps {
    * readback floor alone decides (a matching successful read), and the outcome is reported as unverified.
    */
   readbackJudge?: (condition: string, readbackText: string) => Promise<'yes' | 'no' | 'unclear'>;
+  /**
+   * v2: does this guard/forbid actually govern this specific call? Only a definite 'no' clears a pattern
+   * match (system prompt RULE_APPLIES_SYSTEM). Absent → the pattern alone decides.
+   */
+  ruleJudge?: (ruleKind: 'guard' | 'forbid', condition: string, toolName: string, inputJson: string) => Promise<'yes' | 'no' | 'unclear'>;
   planTracker?: {
     create(
       deliverables: LoopDeliverable[],
@@ -877,6 +883,9 @@ const DRAFT_SYSTEM = [
   '  invariant = something that must still be true at the end ("do not change X", "X stays as is"): applies = the',
   '              read tool that shows it.',
   '- Patterns must use the exact tool names from the tool list; a rule whose pattern names no real tool is rejected.',
+  '- Rules govern SPECIFIC actions. General working style (act on your own, do not ask the user, look values up, be',
+  '  careful, read docs first) is NOT a rule: you already follow it, and a rule for it would block the work itself.',
+  '  A guard/forbid pattern must single out the governed action (exact tool names, or an args regex naming it).',
   // Ported from the legacy plan-protocol teaching (chat-handler buildMemoryPrefix): the two
   // deliverable types weak models systematically miss. Missing them = later 401s / the routine
   // stops when the turn ends.
@@ -942,8 +951,13 @@ export async function runPlanExecuteLoop(
   // every phase below (compile prompt, RESOLVE/READBACK sub-runs), so they are computed once here.
   const knownTools = new Set(deps.toolDefs.map((t) => t.name));
   const readOnlyWhitelist = ((): ReadonlySet<string> | undefined => {
+    // The world the guide is about, not the agent's own memory: self-domain reads (facts, notes, past sessions)
+    // are not evidence that a condition holds or that an outcome happened.
     const names = deps.toolDefs
-      .filter((t) => deps.classifyCall?.(t.name, {})?.capability === 'read')
+      .filter((t) => {
+        const c = deps.classifyCall?.(t.name, {});
+        return c?.capability === 'read' && c.domain !== 'self';
+      })
       .map((t) => t.name);
     return names.length > 0 ? new Set(names) : undefined;
   })();
@@ -1068,13 +1082,57 @@ export async function runPlanExecuteLoop(
   let activeRules: LoopRule[] = [];
   interface TraceRec extends ToolTraceEntry { output: string }
   let currentTrace: TraceRec[] = [];
+  // Rule refusals in the current sub-run; past a small budget the sub-run is told to stop and report, instead of
+  // spending its whole iteration budget on calls the plan will keep refusing.
+  let stepRuleBlocks = 0;
+  const STEP_RULE_BLOCK_BUDGET = 4;
+  const ruleJudgeCache = new Map<string, 'yes' | 'no' | 'unclear'>();
+  const lazyResolves = new Map<string, number>();
+  let inResolve = false;
+  // Assigned below (needs the guide text and tool lists); used for re-checking a guard at the moment of the action.
+  let resolveGuard: ((rule: LoopRule, why: string) => Promise<void>) | null = null;
   const stepToolRunner: PlanLoopDeps['toolRunner'] = async (name, input) => {
+    if (stepRuleBlocks >= STEP_RULE_BLOCK_BUDGET) {
+      return {
+        ok: false,
+        output: '',
+        error: `[plan-rule] this step has been refused ${stepRuleBlocks} times by the plan's own rules. Stop now: finish this step and report what blocked it.`,
+      };
+    }
     // v2: a guide's forbid / unresolved guard refuses the call before any contract guard looks at it.
-    const ruleBlock = findRuleBlock(activeRules, name, input);
-    if (ruleBlock) {
-      deps.log(`[plan-loop] rule-${ruleBlock.rule.kind} BLOCKED ${name} (${ruleBlock.rule.id}: ${ruleBlock.why})`);
+    let blocking: ReturnType<typeof findRuleBlocks>[number] | null = null;
+    for (const b of findRuleBlocks(activeRules, name, input)) {
+      // A guard is a condition on the world AT THE TIME of the action; state changes during the run (the work
+      // the guard waits for gets done). Re-check it now, bounded, before refusing.
+      if (b.rule.kind === 'guard' && !inResolve && resolveGuard && (lazyResolves.get(b.rule.id) ?? 0) < 2 && timeLeft() > 120_000) {
+        lazyResolves.set(b.rule.id, (lazyResolves.get(b.rule.id) ?? 0) + 1);
+        await resolveGuard(b.rule, `at-action (${name})`);
+        if (b.rule.resolution === 'satisfied') continue;
+        b.why = b.rule.resolution === 'not_satisfied' ? 'not_satisfied' : 'unresolved';
+      }
+      // Ceiling over the pattern floor: only a definite "this rule does not govern this call" clears it.
+      if (deps.ruleJudge) {
+        let inputJson = '';
+        try { inputJson = JSON.stringify(input ?? {}).slice(0, 1500); } catch { inputJson = String(input).slice(0, 1500); }
+        const key = `${b.rule.id}\u0000${name}\u0000${inputJson}`;
+        let v = ruleJudgeCache.get(key);
+        if (!v) {
+          try { v = await deps.ruleJudge(b.rule.kind as 'guard' | 'forbid', b.rule.condition, name, inputJson); } catch { v = 'unclear'; }
+          ruleJudgeCache.set(key, v);
+        }
+        if (v === 'no') {
+          deps.log(`[plan-loop] rule-${b.rule.kind} ${b.rule.id} does not govern ${name} (judge) — allowed`);
+          continue;
+        }
+      }
+      blocking = b;
+      break;
+    }
+    if (blocking) {
+      stepRuleBlocks++;
+      deps.log(`[plan-loop] rule-${blocking.rule.kind} BLOCKED ${name} (${blocking.rule.id}: ${blocking.why})`);
       currentTrace.push({ toolName: name, input, success: false, at: now(), output: '' });
-      return { ok: false, output: '', error: ruleBlockMessage(ruleBlock, name) };
+      return { ok: false, output: '', error: ruleBlockMessage(blocking, name) };
     }
     // Guards run in order, first match wins. Each is named so the log says WHICH one blocked: they all
     // used to print "endpoint-guard BLOCKED" regardless, which mislabels a spec/schedule block and makes
@@ -1443,18 +1501,13 @@ export async function runPlanExecuteLoop(
 
   // ── RESOLVE (v2): every guard is checked with READ tools before any step it gates can run ──
   // The verdict is parsed from a fixed line; the floor is at least one successful read — a verdict with
-  // nothing read is 'unresolved' and keeps the gated calls refused.
-  for (const rule of rules) {
-    if (rule.kind !== 'guard') continue;
-    if (deps.abortSignal?.aborted) break;
-    if (timeLeft() < 90_000) {
-      rule.resolution = 'unresolved';
-      rule.resolutionEvidence = 'time budget exhausted before the guard could be checked';
-      deps.log(`[plan-loop] RESOLVE ${rule.id}: unresolved (no time)`);
-      continue;
-    }
-    deps.onStatus?.(`checking guard: ${rule.id}`);
+  // nothing read is 'unresolved' and keeps the gated calls refused. The same check runs again at the moment a
+  // gated action is attempted (see stepToolRunner), because the world may have changed since.
+  resolveGuard = async (rule: LoopRule, why: string): Promise<void> => {
+    const savedTrace = currentTrace;
+    const savedBlocks = stepRuleBlocks;
     currentTrace = [];
+    inResolve = true;
     let verdict: ReturnType<typeof parseGuardVerdict> = 'unresolved';
     let note = '';
     try {
@@ -1462,6 +1515,7 @@ export async function runPlanExecuteLoop(
         systemPrompt: RESOLVE_SYSTEM,
         userMessage:
           `# Condition to check\n${rule.condition}\n\n# It gates\n${rule.applies.map((p) => `- ${p.tool}${p.args ? ` (${p.args})` : ''}`).join('\n')}\n\n` +
+          (stepNotes.length > 0 ? `# Work done so far\n${stepNotes.slice(-6).join('\n')}\n\n` : '') +
           `# Task context\n${task.slice(0, 3000)}\n\n# Guide excerpt\n${guideText.slice(0, 8000)}`,
         llm: deps.llm,
         toolDefs: deps.toolDefs,
@@ -1476,11 +1530,27 @@ export async function runPlanExecuteLoop(
       note = (r.finalText.match(/VERDICT\s*:[^\n]*/i)?.[0] ?? r.finalText).replace(/\s+/g, ' ').slice(0, 200) + (readOk ? '' : ' [no successful read]');
     } catch (e) {
       note = `resolve sub-run failed: ${(e as Error).message?.slice(0, 80)}`;
+    } finally {
+      inResolve = false;
+      currentTrace = savedTrace;
+      stepRuleBlocks = savedBlocks;
     }
     rule.resolution = verdict;
     rule.resolutionEvidence = note;
-    deps.log(`[plan-loop] RESOLVE ${rule.id}: ${verdict} — ${note}`);
+    deps.log(`[plan-loop] RESOLVE ${rule.id} (${why}): ${verdict} — ${note}`);
     trackStep(rule.id, verdict === 'unresolved' ? 'blocked' : 'done', `${verdict}: ${note}`.slice(0, 200));
+  };
+  for (const rule of rules) {
+    if (rule.kind !== 'guard') continue;
+    if (deps.abortSignal?.aborted) break;
+    if (timeLeft() < 90_000) {
+      rule.resolution = 'unresolved';
+      rule.resolutionEvidence = 'time budget exhausted before the guard could be checked';
+      deps.log(`[plan-loop] RESOLVE ${rule.id}: unresolved (no time)`);
+      continue;
+    }
+    deps.onStatus?.(`checking guard: ${rule.id}`);
+    await resolveGuard(rule, 'before execute');
   }
   for (const step of plan.steps) {
     if (deps.abortSignal?.aborted) break;
@@ -1595,6 +1665,7 @@ export async function runPlanExecuteLoop(
     };
     trackStep(step.id, 'doing');
     currentTrace = [];
+    stepRuleBlocks = 0;
     let result = await runStep('');
     // Forced retry (mechanism, not model discipline): the step covers an action/schedule deliverable
     // yet made ZERO relevant attempts ("read and hand in") — re-run ONCE with a hard directive. Prod:

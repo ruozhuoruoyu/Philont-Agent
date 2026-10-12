@@ -74,6 +74,18 @@ export function parseRules(raw: unknown, knownTools: ReadonlySet<string>, validD
     if (knownTools.size > 0) {
       for (const p of applies) {
         const hits = [...knownTools].filter((t) => toolNameMatches(p.tool, t));
+        // A guard/forbid is a statement about SPECIFIC actions. A pattern with no argument filter that covers
+        // a large share of the tool list is not a prohibition of an action, it is a prohibition of working
+        // (observed: "do not ask the user" compiled to a forbid over every read tool → 261 refusals).
+        const broad = (kind === 'guard' || kind === 'forbid') && !(p.args && p.args.trim()) &&
+          hits.length > Math.max(3, Math.ceil(knownTools.size * 0.2));
+        if (broad) {
+          problems.push(
+            `rules[${i}] (${id}): pattern "${p.tool}" with no args filter covers ${hits.length} of ${knownTools.size} tools — ` +
+              `a ${kind} must name the specific actions it governs (exact tool names, or an args regex that identifies the action)`,
+          );
+          return;
+        }
         if (hits.length === 0) {
           problems.push(
             `rules[${i}] (${id}): pattern "${p.tool}" matches no available tool` +
@@ -135,6 +147,19 @@ export function findRuleBlock(rules: readonly LoopRule[], toolName: string, inpu
   return null;
 }
 
+/** Every rule that would refuse this call, in plan order (the caller may clear some — judge veto, re-resolution). */
+export function findRuleBlocks(rules: readonly LoopRule[], toolName: string, input: unknown): RuleBlock[] {
+  const out: RuleBlock[] = [];
+  for (const rule of rules) {
+    if (rule.kind !== 'guard' && rule.kind !== 'forbid') continue;
+    if (!rule.applies.some((p) => patternMatchesCall(p, toolName, input))) continue;
+    if (rule.kind === 'forbid') { out.push({ rule, why: 'forbidden' }); continue; }
+    if (rule.resolution === 'satisfied') continue;
+    out.push({ rule, why: rule.resolution === 'not_satisfied' ? 'not_satisfied' : 'unresolved' });
+  }
+  return out;
+}
+
 /** The refusal the model sees. It names the rule and the guide's words; it never explains how to get around it. */
 export function ruleBlockMessage(b: RuleBlock, toolName: string): string {
   const head = `[plan-rule] ${toolName} refused by ${b.rule.kind} "${b.rule.id}": ${b.rule.condition}`;
@@ -191,6 +216,16 @@ export const RESOLVE_SYSTEM =
 export const READBACK_SYSTEM =
   'You are verifying ONE expected outcome by reading the current state back from the environment. Use READ tools ' +
   'only (look it up; change nothing). Report plainly what the tool returned.';
+
+/**
+ * The ceiling over the pattern floor: a pattern says WHICH calls a rule could govern; whether this rule's own
+ * words actually govern THIS call is a reading question. The judge can only clear a block with a definite
+ * "no" — "unclear" keeps the floor's verdict — so a missing or vague judge never weakens a prohibition.
+ */
+export const RULE_APPLIES_SYSTEM =
+  'You are shown one rule from a task guide and one concrete tool call. Answer with one word — yes, no, or unclear — ' +
+  'to: does THIS rule govern THIS call (for a prohibition: does it prohibit this call; for a precondition: is this ' +
+  'one of the actions that may only happen when the condition holds)? General working-style advice governs no call.';
 
 export const READBACK_JUDGE_SYSTEM =
   'You are shown text that a tool returned, and an expected observation. Answer with one word — yes, no, or unclear — ' +
