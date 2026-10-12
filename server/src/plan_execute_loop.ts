@@ -18,6 +18,21 @@
  */
 
 import { currentPhraseLang } from './response_language.js';
+import type { ToolTraceEntry } from '@agent/memory';
+import {
+  READBACK_JUDGE_SYSTEM,
+  READBACK_SYSTEM,
+  RESOLVE_SYSTEM,
+  findReadback,
+  findRuleBlock,
+  lastWriteIndex,
+  parseGuardVerdict,
+  parseReadbackVerdict,
+  parseRules,
+  ruleBlockMessage,
+  toolListBlock,
+  type LoopRule,
+} from './plan_loop_rules.js';
 
 import {
   runMiniAgentLoop,
@@ -662,10 +677,14 @@ export interface LoopStep {
 export interface DraftPlan {
   deliverables: LoopDeliverable[];
   steps: LoopStep[];
+  /** v2 typed rule items (guard / forbid / evidence / invariant); absent on drafts without rules. */
+  rules?: LoopRule[];
+  /** Rule shape problems the next REVISE round must fix (reported as gaps, never dropped silently). */
+  ruleProblems?: string[];
 }
 
 /** Extract the first JSON object from model text (tolerates ``` fences / prose around it). */
-export function parseDraftJson(text: string): DraftPlan | null {
+export function parseDraftJson(text: string, knownTools: ReadonlySet<string> = new Set()): DraftPlan | null {
   const cleaned = text.replace(/```(?:json)?/gi, '');
   const start = cleaned.indexOf('{');
   if (start < 0) return null;
@@ -687,7 +706,7 @@ export function parseDraftJson(text: string): DraftPlan | null {
     return null;
   }
   if (!raw || typeof raw !== 'object') return null;
-  const o = raw as { deliverables?: unknown; steps?: unknown };
+  const o = raw as { deliverables?: unknown; steps?: unknown; rules?: unknown };
   if (!Array.isArray(o.deliverables) || o.deliverables.length === 0) return null;
   if (!Array.isArray(o.steps) || o.steps.length === 0) return null;
   const deliverables: LoopDeliverable[] = [];
@@ -706,7 +725,8 @@ export function parseDraftJson(text: string): DraftPlan | null {
       : [];
     steps.push({ id: slugify(ss.id), description: ss.description.slice(0, 600), covers });
   }
-  return { deliverables, steps };
+  const parsedRules = parseRules(o.rules, knownTools, validIds, slugify);
+  return { deliverables, steps, rules: parsedRules.rules, ruleProblems: parsedRules.problems };
 }
 
 // ── Orchestrator ────────────────────────────────────────────────────────────
@@ -775,11 +795,19 @@ export interface PlanLoopDeps {
    * catch it — the island joins the pipeline instead of being invisible until it finishes.
    * All calls are best-effort; implementations must swallow their own failures.
    */
+  /**
+   * v2: judge what a readback text SHOWS against an expected observation (yes / no / unclear). It is only
+   * ever given the tool text and the condition — never asked whether the task succeeded. Absent → the
+   * readback floor alone decides (a matching successful read), and the outcome is reported as unverified.
+   */
+  readbackJudge?: (condition: string, readbackText: string) => Promise<'yes' | 'no' | 'unclear'>;
   planTracker?: {
     create(
       deliverables: LoopDeliverable[],
       steps: Array<{ id: string; description: string; covers: string[] }>,
       guideRef: string,
+      /** v2 typed rules, recorded as kind-tagged steps so the plan store shows them. */
+      rules?: LoopRule[],
     ): string | null;
     markStep(planId: string, stepId: string, status: 'doing' | 'done' | 'blocked', evidence?: string): void;
     close(
@@ -809,6 +837,8 @@ export interface DeliverableOutcome {
   status: 'done' | 'failed' | 'not-attempted';
   /** One-line tool evidence ("http POST /register ✓") or the failure reason */
   evidence: string;
+  /** v2: done AND a readback the judge confirmed. Absent/false = done on action evidence only (reported as unverified). */
+  verified?: boolean;
 }
 
 export interface PlanLoopResult {
@@ -824,13 +854,28 @@ export interface PlanLoopResult {
 
 const DRAFT_SYSTEM = [
   'You are the PLANNING stage of a mechanism-driven loop. Output ONLY a JSON object, no prose:',
-  '{"deliverables":[{"id":"<slug>","description":"<what must be produced/done>"}],',
-  ' "steps":[{"id":"<slug>","description":"<how, incl. concrete tool/endpoint>","covers":["<deliverable-id>"]}]}',
+  '{"deliverables":[{"id":"<slug>","description":"<what must be true when done>"}],',
+  ' "steps":[{"id":"<slug>","description":"<how, incl. concrete tool>","covers":["<deliverable-id>"]}],',
+  ' "rules":[{"id":"<slug>","kind":"guard|forbid|evidence|invariant","condition":"<the guide\'s own words>",',
+  '           "applies":[{"tool":"<exact tool name or glob with *>","args":"<optional regex over the call input>"}],',
+  '           "covers":["<deliverable-id>"]}]}',
   'Rules:',
   '- One deliverable per REQUIRED action: every literal action in the user task AND every mandatory',
   '  requirement (MUST/必须/required, numbered steps of the flow being asked for) in the guide.',
   '- Guide content that is reference material (not asked for) is NOT a deliverable.',
-  '- Each step covers ≥1 deliverable id. Keep ≤ 10 deliverables, ≤ 12 steps.',
+  '- Each step covers ≥1 deliverable id. Keep ≤ 12 deliverables, ≤ 14 steps.',
+  '- "rules" are what the mechanism enforces; use them for every sentence of the guide that is not a plain step:',
+  '  guard     = a condition that must be verified BEFORE an action ("only if…", "requires written approval",',
+  '              "unless…"): applies = the tool calls the condition gates; covers = the deliverables they belong to.',
+  '              If the guard can fail, the guide\'s alternative for that case (escalate / notify / record) MUST be',
+  '              its own deliverable with its own step.',
+  '  forbid    = an action the guide prohibits in this task ("never…", "do not…"): applies = those tool calls.',
+  '  evidence  = what a READ tool must show after a deliverable is done: applies = that read tool (and args that',
+  '              identify the record); covers = the deliverable it verifies. Give every deliverable that changes',
+  '              the world an evidence rule when a read tool exists for it.',
+  '  invariant = something that must still be true at the end ("do not change X", "X stays as is"): applies = the',
+  '              read tool that shows it.',
+  '- Patterns must use the exact tool names from the tool list; a rule whose pattern names no real tool is rejected.',
   // Ported from the legacy plan-protocol teaching (chat-handler buildMemoryPrefix): the two
   // deliverable types weak models systematically miss. Missing them = later 401s / the routine
   // stops when the turn ends.
@@ -885,12 +930,57 @@ export async function runPlanExecuteLoop(
     if (text) guideTexts.push(text);
     deps.log(`[plan-loop] GUIDE_READ ${url} → ${text ? `${text.length} chars` : 'FAILED'}`);
   }
-  if (guideTexts.length === 0) {
+  if (guideTexts.length === 0 && guideUrls.length > 0) {
     return fail(
       currentPhraseLang() === 'en'
         ? `Could not read the task guide (${guideUrls.join(', ')}) — the fetch failed. Nothing has been started; retry later or paste the guide contents.`
         : `无法读取任务指引(${guideUrls.join(', ')})——网络抓取失败。任务未开始,请稍后重试或贴出指引内容。`,
     );
+  }
+  // v2 entry is the router's judgement, not a URL regex. The tool list and the read-only subset are needed by
+  // every phase below (compile prompt, RESOLVE/READBACK sub-runs), so they are computed once here.
+  const knownTools = new Set(deps.toolDefs.map((t) => t.name));
+  const readOnlyWhitelist = ((): ReadonlySet<string> | undefined => {
+    const names = deps.toolDefs
+      .filter((t) => deps.classifyCall?.(t.name, {})?.capability === 'read')
+      .map((t) => t.name);
+    return names.length > 0 ? new Set(names) : undefined;
+  })();
+  // ── LOCATE (tier 2: the guide is a document the task refers to, not a URL) ──
+  // A bounded read-only sub-run finds and reads what the task says to follow; every successful read result
+  // long enough to be a document becomes guide corpus. The model names what it reads; the mechanism keeps the
+  // texts. With nothing found, the task's own literal asks are the spec (tier 3) — the loop still runs.
+  if (guideTexts.length === 0 && deps.toolDefs.length > 0 && timeLeft() > 120_000) {
+    deps.onStatus?.('locating the guide…');
+    const located: string[] = [];
+    const locateRunner: PlanLoopDeps['toolRunner'] = async (name, input) => {
+      const r = await deps.toolRunner(name, input);
+      if (r.ok && typeof r.output === 'string' && r.output.length >= 1500) located.push(r.output);
+      return r;
+    };
+    try {
+      const loc = await runMiniAgentLoop({
+        systemPrompt:
+          'Find and read IN FULL the document(s) this task says to follow (a guide, SOP, handbook, policy, ' +
+          'instructions file). Use READ tools only; change nothing. When done, reply with the names of the documents you read.',
+        userMessage: `# Task\n${task}`,
+        llm: deps.llm,
+        toolDefs: deps.toolDefs,
+        toolRunner: locateRunner,
+        maxIters: 6,
+        toolWhitelist: readOnlyWhitelist,
+        toolBlacklist: deps.toolBlacklist,
+        abortSignal: budgetSignal(3 * 60_000),
+      });
+      deps.log(`[plan-loop] LOCATE: ${located.length} document(s) read (${loc.toolCallHistory.length} calls)${readOnlyWhitelist ? '' : ' — no read-only classification, whitelist off'}`);
+    } catch (e) {
+      deps.log(`[plan-loop] LOCATE failed (${(e as Error).message?.slice(0, 80)})`);
+    }
+    guideTexts.push(...located);
+  }
+  if (guideTexts.length === 0) {
+    deps.log('[plan-loop] GUIDE: none located — the task text itself is the spec (tier 3)');
+    guideTexts.push(task);
   }
   const guideText = guideTexts.join('\n\n---\n\n').slice(0, 60_000);
   // Endpoint anchor (weak-model guarantee): the documented API surface + a host allowlist guard.
@@ -972,7 +1062,19 @@ export async function runPlanExecuteLoop(
   // A successful auth call whose response carried a credential ⇒ the securedHttp capture layer
   // stored it (see agent-tools credential_capture). Proof for credential-save deliverables.
   let credentialCaptured = false;
+  // v2 typed rules (set once the plan is final) and the full-output trace of the CURRENT sub-run, which the
+  // readback checks read (toolCallHistory keeps only a 200-char preview; a readback is judged on its text).
+  let activeRules: LoopRule[] = [];
+  interface TraceRec extends ToolTraceEntry { output: string }
+  let currentTrace: TraceRec[] = [];
   const stepToolRunner: PlanLoopDeps['toolRunner'] = async (name, input) => {
+    // v2: a guide's forbid / unresolved guard refuses the call before any contract guard looks at it.
+    const ruleBlock = findRuleBlock(activeRules, name, input);
+    if (ruleBlock) {
+      deps.log(`[plan-loop] rule-${ruleBlock.rule.kind} BLOCKED ${name} (${ruleBlock.rule.id}: ${ruleBlock.why})`);
+      currentTrace.push({ toolName: name, input, success: false, at: now(), output: '' });
+      return { ok: false, output: '', error: ruleBlockMessage(ruleBlock, name) };
+    }
     // Guards run in order, first match wins. Each is named so the log says WHICH one blocked: they all
     // used to print "endpoint-guard BLOCKED" regardless, which mislabels a spec/schedule block and makes
     // a blocked step impossible to attribute from the log.
@@ -999,6 +1101,7 @@ export async function runPlanExecuteLoop(
       }
     }
     const res = await deps.toolRunner(name, input);
+    currentTrace.push({ toolName: name, input, success: res.ok, at: now(), output: typeof res.output === 'string' ? res.output.slice(0, 8000) : '' });
     // A successful read is provenance for later ids: record its body so a value the model later puts in a
     // write can be traced to something it actually saw (API response, get_fact output, …).
     if (res.ok && typeof res.output === 'string' && res.output) readCorpus.push(res.output);
@@ -1079,9 +1182,10 @@ export async function runPlanExecuteLoop(
     // turns the loop into a ratchet: ground can be added but not lost.
     const user =
       `# Task\n${task}\n\n# Guide (authoritative spec)\n${guideText.slice(0, 24_000)}\n\n` +
+      `${toolListBlock(deps.toolDefs)}\n\n` +
       (plan
         ? `# Your previous plan — REVISE it, do not start over\n` +
-          `${JSON.stringify({ deliverables: plan.deliverables, steps: plan.steps })}\n\n` +
+          `${JSON.stringify({ deliverables: plan.deliverables, steps: plan.steps, rules: plan.rules ?? [] })}\n\n` +
           (acceptedIds.size > 0
             ? `# Already accepted — keep these deliverables and their steps VERBATIM\n` +
               `${[...acceptedIds].join(', ')}\n\n`
@@ -1100,7 +1204,7 @@ export async function runPlanExecuteLoop(
     } catch (e) {
       deps.log(`[plan-loop] DRAFT call aborted/failed (${(e as Error).message?.slice(0, 60)})`);
     }
-    const draft = parseDraftJson(draftText);
+    const draft = parseDraftJson(draftText, knownTools);
     if (!draft) {
       deps.log(`[plan-loop] DRAFT round ${round + 1}: unparseable output`);
       gapsNote = 'Your previous output was not valid JSON in the required shape. Output ONLY the JSON object.';
@@ -1138,14 +1242,16 @@ export async function runPlanExecuteLoop(
     // AGAIN after a revision is different: the author had a chance to address it and did not.
     const auxContested = auxSignal.filter((g) => detCovers(g));
     lastMandatoryGaps = cov.gaps.filter((g) => g.mandatory);
-    const gapTexts = [...lastMandatoryGaps.map((g) => g.text), ...auxGaps];
+    // Rule shape problems are gaps too: a guide prohibition the mechanism cannot enforce must be revised, not dropped.
+    const gapTexts = [...lastMandatoryGaps.map((g) => g.text), ...auxGaps, ...(draft.ruleProblems ?? [])];
     const repeatedContested = auxContested.filter((g) => raisedBefore(g, prevContestedTexts)).slice(0, 3);
     const persistedGaps = gapTexts.filter((g) => raisedBefore(g, prevGapTexts));
     prevContestedTexts = auxContested;
     prevGapTexts = gapTexts;
     deps.log(
-      `[plan-loop] VERIFY round ${round + 1}: deliverables=${draft.deliverables.length} ` +
+      `[plan-loop] VERIFY round ${round + 1}: deliverables=${draft.deliverables.length} rules=${draft.rules?.length ?? 0} ` +
       `detGaps=${cov.gaps.filter((g) => g.mandatory).length} auxGaps=${auxGapsRaw ? auxGaps.length : 'n/a'}` +
+      ((draft.ruleProblems?.length ?? 0) > 0 ? ` ruleProblems=${draft.ruleProblems!.length}` : '') +
       (persistedGaps.length ? ` persisted=${persistedGaps.length}` : '') +
       (repeatedContested.length ? ` contested=${repeatedContested.length}` : ''),
     );
@@ -1281,8 +1387,10 @@ export async function runPlanExecuteLoop(
   // ⑤: live plan record — created before EXECUTE so mechanisms outside the loop see the in-flight
   // plan, and a mid-loop crash leaves an `executing` plan for the pipeline safety nets.
   let livePlanId: string | null = null;
+  const rules: LoopRule[] = plan.rules ?? [];
+  activeRules = rules;
   try {
-    livePlanId = deps.planTracker?.create(plan.deliverables, plan.steps, guideUrls[0] ?? '') ?? null;
+    livePlanId = deps.planTracker?.create(plan.deliverables, plan.steps, guideUrls[0] ?? '', rules) ?? null;
   } catch { livePlanId = null; }
   if (livePlanId) deps.log(`[plan-loop] live plan ${livePlanId} created`);
   const trackStep = (stepId: string, status: 'doing' | 'done' | 'blocked', evidence?: string) => {
@@ -1290,6 +1398,78 @@ export async function runPlanExecuteLoop(
     try { deps.planTracker?.markStep(livePlanId, stepId, status, evidence); } catch { /* best-effort */ }
   };
   let budgetExhausted = false;
+  // Shape used by the readback checks over the full-output trace (last successful write, then a matching read).
+  const isActionRec = (c: { name: string; input: Record<string, unknown> }): boolean => {
+    const cls = deps.classifyCall?.(c.name, c.input);
+    if (cls?.capability !== undefined) return (cls.capability === 'write' || cls.capability === 'execute') && cls.domain !== 'self';
+    return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
+  };
+  const traceAsHistory = () => currentTrace.map((t) => ({ ok: t.success, name: t.toolName, input: (t.input ?? {}) as Record<string, unknown> }));
+  /** Read-only sub-run that reads the world back for one rule; its calls land in currentTrace. */
+  const runReadback = async (rule: LoopRule, capMs: number) => runMiniAgentLoop({
+    systemPrompt: READBACK_SYSTEM,
+    userMessage:
+      `# Expected observation\n${rule.condition}\n\n# Read it back with\n${rule.applies.map((p) => `- ${p.tool}${p.args ? ` (args matching /${p.args}/)` : ''}`).join('\n')}\n\n` +
+      `# Task context\n${task.slice(0, 2000)}`,
+    llm: deps.llm,
+    toolDefs: deps.toolDefs,
+    toolRunner: stepToolRunner,
+    maxIters: 4,
+    toolWhitelist: readOnlyWhitelist,
+    toolBlacklist: deps.toolBlacklist,
+    abortSignal: budgetSignal(capMs),
+  });
+  /** What the readback shows, judged on the tool text alone. */
+  const judgeReadback = async (rule: LoopRule, entry: { output: string; toolName: string }): Promise<'yes' | 'no' | 'unclear'> => {
+    if (!deps.readbackJudge) return 'unclear';
+    try {
+      return await deps.readbackJudge(rule.condition, entry.output.slice(0, 6000));
+    } catch {
+      return 'unclear';
+    }
+  };
+
+  // ── RESOLVE (v2): every guard is checked with READ tools before any step it gates can run ──
+  // The verdict is parsed from a fixed line; the floor is at least one successful read — a verdict with
+  // nothing read is 'unresolved' and keeps the gated calls refused.
+  for (const rule of rules) {
+    if (rule.kind !== 'guard') continue;
+    if (deps.abortSignal?.aborted) break;
+    if (timeLeft() < 90_000) {
+      rule.resolution = 'unresolved';
+      rule.resolutionEvidence = 'time budget exhausted before the guard could be checked';
+      deps.log(`[plan-loop] RESOLVE ${rule.id}: unresolved (no time)`);
+      continue;
+    }
+    deps.onStatus?.(`checking guard: ${rule.id}`);
+    currentTrace = [];
+    let verdict: ReturnType<typeof parseGuardVerdict> = 'unresolved';
+    let note = '';
+    try {
+      const r = await runMiniAgentLoop({
+        systemPrompt: RESOLVE_SYSTEM,
+        userMessage:
+          `# Condition to check\n${rule.condition}\n\n# It gates\n${rule.applies.map((p) => `- ${p.tool}${p.args ? ` (${p.args})` : ''}`).join('\n')}\n\n` +
+          `# Task context\n${task.slice(0, 3000)}\n\n# Guide excerpt\n${guideText.slice(0, 8000)}`,
+        llm: deps.llm,
+        toolDefs: deps.toolDefs,
+        toolRunner: stepToolRunner,
+        maxIters: 5,
+        toolWhitelist: readOnlyWhitelist,
+        toolBlacklist: deps.toolBlacklist,
+        abortSignal: budgetSignal(3 * 60_000),
+      });
+      const readOk = r.toolCallHistory.some((c) => c.ok);
+      verdict = readOk ? parseGuardVerdict(r.finalText) : 'unresolved';
+      note = (r.finalText.match(/VERDICT\s*:[^\n]*/i)?.[0] ?? r.finalText).replace(/\s+/g, ' ').slice(0, 200) + (readOk ? '' : ' [no successful read]');
+    } catch (e) {
+      note = `resolve sub-run failed: ${(e as Error).message?.slice(0, 80)}`;
+    }
+    rule.resolution = verdict;
+    rule.resolutionEvidence = note;
+    deps.log(`[plan-loop] RESOLVE ${rule.id}: ${verdict} — ${note}`);
+    trackStep(rule.id, verdict === 'unresolved' ? 'blocked' : 'done', `${verdict}: ${note}`.slice(0, 200));
+  }
   for (const step of plan.steps) {
     if (deps.abortSignal?.aborted) break;
     // Budget check: leave ≥ 45s headroom for the CLOSE + report. Stopping here (with the remaining
@@ -1402,6 +1582,7 @@ export async function runPlanExecuteLoop(
       return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
     };
     trackStep(step.id, 'doing');
+    currentTrace = [];
     let result = await runStep('');
     // Forced retry (mechanism, not model discipline): the step covers an action/schedule deliverable
     // yet made ZERO relevant attempts ("read and hand in") — re-run ONCE with a hard directive. Prod:
@@ -1496,7 +1677,37 @@ export async function runPlanExecuteLoop(
       const dText = `${plan.deliverables.find((x) => x.id === dId)?.description ?? ''} ${step.description}`;
       let dOk: boolean;
       let dEvidence: string;
-      if (CREDENTIAL_SAVE_RE.test(dText) && credentialCaptured) {
+      let dVerified: boolean | undefined;
+      const evRules = rules.filter((r) => r.kind === 'evidence' && r.covers.includes(dId));
+      if (evRules.length > 0) {
+        // v2: the world must SHOW it. For each evidence rule: a successful matching read after the step's last
+        // write (the model's own readback, or one forced sub-run), then the judge on that read's text.
+        dOk = true;
+        dVerified = true;
+        const notes: string[] = [];
+        for (const rule of evRules) {
+          let entry = findReadback(rule, currentTrace, lastWriteIndex(traceAsHistory(), isActionRec) + 1);
+          if (!entry && timeLeft() > 90_000) {
+            deps.log(`[plan-loop] EXECUTE ${step.id}: no readback for ${rule.id} — forcing one`);
+            try { await runReadback(rule, 2 * 60_000); } catch { /* counted as no readback below */ }
+            entry = findReadback(rule, currentTrace, lastWriteIndex(traceAsHistory(), isActionRec) + 1);
+          }
+          if (!entry) {
+            dOk = false; dVerified = false;
+            notes.push(`no readback via ${rule.applies.map((p) => p.tool).join('/')} for "${rule.condition.slice(0, 80)}"`);
+            continue;
+          }
+          const v = await judgeReadback(rule, entry);
+          if (v === 'no') {
+            dOk = false; dVerified = false;
+            notes.push(`readback (${entry.toolName}) does not show: ${rule.condition.slice(0, 80)}`);
+          } else {
+            if (v === 'unclear') dVerified = false;
+            notes.push(`${v === 'yes' ? 'verified' : 'read back (unjudged)'} via ${entry.toolName}`);
+          }
+        }
+        dEvidence = notes.join('; ').slice(0, 200);
+      } else if (CREDENTIAL_SAVE_RE.test(dText) && credentialCaptured) {
         dOk = true;
         dEvidence = 'credential captured and stored by the mechanism (http-cred-capture) during registration';
       } else if (SCHEDULE_REQ_RE.test(dText)) {
@@ -1555,9 +1766,9 @@ export async function runPlanExecuteLoop(
         dOk = stepSucceeded;
         dEvidence = evidence;
       }
-      stepVerdicts.push(`${dId}=${dOk ? 'done' : 'FAILED'}`);
+      stepVerdicts.push(`${dId}=${dOk ? (dVerified ? 'verified' : 'done') : 'FAILED'}`);
       if (dOk) {
-        outcomes.set(dId, { id: dId, status: 'done', evidence: dEvidence });
+        outcomes.set(dId, { id: dId, status: 'done', evidence: dEvidence, ...(dVerified !== undefined ? { verified: dVerified } : {}) });
       } else if (cur.status !== 'done') {
         outcomes.set(dId, { id: dId, status: 'failed', evidence: dEvidence });
       }
@@ -1623,10 +1834,34 @@ export async function runPlanExecuteLoop(
   }
 
   // ── CLOSE (computed, never declared) ──────────────────────────────────────
+  // v2 invariants: read back by the mechanism at the end; one that fails the judge blocks 'completed'.
+  const invariantNotes: string[] = [];
+  let invariantFailed = false;
+  for (const rule of rules) {
+    if (rule.kind !== 'invariant') continue;
+    if (deps.abortSignal?.aborted || timeLeft() < 60_000) {
+      invariantNotes.push(`${rule.id}: not checked (no time)`);
+      invariantFailed = true;
+      continue;
+    }
+    currentTrace = [];
+    try { await runReadback(rule, 2 * 60_000); } catch { /* no readback → fails below */ }
+    const entry = findReadback(rule, currentTrace, 0);
+    if (!entry) {
+      invariantFailed = true;
+      invariantNotes.push(`${rule.id}: no readback — "${rule.condition.slice(0, 80)}"`);
+      continue;
+    }
+    const v = await judgeReadback(rule, entry);
+    if (v === 'no') { invariantFailed = true; invariantNotes.push(`${rule.id}: VIOLATED — readback does not show "${rule.condition.slice(0, 80)}"`); }
+    else invariantNotes.push(`${rule.id}: ${v === 'yes' ? 'holds' : 'read back (unjudged)'}`);
+    deps.log(`[plan-loop] INVARIANT ${rule.id}: ${v}`);
+  }
+  const unresolvedGuards = rules.filter((r) => r.kind === 'guard' && r.resolution !== 'satisfied' && r.resolution !== 'not_satisfied');
   const list = [...outcomes.values()];
   const done = list.filter((o) => o.status === 'done').length;
   const outcome: PlanLoopResult['outcome'] =
-    done === list.length && unresolvedGaps.length === 0 ? 'completed' : done > 0 ? 'partial' : 'aborted';
+    done === list.length && unresolvedGaps.length === 0 && !invariantFailed ? 'completed' : done > 0 ? 'partial' : 'aborted';
   if (livePlanId) {
     try {
       deps.planTracker?.close(
@@ -1642,7 +1877,8 @@ export async function runPlanExecuteLoop(
   // outbound layer chunks by byte size, so fuller lines are safe.
   const trunc = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
   const lines = list.map((o) => {
-    const mark = o.status === 'done' ? '✅' : o.status === 'failed' ? '❌' : '⏸';
+    // ✅ verified by readback · ☑ done on action evidence only (unverified) · ❌ failed · ⏸ not attempted
+    const mark = o.status === 'done' ? (o.verified ? '✅' : '☑') : o.status === 'failed' ? '❌' : '⏸';
     const desc = plan!.deliverables.find((d) => d.id === o.id)?.description ?? o.id;
     return `${mark} ${trunc(desc, 160)}${o.status !== 'done' && o.evidence ? ` (${trunc(o.evidence, 100)})` : ''}`;
   });
@@ -1663,6 +1899,20 @@ export async function runPlanExecuteLoop(
       ? '\n\n⏱ Out of time budget; the remaining steps did not run (marked ⏸ honestly). Reply "continue" and I will finish them.'
       : '\n\n⏱ 时间预算耗尽,余下步骤未执行(已如实标注 ⏸)。需要的话回复"继续",我接着做剩下的。'
     : '';
+  const enRules = currentPhraseLang() === 'en';
+  const ruleLines =
+    (invariantNotes.length > 0 ? `\n\n${enRules ? 'Invariants' : '不变量'}:\n` + invariantNotes.map((n) => `- ${trunc(n, 140)}`).join('\n') : '') +
+    (unresolvedGuards.length > 0
+      ? `\n\n${enRules ? 'Guards that could not be verified (their actions were refused)' : '无法核实的前置条件(相关动作已被拒绝)'}:\n` +
+        unresolvedGuards.map((g) => `- ${g.id}: ${trunc(g.condition, 120)}`).join('\n')
+      : '') +
+    (rules.some((r) => r.kind === 'guard' && r.resolution === 'not_satisfied')
+      ? `\n\n${enRules ? 'Conditions checked and NOT met (actions withheld)' : '已核实不成立的前置条件(动作已拒绝)'}:\n` +
+        rules.filter((r) => r.kind === 'guard' && r.resolution === 'not_satisfied').map((g) => `- ${g.id}: ${trunc(g.condition, 120)}`).join('\n')
+      : '') +
+    (list.some((o) => o.status === 'done' && !o.verified) && rules.length > 0
+      ? `\n${enRules ? '(☑ = done on action evidence, not read back)' : '(☑ = 有动作证据但未读回核实)'}`
+      : '');
   const reply =
     (outcome === 'completed'
       ? enR
@@ -1681,6 +1931,7 @@ export async function runPlanExecuteLoop(
           : '任务未能执行:\n') +
     lines.join('\n') +
     gapLines +
+    ruleLines +
     emittedSkillNote +
     budgetNote;
   return { outcome, deliverables: plan.deliverables, steps: plan.steps, outcomes: list, reply, unresolvedGaps };

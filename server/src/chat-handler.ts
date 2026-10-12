@@ -389,6 +389,7 @@ import {
 } from './autonomous_progress_inject.js';
 import { computeFrontier, createDeepExploreTool } from './deep_explore.js';
 import { TURN_HARD_DEADLINE_MS } from './turn_deadline.js';
+import { READBACK_JUDGE_SYSTEM, parseReadbackVerdict } from './plan_loop_rules.js';
 import { selectSkillsToForget } from './forget_skill.js';
 import {
   classifyGrantReply,
@@ -9689,7 +9690,7 @@ export async function handleChatSend(
           const planLoopWillOwn =
             planLoopEnabled() &&
             intentDecision?.route === 'plan' &&
-            /https?:\/\//.test(userMessage);
+            intentDecision.selfContained !== false;
           const needsNewPlan =
             !planLoopWillOwn &&
             (!last ||
@@ -11579,11 +11580,15 @@ async function handleChatSendInner(
     // for the USER-DRIVEN registration-style task; recurring heartbeats belong to the legacy path that
     // already handles them (prod: the loop hijacked scheduled turns and defanged the auto-pause breaker).
     const isScheduledTurn = sessionId.startsWith('system:scheduled:');
-    if (!isScheduledTurn && planLoopEnabled() && signalBus.intentDecision?.route === 'plan') {
+    // v2 (docs/design/plan_protocol_v2.md): entry is the router's judgement alone. A URL in the message is a
+    // guide SOURCE the loop fetches first; without one the loop locates the guide itself (a document the task
+    // refers to) or runs on the task's literal asks. `selfContained === false` is the router saying the
+    // message continues earlier work rather than naming a task — that is a conversation turn, not a plan.
+    if (!isScheduledTurn && planLoopEnabled() && signalBus.intentDecision?.route === 'plan' && signalBus.intentDecision.selfContained !== false) {
       const loopGuideUrl = userMessage.match(/https?:\/\/[^\s,;:'"<>()`，。；：、]+/)?.[0]?.replace(/[.,;:!?]+$/, '');
-      if (loopGuideUrl) {
-        console.log(`[plan-loop] session=${safeSessionId(sessionId)} entering mechanism loop (guide=${loopGuideUrl})`);
-        const loopResult = await runPlanExecuteLoop(userMessage, [loopGuideUrl], {
+      {
+        console.log(`[plan-loop] session=${safeSessionId(sessionId)} entering mechanism loop (guide=${loopGuideUrl ?? 'to locate'})`);
+        const loopResult = await runPlanExecuteLoop(userMessage, loopGuideUrl ? [loopGuideUrl] : [], {
           llm: miniLoopLLM,
           toolRunner: subTurnToolRunner,
           toolDefs: tools.list()
@@ -11599,8 +11604,31 @@ async function handleChatSendInner(
           // endpoints instead of letting a fresh session hunt (prod: 404/401 wall-loops).
           // ⑤ convergence: the loop drives the REAL plan store live. A mid-loop crash leaves an
           // `executing` plan → turn-end auto-close / cross-turn-reflection catch it like any other.
+          // The loop's budget is the turn's: its default (15 min) predates the env-overridable turn deadline and
+          // would cut a long task short inside a turn that still had most of its time.
+          deadlineMs: Math.max(5 * 60_000, TURN_HARD_DEADLINE_MS - 3 * 60_000),
+          maxItersPerStep: (() => {
+            const n = parseInt(process.env.PHILONT_PLAN_LOOP_STEP_ITERS ?? '', 10);
+            return Number.isFinite(n) && n >= 2 && n <= 40 ? n : undefined;
+          })(),
+          // v2 readback judge: shown only the tool text and the expected observation; answers yes/no/unclear.
+          readbackJudge: isAuxLLMConfigured()
+            ? async (condition, text) => {
+                try {
+                  const out = await callAuxLLM({
+                    system: READBACK_JUDGE_SYSTEM,
+                    user: `# Expected observation\n${condition}\n\n# Tool text\n${text.slice(0, 6000)}\n\nAnswer: yes / no / unclear`,
+                    maxTokens: 20,
+                    fallbackToMain: false,
+                  });
+                  return parseReadbackVerdict(out);
+                } catch {
+                  return 'unclear';
+                }
+              }
+            : undefined,
           planTracker: {
-            create: (deliverables, steps, guideRef) => {
+            create: (deliverables, steps, guideRef, rules) => {
               try {
                 const p = memory.plans.create({
                   sessionId,
@@ -11608,7 +11636,14 @@ async function handleChatSendInner(
                   guideRef,
                   isPlaceholder: false,
                   deliverables: deliverables.map((d) => ({ id: d.id, description: d.description })),
-                  steps: steps.map((st) => ({ id: st.id, description: st.description, covers: st.covers })),
+                  steps: [
+                    ...steps.map((st) => ({ id: st.id, description: st.description, covers: st.covers })),
+                    // v2 typed rules live in the same record as kind-tagged steps (schema v53, additive).
+                    ...(rules ?? []).map((r) => ({
+                      id: r.id, description: r.condition, covers: r.covers, kind: r.kind,
+                      rule: { applies: r.applies, condition: r.condition, resolution: null },
+                    })),
+                  ],
                 });
                 return p.id;
               } catch (e) {
@@ -11630,6 +11665,7 @@ async function handleChatSendInner(
           },
           recordOperationalKnowledge: (entries) => {
             try {
+              if (!loopGuideUrl) return; // the cookbook is keyed by the guide's host; a located document has none
               const labels = new URL(loopGuideUrl).host.split('.').filter(Boolean);
               let i = 0;
               while (i < labels.length - 1 && /^(api|www|app)$/i.test(labels[i])) i++;

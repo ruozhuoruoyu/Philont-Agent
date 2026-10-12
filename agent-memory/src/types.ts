@@ -513,10 +513,50 @@ export type DeliverableStatus =
   | 'failed'
   | 'not-attempted';
 
+/**
+ * Typed plan items (v53, 2026-10-12). The plan used to know one kind of thing: a step. A guide also
+ * states conditions that must hold before an action, things that must never happen, and what the
+ * world should look like afterwards. Those are different things for the MECHANISM, which must
+ * gate a tool call on a guard, refuse a forbidden call, and demand a readback before an item is
+ * marked done — regardless of what domain the words come from. The model still does all the
+ * reading (it decides which sentence becomes which item); the mechanism only enforces the kind.
+ *
+ * - 'step'      do something; marked done with evidence (the default when kind is omitted)
+ * - 'guard'     a condition that must be resolved BEFORE any tool call matching `rule.applies`;
+ *               resolved through plan_update_step({status:'done', resolution:'satisfied'|'not_satisfied'})
+ * - 'forbid'    tool calls matching `rule.applies` are refused while the plan is open
+ * - 'evidence'  a readback the world must show after the step's actions (checked when marked done)
+ * - 'invariant' a readback that must still hold at plan_close
+ */
+export type PlanItemKind = 'step' | 'guard' | 'forbid' | 'evidence' | 'invariant';
+
+/**
+ * A tool-call pattern the mechanism matches deterministically: `tool` is an exact tool name or a
+ * glob with `*` (e.g. "jira__*", "google_mail__send_*"); `args` is an optional regular expression
+ * tested against the JSON of the call's input (e.g. "OFFBOARD|offboard").
+ */
+export interface PlanToolPattern {
+  tool: string;
+  args?: string;
+}
+
+export interface PlanRule {
+  /** guard / forbid: which tool calls the rule governs. evidence / invariant: the readback call. */
+  applies: PlanToolPattern[];
+  /** The condition / prohibition / expected observation, in the guide's own words. */
+  condition: string;
+  /** guard only: how the model resolved the condition (null until resolved). */
+  resolution?: 'satisfied' | 'not_satisfied' | null;
+}
+
 export interface PlanStep {
   id: string;
   description: string;
   status: PlanStepStatus;
+  /** Item kind (v53); absent on rows written before v53 — treated as 'step'. */
+  kind?: PlanItemKind;
+  /** Present for guard / forbid / evidence / invariant items. */
+  rule?: PlanRule;
   /**
    * List of deliverable ids covered by this step (v20 spec-coverage, 2026-05-15).
    * Mechanism layer validates: each id must be ∈ plan.deliverables; each deliverable must
@@ -613,6 +653,9 @@ export interface PlanInput {
     status?: PlanStepStatus;
     /** v20 spec-coverage: list of deliverable ids covered by this step (M1 optional) */
     covers?: string[];
+    /** v53 typed items */
+    kind?: PlanItemKind;
+    rule?: PlanRule;
   }>;
   /** v20 spec-coverage: deliverables list (M1 optional, M4 enforces strictly) */
   deliverables?: PlanDeliverable[];

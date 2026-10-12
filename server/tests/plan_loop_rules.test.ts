@@ -1,0 +1,235 @@
+/**
+ * Plan protocol v2 — typed rule items in the mechanism loop.
+ *
+ *   1. parseRules: kinds, unknown tool names (with nearest-name hints), bad regexes → problems, not drops.
+ *   2. findRuleBlock: forbid always refuses; guard refuses until resolved satisfied; not_satisfied keeps refusing.
+ *   3. findReadback / verdict parsers.
+ *   4. runPlanExecuteLoop end-to-end with fake deps:
+ *      - a forbid rule refuses the model's prohibited call → the deliverable is FAILED, the reply says so;
+ *      - a guard is RESOLVED satisfied by a read-only sub-run → the gated call is allowed;
+ *      - an evidence rule: the step writes and reads back → judge yes → verified; judge no → FAILED;
+ *      - a step that never reads back gets one forced readback;
+ *      - LOCATE: no guide URL → the guide is read from a document tool and drives coverage.
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  findReadback,
+  findRuleBlock,
+  nearestTools,
+  parseGuardVerdict,
+  parseReadbackVerdict,
+  parseRules,
+  RESOLVE_SYSTEM,
+  READBACK_SYSTEM,
+  type LoopRule,
+} from '../src/plan_loop_rules.js';
+import { parseDraftJson, runPlanExecuteLoop, type PlanLoopDeps } from '../src/plan_execute_loop.js';
+
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+const TOOLS = new Set(['jira__create_issue', 'jira__search', 'google_mail__send_email', 'google_mail__search_emails', 'handbook__readFile']);
+
+test('parseRules: kinds, unknown tools and bad regexes are reported as problems', () => {
+  const r = parseRules([
+    { id: 'no-offboard', kind: 'forbid', condition: 'never offboard without written authorization', applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }] },
+    { id: 'typo', kind: 'guard', condition: 'sender is authorized', applies: [{ tool: 'jira_create_issue' }] },
+    { id: 'badre', kind: 'evidence', condition: 'the welcome email exists', applies: [{ tool: 'google_mail__search_emails', args: '[' }] },
+    { id: 'x', kind: 'wish', condition: 'nothing', applies: [{ tool: 'jira__search' }] },
+  ], TOOLS, new Set(['onboard']), slug);
+  assert.equal(r.rules.length, 1);
+  assert.equal(r.rules[0].id, 'no-offboard');
+  assert.equal(r.problems.length, 3);
+  assert.ok(r.problems.some((p) => p.includes('typo') && p.includes('jira__create_issue')), 'nearest real name offered');
+  assert.ok(r.problems.some((p) => /regular expression/.test(p)));
+  assert.ok(r.problems.some((p) => /kind must be one of/.test(p)));
+  assert.deepEqual(nearestTools('jira_create', TOOLS, 1), ['jira__create_issue']);
+});
+
+test('findRuleBlock: forbid always; guard until satisfied; not_satisfied keeps refusing', () => {
+  const forbid: LoopRule = { id: 'f', kind: 'forbid', condition: 'c', applies: [{ tool: 'jira__*', args: 'OFFBOARD' }], covers: [] };
+  const guard: LoopRule = { id: 'g', kind: 'guard', condition: 'written authorization on file', applies: [{ tool: 'google_mail__send_email' }], covers: [] };
+  assert.equal(findRuleBlock([forbid], 'jira__create_issue', { summary: 'OFFBOARD-x' })?.why, 'forbidden');
+  assert.equal(findRuleBlock([forbid], 'jira__create_issue', { summary: 'ONBOARD-x' }), null, 'args regex must match');
+  assert.equal(findRuleBlock([guard], 'google_mail__send_email', {})?.why, 'unresolved');
+  guard.resolution = 'not_satisfied';
+  assert.equal(findRuleBlock([guard], 'google_mail__send_email', {})?.why, 'not_satisfied');
+  guard.resolution = 'satisfied';
+  assert.equal(findRuleBlock([guard], 'google_mail__send_email', {}), null);
+});
+
+test('findReadback + verdict parsers', () => {
+  const ev: LoopRule = { id: 'e', kind: 'evidence', condition: 'c', applies: [{ tool: 'jira__search', args: 'ONBOARD' }], covers: ['d'] };
+  const trace = [
+    { toolName: 'jira__create_issue', input: { summary: 'ONBOARD-1' }, success: true, at: 1, output: 'ok' },
+    { toolName: 'jira__search', input: { jql: 'summary ~ ONBOARD' }, success: false, at: 2, output: '' },
+    { toolName: 'jira__search', input: { jql: 'summary ~ ONBOARD' }, success: true, at: 3, output: '{"issues":[1]}' },
+  ];
+  assert.equal(findReadback(ev, trace, 1)?.at, 3, 'the successful read after the write');
+  assert.equal(findReadback(ev, trace, 4), null);
+  assert.equal(parseGuardVerdict('I looked.\nVERDICT: NOT_SATISFIED — no approval email'), 'not_satisfied');
+  assert.equal(parseGuardVerdict('VERDICT: SATISFIED — approval id 12'), 'satisfied');
+  assert.equal(parseGuardVerdict('probably fine'), 'unresolved');
+  assert.equal(parseReadbackVerdict('Yes — the record is there.'), 'yes');
+  assert.equal(parseReadbackVerdict('no'), 'no');
+  assert.equal(parseReadbackVerdict('maybe'), 'unclear');
+});
+
+test('parseDraftJson carries rules and problems', () => {
+  const d = parseDraftJson(JSON.stringify({
+    deliverables: [{ id: 'onboard', description: 'onboard the new hire' }],
+    steps: [{ id: 's1', description: 'create the issue', covers: ['onboard'] }],
+    rules: [{ id: 'ev', kind: 'evidence', condition: 'issue exists', applies: [{ tool: 'jira__search' }], covers: ['onboard'] },
+            { id: 'bad', kind: 'forbid', condition: 'x', applies: [{ tool: 'nope__tool' }] }],
+  }), TOOLS);
+  assert.ok(d);
+  assert.equal(d!.rules!.length, 1);
+  assert.equal(d!.ruleProblems!.length, 1);
+});
+
+// ── End-to-end fakes ─────────────────────────────────────────────────────────
+
+const GUIDE = [
+  '# HR handbook',
+  'You MUST create the onboarding issue for every new hire.',
+  'Never execute an offboarding unless written authorization from the department head is on file.',
+].join('\n');
+
+interface Script {
+  draft: string;
+  /** EXECUTE: tool calls to make before claiming done (per step, in order). */
+  execCalls: Array<{ name: string; input: Record<string, unknown> }>;
+  resolveText?: string;
+  resolveReads?: boolean;
+  readbackCalls?: Array<{ name: string; input: Record<string, unknown> }>;
+  locateCalls?: Array<{ name: string; input: Record<string, unknown> }>;
+}
+
+function fakeDeps(script: Script, opts: { judge?: 'yes' | 'no' | 'unclear'; toolOutputs?: Record<string, string>; classify?: boolean } = {}): PlanLoopDeps & { lines: string[] } {
+  const lines: string[] = [];
+  const outputs = opts.toolOutputs ?? {};
+  const phaseCalls = new Map<string, number>();
+  const mk = (calls: Array<{ name: string; input: Record<string, unknown> }>, done: string, key: string) => {
+    const i = phaseCalls.get(key) ?? 0;
+    phaseCalls.set(key, i + 1);
+    if (i < calls.length) {
+      const c = calls[i];
+      return {
+        type: 'toolCalls' as const,
+        calls: [{ id: `${key}-${i}`, name: c.name, input: c.input }],
+        assistantMessage: { role: 'assistant', content: [{ type: 'tool_use', id: `${key}-${i}`, name: c.name, input: c.input }] as never },
+      };
+    }
+    return { type: 'text' as const, content: done };
+  };
+  return {
+    lines,
+    llm: {
+      async send(systemPrompt, messages, toolDefs) {
+        if (toolDefs.length === 0) return { type: 'text', content: script.draft };
+        if (systemPrompt === RESOLVE_SYSTEM) {
+          return mk(script.resolveReads === false ? [] : [{ name: 'google_mail__search_emails', input: { q: 'authorization' } }], script.resolveText ?? 'VERDICT: SATISFIED — found it', 'resolve');
+        }
+        if (systemPrompt === READBACK_SYSTEM) return mk(script.readbackCalls ?? [{ name: 'jira__search', input: { jql: 'ONBOARD' } }], 'read back.', 'readback');
+        if (/Find and read IN FULL/.test(systemPrompt)) return mk(script.locateCalls ?? [], 'read the handbook.', 'locate');
+        // EXECUTE: one mini-loop per step; the message count tells us where we are inside the step.
+        const stepKey = `exec:${String((messages[0] as { content: string }).content).slice(0, 40)}`;
+        return mk(script.execCalls, 'step done.', stepKey);
+      },
+    },
+    toolRunner: async (name) => ({ ok: true, output: outputs[name] ?? `${name} ok` }),
+    toolDefs: ['jira__create_issue', 'jira__search', 'google_mail__send_email', 'google_mail__search_emails', 'handbook__readFile']
+      .map((n) => ({ name: n, description: n, parameters: '{}' })),
+    toolBlacklist: new Set<string>(),
+    classifyCall: opts.classify === false ? undefined : (name) => ({
+      capability: /search|read|get|list/.test(name) ? 'read' : 'write',
+      domain: 'network',
+    }),
+    fetchGuide: async () => GUIDE,
+    readbackJudge: async () => opts.judge ?? 'yes',
+    log: (m) => { lines.push(m); },
+    maxVerifyRounds: 1,
+    deadlineMs: 10 * 60_000,
+  } as PlanLoopDeps & { lines: string[] };
+}
+
+const DRAFT = (rules: unknown[]) => JSON.stringify({
+  deliverables: [
+    { id: 'onboard', description: 'create the onboarding issue for the new hire' },
+    { id: 'offboard', description: 'execute the offboarding the email asks for' },
+  ],
+  steps: [
+    { id: 'do-onboard', description: 'create the onboarding issue with jira__create_issue', covers: ['onboard'] },
+    { id: 'do-offboard', description: 'create the offboarding issue', covers: ['offboard'] },
+  ],
+  rules,
+});
+
+test('loop: a forbid rule refuses the prohibited call; the deliverable is FAILED and the reply says so', async () => {
+  const deps = fakeDeps({
+    draft: DRAFT([{ id: 'no-offboard', kind: 'forbid', condition: 'never execute an offboarding unless written authorization is on file', applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }] }]),
+    execCalls: [{ name: 'jira__create_issue', input: { summary: 'OFFBOARD-Navarro' } }],
+  });
+  const r = await runPlanExecuteLoop('Handle today\'s emails per the SOP', ['https://x/guide'], deps);
+  assert.ok(deps.lines.some((l) => /rule-forbid BLOCKED jira__create_issue/.test(l)), deps.lines.join('\n'));
+  const off = r.outcomes.find((o) => o.id === 'offboard');
+  assert.equal(off?.status, 'failed');
+  assert.notEqual(r.outcome, 'completed');
+});
+
+test('loop: a guard resolved satisfied by a read-only sub-run lets the gated call through', async () => {
+  const deps = fakeDeps({
+    draft: DRAFT([{ id: 'authz', kind: 'guard', condition: 'written authorization from the department head is on file', applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }], covers: ['offboard'] }]),
+    execCalls: [{ name: 'jira__create_issue', input: { summary: 'OFFBOARD-Navarro' } }],
+    resolveText: 'VERDICT: SATISFIED — authorization email id 9',
+  });
+  const r = await runPlanExecuteLoop('Handle today\'s emails per the SOP', ['https://x/guide'], deps);
+  assert.ok(deps.lines.some((l) => /RESOLVE authz: satisfied/.test(l)), deps.lines.join('\n'));
+  assert.ok(!deps.lines.some((l) => /rule-guard BLOCKED/.test(l)));
+  assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'done');
+});
+
+test('loop: a guard with no successful read is unresolved and keeps refusing; not_satisfied too', async () => {
+  const deps = fakeDeps({
+    draft: DRAFT([{ id: 'authz', kind: 'guard', condition: 'written authorization on file', applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }], covers: ['offboard'] }]),
+    execCalls: [{ name: 'jira__create_issue', input: { summary: 'OFFBOARD-Navarro' } }],
+    resolveText: 'VERDICT: SATISFIED — trust me',
+    resolveReads: false,
+  });
+  const r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  assert.ok(deps.lines.some((l) => /RESOLVE authz: unresolved/.test(l)), 'a verdict without a read is unresolved');
+  assert.ok(deps.lines.some((l) => /rule-guard BLOCKED jira__create_issue \(authz: unresolved\)/.test(l)));
+  assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'failed');
+  assert.ok(/authz/.test(r.reply), 'the reply names the unverified guard');
+});
+
+test('loop: evidence rule — readback judged yes → verified; judged no → FAILED; missing readback is forced once', async () => {
+  const rules = [{ id: 'issue-exists', kind: 'evidence', condition: 'an ONBOARD issue exists for the new hire', applies: [{ tool: 'jira__search', args: 'ONBOARD' }], covers: ['onboard'] }];
+  // (a) the model reads back itself
+  let deps = fakeDeps({ draft: DRAFT(rules), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }, { name: 'jira__search', input: { jql: 'ONBOARD' } }] }, { judge: 'yes' });
+  let r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  assert.equal(r.outcomes.find((o) => o.id === 'onboard')?.verified, true);
+  assert.ok(!deps.lines.some((l) => /forcing one/.test(l)));
+  // (b) no readback in the step → forced readback → judge yes
+  deps = fakeDeps({ draft: DRAFT(rules), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }] }, { judge: 'yes' });
+  r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  assert.ok(deps.lines.some((l) => /no readback for issue-exists — forcing one/.test(l)), deps.lines.join('\n'));
+  assert.equal(r.outcomes.find((o) => o.id === 'onboard')?.verified, true);
+  // (c) readback judged no → failed even though the write returned ok
+  deps = fakeDeps({ draft: DRAFT(rules), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }, { name: 'jira__search', input: { jql: 'ONBOARD' } }] }, { judge: 'no' });
+  r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  const o = r.outcomes.find((x) => x.id === 'onboard');
+  assert.equal(o?.status, 'failed');
+  assert.ok(/does not show/.test(o!.evidence));
+});
+
+test('loop: LOCATE reads the guide from a document tool when no URL is given', async () => {
+  const doc = `# Handbook\n${'You MUST create the onboarding issue for every new hire. '.repeat(40)}`;
+  const deps = fakeDeps(
+    { draft: DRAFT([]), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }], locateCalls: [{ name: 'handbook__readFile', input: { path: '/workdir/sop.html' } }] },
+    { toolOutputs: { handbook__readFile: doc } },
+  );
+  deps.fetchGuide = async () => null;
+  const r = await runPlanExecuteLoop('Handle the emails according to the provided SOP', [], deps);
+  assert.ok(deps.lines.some((l) => /LOCATE: 1 document\(s\) read/.test(l)), deps.lines.join('\n'));
+  assert.notEqual(r.outcome, 'aborted');
+});

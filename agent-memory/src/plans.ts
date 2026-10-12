@@ -98,6 +98,9 @@ function rowToPlan(row: PlanRow): Plan {
     evidence: s.evidence ?? null,
     startedAt: s.startedAt ?? null,
     completedAt: s.completedAt ?? null,
+    // v53 typed items (absent on older rows)
+    ...(s.kind ? { kind: s.kind } : {}),
+    ...(s.rule ? { rule: s.rule } : {}),
   }));
   return {
     id: row.id,
@@ -126,7 +129,7 @@ function normalizeInputSteps(
 ): PlanStep[] {
   return raw.map((s, i) => {
     const status = s.status && VALID_STEP_STATUS.has(s.status) ? s.status : 'pending';
-    return {
+    const step: PlanStep = {
       id: s.id && s.id.trim().length > 0 ? s.id.trim() : `step-${i + 1}`,
       description: s.description,
       status,
@@ -135,6 +138,10 @@ function normalizeInputSteps(
       startedAt: null,
       completedAt: null,
     };
+    // v53 typed items: kind/rule pass through untouched (the plan tools validate them).
+    if (s.kind) step.kind = s.kind;
+    if (s.rule) step.rule = { ...s.rule, applies: s.rule.applies.map((a) => ({ ...a })) };
+    return step;
   });
 }
 

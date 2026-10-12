@@ -186,6 +186,15 @@ export {
   createPlanTools,
 } from './plan_tools.js';
 export type { PlanToolsDeps, PlanCloseSignals } from './plan_tools.js';
+export {
+  findBlockingRule,
+  patternMatchesCall,
+  readbackSatisfied,
+  ruleItems,
+  toolNameMatches,
+  validateRuleInput,
+} from './plan_rules.js';
+export type { BlockingRule, ToolTraceEntry } from './plan_rules.js';
 // plan_aux_llm.ts fully removed (2026-05-15, M2 Phase 11): aux LLM re-review nested trap proved ineffective in testing
 export {
   FetchedResourceStore,
@@ -539,6 +548,9 @@ export type {
   PlanInput,
   PlanStatus,
   PlanStep,
+  PlanItemKind,
+  PlanRule,
+  PlanToolPattern,
   PlanStepStatus,
   PlanReview,
   AccessLogEntry,
