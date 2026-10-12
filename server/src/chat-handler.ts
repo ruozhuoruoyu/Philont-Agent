@@ -388,6 +388,7 @@ import {
   buildReasoningProgressSection,
 } from './autonomous_progress_inject.js';
 import { computeFrontier, createDeepExploreTool } from './deep_explore.js';
+import { TURN_HARD_DEADLINE_MS } from './turn_deadline.js';
 import { selectSkillsToForget } from './forget_skill.js';
 import {
   classifyGrantReply,
@@ -7723,7 +7724,7 @@ export class LlmTimeoutError extends Error {
 // 2026-05-24: 10 min → 20 min. Benchmark testing of bibtex / scp_crawl-type multi-page
 // web scraping tasks showed the LLM tends to fetch N URLs in a single turn loop; hitting the 10-min wall directly fails the task.
 // Extended to 20 min to let the LLM finish. Simple tasks are unaffected (naturally a few seconds to tens of seconds).
-const TURN_HARD_DEADLINE_MS = 20 * 60_000;
+// The constant itself lives in turn_deadline.ts (shared with deep_explore; env PHILONT_TURN_HARD_DEADLINE_MS override).
 
 /**
  * Stop taking NEW tool calls this long before the hard deadline, and spend what is left writing the user

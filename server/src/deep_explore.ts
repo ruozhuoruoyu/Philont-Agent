@@ -139,13 +139,10 @@ const DEFAULT_MAX_ITERS = resolveDeepExploreMaxIters();
  * is also adjustable (env PHILONT_DEEP_EXPLORE_TOKEN_BUDGET, default 300k, min 50k).
  */
 import { SESSION_TOKEN_BUDGET, exploreBudgetCeiling, exploreBudgetExhausted, exploreBudgetNotice } from './explore_budget.js';
+import { TURN_HARD_DEADLINE_MS } from './turn_deadline.js';
 
-/**
- * Mirror of chat-handler's TURN_HARD_DEADLINE_MS (20 min). Kept as a local literal to avoid a
- * circular import (chat-handler imports this module to register deep_explore). **Must stay in
- * sync** with chat-handler.ts:TURN_HARD_DEADLINE_MS — the clamp below depends on it.
- */
-const TURN_HARD_DEADLINE_MIRROR_MS = 20 * 60_000;
+/** The turn's hard deadline (shared module, no circular import; env-overridable). The clamp below depends on it. */
+const TURN_HARD_DEADLINE_MIRROR_MS = TURN_HARD_DEADLINE_MS;
 /**
  * Headroom reserved between a round's graceful self-abort and the turn's hard deadline. The round
  * must abort, then renderProgressText + onMilestone + the outer turn's reply formatting/send must
