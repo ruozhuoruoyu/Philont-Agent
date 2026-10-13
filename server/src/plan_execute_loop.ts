@@ -921,6 +921,7 @@ const DRAFT_SYSTEM_V1 = [
   '- Guide content that is reference material (not asked for) is NOT a deliverable.',
   '- A requirement about HOW to work (act on your own, print outputs, small chunks, read docs first)',
   '  is NOT a deliverable either: it describes the work, it is not an outcome of it. Fewer deliverables run faster.',
+  '- The final reply/report to the user is written by the mechanism from the results — it is NOT a deliverable.',
   '- Each step covers ≥1 deliverable id. Keep ≤ 10 deliverables, ≤ 12 steps.',
   'Two deliverable types are COMMONLY MISSED — add them when the trigger appears:',
   '- Guide says register/auth returns a token/api_key/secret → add a deliverable to SAVE the',
@@ -1264,6 +1265,7 @@ export async function runPlanExecuteLoop(
   // its verdict is only worth something while its context stays clean, so it must not be anchored on its own
   // earlier judgements. The mechanism does the remembering instead.
   let prevGapTexts: string[] = [];
+  let lastRoundGapCount = Number.POSITIVE_INFINITY;
   let prevContestedTexts: string[] = [];
   let gapsNote = '';
   let unresolvedGaps: string[] = [];
@@ -1383,6 +1385,14 @@ export async function runPlanExecuteLoop(
     }
     if (gapTexts.length === 0) { unresolvedGaps = []; break; }
     unresolvedGaps = gapTexts;
+    // No-progress stop: a revision that closed nothing (every gap was raised before, none fewer) will not close it
+    // next round either — the model has shown it cannot. AppWorld v1 pilot: rounds 2–3 re-raised the same single
+    // gap three times, ~100–200s of a 1020s budget. The mechanical adoption below takes over from here.
+    if (round > 0 && persistedGaps.length === gapTexts.length && gapTexts.length >= lastRoundGapCount) {
+      log(`[plan-loop] VERIFY no progress (${gapTexts.length} gap(s) raised again) — proceeding with current plan`);
+      break;
+    }
+    lastRoundGapCount = gapTexts.length;
     gapsNote = [
       ...gapTexts.map(
         (g, i) =>
@@ -1612,7 +1622,31 @@ export async function runPlanExecuteLoop(
     log(`[plan-loop] RESOLVE ${rule.id} (${why}): ${verdict} — ${note}`);
     trackStep(rule.id, verdict === 'unresolved' ? 'blocked' : 'done', `${verdict}: ${note}`.slice(0, 200));
   };
-  for (const step of plan.steps) {
+  // Execution units. Consecutive steps that work toward the same deliverable run as ONE sub-loop with the steps
+  // as its ordered checklist, instead of one fresh sub-loop per step. Each fresh sub-loop re-sends the task and
+  // notes and re-derives the state the previous one held (AppWorld v1 pilot: execution was ~79% of the time, a
+  // 4-step deliverable took 4 sub-loops and 36 REPL calls vs 13 without a plan). Evidence is still judged per
+  // deliverable, exactly as before; only the number of context resets changes.
+  const MAX_STEPS_PER_UNIT = 4;
+  const execUnits: Array<LoopStep & { members: string[] }> = [];
+  for (const st of plan.steps) {
+    const last = execUnits[execUnits.length - 1];
+    if (last && last.members.length < MAX_STEPS_PER_UNIT && st.covers.some((c) => last.covers.includes(c))) {
+      last.members.push(st.id);
+      last.description += `\n${last.members.length}. ${st.description}`;
+      for (const c of st.covers) if (!last.covers.includes(c)) last.covers.push(c);
+      continue;
+    }
+    execUnits.push({ id: st.id, description: `1. ${st.description}`, covers: [...st.covers], members: [st.id] });
+  }
+  for (const u of execUnits) {
+    if (u.members.length === 1) u.description = u.description.replace(/^1\. /, '');
+    else u.id = `${u.members[0]}+${u.members.length - 1}`;
+  }
+  const trackUnit = (u: { members: string[] }, status: 'doing' | 'done' | 'blocked', evidence?: string) => {
+    for (const m of u.members) trackStep(m, status, evidence);
+  };
+  for (const step of execUnits) {
     if (deps.abortSignal?.aborted) break;
     // Budget check: leave ≥ 45s headroom for the CLOSE + report. Stopping here (with the remaining
     // deliverables honestly not-attempted) beats the turn hard-deadline killing the whole turn —
@@ -1633,7 +1667,7 @@ export async function runPlanExecuteLoop(
     if (step.covers.length > 0 && step.covers.every((id) => outcomes.get(id)?.status === 'done')) {
       log(`[plan-loop] EXECUTE ${step.id}: skipped — all covered deliverables already done`);
       stepNotes.push(`- ${step.id}: SKIPPED (already satisfied by earlier steps)`);
-      trackStep(step.id, 'done', 'skipped — already satisfied by earlier steps');
+      trackUnit(step, 'done', 'skipped — already satisfied by earlier steps');
       continue;
     }
     deps.onStatus?.(`executing: ${step.id}`);
@@ -1649,11 +1683,11 @@ export async function runPlanExecuteLoop(
       : '';
     const runStep = (extraDirective: string) => runMiniAgentLoop({
       systemPrompt:
-        'You are executing ONE step of a verified plan. Complete it with REAL tool calls and report ' +
+        'You are executing ONE step (or a short ordered checklist of steps) of a verified plan. Complete it with REAL tool calls and report ' +
         'plainly what the tools returned. Do not claim success without a successful tool call. ' +
         'Do NOT redo work listed as already completed (e.g. do not re-register, re-fetch, or re-read).',
       userMessage:
-        `# Step\n${step.description}\n\n# Overall task (context)\n${task}\n\n` +
+        `# Step${step.members.length > 1 ? 's (do them in order)' : ''}\n${step.description}\n\n# Overall task (context)\n${task}\n\n` +
         (stepNotes.length > 0 ? `# Already completed steps (do NOT redo)\n${stepNotes.join('\n')}\n\n` : '') +
         (rulesBlock ? `# Guide constraints (OBEY these; they are NOT tasks)\n${rulesBlock}\n\n` : '') +
         (registerBlock ? `${registerBlock}\n\n` : '') +
@@ -1663,13 +1697,14 @@ export async function runPlanExecuteLoop(
       llm: deps.llm,
       toolDefs: deps.toolDefs,
       toolRunner: stepToolRunner,
-      maxIters: deps.maxItersPerStep ?? 8,
+      // A unit of n steps gets the budget of n steps (bounded): merging must not starve the work.
+      maxIters: Math.min(24, (deps.maxItersPerStep ?? 8) * step.members.length),
       toolBlacklist: deps.toolBlacklist,
       // Per-step cutoff at the remaining budget (min 10s) so one hung step (e.g. a 503-retry storm)
       // cannot silently eat the whole loop budget; combined with the caller's signal when present.
       // 4-min ceiling per step: one hung step (503-retry storm × 439s+ call timeouts) wastes at
       // most 4 min, and the loop moves on to the next step / the honest report.
-      abortSignal: budgetSignal(4 * 60_000),
+      abortSignal: budgetSignal(Math.min(8, 2 + 2 * step.members.length) * 60_000),
     });
 
     // Which successful calls count as THE action a deliverable names.
@@ -1723,7 +1758,7 @@ export async function runPlanExecuteLoop(
       }
       return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
     };
-    trackStep(step.id, 'doing');
+    trackUnit(step, 'doing');
     currentTrace = [];
     stepRuleBlocks = 0;
     let result = await runStep('');
@@ -1805,7 +1840,7 @@ export async function runPlanExecuteLoop(
     stepNotes.push(
       `- ${step.id}: ${stepSucceeded ? 'DONE' : 'FAILED'} (${evidence}). ${result.finalText.replace(/\s+/g, ' ').slice(0, 180)}`,
     );
-    trackStep(step.id, stepSucceeded ? 'done' : 'blocked', evidence.slice(0, 200));
+    trackUnit(step, stepSucceeded ? 'done' : 'blocked', evidence.slice(0, 200));
     // Per-deliverable evidence MATCHING (2026-07-02 v1.2). "Some action succeeded" is not enough:
     // prod reported 9/9 ✅ while NO post existed and NO schedule was set — the posting step made
     // ZERO action attempts (dodged into the pure-read pass) and the heartbeat step's one "action"
@@ -1817,7 +1852,7 @@ export async function runPlanExecuteLoop(
     // A deliverable that later steps also cover is not settled by this one: this step is part of the work, not
     // its end. Settling it here marked the final answer done after the first of six steps (fetch the date), and
     // the skip rule then skipped the five that do the work (AppWorld 21abae1_3, route pinned to plan).
-    const laterCovers = new Set(plan.steps.slice(plan.steps.indexOf(step) + 1).flatMap((s) => s.covers));
+    const laterCovers = new Set(execUnits.slice(execUnits.indexOf(step) + 1).flatMap((s) => s.covers));
     for (const dId of step.covers.length > 0 ? step.covers : []) {
       const cur = outcomes.get(dId);
       if (!cur) continue;

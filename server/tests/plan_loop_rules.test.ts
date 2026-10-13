@@ -359,7 +359,7 @@ test('loop: every loop log line carries its elapsed time', async () => {
   assert.ok(loopLines.length > 0 && loopLines.every((l) => /^\[plan-loop \+\d+s\]/.test(l)), loopLines.join('\n'));
 });
 
-test('loop: a deliverable that later steps also cover is not settled (or skipped past) by the first step', async () => {
+test('loop: steps toward the same deliverable run as one unit; a deliverable later units cover is not settled early', async () => {
   const draft = JSON.stringify({
     deliverables: [{ id: 'answer', description: 'create the onboarding issue for the new hire' }],
     steps: [
@@ -370,9 +370,9 @@ test('loop: a deliverable that later steps also cover is not settled (or skipped
   });
   const deps = fakeDeps({ draft, execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }] });
   await runPlanExecuteLoop('task', ['https://x/guide'], deps);
-  assert.ok(deps.lines.some((l) => /EXECUTE s1: deliverables answer=pending/.test(l)), deps.lines.join('\n'));
-  assert.ok(!deps.lines.some((l) => /EXECUTE s2: skipped/.test(l)), deps.lines.join('\n'));
-  assert.ok(deps.lines.some((l) => /EXECUTE s2: deliverables answer=done/.test(l)), deps.lines.join('\n'));
+  // Consecutive steps toward the same deliverable run as one unit (one sub-loop), settled once at its end.
+  assert.ok(deps.lines.some((l) => /EXECUTE s1\+1: deliverables answer=done/.test(l)), deps.lines.join('\n'));
+  assert.ok(!deps.lines.some((l) => /EXECUTE s2/.test(l)), deps.lines.join('\n'));
 });
 
 test('parseRules: a guard/forbid on a general executor needs an args regex; with one it is accepted', () => {
@@ -401,4 +401,20 @@ test('loop: with typed rules off (the default) a drafted rule is ignored and the
   }
   assert.ok(!deps.lines.some((l) => /BLOCKED|RESOLVE/.test(l)), deps.lines.join('\n'));
   assert.ok(deps.lines.some((l) => /VERIFY round 1: .* rules=0/.test(l)), deps.lines.join('\n'));
+});
+
+test('loop: a deliverable a LATER unit also covers stays pending after the first unit', async () => {
+  const draft = JSON.stringify({
+    deliverables: [{ id: 'a', description: 'create the onboarding issue' }, { id: 'b', description: 'send the welcome email' }],
+    steps: [
+      { id: 's1', description: 'create the issue with jira__create_issue', covers: ['a'] },
+      { id: 's2', description: 'send the email with google_mail__send_email', covers: ['b'] },
+      { id: 's3', description: 'link the issue in a follow-up with jira__create_issue', covers: ['a'] },
+    ],
+    rules: [],
+  });
+  const deps = fakeDeps({ draft, execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }, { name: 'google_mail__send_email', input: { subject: 'welcome' } }] });
+  await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  assert.ok(deps.lines.some((l) => /EXECUTE s1: deliverables a=pending/.test(l)), deps.lines.join('\n'));
+  assert.ok(deps.lines.some((l) => /EXECUTE s3: /.test(l)), 'non-adjacent steps are not merged');
 });
