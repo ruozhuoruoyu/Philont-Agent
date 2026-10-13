@@ -1674,6 +1674,14 @@ export async function runPlanExecuteLoop(
   const trackUnit = (u: { members: string[] }, status: 'doing' | 'done' | 'blocked', evidence?: string) => {
     for (const m of u.members) trackStep(m, status, evidence);
   };
+  const unitMaxIters = (u: { members: string[] }) => Math.min(24, (deps.maxItersPerStep ?? 8) * u.members.length);
+  const unitCapMs = (u: { members: string[] }): number => {
+    const floorMs = Math.min(8, 2 + 2 * u.members.length) * 60_000;
+    const iterCapMs = unitMaxIters(u) * 75_000;
+    const laterUnits = execUnits.length - 1 - execUnits.indexOf(u as (typeof execUnits)[number]);
+    const leaveForLaterMs = laterUnits * 3 * 60_000 + 60_000;
+    return Math.max(floorMs, Math.min(iterCapMs, timeLeft() - leaveForLaterMs));
+  };
   for (const step of execUnits) {
     if (deps.abortSignal?.aborted) break;
     // Budget check: leave ≥ 45s headroom for the CLOSE + report. Stopping here (with the remaining
@@ -1769,13 +1777,13 @@ export async function runPlanExecuteLoop(
       toolDefs: deps.toolDefs,
       toolRunner: stepToolRunner,
       // A unit of n steps gets the budget of n steps (bounded): merging must not starve the work.
-      maxIters: Math.min(24, (deps.maxItersPerStep ?? 8) * step.members.length),
+      maxIters: unitMaxIters(step),
       toolBlacklist: deps.toolBlacklist,
-      // Per-step cutoff at the remaining budget (min 10s) so one hung step (e.g. a 503-retry storm)
-      // cannot silently eat the whole loop budget; combined with the caller's signal when present.
-      // 4-min ceiling per step: one hung step (503-retry storm × 439s+ call timeouts) wastes at
-      // most 4 min, and the loop moves on to the next step / the honest report.
-      abortSignal: budgetSignal(Math.min(8, 2 + 2 * step.members.length) * 60_000),
+      // Per-unit cutoff so one hung unit (e.g. a 503-retry storm × 439s+ call timeouts) cannot eat
+      // the whole loop budget. The cap follows the unit's own iteration budget (a slow endpoint
+      // takes ~60s per iteration; a fixed 4–8 min cap killed units mid-work with every tool call
+      // succeeding), but leaves every later unit a minimum share of what remains.
+      abortSignal: budgetSignal(unitCapMs(step)),
     });
 
     // Which successful calls count as THE action a deliverable names.
