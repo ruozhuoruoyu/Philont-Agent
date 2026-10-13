@@ -149,6 +149,7 @@ function fakeDeps(script: Script, opts: { judge?: 'yes' | 'no' | 'unclear'; tool
     log: (m) => { lines.push(m); },
     maxVerifyRounds: 1,
     deadlineMs: 10 * 60_000,
+    typedRules: true,
   } as PlanLoopDeps & { lines: string[] };
 }
 
@@ -383,4 +384,21 @@ test('parseRules: a guard/forbid on a general executor needs an args regex; with
   const scoped = parseRules([{ id: 'done-first', kind: 'guard', condition: 'complete only when done', applies: [{ tool: 'shell', args: 'complete_task' }] }], tools, new Set(), (s) => s, isExec);
   assert.equal(scoped.rules.length, 1);
   assert.equal(scoped.problems.length, 0);
+});
+
+test('loop: with typed rules off (the default) a drafted rule is ignored and the v1 loop runs', async () => {
+  const deps = fakeDeps({
+    draft: DRAFT([{ id: 'no-offboard', kind: 'forbid', condition: 'never offboard', applies: [{ tool: 'jira__create_issue', args: 'OFFBOARD' }] }]),
+    execCalls: [{ name: 'jira__create_issue', input: { summary: 'OFFBOARD-1' } }],
+  });
+  delete deps.typedRules;
+  const prev = process.env.PHILONT_PLAN_RULES;
+  delete process.env.PHILONT_PLAN_RULES;
+  try {
+    await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  } finally {
+    if (prev !== undefined) process.env.PHILONT_PLAN_RULES = prev;
+  }
+  assert.ok(!deps.lines.some((l) => /BLOCKED|RESOLVE/.test(l)), deps.lines.join('\n'));
+  assert.ok(deps.lines.some((l) => /VERIFY round 1: .* rules=0/.test(l)), deps.lines.join('\n'));
 });

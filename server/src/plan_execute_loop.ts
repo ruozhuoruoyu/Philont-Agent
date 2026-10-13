@@ -831,6 +831,12 @@ export interface PlanLoopDeps {
   onStatus?: (text: string) => void;
   abortSignal?: AbortSignal;
   maxVerifyRounds?: number; // default 3
+  /**
+   * v2 typed rules (guard / forbid / evidence / invariant). Default: PHILONT_PLAN_RULES=1, else off. Off = the v1
+   * loop: deliverables + steps + coverage review + tool evidence. On AppWorld the rules layer cost more than it
+   * caught (v2b: 8/8 plan-routed tasks out of time; pinned-plan pilots spent the budget on guard checks).
+   */
+  typedRules?: boolean;
   maxItersPerStep?: number; // default 8
   /**
    * Wall-clock budget for the WHOLE loop (default 15 min — below the turn's 20-min hard deadline,
@@ -904,6 +910,25 @@ const DRAFT_SYSTEM = [
   '  to REGISTER it via schedule_reminder (otherwise the commitment dies with this turn).',
 ].join('\n');
 
+// The v1 planning prompt (no typed rules), used when typedRules is off.
+const DRAFT_SYSTEM_V1 = [
+  'You are the PLANNING stage of a mechanism-driven loop. Output ONLY a JSON object, no prose:',
+  '{"deliverables":[{"id":"<slug>","description":"<what must be produced/done>"}],',
+  ' "steps":[{"id":"<slug>","description":"<how, incl. concrete tool/endpoint>","covers":["<deliverable-id>"]}]}',
+  'Rules:',
+  '- One deliverable per REQUIRED action: every literal action in the user task AND every mandatory',
+  '  requirement (MUST/必须/required, numbered steps of the flow being asked for) in the guide.',
+  '- Guide content that is reference material (not asked for) is NOT a deliverable.',
+  '- A requirement about HOW to work (act on your own, print outputs, small chunks, read docs first)',
+  '  is NOT a deliverable either: it describes the work, it is not an outcome of it. Fewer deliverables run faster.',
+  '- Each step covers ≥1 deliverable id. Keep ≤ 10 deliverables, ≤ 12 steps.',
+  'Two deliverable types are COMMONLY MISSED — add them when the trigger appears:',
+  '- Guide says register/auth returns a token/api_key/secret → add a deliverable to SAVE the',
+  '  credential (SecretStore via saveCredential; later http uses a {credential-id} placeholder).',
+  '- Guide has a routine/check-in/periodic/every-N-minutes/heartbeat requirement → add a deliverable',
+  '  to REGISTER it via schedule_reminder (otherwise the commitment dies with this turn).',
+].join('\n');
+
 async function llmText(
   llm: MiniLoopLLMClient,
   system: string,
@@ -930,6 +955,7 @@ export async function runPlanExecuteLoop(
   const startedAt = now();
   const timeLeft = () => deadlineMs - (now() - startedAt);
   const planningShareMs = Math.max(3 * 60_000, deadlineMs * 0.3);
+  const typedRules = deps.typedRules ?? process.env.PHILONT_PLAN_RULES === '1';
   // Every loop line carries its elapsed time: without it a run that ends out of budget cannot be split into phases.
   const log = (m: string) => deps.log(m.replace(/^\[plan-loop\]/, () => `[plan-loop +${Math.round((now() - startedAt) / 1000)}s]`));
   // Hard per-call ceiling. The adapter's own call timeout can reach 439s+ (formula-clamped up to
@@ -1283,11 +1309,12 @@ export async function runPlanExecuteLoop(
     // loop). An abort/exception degrades to an unparseable draft → the round retries with a note.
     let draftText = '';
     try {
-      draftText = await llmText(deps.llm, DRAFT_SYSTEM, user, budgetSignal(180_000));
+      draftText = await llmText(deps.llm, typedRules ? DRAFT_SYSTEM : DRAFT_SYSTEM_V1, user, budgetSignal(180_000));
     } catch (e) {
       log(`[plan-loop] DRAFT call aborted/failed (${(e as Error).message?.slice(0, 60)})`);
     }
     const draft = parseDraftJson(draftText, knownTools, isGeneralExecutor);
+    if (draft && !typedRules) { draft.rules = []; draft.ruleProblems = []; }
     if (!draft) {
       log(`[plan-loop] DRAFT round ${round + 1}: unparseable output`);
       gapsNote = 'Your previous output was not valid JSON in the required shape. Output ONLY the JSON object.';
