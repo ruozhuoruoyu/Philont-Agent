@@ -17,6 +17,7 @@
  * placeholder+gate path).
  */
 
+import { appendFileSync } from 'node:fs';
 import { currentPhraseLang } from './response_language.js';
 import type { ToolTraceEntry } from '@agent/memory';
 import { patternMatchesCall as patternMatchesCallInput, toolNameMatches as toolNameMatchesPattern } from '@agent/memory';
@@ -1129,6 +1130,8 @@ export async function runPlanExecuteLoop(
   // Rule refusals in the current sub-run; past a small budget the sub-run is told to stop and report, instead of
   // spending its whole iteration budget on calls the plan will keep refusing.
   let stepRuleBlocks = 0;
+  // Which phase/unit the current sub-run belongs to (evaluation trace only).
+  let currentUnitId = 'locate';
   const STEP_RULE_BLOCK_BUDGET = 4;
   const ruleJudgeCache = new Map<string, 'yes' | 'no' | 'unclear'>();
   const lazyResolves = new Map<string, number>();
@@ -1204,6 +1207,18 @@ export async function runPlanExecuteLoop(
       }
     }
     const res = await deps.toolRunner(name, input);
+    // Evaluation trace (unset in normal use): every sub-run call with its input and the head of its output, so a
+    // run can be read call by call — the loop log only aggregates (tools=8 ok=8), which cannot show why a step
+    // needed 8 calls. Inputs can carry credentials; this is for sandboxed benchmark runs only.
+    const tracePath = process.env.PHILONT_PLAN_LOOP_TRACE;
+    if (tracePath) {
+      try {
+        appendFileSync(tracePath, JSON.stringify({
+          t: Math.round((now() - startedAt) / 1000), unit: currentUnitId, name, input,
+          ok: res.ok, out: String(res.ok ? res.output ?? '' : res.error ?? '').slice(0, 1500),
+        }) + '\n');
+      } catch { /* tracing must never break the run */ }
+    }
     currentTrace.push({ toolName: name, input, success: res.ok, at: now(), output: typeof res.output === 'string' ? res.output.slice(0, 8000) : '' });
     // A successful read is provenance for later ids: record its body so a value the model later puts in a
     // write can be traced to something it actually saw (API response, get_fact output, …).
@@ -1759,6 +1774,7 @@ export async function runPlanExecuteLoop(
       return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
     };
     trackUnit(step, 'doing');
+    currentUnitId = step.id;
     currentTrace = [];
     stepRuleBlocks = 0;
     let result = await runStep('');
