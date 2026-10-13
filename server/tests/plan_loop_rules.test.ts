@@ -230,9 +230,18 @@ test('loop: LOCATE reads the guide from a document tool when no URL is given', a
     { toolOutputs: { handbook__readFile: doc } },
   );
   deps.fetchGuide = async () => null;
+  deps.locateGuide = true;
   const r = await runPlanExecuteLoop('Handle the emails according to the provided SOP', [], deps);
   assert.ok(deps.lines.some((l) => /LOCATE: 1 document\(s\) read/.test(l)), deps.lines.join('\n'));
   assert.notEqual(r.outcome, 'aborted');
+});
+
+test('loop: without the router saying the guide lives in the environment, no LOCATE — the task text is the spec', async () => {
+  const deps = fakeDeps({ draft: DRAFT([]), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }], locateCalls: [{ name: 'handbook__readFile', input: { path: '/x' } }] });
+  deps.fetchGuide = async () => null;
+  await runPlanExecuteLoop('Create the onboarding issue', [], deps);
+  assert.ok(!deps.lines.some((l) => /LOCATE/.test(l)), deps.lines.join('\n'));
+  assert.ok(deps.lines.some((l) => /the task text itself is the spec/.test(l)), deps.lines.join('\n'));
 });
 
 test('loop: an execute-class REPL is both write and readback — a call matching the evidence pattern is not the "last write"', async () => {

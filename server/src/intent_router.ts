@@ -38,6 +38,11 @@ export interface IntentDecision {
   selfContained?: boolean;
   /** Whether the owner wants the exploration to keep advancing without another continue message. */
   continuous?: boolean;
+  /**
+   * route=plan only: the message says to follow a document (handbook, SOP, policy, guide) that is neither pasted in
+   * the message nor linked by URL — it lives in files/tools the assistant can read, and the plan loop must find it.
+   */
+  guideInEnvironment?: boolean;
 }
 
 export function intentRouterEnabled(): boolean {
@@ -99,10 +104,13 @@ export function buildIntentPrompt(userMessage: string): string {
     'unknown and external (a production incident, a system nobody can just read). A bug report about a ' +
     'file we just wrote is a work item, not an investigation.\n\n' +
     'Respond with ONLY a JSON object, no prose:\n' +
-    '{"route":"direct|deep_explore|plan","domain":"formal|deliberate|discover","confidence":0.0-1.0,"reason":"<short>","selfContained":true|false,"continuous":true|false}\n' +
+    '{"route":"direct|deep_explore|plan","domain":"formal|deliberate|discover","confidence":0.0-1.0,"reason":"<short>","selfContained":true|false,"continuous":true|false,"guideInEnvironment":true|false}\n' +
     'Set selfContained=false when the message depends on prior context (for example: this/new angle/continue/change direction).\n' +
     'Set continuous=true when the owner asks the exploration to keep pushing/running, rather than assess or advance only once.\n' +
-    'Omit "domain" unless route is deep_explore.\n\n' +
+    'Omit "domain" unless route is deep_explore.\n' +
+    'Set guideInEnvironment=true ONLY when route is plan AND the message tells you to follow a specific document ' +
+    '(handbook, SOP, policy, playbook, guide) that is NOT pasted in the message and has NO URL — it must be found in ' +
+    'files or tools. Instructions written in the message itself, or ordinary API/app documentation, do not count.\n\n' +
     'User message:\n"""\n' +
     userMessage.slice(0, 2000) +
     '\n"""'
@@ -133,7 +141,8 @@ export function parseIntentDecision(raw: string): IntentDecision | null {
   const reason = typeof obj.reason === 'string' ? obj.reason.slice(0, 200) : '';
   const selfContained = typeof obj.selfContained === 'boolean' ? obj.selfContained : undefined;
   const continuous = typeof obj.continuous === 'boolean' ? obj.continuous : undefined;
-  return { route, domain, confidence, reason, selfContained, continuous };
+  const guideInEnvironment = route === 'plan' && obj.guideInEnvironment === true ? true : undefined;
+  return { route, domain, confidence, reason, selfContained, continuous, guideInEnvironment };
 }
 
 /** A contextual deep-explore request with a live session means continue it, rather than answer flat. */

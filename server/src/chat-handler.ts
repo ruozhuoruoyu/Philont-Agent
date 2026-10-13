@@ -11613,6 +11613,8 @@ async function handleChatSendInner(
           // The loop's budget is the turn's: its default (15 min) predates the env-overridable turn deadline and
           // would cut a long task short inside a turn that still had most of its time.
           deadlineMs: Math.max(5 * 60_000, TURN_HARD_DEADLINE_MS - 3 * 60_000),
+          // The router's judgement that the task points at a document living in files/tools (not a URL, not pasted).
+          locateGuide: signalBus.intentDecision?.guideInEnvironment === true,
           maxItersPerStep: (() => {
             const n = parseInt(process.env.PHILONT_PLAN_LOOP_STEP_ITERS ?? '', 10);
             return Number.isFinite(n) && n >= 2 && n <= 40 ? n : undefined;

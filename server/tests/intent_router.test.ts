@@ -549,3 +549,9 @@ test('classifyIntent: PHILONT_INTENT_ROUTE_OVERRIDE pins the route without calli
     if (prevOn === undefined) delete process.env.PHILONT_INTENT_ROUTER; else process.env.PHILONT_INTENT_ROUTER = prevOn;
   }
 });
+
+test('parseIntentDecision: guideInEnvironment is kept only for route=plan', () => {
+  assert.equal(parseIntentDecision('{"route":"plan","confidence":0.9,"reason":"x","guideInEnvironment":true}')?.guideInEnvironment, true);
+  assert.equal(parseIntentDecision('{"route":"direct","confidence":0.9,"reason":"x","guideInEnvironment":true}')?.guideInEnvironment, undefined);
+  assert.equal(parseIntentDecision('{"route":"plan","confidence":0.9,"reason":"x"}')?.guideInEnvironment, undefined);
+});

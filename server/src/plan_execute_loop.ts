@@ -838,6 +838,13 @@ export interface PlanLoopDeps {
    * caught (v2b: 8/8 plan-routed tasks out of time; pinned-plan pilots spent the budget on guard checks).
    */
   typedRules?: boolean;
+  /**
+   * Look for the guide in the environment when no URL is given. Only when the router judged that the task points at
+   * a document to follow that lives in files/tools (guideInEnvironment). Default off: the loop is for guides the
+   * owner hands over (URL or pasted text); without one the task text is the spec. Searching unconditionally cost up
+   * to the whole 3-min cap on tasks with no guide at all, and scanned the filesystem from / (AppWorld).
+   */
+  locateGuide?: boolean;
   maxItersPerStep?: number; // default 8
   /**
    * Wall-clock budget for the WHOLE loop (default 15 min — below the turn's 20-min hard deadline,
@@ -1024,7 +1031,7 @@ export async function runPlanExecuteLoop(
   // A bounded read-only sub-run finds and reads what the task says to follow; every successful read result
   // long enough to be a document becomes guide corpus. The model names what it reads; the mechanism keeps the
   // texts. With nothing found, the task's own literal asks are the spec (tier 3) — the loop still runs.
-  if (guideTexts.length === 0 && deps.toolDefs.length > 0 && timeLeft() > 120_000) {
+  if (guideTexts.length === 0 && deps.locateGuide === true && deps.toolDefs.length > 0 && timeLeft() > 120_000) {
     deps.onStatus?.('locating the guide…');
     const located: string[] = [];
     const locateRunner: PlanLoopDeps['toolRunner'] = async (name, input) => {
@@ -1037,7 +1044,8 @@ export async function runPlanExecuteLoop(
       const loc = await runMiniAgentLoop({
         systemPrompt:
           'Find and read IN FULL the document(s) this task says to follow (a guide, SOP, handbook, policy, ' +
-          'instructions file). Use READ tools only; change nothing. When done, reply with the names of the documents you read.',
+          'instructions file). Use READ tools only; change nothing. Look where the task points and in the working directory; ' +
+          'never scan the whole filesystem (no searches from / or system directories). When done, reply with the names of the documents you read.',
         userMessage: `# Task\n${task}`,
         llm: deps.llm,
         toolDefs: deps.toolDefs,
@@ -1045,7 +1053,7 @@ export async function runPlanExecuteLoop(
         maxIters: 6,
         toolWhitelist: readOnlyWhitelist,
         toolBlacklist: deps.toolBlacklist,
-        abortSignal: budgetSignal(3 * 60_000),
+        abortSignal: budgetSignal(90_000),
       });
       log(`[plan-loop] LOCATE: ${located.length} document(s) read (${loc.toolCallHistory.length} calls)${readOnlyWhitelist ? '' : ' — no read-only classification, whitelist off'}`);
     } catch (e) {
