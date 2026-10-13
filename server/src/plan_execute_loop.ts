@@ -686,7 +686,11 @@ export interface DraftPlan {
 }
 
 /** Extract the first JSON object from model text (tolerates ``` fences / prose around it). */
-export function parseDraftJson(text: string, knownTools: ReadonlySet<string> = new Set()): DraftPlan | null {
+export function parseDraftJson(
+  text: string,
+  knownTools: ReadonlySet<string> = new Set(),
+  isGeneralExecutor: (tool: string) => boolean = () => false,
+): DraftPlan | null {
   const cleaned = text.replace(/```(?:json)?/gi, '');
   const start = cleaned.indexOf('{');
   if (start < 0) return null;
@@ -727,7 +731,7 @@ export function parseDraftJson(text: string, knownTools: ReadonlySet<string> = n
       : [];
     steps.push({ id: slugify(ss.id), description: ss.description.slice(0, 600), covers });
   }
-  const parsedRules = parseRules(o.rules, knownTools, validIds, slugify);
+  const parsedRules = parseRules(o.rules, knownTools, validIds, slugify, isGeneralExecutor);
   return { deliverables, steps, rules: parsedRules.rules, ruleProblems: parsedRules.problems };
 }
 
@@ -888,6 +892,8 @@ const DRAFT_SYSTEM = [
   '- Rules govern SPECIFIC actions. General working style (act on your own, do not ask the user, look values up, be',
   '  careful, read docs first) is NOT a rule: you already follow it, and a rule for it would block the work itself.',
   '  A guard/forbid pattern must single out the governed action (exact tool names, or an args regex naming it).',
+  '  On a general executor (shell, code interpreter) the tool name names no action: its guard/forbid MUST carry an',
+  '  args regex matching the governed call in the input (e.g. the API it invokes), or it would gate all the work.',
   // Ported from the legacy plan-protocol teaching (chat-handler buildMemoryPrefix): the two
   // deliverable types weak models systematically miss. Missing them = later 401s / the routine
   // stops when the turn ends.
@@ -955,6 +961,12 @@ export async function runPlanExecuteLoop(
   // v2 entry is the router's judgement, not a URL regex. The tool list and the read-only subset are needed by
   // every phase below (compile prompt, RESOLVE/READBACK sub-runs), so they are computed once here.
   const knownTools = new Set(deps.toolDefs.map((t) => t.name));
+  // A local interpreter (shell, code REPL): executes whatever its input says. A networked execute tool (a browser)
+  // names its action (navigate/click), so it is not one.
+  const isGeneralExecutor = (t: string): boolean => {
+    const c = deps.classifyCall?.(t, {});
+    return c?.capability === 'execute' && c.domain === 'local';
+  };
   const readOnlyWhitelist = ((): ReadonlySet<string> | undefined => {
     // The world the guide is about, not the agent's own memory: self-domain reads (facts, notes, past sessions)
     // are not evidence that a condition holds or that an outcome happened.
@@ -1275,7 +1287,7 @@ export async function runPlanExecuteLoop(
     } catch (e) {
       log(`[plan-loop] DRAFT call aborted/failed (${(e as Error).message?.slice(0, 60)})`);
     }
-    const draft = parseDraftJson(draftText, knownTools);
+    const draft = parseDraftJson(draftText, knownTools, isGeneralExecutor);
     if (!draft) {
       log(`[plan-loop] DRAFT round ${round + 1}: unparseable output`);
       gapsNote = 'Your previous output was not valid JSON in the required shape. Output ONLY the JSON object.';

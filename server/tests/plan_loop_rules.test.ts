@@ -373,3 +373,14 @@ test('loop: a deliverable that later steps also cover is not settled (or skipped
   assert.ok(!deps.lines.some((l) => /EXECUTE s2: skipped/.test(l)), deps.lines.join('\n'));
   assert.ok(deps.lines.some((l) => /EXECUTE s2: deliverables answer=done/.test(l)), deps.lines.join('\n'));
 });
+
+test('parseRules: a guard/forbid on a general executor needs an args regex; with one it is accepted', () => {
+  const tools = new Set(['shell', 'jira__search', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
+  const isExec = (t: string) => t === 'shell';
+  const bare = parseRules([{ id: 'spec-first', kind: 'guard', condition: 'read the spec before calling an API', applies: [{ tool: 'shell' }] }], tools, new Set(), (s) => s, isExec);
+  assert.equal(bare.rules.length, 0);
+  assert.ok(/general executor/.test(bare.problems.join('\n')), bare.problems.join('\n'));
+  const scoped = parseRules([{ id: 'done-first', kind: 'guard', condition: 'complete only when done', applies: [{ tool: 'shell', args: 'complete_task' }] }], tools, new Set(), (s) => s, isExec);
+  assert.equal(scoped.rules.length, 1);
+  assert.equal(scoped.problems.length, 0);
+});

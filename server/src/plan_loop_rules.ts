@@ -49,7 +49,14 @@ export interface ParsedRules {
  * guide's prohibition quietly disappears. A pattern naming a tool that does not exist is the common
  * weak-model slip (a near-miss spelling), so the message carries the closest real names.
  */
-export function parseRules(raw: unknown, knownTools: ReadonlySet<string>, validDeliverableIds: ReadonlySet<string>, slug: (s: string) => string): ParsedRules {
+export function parseRules(
+  raw: unknown,
+  knownTools: ReadonlySet<string>,
+  validDeliverableIds: ReadonlySet<string>,
+  slug: (s: string) => string,
+  /** Tools whose name identifies no action (a shell, a code interpreter): what they do is in their args. */
+  isGeneralExecutor: (tool: string) => boolean = () => false,
+): ParsedRules {
   const rules: LoopRule[] = [];
   const problems: string[] = [];
   if (raw === undefined || raw === null) return { rules, problems };
@@ -83,6 +90,16 @@ export function parseRules(raw: unknown, knownTools: ReadonlySet<string>, validD
           problems.push(
             `rules[${i}] (${id}): pattern "${p.tool}" with no args filter covers ${hits.length} of ${knownTools.size} tools — ` +
               `a ${kind} must name the specific actions it governs (exact tool names, or an args regex that identifies the action)`,
+          );
+          return;
+        }
+        // On a general executor the tool name says nothing about the action: a guard/forbid on `shell` with no args
+        // gates every call the work is made of (AppWorld, REPL-only: "read the spec first" on `shell` refused the
+        // spec read itself, and "complete only when done" refused the computation that gets it done).
+        if ((kind === 'guard' || kind === 'forbid') && !(p.args && p.args.trim()) && hits.some(isGeneralExecutor)) {
+          problems.push(
+            `rules[${i}] (${id}): "${p.tool}" is a general executor — what it does is in its input, so a ${kind} on it needs an ` +
+              `args regex that identifies the governed action (e.g. the API or command it calls)`,
           );
           return;
         }
