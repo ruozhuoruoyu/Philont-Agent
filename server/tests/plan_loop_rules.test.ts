@@ -418,3 +418,15 @@ test('loop: a deliverable a LATER unit also covers stays pending after the first
   assert.ok(deps.lines.some((l) => /EXECUTE s1: deliverables a=pending/.test(l)), deps.lines.join('\n'));
   assert.ok(deps.lines.some((l) => /EXECUTE s3: /.test(l)), 'non-adjacent steps are not merged');
 });
+
+test('loop: the next unit is shown the calls earlier units made and what they returned', async () => {
+  const deps = fakeDeps({ draft: DRAFT([]), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }] },
+    { toolOutputs: { jira__create_issue: 'created issue KEY-42' } });
+  const prompts: string[] = [];
+  const base = deps.llm.send.bind(deps.llm);
+  deps.llm = { async send(system, m, t, o) { if (t.length > 0 && m.length === 1) prompts.push(String((m[0] as { content: string }).content)); return base(system, m, t, o); } };
+  await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+  const second = prompts.find((p) => /^# Step\ncreate the offboarding issue/.test(p));
+  assert.ok(second, prompts.map((p) => p.slice(0, 60)).join('\n'));
+  assert.ok(/# Work already done in this task[\s\S]*\[do-onboard\] jira__create_issue[\s\S]*created issue KEY-42/.test(second!), second);
+});

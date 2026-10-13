@@ -1130,6 +1130,8 @@ export async function runPlanExecuteLoop(
   // Rule refusals in the current sub-run; past a small budget the sub-run is told to stop and report, instead of
   // spending its whole iteration budget on calls the plan will keep refusing.
   let stepRuleBlocks = 0;
+  // Successful calls of the execution units, in order: handed to the next unit as what is already known.
+  const workLog: Array<{ unit: string; name: string; input: Record<string, unknown>; output: string }> = [];
   // Which phase/unit the current sub-run belongs to (evaluation trace only).
   let currentUnitId = 'locate';
   const STEP_RULE_BLOCK_BUDGET = 4;
@@ -1220,6 +1222,7 @@ export async function runPlanExecuteLoop(
       } catch { /* tracing must never break the run */ }
     }
     currentTrace.push({ toolName: name, input, success: res.ok, at: now(), output: typeof res.output === 'string' ? res.output.slice(0, 8000) : '' });
+    if (res.ok && !inResolve && typeof res.output === 'string') workLog.push({ unit: currentUnitId, name, input, output: res.output });
     // A successful read is provenance for later ids: record its body so a value the model later puts in a
     // write can be traced to something it actually saw (API response, get_fact output, …).
     if (res.ok && typeof res.output === 'string' && res.output) readCorpus.push(res.output);
@@ -1696,6 +1699,26 @@ export async function runPlanExecuteLoop(
     const registerBlock = coverTexts.some((t) => /\bregister\b|\bsign\s*up\b|注册/i.test(t))
       ? buildRegisterTemplate(task, guideApi)
       : '';
+    // What earlier units actually did and got back: the calls (their inputs name the variables and ids the
+    // environment now holds) and the head of each result. A one-line step note does not carry that, and each new
+    // sub-loop spent its first calls re-discovering it — listing REPL variables, re-reading passwords, logging in
+    // again, re-fetching lists already fetched (AppWorld trace: ~9 of 37 calls). Most recent first, bounded.
+    // Computed per sub-run, so a forced retry of this unit also sees what its first attempt did.
+    const priorWorkBlock = (): string => {
+      const prev = workLog;
+      if (prev.length === 0) return '';
+      const lines: string[] = [];
+      let budget = 6000;
+      for (let i = prev.length - 1; i >= 0 && budget > 0; i--) {
+        const w = prev[i];
+        let inp = '';
+        try { inp = JSON.stringify(w.input); } catch { inp = String(w.input); }
+        const line = `- [${w.unit}] ${w.name} ${inp.slice(0, 500)}\n  → ${w.output.replace(/\s+/g, ' ').slice(0, 400)}`;
+        budget -= line.length;
+        if (budget >= 0) lines.unshift(line);
+      }
+      return '# Work already done in this task — calls made and what they returned (state they created still exists; reuse it, do not redo)\n' + lines.join('\n');
+    };
     const runStep = (extraDirective: string) => runMiniAgentLoop({
       systemPrompt:
         'You are executing ONE step (or a short ordered checklist of steps) of a verified plan. Complete it with REAL tool calls and report ' +
@@ -1704,6 +1727,7 @@ export async function runPlanExecuteLoop(
       userMessage:
         `# Step${step.members.length > 1 ? 's (do them in order)' : ''}\n${step.description}\n\n# Overall task (context)\n${task}\n\n` +
         (stepNotes.length > 0 ? `# Already completed steps (do NOT redo)\n${stepNotes.join('\n')}\n\n` : '') +
+        (workLog.length > 0 ? `${priorWorkBlock()}\n\n` : '') +
         (rulesBlock ? `# Guide constraints (OBEY these; they are NOT tasks)\n${rulesBlock}\n\n` : '') +
         (registerBlock ? `${registerBlock}\n\n` : '') +
         (endpointRegistry ? `${endpointRegistry}\n\n` : '') +
