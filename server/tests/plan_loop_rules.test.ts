@@ -421,7 +421,7 @@ test('loop: a deliverable a LATER unit also covers stays pending after the first
 
 test('loop: the next unit is shown the calls earlier units made and what they returned', async () => {
   const deps = fakeDeps({ draft: DRAFT([]), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1' } }] },
-    { toolOutputs: { jira__create_issue: 'created issue KEY-42' } });
+    { judge: 'unclear', toolOutputs: { jira__create_issue: 'created issue KEY-42' } });
   const prompts: string[] = [];
   const base = deps.llm.send.bind(deps.llm);
   deps.llm = { async send(system, m, t, o) { if (t.length > 0 && m.length === 1) prompts.push(String((m[0] as { content: string }).content)); return base(system, m, t, o); } };
@@ -429,4 +429,14 @@ test('loop: the next unit is shown the calls earlier units made and what they re
   const second = prompts.find((p) => /^# Step\ncreate the offboarding issue/.test(p));
   assert.ok(second, prompts.map((p) => p.slice(0, 60)).join('\n'));
   assert.ok(/# Work already done in this task[\s\S]*\[do-onboard\] jira__create_issue[\s\S]*created issue KEY-42/.test(second!), second);
+});
+
+test('loop: a unit whose deliverables earlier tool output already shows done is skipped (judge yes only)', async () => {
+  for (const [verdict, skipped] of [['yes', true], ['unclear', false]] as const) {
+    const deps = fakeDeps({ draft: DRAFT([]), execCalls: [{ name: 'jira__create_issue', input: { summary: 'ONBOARD-1 and OFFBOARD-1' } }] },
+      { judge: verdict, toolOutputs: { jira__create_issue: 'created ONBOARD-1 and OFFBOARD-1' } });
+    const r = await runPlanExecuteLoop('task', ['https://x/guide'], deps);
+    assert.equal(deps.lines.some((l) => /EXECUTE do-offboard: skipped — earlier units' tool output shows offboard done/.test(l)), skipped, deps.lines.join('\n'));
+    if (skipped) assert.equal(r.outcomes.find((o) => o.id === 'offboard')?.status, 'done');
+  }
 });

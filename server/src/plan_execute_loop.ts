@@ -1690,6 +1690,28 @@ export async function runPlanExecuteLoop(
       trackUnit(step, 'done', 'skipped — already satisfied by earlier steps');
       continue;
     }
+    // Ran ahead: weak models often finish later units' work inside an earlier one (AppWorld 634f342_1: one unit
+    // created the playlist, moved the songs and completed the task; the next two units re-checked and re-did it for
+    // ~230s). Before running a unit, an independent judge that sees only the tool output gathered so far is asked,
+    // per open deliverable, whether that output shows it done. Only a definite yes for every one skips the unit.
+    const openIds = step.covers.filter((id) => outcomes.get(id)?.status !== 'done');
+    if (deps.readbackJudge && workLog.length > 0 && openIds.length > 0) {
+      const seen = workLog.slice(-10).map((w) => w.output.slice(-1200)).join('\n---\n').slice(-8000);
+      let allShown = true;
+      for (const id of openIds) {
+        const d = plan.deliverables.find((x) => x.id === id);
+        let v: 'yes' | 'no' | 'unclear' = 'unclear';
+        if (d) { try { v = await deps.readbackJudge(d.description, seen); } catch { v = 'unclear'; } }
+        if (v !== 'yes') { allShown = false; break; }
+      }
+      if (allShown) {
+        for (const id of openIds) outcomes.set(id, { id, status: 'done', evidence: 'shown by the tool output of earlier units (judged)' });
+        log(`[plan-loop] EXECUTE ${step.id}: skipped — earlier units' tool output shows ${openIds.join(', ')} done (judge)`);
+        stepNotes.push(`- ${step.id}: SKIPPED (earlier tool output already shows it done)`);
+        trackUnit(step, 'done', 'skipped — earlier tool output shows it done (judged)');
+        continue;
+      }
+    }
     deps.onStatus?.(`executing: ${step.id}`);
     const coverTexts = step.covers.map(
       (id) => `${plan!.deliverables.find((x) => x.id === id)?.description ?? ''} ${step.description}`,
