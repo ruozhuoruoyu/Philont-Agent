@@ -526,3 +526,23 @@ test('an LLM that only ever returns empty reports it, instead of silence dressed
   assert.equal(r.finalText, '');
   assert.equal(r.hitCap, false, 'this is not a cap; the model said nothing');
 });
+
+test('abort: a running tool call that never returns is cut off by the loop budget', async () => {
+  // AbortSignal.timeout's timer is unref'd and would let the test runner exit early; a plain timer keeps it alive.
+  const ctl = new AbortController();
+  setTimeout(() => ctl.abort(), 50);
+  const signal = ctl.signal;
+  const started = Date.now();
+  const res = await runMiniAgentLoop({
+    systemPrompt: 's',
+    userMessage: 'u',
+    llm: stubLLM([toolCallResponse([{ id: 't1', name: 'shell', input: { command: 'find /' } }]), textResponse('unreachable')]),
+    toolDefs: NO_TOOLS,
+    toolRunner: () => new Promise<MiniLoopToolRunResult>(() => { /* hangs */ }),
+    maxIters: 4,
+    abortSignal: signal,
+  });
+  assert.ok(Date.now() - started < 2000, 'returned promptly');
+  assert.equal(res.error, 'aborted');
+  assert.match(res.toolCallHistory[0]?.outputPreview ?? '', /aborted/);
+});

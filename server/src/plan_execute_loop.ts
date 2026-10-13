@@ -957,6 +957,20 @@ export async function runPlanExecuteLoop(
   const startedAt = now();
   const timeLeft = () => deadlineMs - (now() - startedAt);
   const planningShareMs = Math.max(3 * 60_000, deadlineMs * 0.3);
+  // Evaluation trace (unset in normal use): every sub-run call with its input and the head of its output, so a run
+  // can be read call by call — the loop log only aggregates (tools=8 ok=8), which cannot show why a step needed 8
+  // calls. Inputs can carry credentials; this is for sandboxed benchmark runs only.
+  let traceUnit = 'locate';
+  const traceCall = (name: string, input: Record<string, unknown>, res: { ok: boolean; output?: unknown; error?: string }): void => {
+    const tracePath = process.env.PHILONT_PLAN_LOOP_TRACE;
+    if (!tracePath) return;
+    try {
+      appendFileSync(tracePath, JSON.stringify({
+        t: Math.round((now() - startedAt) / 1000), unit: traceUnit, name, input,
+        ok: res.ok, out: String(res.ok ? res.output ?? '' : res.error ?? '').slice(0, 1500),
+      }) + '\n');
+    } catch { /* tracing must never break the run */ }
+  };
   const typedRules = deps.typedRules ?? process.env.PHILONT_PLAN_RULES === '1';
   // Every loop line carries its elapsed time: without it a run that ends out of budget cannot be split into phases.
   const log = (m: string) => deps.log(m.replace(/^\[plan-loop\]/, () => `[plan-loop +${Math.round((now() - startedAt) / 1000)}s]`));
@@ -1015,6 +1029,7 @@ export async function runPlanExecuteLoop(
     const located: string[] = [];
     const locateRunner: PlanLoopDeps['toolRunner'] = async (name, input) => {
       const r = await deps.toolRunner(name, input);
+      traceCall(name, input, r);
       if (r.ok && typeof r.output === 'string' && r.output.length >= 1500) located.push(r.output);
       return r;
     };
@@ -1132,8 +1147,6 @@ export async function runPlanExecuteLoop(
   let stepRuleBlocks = 0;
   // Successful calls of the execution units, in order: handed to the next unit as what is already known.
   const workLog: Array<{ unit: string; name: string; input: Record<string, unknown>; output: string }> = [];
-  // Which phase/unit the current sub-run belongs to (evaluation trace only).
-  let currentUnitId = 'locate';
   const STEP_RULE_BLOCK_BUDGET = 4;
   const ruleJudgeCache = new Map<string, 'yes' | 'no' | 'unclear'>();
   const lazyResolves = new Map<string, number>();
@@ -1209,20 +1222,9 @@ export async function runPlanExecuteLoop(
       }
     }
     const res = await deps.toolRunner(name, input);
-    // Evaluation trace (unset in normal use): every sub-run call with its input and the head of its output, so a
-    // run can be read call by call — the loop log only aggregates (tools=8 ok=8), which cannot show why a step
-    // needed 8 calls. Inputs can carry credentials; this is for sandboxed benchmark runs only.
-    const tracePath = process.env.PHILONT_PLAN_LOOP_TRACE;
-    if (tracePath) {
-      try {
-        appendFileSync(tracePath, JSON.stringify({
-          t: Math.round((now() - startedAt) / 1000), unit: currentUnitId, name, input,
-          ok: res.ok, out: String(res.ok ? res.output ?? '' : res.error ?? '').slice(0, 1500),
-        }) + '\n');
-      } catch { /* tracing must never break the run */ }
-    }
+    traceCall(name, input, res);
     currentTrace.push({ toolName: name, input, success: res.ok, at: now(), output: typeof res.output === 'string' ? res.output.slice(0, 8000) : '' });
-    if (res.ok && !inResolve && typeof res.output === 'string') workLog.push({ unit: currentUnitId, name, input, output: res.output });
+    if (res.ok && !inResolve && typeof res.output === 'string') workLog.push({ unit: traceUnit, name, input, output: res.output });
     // A successful read is provenance for later ids: record its body so a value the model later puts in a
     // write can be traced to something it actually saw (API response, get_fact output, …).
     if (res.ok && typeof res.output === 'string' && res.output) readCorpus.push(res.output);
@@ -1798,7 +1800,7 @@ export async function runPlanExecuteLoop(
       return c.name === 'http' && /^(POST|PUT|DELETE|PATCH)$/.test(String(c.input.method ?? 'GET').toUpperCase());
     };
     trackUnit(step, 'doing');
-    currentUnitId = step.id;
+    traceUnit = step.id;
     currentTrace = [];
     stepRuleBlocks = 0;
     let result = await runStep('');

@@ -257,6 +257,21 @@ function gateToolCall(
   return null;
 }
 
+/** Resolve with the tool's result, or with an abort failure as soon as `signal` fires — whichever comes first. */
+function raceAbort(run: Promise<MiniLoopToolRunResult>, signal: AbortSignal | undefined): Promise<MiniLoopToolRunResult> {
+  if (!signal) return run;
+  const aborted: MiniLoopToolRunResult = { ok: false, output: '', error: 'aborted: the sub-run budget ran out while this call was running' };
+  if (signal.aborted) return Promise.resolve(aborted);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve(aborted);
+    signal.addEventListener('abort', onAbort, { once: true });
+    run.then(
+      (r) => { signal.removeEventListener('abort', onAbort); resolve(r); },
+      (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
+    );
+  });
+}
+
 export async function runMiniAgentLoop(
   opts: MiniAgentLoopOptions,
 ): Promise<MiniAgentLoopResult> {
@@ -406,7 +421,10 @@ export async function runMiniAgentLoop(
         runResult = { ok: false, output: '', error: gateReject };
       } else {
         try {
-          runResult = await toolRunner(call.name, call.input);
+          // The loop's budget must bound a running tool too, not only the gaps between calls: a shell command
+          // that runs to its own 5-minute timeout ignored a 3-minute sub-run budget (plan-loop LOCATE took 751s).
+          // The tool itself is left to its own timeout; the loop stops waiting for it.
+          runResult = await raceAbort(toolRunner(call.name, call.input), abortSignal);
         } catch (e) {
           runResult = {
             ok: false,
