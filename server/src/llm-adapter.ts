@@ -93,6 +93,39 @@ export function hasToolUseWithoutThinking(messages: NativeMessage[]): boolean {
   return false;
 }
 
+/**
+ * True for the thinking-mode echo 400 on either wire shape:
+ *   Anthropic: "The `content[].thinking` in the thinking mode must be passed back to the API"
+ *   OpenAI:    "The reasoning_content in the thinking mode must be passed back to the API"
+ * hasToolUseWithoutThinking is a prediction of when the endpoint will demand the echo; this is the
+ * endpoint's own verdict, so it also catches the shapes the prediction misses.
+ */
+export function isThinkingEchoError(e: unknown): boolean {
+  const msg = typeof e === 'string' ? e : String((e as { message?: unknown })?.message ?? e ?? '');
+  return /(?:thinking|reasoning_content)[\s\S]{0,80}must be passed back/i.test(msg);
+}
+
+/**
+ * Compact per-assistant-message block layout, e.g. `#3[thinking:0,tool_use] #5"text"`, logged when the
+ * echo 400 fires despite the guard so the next occurrence names the exact shape that slipped through.
+ * `thinking:N` is the length of the thinking text; a string-content message shows as `"text"`.
+ */
+export function describeThinkingShape(messages: NativeMessage[]): string {
+  const parts: string[] = [];
+  messages.forEach((m, i) => {
+    if (m.role !== 'assistant') return;
+    if (!Array.isArray(m.content)) {
+      parts.push(`#${i}"text"`);
+      return;
+    }
+    const blocks = (m.content as Array<{ type?: string; thinking?: unknown }>).map((b) =>
+      b?.type === 'thinking' ? `thinking:${String(b.thinking ?? '').length}` : String(b?.type),
+    );
+    parts.push(`#${i}[${blocks.join(',')}]`);
+  });
+  return parts.join(' ') || '(no assistant messages)';
+}
+
 /** Drop thinking / redacted_thinking blocks from assistant messages (for sends where thinking is disabled). */
 export function stripThinkingBlocks(messages: NativeMessage[]): NativeMessage[] {
   return messages.map((m) => {
@@ -457,7 +490,7 @@ export function planThinkingOnlyRetry(
  * The token counters (2026-10-10) are what a cost column is made of: headless writes them into result.json
  * so a benchmark run reports tokens per task next to its pass/fail, instead of seconds alone.
  */
-export const adapterStats = { thinkingOnlyRetries: 0, continuations: 0, calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+export const adapterStats = { thinkingOnlyRetries: 0, thinkingEchoFallbacks: 0, continuations: 0, calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
 
 /** Add one provider response's reported usage to adapterStats; a response without usage still counts as a call. */
 export function recordAdapterUsage(u: { input?: number; output?: number; cacheRead?: number } | undefined): void {
@@ -755,12 +788,12 @@ class AnthropicAdapter implements LLMAdapter {
       // turn, disable thinking for THIS call AND strip thinking blocks, so there is no echo requirement and
       // no present-but-disabled mismatch. Normal turns (model produced thinking+tool_use) are untouched.
       const syntheticToolUse = hasToolUseWithoutThinking(messages);
-      const effReasoning = syntheticToolUse ? { ...opts?.reasoning, enabled: false } : opts?.reasoning;
-      const wire = this.profile.buildReasoningWire(this.model, effReasoning);
+      let effReasoning = syntheticToolUse ? { ...opts?.reasoning, enabled: false } : opts?.reasoning;
+      let wire = this.profile.buildReasoningWire(this.model, effReasoning);
       const maxTokens = this.profile.resolveMaxTokens(this.model, opts?.reasoning, baseMaxTokens);
       // Repair tool_use ↔ tool_result pairing before sending the request (deepseek
       // multi-tool_use + auth-pause leaves dangling tool_use → 400).
-      const safeMessages = repairToolResultPairing(syntheticToolUse ? stripThinkingBlocks(messages) : messages);
+      let safeMessages = repairToolResultPairing(syntheticToolUse ? stripThinkingBlocks(messages) : messages);
       // Build params as a Record then cast to the SDK param type at the boundary:
       // `output_config` and `thinking:{type:'disabled'}` (DeepSeek extension) are not in
       // the Anthropic SDK's typed surface, so a typed literal would not compile. The shape
@@ -772,7 +805,6 @@ class AnthropicAdapter implements LLMAdapter {
         ...(anthropicTools?.length ? { tools: anthropicTools } : {}),
         ...(w.anthropicParams ?? {}),
       });
-      const createParams = buildParams(wire, maxTokens);
       // The wire/budget the FINAL response was produced with — a continuation must use the same ones.
       let wireInUse = wire;
       let maxInUse = maxTokens;
@@ -800,7 +832,25 @@ class AnthropicAdapter implements LLMAdapter {
         recordAdapterUsage({ input: u?.input_tokens, output: u?.output_tokens, cacheRead: u?.cache_read_input_tokens ?? undefined });
         return message;
       };
-      response = await dispatch(createParams, maxTokens);
+      try {
+        response = await dispatch(buildParams(wire, maxTokens), maxTokens);
+      } catch (e) {
+        // The guard above predicts the echo requirement from one shape (tool_use without thinking).
+        // When the endpoint rejects anyway, the reasoning it wants is not in this history, so the
+        // only request that can succeed is the same one with thinking off and no thinking blocks —
+        // the same honest fallback the guard takes, decided by the endpoint instead of a prediction.
+        if (syntheticToolUse || !isThinkingEchoError(e)) throw e;
+        adapterStats.thinkingEchoFallbacks += 1;
+        console.warn(
+          `[llm-adapter] anthropic: thinking-echo 400 despite the guard; retrying once with thinking ` +
+            `disabled. assistant shape: ${describeThinkingShape(safeMessages)}`,
+        );
+        effReasoning = { ...opts?.reasoning, enabled: false };
+        wire = this.profile.buildReasoningWire(this.model, effReasoning);
+        wireInUse = wire;
+        safeMessages = repairToolResultPairing(stripThinkingBlocks(messages));
+        response = await dispatch(buildParams(wire, maxTokens), maxTokens);
+      }
       const retryPlan = thinkingOnlyAtCap(response)
         ? planThinkingOnlyRetry(effReasoning, maxTokens, this.profile.supportsEffort(this.model))
         : null;
@@ -1251,6 +1301,7 @@ class OpenAICompatAdapter implements LLMAdapter {
       return Math.min(65536, Math.max(maxTokens * 2, 32000));
     })();
     let emptyRetried = false;
+    let echoFallbackDone = false;
     // The cut first half of a text reply while its continuation request is in flight (see CONTINUATION_PROMPT).
     let continuationHead: string | null = null;
     // Retry transient network failures (fetch failed / connection reset) + 5xx/429 — a failed POST
@@ -1286,6 +1337,22 @@ class OpenAICompatAdapter implements LLMAdapter {
         (resp.status === 400 && isContextTooLargeMessage(errText))
       ) {
         throw new ContextTooLargeError(msg);
+      }
+      // Same endpoint-verdict fallback as the Anthropic path: the echo 400 fired on a history the
+      // guard judged safe, so resend once with thinking off and every reasoning_content stripped.
+      if (resp.status === 400 && !syntheticToolUse && !echoFallbackDone && isThinkingEchoError(errText)) {
+        echoFallbackDone = true;
+        adapterStats.thinkingEchoFallbacks += 1;
+        console.warn(
+          `[llm-adapter] ${this.cfg.name}: thinking-echo 400 despite the guard; retrying once with thinking ` +
+            `disabled. assistant shape: ${describeThinkingShape(messages)}`,
+        );
+        for (const k of Object.keys(wire.openaiTopLevel ?? {})) delete body[k];
+        for (const k of Object.keys(wire.openaiExtraBody ?? {})) delete body[k];
+        const offWire = this.profile.buildReasoningWire(this.model, { ...opts?.reasoning, enabled: false });
+        for (const [k, v] of Object.entries({ ...(offWire.openaiTopLevel ?? {}), ...(offWire.openaiExtraBody ?? {}) })) body[k] = v;
+        body.messages = anthropicToOpenAI(repairToolResultPairing(stripThinkingBlocks(messages)));
+        continue;
       }
       throw new Error(msg);
     }
