@@ -48,6 +48,28 @@ test('failed forced auto_on is attempted once even after records are compacted a
   assert.equal(await decideForcedDeepExploreCall(owner, '', bus, 3), null);
 });
 
+// Prod 2026-11-25: four open sessions, none focused; every forced continue carried no sessionId and the
+// tool refused to guess. A forced advance must name its tree, and must not fire when it cannot.
+test('forced continue names the bound session; with several unbound sessions it does not fire', async () => {
+  const { memory, decideForcedDeepExploreCall } = await import('../src/chat-handler.js');
+  const bus = () => ({
+    intentDecision: { route: 'deep_explore' as const, confidence: 0.8, reason: 'continue', selfContained: false },
+    userMessage: '深度探索，自主推进',
+  });
+
+  const sole = 'forced-target-sole';
+  const { session } = memory.reasoning.createSession({ goal: '深度探索 test goal', ownerSessionId: sole });
+  const call = await decideForcedDeepExploreCall(sole, '', bus(), 1);
+  assert.equal(call?.input.action, 'continue');
+  assert.equal(call?.input.sessionId, session.id, 'the forced call names the tree it advances');
+
+  const many = 'forced-target-ambiguous';
+  for (let i = 0; i < 4; i++) memory.reasoning.createSession({ goal: `深度探索 goal ${i}`, ownerSessionId: many });
+  const none = await decideForcedDeepExploreCall(many, '', bus(), 2);
+  assert.notEqual(none?.input.action, 'continue', 'no unaddressed continue the tool would refuse');
+  assert.notEqual(none?.input.action, 'auto_on');
+});
+
 // Recite: deep_explore round jargon ("第 N 轮", "x 开→y 开") narrated as if just produced.
 const RECITE = '## For User\n第 3 轮完成，已 settled Meta-complexity 分支；当前 5 开→4 开，剩 4 个开放节点。';
 // Ordinary substantive answer — no round/session jargon.

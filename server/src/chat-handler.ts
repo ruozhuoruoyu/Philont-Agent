@@ -12571,6 +12571,13 @@ export async function decideForcedDeepExploreCall(
   const records = signalBus.inTurnRecords ?? [];
   const deepExploreRanThisTurn = records.some(isDeepExploreAdvanceRecord);
   const activeExplore = hasOwnedActiveExploreSession(sessionId);
+  // Which tree a forced advance would act on. Prod 2026-11-25: four open sessions, none focused — every
+  // forced `deep_explore(action=continue)` carried no sessionId, the tool correctly refused to guess, and
+  // the turn spent its one forced advance on a call that could only fail (then died on the thinking-echo
+  // 400 behind it). With no bound session among several the controller cannot name the tree either, so it
+  // does not force an advance; the model can still list and pick. A bound session is named explicitly.
+  const ambiguousTarget = !boundExplore && activeExplore;
+  const targetInput: Record<string, unknown> = boundExplore ? { sessionId: boundExplore.id } : {};
   const forceMessage = signalBus.carriedExploreGoal ?? signalBus.userMessage ?? '';
   const metaQuestion = isSelfReferentialMetaQuestion(forceMessage);
   const topicMatches = messageRelatesToBoundExplore(sessionId, forceMessage);
@@ -12589,8 +12596,14 @@ export async function decideForcedDeepExploreCall(
   // A live binding plus a contextual deep-explore route is an instruction to advance THAT tree. The ask
   // tier is intentionally skipped for an active session, so without this branch the route had no actuator:
   // prod called action=list, did flat Python work, then let stale viability stop the proof without one round.
+  if (ambiguousTarget && signalBus.intentDecision?.route === 'deep_explore' && !deepExploreRanThisTurn) {
+    console.warn(
+      `[force-continue] session=${safeSessionId(sessionId)} several open deep-explore sessions and none bound — not forcing an advance the tool would refuse`,
+    );
+  }
   if (
     deepExploreForceAdvanceEnabled() &&
+    !ambiguousTarget &&
     shouldForceRoutedDeepExploreContinue({
       decision: signalBus.intentDecision ?? null,
       hasActiveSession: activeExplore,
@@ -12605,7 +12618,7 @@ export async function decideForcedDeepExploreCall(
     console.warn(
       `[force-continue] session=${safeSessionId(sessionId)} contextual deep_explore route + live binding — forcing action=continue`,
     );
-    return { id: `forced-routed-de-continue-${idSeed}`, name: 'deep_explore', input: { action: 'continue' } };
+    return { id: `forced-routed-de-continue-${idSeed}`, name: 'deep_explore', input: { action: 'continue', ...targetInput } };
   }
 
   // "Keep pushing" is a hand-off, not a request for one expensive round followed by another prompt.
@@ -12617,7 +12630,7 @@ export async function decideForcedDeepExploreCall(
   const autoOnAttempted = !!signalBus.forcedDeepExploreAutoOn || records.some(
     (r) => r.toolName === 'deep_explore' && String(r.toolInput?.action ?? '') === 'auto_on',
   );
-  if (shouldForceDeepExploreAutoOn({
+  if (!ambiguousTarget && shouldForceDeepExploreAutoOn({
     decision: signalBus.intentDecision ?? null,
     advanceRanThisTurn: deepExploreRanThisTurn,
     hasActiveSession: activeExplore,
@@ -12633,12 +12646,13 @@ export async function decideForcedDeepExploreCall(
   })) {
     signalBus.forcedDeepExploreAutoOn = true;
     console.warn(`[auto-advance] session=${safeSessionId(sessionId)} continuous explore request — forcing action=auto_on`);
-    return { id: `forced-de-auto-on-${idSeed}`, name: 'deep_explore', input: { action: 'auto_on' } };
+    return { id: `forced-de-auto-on-${idSeed}`, name: 'deep_explore', input: { action: 'auto_on', ...targetInput } };
   }
 
   // Force-CONTINUE: the model recited deep_explore round results with ZERO deep_explore calls this turn.
   if (
     deepExploreForceAdvanceEnabled() &&
+    !ambiguousTarget &&
     // A status/count question ("how many unfinished explores?") must never be forced into an advancing
     // round — narrating the saved snapshot is the correct answer, not a stall.
     !signalBus.userAsksExploreStatus && !metaQuestion &&
@@ -12653,7 +12667,7 @@ export async function decideForcedDeepExploreCall(
     console.warn(
       `[force-continue] session=${safeSessionId(sessionId)} model narrated deep_explore round results with 0 calls — forcing a real deep_explore(action=continue)`,
     );
-    return { id: `forced-de-continue-${idSeed}`, name: 'deep_explore', input: { action: 'continue' } };
+    return { id: `forced-de-continue-${idSeed}`, name: 'deep_explore', input: { action: 'continue', ...targetInput } };
   }
 
   // Force-START. On a pending-auth resume the live userMessage is the bare "ok" that answered the auth
