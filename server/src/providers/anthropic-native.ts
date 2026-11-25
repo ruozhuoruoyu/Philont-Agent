@@ -18,13 +18,13 @@
  * (otherwise the answer has zero headroom). resolveMaxTokens enforces that.
  */
 
-import { BaseProfile, mapEffort, envInt, type ReasoningConfig, type ReasoningWire } from './base.js';
+import { BaseProfile, bareModelId, mapEffort, envInt, type ReasoningConfig, type ReasoningWire } from './base.js';
 
 const THINKING_BUDGET_ENV = 'PHILONT_DEEPSEEK_THINKING_BUDGET';
 const THINKING_BUDGET_DEFAULT = 12000;
 
 export function isClaudeModel(model: string): boolean {
-  return (model || '').trim().toLowerCase().startsWith('claude');
+  return bareModelId(model).startsWith('claude');
 }
 
 export class AnthropicNativeProfile extends BaseProfile {

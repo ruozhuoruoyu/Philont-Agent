@@ -31,10 +31,10 @@
  *       high/max effort so the answer has headroom past the thinking tokens.
  */
 
-import { BaseProfile, mapEffort, envInt, type ReasoningConfig, type ReasoningWire } from './base.js';
+import { BaseProfile, bareModelId, mapEffort, envInt, type ReasoningConfig, type ReasoningWire } from './base.js';
 
 export function deepseekSupportsThinking(model: string): boolean {
-  const m = (model || '').trim().toLowerCase();
+  const m = bareModelId(model);
   if (!m) return false;
   // deepseek-v4-*, deepseek-v5-*, … every V4+ generation has thinking; v3 excluded.
   if (m.startsWith('deepseek-v') && !m.startsWith('deepseek-v3')) return true;

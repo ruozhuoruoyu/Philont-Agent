@@ -92,3 +92,17 @@ export function envInt(name: string, fallback: number): number {
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
+
+/**
+ * The model id without any gateway/vendor routing prefix, lowercased: `deepseek/deepseek-v4.1-flash`,
+ * `neolink/deepseek-v4.1-flash` → `deepseek-v4.1-flash`. Profile matchers must see the bare id: prod
+ * 2026-11-25, the neolink gateway named the model `deepseek/deepseek-v4.1-flash`, deepseekSupportsThinking
+ * answered false, the wire carried NO thinking field, DeepSeek defaulted thinking ON — and the
+ * synthetic-turn guard's "disable thinking for this call" compiled to nothing, so every force-continue /
+ * auth-resume turn died with the content[].thinking echo 400.
+ */
+export function bareModelId(model: string): string {
+  const m = (model || '').trim().toLowerCase();
+  const i = m.lastIndexOf('/');
+  return i >= 0 ? m.slice(i + 1) : m;
+}

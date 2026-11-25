@@ -11,7 +11,7 @@
  * the plain OpenAI-compat / Base fallback.
  */
 
-import { BaseProfile, type ProviderProfile } from './base.js';
+import { BaseProfile, bareModelId, type ProviderProfile } from './base.js';
 import { DeepSeekProfile, deepseekSupportsThinking } from './deepseek.js';
 import { AnthropicNativeProfile, isClaudeModel } from './anthropic-native.js';
 import { KimiProfile, OpenAICompatProfile, isKimiModel } from './openai-compat.js';
@@ -32,7 +32,8 @@ const OPENAI_COMPAT = new OpenAICompatProfile();
 const BASE = new BaseProfile();
 
 export function resolveProfile(model: string): ProviderProfile {
-  const m = (model || '').trim().toLowerCase();
+  // Gateway prefixes (`deepseek/…`, `neolink/…`) are routing, not the model — match on the bare id.
+  const m = bareModelId(model);
   // deepseek-* (covers v4 thinking-capable and v3 non-thinking; the profile
   // itself decides supportsThinking per model).
   if (m.startsWith('deepseek') || deepseekSupportsThinking(m)) return DEEPSEEK;

@@ -157,3 +157,37 @@ test('a non-echo 400 still propagates untouched', async () => {
     },
   );
 });
+
+// ── Prod 2026-11-25 root cause: a gateway-prefixed model id disabled the guard's "thinking off" ──
+
+test('gateway-prefixed DeepSeek ids are recognised as thinking-capable', async () => {
+  const { resolveProfile, deepseekSupportsThinking, isClaudeModel } = await import('../src/providers/index.js');
+  for (const id of ['deepseek/deepseek-v4.1-flash', 'neolink/deepseek-v4.1-flash', 'deepseek-v4.1-flash']) {
+    assert.equal(deepseekSupportsThinking(id), true, id);
+    assert.equal(resolveProfile(id).name, 'deepseek', id);
+    assert.deepEqual(resolveProfile(id).buildReasoningWire(id, { enabled: false }).anthropicParams, { thinking: { type: 'disabled' } }, id);
+  }
+  assert.equal(deepseekSupportsThinking('deepseek/deepseek-v3'), false);
+  assert.equal(isClaudeModel('anthropic/claude-opus-5-5'), true);
+});
+
+test('prefixed model + synthetic force-continue tool_use → the FIRST request already sends thinking disabled', async () => {
+  await withEnv(
+    { LLM_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'sk-test', ANTHROPIC_BASE_URL: 'https://gw.example.com', ANTHROPIC_MODEL: 'deepseek/deepseek-v4.1-flash' },
+    async () => {
+      const f = stubFetch([{ status: 200, body: anthropicOk }]);
+      try {
+        const synthetic = [
+          { role: 'user', content: '深度探索，自主推进' },
+          { role: 'assistant', content: [{ type: 'tool_use', id: 'fc1', name: 'deep_explore', input: { action: 'continue' } }] },
+          { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'fc1', content: 'There are 4 open deep-explore sessions.' }] },
+        ];
+        await createLLMAdapter().send(synthetic as never, undefined, { reasoning: { enabled: true, effort: 'medium' } });
+        assert.equal(f.bodies.length, 1);
+        assert.deepEqual(f.bodies[0].thinking, { type: 'disabled' });
+      } finally {
+        f.restore();
+      }
+    },
+  );
+});
